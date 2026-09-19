@@ -498,6 +498,16 @@ class TestMvpApi(AioHTTPTestCase):
         self.assertEqual(rows[self.star]["mvp_count"], 1)
         self.assertEqual(rows[self.star]["team_name"], self.owner_team)
 
+    async def test_match_detail_endpoint_exposes_the_crown(self):
+        """6. /api/matches/{id} отдаёт mvp_player — на нём держится протокол в Mini App."""
+        resp = await self.client.request(
+            "GET", f"/api/matches/{self.match_id}", headers=_headers(self.owner_id)
+        )
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["match"]["mvp_player"], self.star)
+
     async def test_cabinet_squad_endpoint_returns_mvp_fields(self):
         """5. /api/cabinet/squad отдаёт top_mvp клуба и mvp_count по игрокам."""
         resp = await self.client.request(

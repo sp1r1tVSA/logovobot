@@ -188,6 +188,7 @@ def build_digest_payload(division_id: int, round_number: int, season_id: int | N
             "score2": s2,
             "margin": abs(s1 - s2),
             "total_goals": s1 + s2,
+            "mvp_player": (m.get("mvp_player") or "").strip() or None,
         })
 
     # Разгром тура — максимальная разница, при равенстве больше голов
@@ -200,6 +201,20 @@ def build_digest_payload(division_id: int, round_number: int, season_id: int | N
     # Игрок тура — лучший по Г+П (already sorted by the DB layer)
     player_stats = database.get_round_player_stats(round_number, division_id=division_id, season_id=season_id)
     player_of_the_round = dict(player_stats[0]) if player_stats else None
+
+    # Обладатель золотой короны тура: больше всего наград «Игрок матча». При
+    # равенстве корона одна на всех — в этом случае выделять некого, и поле
+    # остаётся пустым, чтобы Темшик не назвал случайного из них лучшим.
+    crown_counts: dict[str, int] = {}
+    for r in results:
+        if r["mvp_player"]:
+            crown_counts[r["mvp_player"]] = crown_counts.get(r["mvp_player"], 0) + 1
+    mvp_of_the_round = None
+    if crown_counts:
+        best = max(crown_counts.values())
+        leaders = [name for name, cnt in crown_counts.items() if cnt == best]
+        if len(leaders) == 1:
+            mvp_of_the_round = {"player_name": leaders[0], "mvp_count": best}
 
     # Движение по таблице: срез до тура vs срез до предыдущего тура
     after = database.get_standings(division_id=division_id, season_id=season_id, up_to_round=round_number)
@@ -233,6 +248,7 @@ def build_digest_payload(division_id: int, round_number: int, season_id: int | N
         "goals_total": sum(r["total_goals"] for r in results),
         "rout": rout,
         "player_of_the_round": player_of_the_round,
+        "mvp_of_the_round": mvp_of_the_round,
         "table": table,
         "movers": movers,
         "leader": table[0] if table else None,
@@ -268,7 +284,7 @@ _DIGEST_INSTRUCTION = (
     "Ты — Темшик, аналитик и голос лиги «Логово Фифарей»: душевный 30+ мужик, батейный юмор, "
     "но по цифрам — строгий аналитик.\n\n"
     "ЗАДАЧА: написать ПОДПИСЬ к картинке с итогами тура по переданному JSON. "
-    "Картинку читатель уже видит: там результаты, игрок тура и движение по таблице — "
+    "Картинку читатель уже видит: там результаты с игроками матчей, игрок тура и движение по таблице — "
     "не пересказывай их построчно, а выдели главное.\n"
     "СТРУКТУРА: заголовок с номером тура → 3-5 строк про самое интересное "
     "(разгром тура, игрок тура, кто взлетел и кто просел, лидер) → короткая концовка.\n\n"

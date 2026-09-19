@@ -37,6 +37,16 @@ GOLD = (250, 204, 21)
 SEPARATOR = (45, 45, 52)
 
 
+def _fit_text(draw: ImageDraw.ImageDraw, text: str, font, max_width: int) -> str:
+    """Обрезать строку по ширине, добавив многоточие: длинное имя иначе
+    наезжает на эмблемы соседних команд."""
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    while text and draw.textlength(text + "…", font=font) > max_width:
+        text = text[:-1]
+    return (text + "…") if text else ""
+
+
 def _draw_logo_badge(img: Image.Image, draw: ImageDraw.ImageDraw, team_name: str, center_x: int, center_y: int, diameter: int) -> None:
     """Белый круглый бейдж с эмблемой клуба по центру заданной точки."""
     x0 = center_x - diameter // 2
@@ -99,6 +109,7 @@ def generate_round_digest_image(payload: dict) -> io.BytesIO:
     font_row = load_font(14 * SCALE)
     font_row_bold = load_font(14 * SCALE, bold=True)
     font_badge = load_font(12 * SCALE, bold=True)
+    font_mvp = load_font(11 * SCALE, bold=True)
 
     margin = 35 * SCALE
     inner_right = width - margin
@@ -148,9 +159,17 @@ def generate_round_digest_image(payload: dict) -> io.BytesIO:
             _draw_logo_badge(img, draw, r["team2"], center + 180 * SCALE, y_center, badge)
             draw.text((center + 210 * SCALE, y_center), str(r["team2"]), fill=TEXT_PRIMARY, font=font_team, anchor="lm")
 
-            # Счёт
+            # Счёт; при наличии короны он поднимается, освобождая строку под имя MVP
             score_color = GOLD if (rout and r.get("match_id") == rout.get("match_id")) else TEXT_PRIMARY
-            draw.text((center, y_center), f"{r['score1']} : {r['score2']}", fill=score_color, font=font_score, anchor="mm")
+            mvp_name = str(r.get("mvp_player") or "").strip()
+            score_y = y_center - 9 * SCALE if mvp_name else y_center
+            draw.text((center, score_y), f"{r['score1']} : {r['score2']}", fill=score_color, font=font_score, anchor="mm")
+
+            if mvp_name:
+                # Эмодзи в Pillow не гарантированы (на сервере рисуется «тофу»),
+                # поэтому корона обозначается подписью и золотым цветом.
+                label = _fit_text(draw, f"MVP · {mvp_name}", font_mvp, 300 * SCALE)
+                draw.text((center, y_center + 14 * SCALE), label, fill=GOLD, font=font_mvp, anchor="mm")
 
             y += row_h
 
@@ -170,10 +189,17 @@ def generate_round_digest_image(payload: dict) -> io.BytesIO:
             draw.text((x_left + 20 * SCALE, y + 64 * SCALE), sub, fill=TEXT_MUTED, font=font_row)
 
         if potr:
+            # Лучший по Г+П и обладатель корон — часто один и тот же игрок;
+            # тогда награды дописываются к его строке, а не спорят с ней.
+            round_mvp = payload.get("mvp_of_the_round") or {}
+            sub = f"{potr.get('team_name') or ''}  •  {potr.get('goals', 0)} г + {potr.get('assists', 0)} п"
+            round_mvp_name = str(round_mvp.get("player_name") or "").strip()
+            if round_mvp_name and round_mvp_name.lower() == str(potr.get("player_name") or "").strip().lower():
+                sub += f"  •  MVP x{round_mvp.get('mvp_count', 0)}"
             _highlight_card(
                 margin, margin + half, GOLD, "ИГРОК ТУРА",
                 str(potr.get("player_name") or ""),
-                f"{potr.get('team_name') or ''}  •  {potr.get('goals', 0)} г + {potr.get('assists', 0)} п",
+                sub,
             )
 
         if rout:

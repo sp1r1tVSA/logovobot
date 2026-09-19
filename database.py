@@ -3751,7 +3751,7 @@ def get_matches_by_round(round_number: int, division_id: int | None = None, seas
             cursor.execute("""
                 SELECT
                     m.id, m.round_number, m.division_id, m.season_id, u1.telegram_id AS player1_id, u2.telegram_id AS player2_id,
-                    m.player1_score, m.player2_score, m.status,
+                    m.player1_score, m.player2_score, m.status, m.mvp_player,
                     COALESCE(u1.username, u1_id.username) AS player1_nickname,
                     COALESCE(u1.username, u1_id.username) AS player1_username,
                     COALESCE(m.player1_team, u1.team_name, u1_id.team_name, 'Команда 1') AS player1_team,
@@ -3773,7 +3773,7 @@ def get_matches_by_round(round_number: int, division_id: int | None = None, seas
             cursor.execute("""
                 SELECT
                     m.id, m.round_number, m.division_id, m.season_id, u1.telegram_id AS player1_id, u2.telegram_id AS player2_id,
-                    m.player1_score, m.player2_score, m.status,
+                    m.player1_score, m.player2_score, m.status, m.mvp_player,
                     COALESCE(u1.username, u1_id.username) AS player1_nickname,
                     COALESCE(u1.username, u1_id.username) AS player1_username,
                     COALESCE(m.player1_team, u1.team_name, u1_id.team_name, 'Команда 1') AS player1_team,

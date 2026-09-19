@@ -292,6 +292,43 @@ class TestDigestPayload(RoundAnalyticsTestBase):
         self.assertEqual(payload["matches_played"], 1)
         self.assertEqual(len(payload["results"]), 1)
 
+    def _set_mvp(self, match_id, player_name):
+        with database.transaction() as conn:
+            conn.cursor().execute(
+                "UPDATE matches SET mvp_player = ? WHERE id = ?", (player_name, match_id)
+            )
+
+    def test_results_carry_the_crown_of_each_match(self):
+        crowned = self._add_match(1, "A", "B", 3, 0, "confirmed")
+        self._add_match(1, "C", "D", 1, 1, "confirmed")
+        self._set_mvp(crowned, "Форвард-A")
+
+        results = {r["match_id"]: r for r in round_preview.build_digest_payload(self.div_id, 1)["results"]}
+        self.assertEqual(results[crowned]["mvp_player"], "Форвард-A")
+        self.assertIsNone([r for r in results.values() if r["match_id"] != crowned][0]["mvp_player"])
+
+    def test_two_crowns_make_a_player_of_the_round_mvp(self):
+        m1 = self._add_match(1, "A", "B", 3, 0, "confirmed")
+        m2 = self._add_match(1, "C", "D", 1, 1, "confirmed")
+        self._set_mvp(m1, "Форвард-A")
+        self._set_mvp(m2, "Форвард-A")
+
+        payload = round_preview.build_digest_payload(self.div_id, 1)
+        self.assertEqual(payload["mvp_of_the_round"], {"player_name": "Форвард-A", "mvp_count": 2})
+
+    def test_shared_lead_leaves_the_round_mvp_empty(self):
+        """У каждого по короне — выделять некого, иначе Темшик назовёт случайного."""
+        m1 = self._add_match(1, "A", "B", 3, 0, "confirmed")
+        m2 = self._add_match(1, "C", "D", 1, 1, "confirmed")
+        self._set_mvp(m1, "Форвард-A")
+        self._set_mvp(m2, "Форвард-C")
+
+        self.assertIsNone(round_preview.build_digest_payload(self.div_id, 1)["mvp_of_the_round"])
+
+    def test_round_without_crowns_has_no_round_mvp(self):
+        self._add_match(1, "A", "B", 3, 0, "confirmed")
+        self.assertIsNone(round_preview.build_digest_payload(self.div_id, 1)["mvp_of_the_round"])
+
 
 class TestTextFallbacks(RoundAnalyticsTestBase):
     """Без Gemini публикация всё равно должна состояться — шаблоном."""

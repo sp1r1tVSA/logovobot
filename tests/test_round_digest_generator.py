@@ -88,6 +88,18 @@ class TestRoundDigestGenerator(unittest.TestCase):
         })
         self._render(payload)
 
+    def test_crowned_matches_render(self):
+        """👑 в строке матча: имя любой длины и матч без короны рядом."""
+        payload = _full_payload()
+        payload["results"][0]["mvp_player"] = "David Neres"
+        payload["results"][1]["mvp_player"] = "Имя Которое Никуда Не Влезает По Ширине Строки"
+        payload["results"][2]["mvp_player"] = None
+        payload["mvp_of_the_round"] = {"player_name": "David Neres", "mvp_count": 1}
+        crowned = self._render(payload)
+
+        # Короны живут внутри существующей строки — картинка не растёт.
+        self.assertEqual(crowned.height, self._render(_full_payload()).height)
+
     def test_unknown_clubs_do_not_break_the_render(self):
         """Эмблемы нет — бейдж рисуется пустым, но картинка всё равно выходит."""
         payload = _full_payload()

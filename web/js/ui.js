@@ -692,6 +692,8 @@ export class UIRenderer {
     const tag1 = u1 ? (u1.startsWith('@') ? u1 : `@${u1}`) : '';
     const u2 = (matchDetail.player2_username || matchDetail.player2_nickname || '').trim();
     const tag2 = u2 ? (u2.startsWith('@') ? u2 : `@${u2}`) : '';
+    // Корона есть только у разобранного матча — у линии и лайва её быть не может.
+    const mvp = (matchDetail.mvp_player || '').trim();
 
     container.innerHTML = `
       <!-- Header Hero Card with Clean Logos -->
@@ -712,6 +714,7 @@ export class UIRenderer {
             <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 700;">
               ${matchDetail.status === 'live' ? '🔴 LIVE' : `Тур ${tourNum}`}
             </span>
+            ${mvp ? `<span style="font-size: 0.72rem; color: var(--accent-gold); font-weight: 700; text-align: center; max-width: 120px;" title="Игрок матча">👑 ${escapeHtml(mvp)}</span>` : ''}
           </div>
           <div class="team-block">
             <div class="team-crest-container">
@@ -2390,6 +2393,9 @@ export class UIRenderer {
 
     const goals = events.filter(e => e.event_type === 'goal');
     const assists = events.filter(e => e.event_type === 'assist');
+    // Корона приходит из matches.mvp_player голым именем: клуб по ней не
+    // определить, поэтому показываем только имя, без принадлежности.
+    const mvp = (m.mvp_player || '').trim();
 
     container.innerHTML = `
       <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 14px; margin-bottom: 14px;">
@@ -2422,6 +2428,16 @@ export class UIRenderer {
           </div>
         </div>
       </div>
+
+      ${mvp ? `
+        <div style="display: flex; align-items: center; gap: 8px; background: rgba(245,176,39,0.08); border: 1px solid rgba(245,176,39,0.25); border-radius: var(--radius-md); padding: 10px 12px; margin-bottom: 14px;">
+          <span style="font-size: 1.1rem;">👑</span>
+          <div>
+            <div style="font-size: 0.7rem; font-weight: 800; color: var(--accent-gold); text-transform: uppercase; letter-spacing: 0.5px;">Игрок матча</div>
+            <div style="font-size: 0.9rem; font-weight: 800; color: #fff;">${escapeHtml(mvp)}</div>
+          </div>
+        </div>
+      ` : ''}
 
       <!-- Events List (Goals & Assists) -->
       <div style="margin-bottom: 16px;">
