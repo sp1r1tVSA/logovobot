@@ -125,6 +125,41 @@ class TestPhase9Cashout(unittest.TestCase):
             self.assertIsNotNone(tx)
             self.assertEqual(tx["amount"], offer_val)
 
+    def test_p9_cash_03b_cashout_enqueues_detailed_notice(self):
+        """Кэшаут кладёт в очередь одну подробную квитанцию в бот."""
+        _, bet_id = database.place_user_bet(
+            user_id=self.user_id,
+            amount=100,
+            selections=[{"match_id": self.match_id, "market_id": 961, "selection_id": 9611, "outcome": "home", "odds": 2.00}],
+            idempotency_key="cashout-notice-bet"
+        )
+        ok, res = execute_cashout(user_id=self.user_id, bet_id=bet_id)
+        self.assertTrue(ok)
+        self.assertEqual(res["stake"], 100)
+
+        with database.transaction() as conn:
+            rows = conn.execute(
+                "SELECT * FROM notification_events WHERE user_id = ? AND event_type = 'BET_SETTLED'",
+                (self.user_id,),
+            ).fetchall()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["source_event_id"], f"bet_{bet_id}")
+        self.assertIn(f"Кэшаут по ставке #{bet_id}", rows[0]["title"])
+        body = rows[0]["body"]
+        self.assertIn("Liverpool — Chelsea", body)
+        self.assertIn("Ставка: <b>100 🪙</b> × 2.00", body)
+        self.assertIn("Возможный выигрыш: 200 🪙", body)
+        self.assertIn(f"Кэшаут: <b>+{res['payout']} 🪙</b>", body)
+        self.assertIn(f"Баланс: <b>{res['balance']:,} 🪙</b>".replace(",", " "), body)
+
+        # Более поздний расчёт матча не должен слать второе уведомление.
+        settle_match_predictions(self.match_id, 2, 0, "finished")
+        with database.transaction() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM notification_events WHERE user_id = ?", (self.user_id,)
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
+
     def test_p9_cash_04_duplicate_cashout_rejected(self):
         """P9-CASH-04: Second cashout attempt on already settled bet is cleanly rejected."""
         _, bet_id = database.place_user_bet(

@@ -968,8 +968,17 @@ class AppController {
             return;
           }
           const quoteAmount = quote.amount;
+          const confirmLines = [`💰 Кэшаут ставки #${betId}`, ''];
+          if (quote.stake) confirmLines.push(`Ставка: ${quote.stake} 🪙`);
+          if (quote.potential_win) confirmLines.push(`Возможный выигрыш: ${quote.potential_win} 🪙`);
+          confirmLines.push(`Получите сейчас: ${quoteAmount} 🪙`);
+          if (quote.stake) {
+            const diff = quoteAmount - quote.stake;
+            confirmLines.push(diff >= 0 ? `Прибыль: +${diff} 🪙` : `Итог к ставке: −${-diff} 🪙`);
+          }
+          confirmLines.push('', 'Завершить ставку досрочно?');
           tgBridge.showConfirm(
-            `💰 Досрочный расчет (Cashout)\n\nВы получите ${quoteAmount} 🪙 немедленно. Завершить ставку?`,
+            confirmLines.join('\n'),
             async (confirmed) => {
               if (!confirmed) return;
               try {
@@ -980,7 +989,13 @@ class AppController {
                   const newBal = res.new_balance;
                   store.setUser({ ...store.state.user, balance: newBal });
                   tgBridge.hapticNotification('success');
-                  this.showSuccessModal('💰 Кэшаут выполнен!', `Зачислено: +${res.payout} 🪙.`);
+                  const doneLines = [`Ставка #${betId} закрыта досрочно.`, `Зачислено: +${res.payout} 🪙`];
+                  if (res.stake) {
+                    const diff = res.payout - res.stake;
+                    doneLines.push(diff >= 0 ? `Прибыль: +${diff} 🪙` : `Итог к ставке: −${-diff} 🪙`);
+                  }
+                  if (newBal !== undefined && newBal !== null) doneLines.push(`Баланс: ${newBal} 🪙`);
+                  this.showSuccessModal('💰 Кэшаут выполнен!', doneLines.join('\n'));
                   try {
                     const myBetsRes = await api.getPredictions();
                     if (myBetsRes.status === 'ok') store.setMyBets(myBetsRes.predictions);
@@ -1222,7 +1237,10 @@ class AppController {
     const descEl = document.getElementById('success-modal-desc');
     if (modal) {
       if (titleEl) titleEl.textContent = title;
-      if (descEl) descEl.textContent = desc;
+      if (descEl) {
+        descEl.textContent = desc;
+        descEl.style.whiteSpace = 'pre-line';
+      }
       modal.classList.add('active');
     }
   }

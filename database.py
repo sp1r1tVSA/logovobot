@@ -8580,11 +8580,22 @@ def execute_cashout(
             VALUES (?, ?, 'cashout', ?, 'bet', ?)
         """, (user_id, offer, bet_id, new_balance))
 
+        try:
+            from services.settlement_engine import notify_bet_cashed_out
+            notify_bet_cashed_out(
+                cursor, user_id, bet_id, bet["bet_type"], float(bet["total_odd"] or 1.0),
+                bet["amount"], bet["potential_win"] or 0, offer, new_balance,
+            )
+        except Exception as e:
+            logger.warning("Cashout notice for bet #%s skipped: %s", bet_id, e)
+
         return True, {
             "bet_id": bet_id,
             "status": "cashed_out",
             "cashout_payout": offer,
             "payout": offer,
+            "stake": bet["amount"],
+            "potential_win": bet["potential_win"],
             "balance": new_balance,
             "message": f"✅ Ставка #{bet_id} успешно закрыта досрочно (+{offer} 🪙)"
         }

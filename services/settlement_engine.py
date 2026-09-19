@@ -142,6 +142,34 @@ def _notify_bet_lost(cursor, user_id: int, bet_id: int, bet_type: Optional[str],
     )
 
 
+def notify_bet_cashed_out(cursor, user_id: int, bet_id: int, bet_type: Optional[str], odd: float, stake: int,
+                          potential_win: int, payout: int, balance_after: int) -> None:
+    """Квитанция о кэшауте. Вызывается на курсоре транзакции кэшаута и не бросает."""
+    try:
+        legs, _ = _leg_lines(cursor, bet_id)
+        parts = []
+        if legs:
+            parts.append("\n".join(legs))
+        diff = payout - stake
+        result = (f"📈 Чистая прибыль: <b>+{_coins(diff)} 🪙</b>" if diff >= 0
+                  else f"📉 Итог: <b>−{_coins(-diff)} 🪙</b> к ставке")
+        money = [
+            f"💵 Ставка: <b>{_coins(stake)} 🪙</b> × {odd:.2f}",
+            f"🎯 Возможный выигрыш: {_coins(potential_win)} 🪙",
+            f"💰 Кэшаут: <b>+{_coins(payout)} 🪙</b> зачислен на баланс",
+            result,
+            f"👛 Баланс: <b>{_coins(balance_after)} 🪙</b>",
+        ]
+        parts.append("\n".join(money))
+        database.enqueue_bet_settled_notice(
+            cursor, user_id, bet_id,
+            title=f"💰 Кэшаут по ставке #{bet_id} ({_bet_type_label(bet_type)})",
+            body="\n\n".join(parts),
+        )
+    except Exception as e:
+        logger.warning("Could not enqueue cashout notice for bet #%s: %s", bet_id, e)
+
+
 def settle_match_predictions(
     match_id: int,
     score1: int,
