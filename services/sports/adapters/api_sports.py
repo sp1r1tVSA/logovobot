@@ -311,27 +311,6 @@ class APISportsProvider(SportsDataProvider):
         odds = await self.get_odds(match_id)
         return [o.to_dict() for o in odds]
 
-    def get_provider_status(self) -> dict[str, Any]:
-        if not self.api_key:
-            return {
-                "provider": self.provider_name,
-                "connected": False,
-                "status": "UNCONFIGURED",
-                "message": "SPORTS_API_KEY is not configured. Operating in safe fallback mode.",
-                "last_sync": None,
-            }
-        summary = self.health_monitor.get_summary(
-            provider_name=self.provider_name,
-            is_connected=self.is_connected,
-            circuit_state=self.circuit_breaker.get_state(),
-            rate_limiter_stats=self.rate_limiter.get_stats(),
-            cache_stats=self.cache.get_stats(),
-        )
-        if self.circuit_open:
-            summary["status"] = "CIRCUIT_OPEN"
-            summary["connected"] = False
-        return summary
-
     # ── Normalization Helpers ────────────────────────────────────────────────
 
     def _normalize_fixture(self, f: dict[str, Any]) -> ProviderMatch:
