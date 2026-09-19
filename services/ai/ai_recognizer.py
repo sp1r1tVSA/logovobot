@@ -163,7 +163,7 @@ PROMPT_TEXT = """
 - Колонка `Г` или `G` = ГОЛЫ (Goals).
 - Колонка `А` или `A` = АССИСТЫ (Assists).
 - Для ТИП 2 установи `"is_single_timeline": false`.
-- Из этого типа ОБЯЗАТЕЛЬНО берутся: `left_score`, `right_score`, все авторы голов И ВСЕ АССИСТЕНТЫ (`left_assists`, `right_assists`).
+- Из этого типа ОБЯЗАТЕЛЬНО берутся: `left_score`, `right_score` и ВСЕ строки обеих таблиц (`left_rows`, `right_rows`).
 
 ---
 
@@ -179,6 +179,25 @@ PROMPT_TEXT = """
 ---
 
 ### ЭТАП 2: ОБРАБОТКА СКРИНШОТА ТИПА 2 (ТАБЛИЦА СТАТИСТИКИ)
+
+⭐⭐ ДЛЯ ТИПА 2 ТЫ НЕ СОСТАВЛЯЕШЬ СПИСКИ ГОЛОВ И АССИСТОВ САМ. ТЫ ПЕРЕПИСЫВАЕШЬ СТРОКИ ТАБЛИЦЫ.
+Для каждой таблицы верни массив строк — `left_rows` (левая таблица) и `right_rows` (правая),
+в том порядке, в каком строки идут на экране сверху вниз. КАЖДАЯ строка таблицы попадает
+в массив, ВКЛЮЧАЯ строки с нулями `0 0`:
+   {"name": "<имя из колонки ИГРОКИ>", "digits": [<цифра 1>, <цифра 2>]}
+- `digits` — это ДВЕ МАЛЕНЬКИЕ ЦИФРЫ СТРОКИ, БЛИЖАЙШИЕ К ЦЕНТРАЛЬНОЙ ВЕРТИКАЛЬНОЙ ЛИНИИ,
+  записанные В ТОМ ПОРЯДКЕ, В КАКОМ ОНИ СТОЯТ НА ЭКРАНЕ СЛЕВА НАПРАВО.
+  • В левой таблице это две ПОСЛЕДНИЕ цифры строки (под заголовками `Г` и `А`).
+  • В правой таблице это две ПЕРВЫЕ цифры строки (под заголовками `А` и `Г`).
+- НЕ ПЕРЕСТАВЛЯЙ цифры и НЕ РЕШАЙ, где голы, а где ассисты — просто перепиши их слева
+  направо, как видишь. Зеркальный порядок колонок правой таблицы учтёт программа.
+- Число `ОБЩ`/`OVR` (двух- и трёхзначное: 86, 111, 117) в `digits` НЕ ВХОДИТ НИКОГДА.
+- Пример правой строки `1  0  113  Valverde  ЦОП` → {"name": "Valverde", "digits": [1, 0]}.
+- Пример левой строки `ФРВ  Kane  117  2  1` → {"name": "Kane", "digits": [2, 1]}.
+- Для ТИПА 2 оставь `left_goals`, `right_goals`, `left_assists`, `right_assists` пустыми `[]` —
+  их вычислит программа из `left_rows` / `right_rows`.
+
+Правила ниже объясняют, КАК НАЙТИ эти две цифры, не перепутав их с соседними колонками.
 
 2. **ТАБЛИЦА СТАТИСТИКИ (СТРОГО РАЗДЕЛЕНА ПОПОЛАМ ПО ВЕРТИКАЛИ):**
 Экран четко разделен на две независимые таблицы (Левая и Правая команда).
@@ -235,9 +254,8 @@ PROMPT_TEXT = """
 ⚠️ ПРАВИЛО ЧТЕНИЯ ИМЕН И НУЛЕЙ:
 - ЧИТАЙ СТРОГО ТЕ ИМЕНА, КОТОРЫЕ НАПИСАНЫ В КОЛОНКЕ «ИГРОКИ» (PLAYERS) ДЛЯ ДАННОЙ СТРОКИ!
 - Игнорируй иконки капитана или бейджи (короны 👑, значки C, мячики ⚽) рядом с фамилией игрока — извлекай чистое имя.
-- ⚠️ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО добавлять игрока в ассисты, если в его колонке А/A стоит 0! Даже если он забил гол!
-- ⚠️ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО добавлять игрока в голы, если в его колонке Г/G стоит 0!
-- ⚠️ Если у игрока в обеих колонках стоят нули (0 0), он НЕ ДОЛЖЕН попадать ни в голы, ни в ассисты!
+- Цифры строки берутся из ТОЙ ЖЕ горизонтальной линии, что и имя. Не сдвигай их на строку выше или ниже.
+- Строки с нулями `0 0` тоже записывай в `left_rows` / `right_rows` — программа их отфильтрует сама.
 
 👑 ОПРЕДЕЛЕНИЕ ИГРОКА МАТЧА (MVP):
 В EA FC Mobile рядом с именами игроков отображаются круглые значки с короной. ОБРАТИ СТРОГОЕ ВНИМАНИЕ НА ЦВЕТ ЗНАЧКА:
@@ -248,54 +266,27 @@ PROMPT_TEXT = """
   Это утешительный значок проигравшей команды или капитан. Считай это за шум и ИГНОРИРУЙ — в "mvp_player" его НЕ записывай!
 - Если золотой короны нет ни у одного игрока на скриншоте — верни "mvp_player": null.
 
-3. **ЛЕВАЯ ПОЛОВИНА (LEFT SIDE — ЛЕВАЯ КОМАНДА):**
-   - Порядок столбцов: `ПОЗ/POS` | `ИГРОКИ/PLAYERS` | `ОБЩ/OVR` | `ИС/PS` | `Г/G` (Голы) | `А/A` (Ассисты)
-   - Имена игроков левой команды находятся в ЛЕВОЙ КОЛОНКЕ (слева от ОБЩ/OVR).
-   - Столбец `Г` / `G` (Голы) идет ПЕРВЫМ из двух правых цифр (предпоследняя колонка левой таблицы).
-   - Столбец `А` / `A` (Ассисты) идет ВТОРЫМ (крайняя правая колонка левой таблицы, ближе к центру).
-   - Примеры для левой стороны:
-     • `Steijn ... 2 0`: Г=2, А=0 -> Steijn забил 2 гола, 0 ассистов. (В `left_goals` 2 раза, в `left_assists` НЕТ).
-     • `Guirassy ... 2 1`: Г=2, А=1 -> Guirassy забил 2 гола, 1 ассист.
-     • `Sterling ... 1 2`: Г=1, А=2 -> Sterling забил 1 гол, 2 ассиста.
+3. **ЛЕВАЯ ТАБЛИЦА (ЛЕВАЯ КОМАНДА, `left_rows`):**
+   - Порядок столбцов: `ПОЗ/POS` | `ИГРОКИ/PLAYERS` | `ОБЩ/OVR` | `ИС/PS` | `Г/G` | `А/A`
+   - Имена — слева от ОБЩ/OVR. `digits` = две ПОСЛЕДНИЕ цифры строки, слева направо.
+   - Примеры: `ФРВ Kane 117 ⟨пусто⟩ 2 1` → {"name": "Kane", "digits": [2, 1]};
+     `ЦОП Kimmich 117 ⟨пусто⟩ 0 0` → {"name": "Kimmich", "digits": [0, 0]}.
 
-4. **ПРАВАЯ ПОЛОВИНА (RIGHT SIDE — ПРАВАЯ КОМАНДА):**
-   - ⚠️ ВНИМАНИЕ: ЗЕРКАЛЬНЫЙ ПОРЯДОК СТОЛБЦОВ!
-   - Порядок столбцов: `А/A` (Ассисты) | `Г/G` (Голы) | `ИС/PS` | `ОБЩ/OVR` | `ИГРОКИ/PLAYERS` | `ПОЗ/POS`
-   - Имена игроков правой команды находятся в ПРАВОЙ КОЛОНКЕ (СПРАВА ОТ ОБЩ/OVR, ближе к правому краю)!
-   - ⚠️ СТОЛБЕЦ `А` (Ассисты) ИДЕТ ПЕРВЫМ СЛЕВА В ПРАВОЙ ТАБЛИЦЕ (крайняя левая колонка правой таблицы, ближе к центру)!
-   - ⚠️ СТОЛБЕЦ `Г` (Голы) ИДЕТ ВТОРЫМ (перед столбцом ОБЩ/OVR)!
-   - ПРИМЕРЫ РАЗБОРА СТРОК ПРАВОЙ КОМАНДЫ (КРИТИЧЕСКИ ВАЖНО):
-     • `0  0  ... Christie`: А=0, Г=0 -> 0 голов, 0 ассистов.
-     • `0  0  ... Ríos`:     А=0, Г=0 -> 0 голов, 0 ассистов.
-     • `0  1  ... Rafa`:     А=0 (колонка А), Г=1 (колонка Г) -> Rafa забил 1 ГОЛ, но 0 АССИСТОВ! (В `right_goals` 1 раз, в `right_assists` НЕТ!).
-     • `1  0  ... Carlos Forbs`: А=1 (колонка А), Г=0 (колонка Г) -> Carlos Forbs сделал 1 АССИСТ, но 0 ГОЛОВ! (В `right_assists` 1 раз, в `right_goals` НЕТ!).
-   - ⚠️ ПОЛНОЕ СКАНИРОВАНИЕ ВСЕХ СТРОК (ДО САМОГО НИЗА ТАБЛИЦЫ):
-     Обязательно проверяй каждую видимую строку сверху донизу, включая САМУЮ НИЖНЮЮ (последнюю) строку над кнопками интерфейса! Не пропускай результативные действия игроков в нижней строке.
-     • `2  2  ... Rodrygo`:  А=2 (колонка А), Г=2 (колонка Г) -> Rodrygo забил 2 ГОЛА и сделал 2 АССИСТА! (В `right_goals` 2 раза, в `right_assists` 2 раза).
-     • `2  1  ... João Pedro`: А=2 (колонка А), Г=1 (колонка Г) -> João Pedro забил 1 ГОЛ и сделал 2 АССИСТА! (В `right_goals` 1 раз, в `right_assists` 2 раза).
+4. **ПРАВАЯ ТАБЛИЦА (ПРАВАЯ КОМАНДА, `right_rows`) — ЗЕРКАЛЬНАЯ:**
+   - Порядок столбцов: `А/A` | `Г/G` | `ИС/PS` | `ОБЩ/OVR` | `ИГРОКИ/PLAYERS` | `ПОЗ/POS`
+   - Имена — СПРАВА от ОБЩ/OVR, у правого края. `digits` = две ПЕРВЫЕ цифры строки
+     (у центральной линии), слева направо, БЕЗ перестановки.
+   - Примеры: `0 1 ⟨пусто⟩ 114 Brahim ЦАП` → {"name": "Brahim", "digits": [0, 1]};
+     `1 0 ⟨пусто⟩ 113 Valverde ЦОП` → {"name": "Valverde", "digits": [1, 0]};
+     `1 1 ⟨пусто⟩ 117 Golovin ЛП` → {"name": "Golovin", "digits": [1, 1]}.
 
-5. **ОБЯЗАТЕЛЬНЫЙ МАТЕМАТИЧЕСКИЙ ЛИМИТ АССИСТОВ (ЗАКОН ФУТБОЛА):**
-   - ⚠️ Общее количество ассистов команды НЕ МОЖЕТ превышать количество забитых ею голов (счёт команды)!
-   - `len(left_assists) <= left_score`
-   - `len(right_assists) <= right_score`
-   - Если Бенфика забила 4 гола (`right_score = 4`), у неё в `right_assists` может быть МАКСИМУМ 4 ассиста (например, Rodrygo (2), João Pedro (2) = 4). 5-го ассиста быть НЕ МОЖЕТ!
-   - Если Фейеноорд забил 5 голов (`left_score = 5`), у него в `left_assists` может быть МАКСИМУМ 5 ассистов!
+5. **ПОЛНОТА:**
+   - Запиши ВСЕ строки каждой таблицы от шапки до самой нижней, включая строку над кнопками.
+   - Количество элементов в `left_rows` и `right_rows` обычно одинаковое — пересчитай.
 
-5-БИС. **ОБЯЗАТЕЛЬНАЯ САМОПРОВЕРКА ПЕРЕД ОТВЕТОМ (ТИП 2):**
-   Прежде чем выдать JSON, выполни сверку и, если она не сходится, ПЕРЕЧИТАЙ таблицу:
-   - Сумма всех цифр в колонке `Г` левой таблицы ДОЛЖНА быть равна `left_score`.
-     → значит `len(left_goals) == left_score`.
-   - Сумма всех цифр в колонке `Г` правой таблицы ДОЛЖНА быть равна `right_score`.
-     → значит `len(right_goals) == right_score`.
-   - Если голов НЕ ХВАТАЕТ — ты пропустил строку. Чаще всего это САМАЯ НИЖНЯЯ строка
-     или строка, где цифра стоит далеко от имени из-за пустой колонки `ИС`.
-   - Если голов БОЛЬШЕ, чем счёт — ты прочитал цифру из колонки `А` как `Г`
-     (проверь зеркальный порядок правой таблицы).
-   - `len(left_assists) <= left_score` и `len(right_assists) <= right_score`.
-
-6. **ОБРАБОТКА ДВУХ СКРИНШОТОВ ОДНОЙ ТАБЛИЦЫ (ПРИ ПРОКРУТКЕ/СКРОЛЛЕ):**
-   - Если прислано 2 скриншота одной игры (верхняя и нижняя часть состава), один и тот же игрок может попасть на оба скриншота на стыке (например, `Diomande 1 0` или `Rodrygo 2 2`).
-   - НЕ ДУБЛИРУЙ ЕГО! Это одна и та же строка одного матча — учитывай её ровно 1 раз!
+6. **ДВА СКРИНШОТА ОДНОЙ ТАБЛИЦЫ (ПРОКРУТКА):**
+   - Если прислано 2 скриншота одной игры (верх и низ состава), объедини их строки в один
+     матч. Игрок на стыке, видимый на обоих скриншотах, записывается ОДИН раз.
 
 ---
 
@@ -310,11 +301,11 @@ PROMPT_TEXT = """
 
 ### ЭТАП 4: ФОРМАТ ОТВЕТА
 
-⚠️ КРИТИЧЕСКИ ВАЖНО: В массивах left_goals, right_goals, left_assists, right_assists количество элементов ОБЯЗАНО строго равняться числу в соответствующей колонке таблицы (Г или А)!
-- Если у игрока в колонке А стоит 2 — ровно 2 раза в массиве ассистов (например: ["Igor Paixão", "Igor Paixão"]).
-- Если у игрока в колонке А стоит 0 — его НЕ ДОЛЖНО быть в массиве ассистов.
-- Если у игрока в колонке Г стоит 2 — ровно 2 раза в массиве голов (например: ["Rodrygo", "Rodrygo"]).
-- Если у игрока в колонке Г стоит 0 — его НЕ ДОЛЖНО быть в массиве голов.
+- ТИП 2 (таблица): заполни `left_rows` и `right_rows`; `left_goals`, `right_goals`,
+  `left_assists`, `right_assists` оставь пустыми `[]`.
+- ТИП 1 (колонка голов) и матчи ИЗ ТЕКСТА ПОДПИСИ: `left_rows` и `right_rows` пустые `[]`,
+  заполни `left_goals` / `right_goals` (игрок повторяется столько раз, сколько забил) и,
+  если они указаны, `left_assists` / `right_assists`.
 
 Верни результат СТРОГО в виде одного валидного JSON-объекта без разметки markdown:
 
@@ -326,10 +317,19 @@ PROMPT_TEXT = """
       "left_score": 3,
       "right_score": 2,
       "is_single_timeline": false,
-      "left_goals": ["ИмяИгрокаA", "ИмяИгрокаB", "ИмяИгрокаB"],
-      "right_goals": ["ИмяИгрокаC", "ИмяИгрокаD"],
-      "left_assists": ["ИмяИгрокаE", "ИмяИгрокаF"],
-      "right_assists": ["ИмяИгрокаG", "ИмяИгрокаD"],
+      "left_rows": [
+        {"name": "ИмяИгрокаA", "digits": [0, 0]},
+        {"name": "ИмяИгрокаB", "digits": [2, 1]},
+        {"name": "ИмяИгрокаC", "digits": [1, 0]}
+      ],
+      "right_rows": [
+        {"name": "ИмяИгрокаD", "digits": [1, 0]},
+        {"name": "ИмяИгрокаE", "digits": [0, 2]}
+      ],
+      "left_goals": [],
+      "right_goals": [],
+      "left_assists": [],
+      "right_assists": [],
       "mvp_player": "ИмяИгрокаB"
     }
   ]
@@ -385,6 +385,125 @@ def validate_and_sanitize_match_events(m: dict) -> None:
         logger.warning(
             "OCR goal/score mismatch (likely a cut-off table row): %s", "; ".join(mismatches)
         )
+
+
+# Screen order of the two stat digits next to the centre divider. The right-hand
+# table mirrors the left one, so the same left-to-right reading means A, G there.
+_DIGIT_ORDER = {"left": ("g", "a"), "right": ("a", "g")}
+
+# A single player's goals or assists never reach this; a bigger number is an
+# OVR rating (86, 117) that bled into the stat columns.
+_MAX_STAT = 9
+
+
+def _parse_stat(value) -> int | None:
+    """One stat cell as an int; a dash or blank is 0, anything unreadable is None."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        n = int(value)
+    else:
+        text = str(value).strip()
+        if text in ("", "-", "—", "–"):
+            return 0
+        if not re.fullmatch(r"\d+", text):
+            return None
+        n = int(text)
+    return n if 0 <= n <= _MAX_STAT else None
+
+
+def _parse_row(row) -> tuple[str, int, int] | None:
+    """
+    Reads one transcribed table row as (name, first digit, second digit) in screen
+    order. Accepts the prompted {"name": ..., "digits": [x, y]} shape and a flat
+    [name, x, y] list. Returns None when the row cannot be trusted.
+    """
+    if isinstance(row, dict):
+        name = row.get("name") or row.get("player")
+        digits = row.get("digits")
+    elif isinstance(row, (list, tuple)) and len(row) == 3:
+        name, digits = row[0], row[1:]
+    else:
+        return None
+    if not isinstance(digits, (list, tuple)) or len(digits) != 2:
+        return None
+    first, second = _parse_stat(digits[0]), _parse_stat(digits[1])
+    if first is None or second is None:
+        return None
+    name = clean_player_name(name or "")
+    if not name:
+        return None
+    return name, first, second
+
+
+def rows_to_events(rows, side: str, score: int) -> tuple[list[str], list[str], bool]:
+    """
+    Turns the rows the model transcribed for one table into goal and assist lists.
+
+    The model only copies the two digits beside the centre line in screen order;
+    which one is goals is decided here, because mirroring the right-hand table is
+    exactly where the model used to slip. The scoreboard is the ground truth: if
+    the expected goal column does not add up to `score` but the other one does,
+    the model reordered the digits and the columns are swapped back.
+
+    Rows repeated on two scrolled screenshots are counted once (a player appears
+    in a team's table only once). Returns (goals, assists, needs_review).
+    """
+    parsed = []
+    seen = set()
+    needs_review = False
+    for row in rows or []:
+        item = _parse_row(row)
+        if item is None:
+            needs_review = True
+            logger.warning("OCR %s row unreadable, skipped: %r", side, row)
+            continue
+        key = item[0].casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        parsed.append(item)
+
+    goal_idx = 1 if _DIGIT_ORDER[side][0] == "g" else 2
+    assist_idx = 3 - goal_idx
+    goal_sum = sum(r[goal_idx] for r in parsed)
+    assist_sum = sum(r[assist_idx] for r in parsed)
+    if score > 0 and goal_sum != score and assist_sum == score:
+        logger.warning(
+            "OCR %s table: goal column sums to %d, the other to %d = score; "
+            "columns were read mirrored, swapping.", side, goal_sum, assist_sum,
+        )
+        goal_idx, assist_idx = assist_idx, goal_idx
+
+    goals, assists = [], []
+    for row in parsed:
+        goals.extend([row[0]] * row[goal_idx])
+        assists.extend([row[0]] * row[assist_idx])
+    return goals, assists, needs_review
+
+
+def apply_table_rows(m: dict) -> None:
+    """
+    Replaces a match's goal/assist lists with the ones derived from `left_rows` /
+    `right_rows` when the model returned a stats table. Timeline screenshots and
+    matches taken from the caption carry no rows and keep their lists.
+    """
+    for side in ("left", "right"):
+        rows = m.get(f"{side}_rows")
+        if not isinstance(rows, list) or not rows:
+            continue
+        try:
+            score = int(m.get(f"{side}_score") or 0)
+        except (TypeError, ValueError):
+            score = 0
+        goals, assists, needs_review = rows_to_events(rows, side, score)
+        m[f"{side}_goals"] = goals
+        m[f"{side}_assists"] = assists
+        m["is_single_timeline"] = False
+        if needs_review:
+            m["ocr_needs_review"] = True
 
 
 def _check_proxy_alive(proxy_url: str) -> bool:
@@ -553,6 +672,9 @@ def recognize_match_screenshots_bytes(
                         m.setdefault("left_assists", [])
                         m.setdefault("right_assists", [])
                         m.setdefault("is_single_timeline", False)
+
+                        # Stats table: build goals/assists from the transcribed rows
+                        apply_table_rows(m)
 
                         # Clean and sanitize player names
                         m["left_goals"] = [clean_player_name(p) for p in m["left_goals"] if clean_player_name(p)]

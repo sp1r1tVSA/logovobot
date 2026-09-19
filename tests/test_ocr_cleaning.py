@@ -23,9 +23,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from services.ai.ai_recognizer import (
     BADGE_WORDS,
     POS_TOKENS,
+    apply_table_rows,
     clean_json_response,
     clean_player_name,
     clean_team_name,
+    rows_to_events,
     validate_and_sanitize_match_events,
 )
 
@@ -363,6 +365,118 @@ class TestGroundTruthScreenshotRows(unittest.TestCase):
         for player in zero_row_players:
             with self.subTest(player=player):
                 self.assertNotIn(player, everyone)
+
+
+def _rows(*triples):
+    return [{"name": n, "digits": [x, y]} for n, x, y in triples]
+
+
+# GROUND TRUTH: AR-KOT (Бавария) 3 - 2 робзи (Реал Мадрид). The old list-based
+# output credited Brahim and Mbappé with both the goals and the assists; the
+# assists actually belong to Valverde and Bellingham in the mirrored A column.
+BAYERN_LEFT = _rows(
+    ("ЦОП Kimmich 117", 0, 0), ("Bischof", 0, 0), ("Musiala", 0, 0),
+    ("Olise", 0, 1), ("👑Kane", 2, 1), ("Gnabry", 1, 0), ("Díaz", 0, 0),
+)
+REAL_RIGHT = _rows(  # screen order: A, G
+    ("Huijsen", 0, 0), ("Marc Cucurella", 0, 0), ("Valverde", 1, 0),
+    ("Camavinga", 0, 0), ("Bellingham", 1, 0), ("Brahim", 0, 1), ("Mbappé", 0, 1),
+)
+
+# GROUND TRUTH: loki (Торино) 4 - 2 радя (Монако). The old output lost both
+# Monaco goals (Camara, Golovin) and kept only Balogun's assist.
+TORINO_LEFT = _rows(
+    ("Rodríguez", 0, 1), ("Mandragora", 0, 0), ("Gineitis", 0, 1),
+    ("Oristanio", 1, 1), ("Vlašić", 3, 1), ("Zapata", 0, 0), ("Abouklhal", 0, 0),
+)
+MONACO_RIGHT = _rows(  # screen order: A, G
+    ("Salisu", 0, 0), ("Zakaria", 0, 0), ("Camara", 0, 1), ("Golovin", 1, 1),
+    ("Balogun", 1, 0), ("Biereth", 0, 0), ("Ansu Fati", 0, 0),
+)
+
+
+class TestTableRows(unittest.TestCase):
+    def test_bayern_real_screenshot(self):
+        m = {"left_score": 3, "right_score": 2, "left_rows": BAYERN_LEFT, "right_rows": REAL_RIGHT}
+        apply_table_rows(m)
+        validate_and_sanitize_match_events(m)
+        self.assertEqual(m["left_goals"], ["Kane", "Kane", "Gnabry"])
+        self.assertEqual(m["left_assists"], ["Olise", "Kane"])
+        self.assertEqual(m["right_goals"], ["Brahim", "Mbappé"])
+        self.assertEqual(m["right_assists"], ["Valverde", "Bellingham"])
+        self.assertNotIn("ocr_needs_review", m)
+
+    def test_torino_monaco_screenshot(self):
+        m = {"left_score": 4, "right_score": 2, "left_rows": TORINO_LEFT, "right_rows": MONACO_RIGHT}
+        apply_table_rows(m)
+        validate_and_sanitize_match_events(m)
+        self.assertEqual(m["left_goals"], ["Oristanio", "Vlašić", "Vlašić", "Vlašić"])
+        self.assertEqual(m["left_assists"], ["Rodríguez", "Gineitis", "Oristanio", "Vlašić"])
+        self.assertEqual(m["right_goals"], ["Camara", "Golovin"])
+        self.assertEqual(m["right_assists"], ["Golovin", "Balogun"])
+        self.assertNotIn("ocr_needs_review", m)
+
+    def test_mirrored_reading_is_swapped_back_by_the_score(self):
+        """The model 'helpfully' wrote the right table as G, A instead of screen order."""
+        reordered = _rows(("Rodrygo", 2, 0), ("João Pedro", 1, 1), ("Rafa", 0, 0))
+        with self.assertLogs("services.ai.ai_recognizer", level=logging.WARNING):
+            goals, assists, review = rows_to_events(reordered, "right", 3)
+        self.assertEqual(goals, ["Rodrygo", "Rodrygo", "João Pedro"])
+        self.assertEqual(assists, ["João Pedro"])
+        self.assertFalse(review)
+
+    def test_left_table_swap_too(self):
+        reordered = [{"name": r["name"], "digits": r["digits"][::-1]} for r in BAYERN_LEFT]
+        with self.assertLogs("services.ai.ai_recognizer", level=logging.WARNING):
+            goals, assists, _ = rows_to_events(reordered, "left", 3)
+        self.assertEqual(goals, ["Kane", "Kane", "Gnabry"])
+        self.assertEqual(assists, ["Olise", "Kane"])
+
+    def test_ambiguous_sums_are_not_swapped(self):
+        """
+        Monaco 2: both columns sum to 2, so the score cannot tell them apart and
+        the screen-order mapping stands, whatever the model did.
+        """
+        goals, assists, _ = rows_to_events(MONACO_RIGHT, "right", 2)
+        self.assertEqual(goals, ["Camara", "Golovin"])
+        self.assertEqual(assists, ["Golovin", "Balogun"])
+
+    def test_equal_sums_keep_the_screen_mapping(self):
+        """Real 3-2: both right-hand columns sum to 2, so nothing is swapped."""
+        goals, assists, _ = rows_to_events(REAL_RIGHT, "right", 2)
+        self.assertEqual(goals, ["Brahim", "Mbappé"])
+        self.assertEqual(assists, ["Valverde", "Bellingham"])
+
+    def test_scrolled_duplicate_row_counted_once(self):
+        rows = _rows(("Rodrygo", 2, 2), ("João Pedro", 2, 1), ("Rodrygo", 2, 2))
+        goals, assists, _ = rows_to_events(rows, "right", 3)
+        self.assertEqual(goals, ["Rodrygo", "Rodrygo", "João Pedro"])
+        self.assertEqual(assists, ["Rodrygo", "Rodrygo", "João Pedro", "João Pedro"])
+
+    def test_ovr_bleed_row_is_dropped_and_flagged(self):
+        rows = _rows(("Kane", 117, 2), ("Gnabry", 1, 0))
+        with self.assertLogs("services.ai.ai_recognizer", level=logging.WARNING):
+            goals, _, review = rows_to_events(rows, "left", 1)
+        self.assertEqual(goals, ["Gnabry"])
+        self.assertTrue(review)
+
+    def test_loose_cell_values(self):
+        rows = [
+            {"name": "A", "digits": ["1", "-"]},
+            ["B", 0, "2"],
+            {"name": "C", "digits": [None, 1]},
+        ]
+        goals, assists, review = rows_to_events(rows, "left", 1)
+        self.assertEqual(goals, ["A"])
+        self.assertEqual(assists, ["B", "B", "C"])
+        self.assertFalse(review)
+
+    def test_without_rows_the_lists_are_kept(self):
+        """Timeline screenshots and caption matches carry plain lists."""
+        m = {"left_score": 1, "right_score": 0, "left_goals": ["X"], "left_rows": [], "is_single_timeline": True}
+        apply_table_rows(m)
+        self.assertEqual(m["left_goals"], ["X"])
+        self.assertTrue(m["is_single_timeline"])
 
 
 if __name__ == "__main__":
