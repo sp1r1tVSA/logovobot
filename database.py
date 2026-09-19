@@ -2450,7 +2450,7 @@ def get_match(match_id: int) -> dict | None:
                 m.id, m.round_number, COALESCE(u1.telegram_id, m.player1_id) AS player1_id, COALESCE(u2.telegram_id, m.player2_id) AS player2_id,
                 m.player1_score, m.player2_score, m.status, m.played_at, m.is_extended,
                 COALESCE(m.frozen_seconds, 0) AS frozen_seconds, m.frozen_at,
-                m.photo_id, m.dispute_photos, m.reported_by,
+                m.photo_id, m.dispute_photos, m.reported_by, m.mvp_player,
                 m.proposed_time, m.proposed_by, m.time_status,
                 m.tournament_type, m.cup_stage, m.cup_series_id, m.game_num_in_series, m.division_id, m.season_id,
                 m.player1_team AS direct_p1_team, m.player2_team AS direct_p2_team,

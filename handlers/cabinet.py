@@ -1376,6 +1376,7 @@ async def cancel_score_report_and_navigate(update: Update, context: ContextTypes
         "is_admin_reporting",
         "ai_photos_list",
         "processed_media_groups",
+        "report_mvp_player",
     ):
         context.user_data.pop(key, None)
 
@@ -1813,6 +1814,7 @@ async def start_score_reporting(update: Update, context: ContextTypes.DEFAULT_TY
             match_id = int(query.data.replace("cabinet_report_score_", ""))
 
     context.user_data["reporting_match_id"] = match_id
+    context.user_data.pop("report_mvp_player", None)
 
     match = await asyncio.to_thread(database.get_match, match_id)
     if not match:
@@ -1872,6 +1874,7 @@ async def cb_report_choice_auto(update: Update, context: ContextTypes.DEFAULT_TY
     user_id = query.from_user.id
     context.user_data["reporting_match_id"] = match_id
     context.user_data["reporting_mode"] = "auto"
+    context.user_data.pop("report_mvp_player", None)
     context.user_data["awaiting_report_photo"] = True
     context.user_data["ai_photos_list"] = []
 
@@ -1910,6 +1913,9 @@ async def cb_report_choice_manual(update: Update, context: ContextTypes.DEFAULT_
     user_id = query.from_user.id
     context.user_data["reporting_match_id"] = match_id
     context.user_data["reporting_mode"] = "manual"
+    # Ручной ввод не редактирует MVP, а к нему часто переходят как раз потому,
+    # что ИИ ошибся — поэтому корону из распознавания не переносим.
+    context.user_data.pop("report_mvp_player", None)
 
     home_team = match['player1_team'] or match['player1_nickname']
     away_team = match['player2_team'] or match['player2_nickname']
@@ -2455,6 +2461,12 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             context.user_data["away_assists_count"] = a_assists
             context.user_data["is_single_timeline"] = bool(is_single_timeline)
             context.user_data["report_photo_id"] = photos_list[0] if photos_list else context.user_data.get("report_photo_id")
+            mvp_player = ai_recognizer.clean_mvp_name(ai_res.get("mvp_player"))
+            if mvp_player:
+                context.user_data["report_mvp_player"] = mvp_player
+            else:
+                context.user_data.pop("report_mvp_player", None)
+            mvp_line = f"👑 <b>Игрок матча (MVP):</b> {safe_escape(mvp_player)}\n\n" if mvp_player else ""
 
             h_goals_summary = ", ".join([f"{p} ({c})" for p, c in h_goals.items()]) if h_goals else "Нет"
             a_goals_summary = ", ".join([f"{p} ({c})" for p, c in a_goals.items()]) if a_goals else "Нет"
@@ -2472,6 +2484,7 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 f"🎯 <b>Ассисты ({safe_escape(home_team)}):</b> {h_assists_str}\n\n"
                 f"⚽ <b>Голы ({safe_escape(away_team)}):</b> {safe_escape(a_goals_summary)}\n"
                 f"🎯 <b>Ассисты ({safe_escape(away_team)}):</b> {a_assists_str}\n\n"
+                f"{mvp_line}"
                 f"📸 <i>Скриншот(ы) прикреплены.</i>"
             )
 
@@ -2490,6 +2503,7 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await context.bot.send_photo(chat_id=user_id, photo=photo_to_show, caption=text, parse_mode="HTML", reply_markup=markup)
         else:
             context.user_data["report_photo_id"] = photos_list[0] if photos_list else context.user_data.get("report_photo_id")
+            context.user_data.pop("report_mvp_player", None)
             cancel_cb = get_match_cancel_cb(context, user_id, match_id)
             fail_text = (
                 "⚠️ <b>Не удалось автоматически распознать результат со скриншотов.</b>\n\n"
@@ -2618,7 +2632,7 @@ def collect_report_payload(context: ContextTypes.DEFAULT_TYPE, match: dict) -> d
     Reads the ACTUAL keys written by both reporting flows:
       - AI flow & manual flow: report_home_goals/report_away_goals +
         home_goals_count/away_goals_count/home_assists_count/away_assists_count.
-    Returns {h_score, a_score, scorers[], assists[], photo_id} where
+    Returns {h_score, a_score, scorers[], assists[], photo_id, mvp_player} where
     scorers/assists are [{player_name, team_name, count}] suitable for
     confirm_and_finalize_match event conversion.
     """
@@ -2650,6 +2664,7 @@ def collect_report_payload(context: ContextTypes.DEFAULT_TYPE, match: dict) -> d
         "scorers": scorers,
         "assists": assists,
         "photo_id": photo_id,
+        "mvp_player": ud.get("report_mvp_player"),
     }
 
 
@@ -2717,6 +2732,7 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
     a_assists = context.user_data.get("away_assists_count", {})
     photo_id = context.user_data.get("report_photo_id")
     is_single_tl = bool(context.user_data.get("is_single_timeline", False))
+    mvp_player = context.user_data.get("report_mvp_player")
 
     home_team = match['player1_team'] or match['player1_nickname']
     away_team = match['player2_team'] or match['player2_nickname']
@@ -2731,7 +2747,11 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
     for p, c in a_assists.items():
         events.append((away_team, p, "assist", c))
 
-    await asyncio.to_thread(database.confirm_and_finalize_match, match_id, h_score, a_score, events, reporter_id=user_id, photo_id=photo_id)
+    await asyncio.to_thread(
+        database.confirm_and_finalize_match, match_id, h_score, a_score, events,
+        reporter_id=user_id, photo_id=photo_id, mvp_player=mvp_player,
+    )
+    context.user_data.pop("report_mvp_player", None)
     await refresh_debts_summary(context)
     await refresh_league_table(context, division_id=match.get("division_id"))
 
@@ -2752,7 +2772,8 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
         is_single_timeline=is_single_tl,
         is_pm=True,
         pm_title="🎉 <b>Результат успешно занесен в лигу!</b>",
-        match_id=match_id
+        match_id=match_id,
+        mvp_player=mvp_player
     ) + debt_note
 
     is_admin_user = is_admin(user_id) or context.user_data.get("is_admin_reporting", False)
@@ -2792,7 +2813,8 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
         is_single_timeline=is_single_tl,
         is_pm=True,
         pm_title="🔔 <b>Результат вашего матча занесен в лигу!</b>",
-        match_id=match_id
+        match_id=match_id,
+        mvp_player=mvp_player
     ) + debt_note
 
     for p_id in set(players_to_notify):
@@ -2822,7 +2844,8 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
             a_assists=a_assists,
             is_single_timeline=is_single_tl,
             is_pm=False,
-            match_id=match_id
+            match_id=match_id,
+            mvp_player=mvp_player
         ) + debt_note
         try:
             kwargs = {"chat_id": target_chat_id, "caption": group_text, "parse_mode": "HTML"}
@@ -2882,6 +2905,7 @@ async def submit_report_to_guest(update: Update, context: ContextTypes.DEFAULT_T
             match_id, payload["h_score"], payload["a_score"], events,
             reporter_id=submitter_id,
             photo_id=payload.get("photo_id"),
+            mvp_player=payload.get("mvp_player"),
         )
         await asyncio.to_thread(database.delete_pending_report, match_id)
         await notify_match_confirmed(context, match_id)
@@ -2945,6 +2969,7 @@ async def submit_report_to_guest(update: Update, context: ContextTypes.DEFAULT_T
         f"🏠 <b>{safe_escape(home_team)}</b> <b>{h_score} : {a_score}</b> <b>{safe_escape(away_team)}</b> ✈️\n\n"
         f"<b>Авторы голов:</b>\n{sc_text}\n\n"
         f"<b>Ассистенты:</b>\n{ast_text}\n\n"
+        f"{_mvp_card_line(payload)}"
         f"Пожалуйста, подтвердите результат или отклоните его, если данные неверны."
     )
 
@@ -2990,9 +3015,16 @@ async def _build_pending_report_card(context: ContextTypes.DEFAULT_TYPE, match: 
         f"🏠 <b>{safe_escape(str(home_team))}</b> <b>{h_score} : {a_score}</b> <b>{safe_escape(str(away_team))}</b> ✈️\n\n"
         f"<b>Авторы голов:</b>\n{sc_text}\n\n"
         f"<b>Ассистенты:</b>\n{ast_text}\n\n"
+        f"{_mvp_card_line(pending)}"
         f"Пожалуйста, подтвердите результат или отклоните его."
     )
     return text, pending.get("photo_id")
+
+
+def _mvp_card_line(report: dict) -> str:
+    """MVP line for a confirmation card; empty when no gold crown was recognized."""
+    mvp = str(report.get("mvp_player") or "").strip()
+    return f"👑 <b>Игрок матча (MVP):</b> {safe_escape(mvp)}\n\n" if mvp else ""
 
 
 def _pending_report_events(match: dict, pending: dict) -> list:
@@ -3054,6 +3086,7 @@ async def cb_guest_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         match_id, h_score, a_score, events,
         reporter_id=pending.get("reporter_id"),
         photo_id=pending.get("photo_id"),
+        mvp_player=pending.get("mvp_player"),
     )
     await asyncio.to_thread(database.delete_pending_report, match_id)
 
@@ -3360,7 +3393,8 @@ async def notify_match_confirmed(context: ContextTypes.DEFAULT_TYPE, match_id: i
         a_assists=away_assists,
         is_pm=True,
         pm_title="✅ <b>Матч успешно подтвержден и сыгран!</b>",
-        match_id=match_id
+        match_id=match_id,
+        mvp_player=match.get("mvp_player")
     ) + debt_note
 
     for p_id in (match['player1_id'], match['player2_id']):
@@ -3398,7 +3432,8 @@ async def notify_match_confirmed(context: ContextTypes.DEFAULT_TYPE, match_id: i
             h_assists=home_assists,
             a_assists=away_assists,
             is_pm=False,
-            match_id=match_id
+            match_id=match_id,
+            mvp_player=match.get("mvp_player")
         ) + debt_note
 
         photo_id = match.get("photo_id")

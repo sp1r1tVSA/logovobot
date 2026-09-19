@@ -12,6 +12,7 @@ import json
 import os
 import sys
 import time
+import types
 import unittest
 import urllib.parse
 import uuid
@@ -23,6 +24,7 @@ from aiohttp.test_utils import AioHTTPTestCase
 import config
 import database
 from api.server import create_app
+from handlers import cabinet
 from services.ai.ai_recognizer import clean_mvp_name
 
 # Заведомо недействительный токен из документации Telegram: настоящий
@@ -61,6 +63,41 @@ class TestMvpNameCleaning(unittest.TestCase):
         """Все способы, которыми модель пишет «короны нет», сводятся к None."""
         for raw in (None, "", "   ", "null", "NULL", "None", "nan", "-", "—", "нет"):
             self.assertIsNone(clean_mvp_name(raw), f"raw={raw!r}")
+
+
+class TestMvpReportPayload(unittest.TestCase):
+    """Корона внутри личного кабинета: из user_data в отчёт и на карточку."""
+
+    def _context(self, **user_data):
+        return types.SimpleNamespace(user_data=dict(user_data))
+
+    @property
+    def _match(self):
+        return {"id": 1, "player1_team": "Бавария", "player2_team": "Реал"}
+
+    def test_payload_carries_recognized_mvp(self):
+        ctx = self._context(
+            report_home_goals=2, report_away_goals=1,
+            home_goals_count={"Kane": 2}, away_goals_count={"Mbappe": 1},
+            report_mvp_player="Harry Kane",
+        )
+        payload = cabinet.collect_report_payload(ctx, self._match)
+        self.assertEqual(payload["mvp_player"], "Harry Kane")
+
+    def test_payload_without_mvp_is_none(self):
+        """Ручной ввод короны не даёт — в базу должен уйти NULL, а не пустая строка."""
+        ctx = self._context(report_home_goals=0, report_away_goals=0)
+        self.assertIsNone(cabinet.collect_report_payload(ctx, self._match)["mvp_player"])
+
+    def test_card_line_shown_only_with_mvp(self):
+        line = cabinet._mvp_card_line({"mvp_player": "Harry Kane"})
+        self.assertIn("Harry Kane", line)
+        self.assertIn("👑", line)
+        for empty in ({}, {"mvp_player": None}, {"mvp_player": "   "}):
+            self.assertEqual(cabinet._mvp_card_line(empty), "")
+
+    def test_card_line_escapes_html(self):
+        self.assertNotIn("<b>Kane", cabinet._mvp_card_line({"mvp_player": "<b>Kane"}))
 
 
 class TestMvpDatabase(unittest.TestCase):
@@ -224,6 +261,29 @@ class TestMvpDatabase(unittest.TestCase):
                 "UPDATE matches SET mvp_player = ? WHERE id = ?", (self.outsider, pending_id)
             )
         self.assertEqual(database.get_top_mvps(division_id=self.div_b)[0]["mvp_count"], 1)
+
+    def test_get_match_exposes_mvp_player(self):
+        """Строка матча отдаёт корону: посты после подтверждения берут её оттуда."""
+        match_id = self._create_match(self.div_a, self.team_a1, self.team_a2,
+                                      self.coach_a1, self.coach_a2)
+        database.confirm_and_finalize_match(
+            match_id, 1, 0, [(self.team_a1, self.star, "goal", 1)],
+            reporter_id=self.coach_a1, mvp_player=self.star,
+        )
+        self.assertEqual(database.get_match(match_id).get("mvp_player"), self.star)
+
+    def test_pending_report_round_trip_keeps_mvp(self):
+        """Отложенный отчёт переживает корону: соперник/админ подтверждает с ней."""
+        match_id = self._create_match(self.div_a, self.team_a1, self.team_a2,
+                                      self.coach_a1, self.coach_a2)
+        payload = {
+            "h_score": 1, "a_score": 0,
+            "scorers": [{"player_name": self.star, "team_name": self.team_a1, "count": 1}],
+            "assists": [], "photo_id": None, "mvp_player": self.star,
+        }
+        database.save_pending_report(match_id, self.coach_a1, payload)
+        self.assertEqual(database.get_pending_report(match_id).get("mvp_player"), self.star)
+        database.delete_pending_report(match_id)
 
     def test_cabinet_squad_stats_reports_mvp(self):
         """3. Состав клуба: mvp_count у игрока и лидер top_mvp у клуба."""
