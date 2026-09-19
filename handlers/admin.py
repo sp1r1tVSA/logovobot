@@ -390,13 +390,13 @@ async def admin_list_players(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("👥 Нет зарегистрированных игроков.", reply_markup=markup)
         return
 
-    lines = ["👥 **Зарегистрированные игроки:**\n"]
+    lines = ["👥 <b>Зарегистрированные игроки:</b>\n"]
     for i, p in enumerate(players, start=1):
-        username_str = f"@{p['username']}" if p['username'] else "(без юзернейма)"
-        team_str = f" [{p['team_name']}]" if p['team_name'] else ""
-        lines.append(f"{i}. {username_str}{team_str} `ID: {p['telegram_id']}`")
+        username_str = f"@{html.escape(p['username'])}" if p['username'] else "(без юзернейма)"
+        team_str = f" [{html.escape(p['team_name'])}]" if p['team_name'] else ""
+        lines.append(f"{i}. {username_str}{team_str} <code>ID: {p['telegram_id']}</code>")
 
-    await query.edit_message_text("\n".join(lines), parse_mode="Markdown", reply_markup=markup)
+    await query.edit_message_text("\n".join(lines), parse_mode="HTML", reply_markup=markup)
 
 
 
@@ -407,7 +407,7 @@ async def admin_test_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not msg:
         return
 
-    status_msg = await msg.reply_text("🔄 **Запуск диагностики связи с WARP и Gemini AI...**", parse_mode="Markdown")
+    status_msg = await msg.reply_text("🔄 <b>Запуск диагностики связи с WARP и Gemini AI...</b>", parse_mode="HTML")
 
     import urllib.request
     import urllib.error
@@ -417,9 +417,9 @@ async def admin_test_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     target_api_key = (getattr(config, "GEMINI_API_KEY", "") or "").strip()
     if not target_api_key:
         await status_msg.edit_text(
-            "🤖 **РЕЗУЛЬТАТЫ ДИАГНОСТИКИ AI & WARP**\n\n"
-            "❌ `GEMINI_API_KEY не установлен в config.py!`",
-            parse_mode="Markdown",
+            "🤖 <b>РЕЗУЛЬТАТЫ ДИАГНОСТИКИ AI &amp; WARP</b>\n\n"
+            "❌ <code>GEMINI_API_KEY не установлен в config.py!</code>",
+            parse_mode="HTML",
         )
         return
 
@@ -448,28 +448,28 @@ async def admin_test_ai(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
                 with opener.open(req, timeout=8) as res:
                     res_data = json.loads(res.read().decode("utf-8"))
                     if res_data.get("candidates"):
-                        results.append(f"• `{m_name}`: ✅ 200 OK")
+                        results.append(f"• <code>{m_name}</code>: ✅ 200 OK")
                     else:
-                        results.append(f"• `{m_name}`: ⚠️ Нет ответа")
+                        results.append(f"• <code>{m_name}</code>: ⚠️ Нет ответа")
             except urllib.error.HTTPError as e:
                 err_text = e.read().decode("utf-8", errors="ignore")[:60].replace("\n", " ")
-                results.append(f"• `{m_name}`: ❌ HTTP {e.code} ({err_text})")
+                results.append(f"• <code>{m_name}</code>: ❌ HTTP {e.code} ({html.escape(err_text)})")
             except Exception as e:
-                results.append(f"• `{m_name}`: ❌ {e}")
+                results.append(f"• <code>{m_name}</code>: ❌ {html.escape(str(e))}")
 
         return alive, results
 
     warp_alive, model_lines = await asyncio.to_thread(_run_diagnostics)
-    warp_status_str = "✅ **Доступен (127.0.0.1:4001)**" if warp_alive else "❌ **Не прослушивается (прямой режим)**"
+    warp_status_str = "✅ <b>Доступен (127.0.0.1:4001)</b>" if warp_alive else "❌ <b>Не прослушивается (прямой режим)</b>"
 
     lines = [
-        "🤖 **РЕЗУЛЬТАТЫ ДИАГНОСТИКИ AI & WARP**\n",
-        f"📡 **WARP Proxy Status:** {warp_status_str}\n",
-        "🧪 **Статус моделей Gemini:**",
+        "🤖 <b>РЕЗУЛЬТАТЫ ДИАГНОСТИКИ AI &amp; WARP</b>\n",
+        f"📡 <b>WARP Proxy Status:</b> {warp_status_str}\n",
+        "🧪 <b>Статус моделей Gemini:</b>",
         *model_lines,
     ]
 
-    await status_msg.edit_text("\n".join(lines), parse_mode="Markdown")
+    await status_msg.edit_text("\n".join(lines), parse_mode="HTML")
 
 # --- Broadcast Handlers (Debt Notifications) ---
 
@@ -2275,11 +2275,11 @@ async def admin_view_player(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
         
     text = (
-        f"👤 **Карточка участника лиги**\n\n"
-        f"• **Telegram:** @{player['username'] or 'нет'}\n"
-        f"• **Клуб:** {player['team_name'] or 'нет'}\n"
-        f"• **Роль:** {player['role'].capitalize()}\n"
-        f"• **ID в боте:** `{player['telegram_id']}`"
+        f"👤 <b>Карточка участника лиги</b>\n\n"
+        f"• <b>Telegram:</b> @{html.escape(player['username'] or 'нет')}\n"
+        f"• <b>Клуб:</b> {html.escape(player['team_name'] or 'нет')}\n"
+        f"• <b>Роль:</b> {html.escape(str(player['role']).capitalize())}\n"
+        f"• <b>ID в боте:</b> <code>{player['telegram_id']}</code>"
     )
     
     role_btn = (
@@ -2299,7 +2299,7 @@ async def admin_view_player(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         [InlineKeyboardButton("❌ Удалить из лиги", callback_data=f"admin_delete_options_{player_id}")],
         [InlineKeyboardButton("« Назад к списку", callback_data="admin_list_players_page_0")]
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 @admin_only
 async def admin_confirm_delete_player(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2318,8 +2318,8 @@ async def admin_confirm_delete_player(update: Update, context: ContextTypes.DEFA
         return
         
     text = (
-        f"⚠️ **Подтвердите удаление**\n\n"
-        f"Вы действительно хотите исключить игрока @{player['username']} "
+        f"⚠️ <b>Подтвердите удаление</b>\n\n"
+        f"Вы действительно хотите исключить игрока @{html.escape(str(player['username']))} "
         f"из лиги?\n\n"
         f"Клуб освободится для нового участника. Сыгранные матчи останутся в истории лиги, "
         f"несыгранные — в расписании."
@@ -2332,7 +2332,7 @@ async def admin_confirm_delete_player(update: Update, context: ContextTypes.DEFA
         [InlineKeyboardButton("🗑️ Да, удалить игрока", callback_data=f"admin_delete_player_execute_{player_id}")],
         [InlineKeyboardButton("❌ Отмена", callback_data=f"admin_view_player_{player_id}")]
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 
 @admin_only
@@ -3674,7 +3674,7 @@ async def admin_import_players_text(update: Update, context: ContextTypes.DEFAUL
         if len(parts) != 2:
             parts = line_clean.split(":", 1)
         if len(parts) != 2:
-            errors.append(f"Не удалось распарсить строку: `{line_clean}`")
+            errors.append(f"Не удалось распарсить строку: <code>{html.escape(line_clean)}</code>")
             continue
             
         part1 = parts[0].strip()
@@ -3688,27 +3688,27 @@ async def admin_import_players_text(update: Update, context: ContextTypes.DEFAUL
             team_name = part2
             
         if not username or not team_name:
-            errors.append(f"Пустой юзернейм или клуб в строке: `{line_clean}`")
+            errors.append(f"Пустой юзернейм или клуб в строке: <code>{html.escape(line_clean)}</code>")
             continue
             
         try:
             temp_id, old_username = await asyncio.to_thread(database.assign_player_to_club, username, team_name, 1)
-            added.append(f"• @{username} — {team_name} (ID: `{temp_id}`)")
+            added.append(f"• @{html.escape(username)} — {html.escape(team_name)} (ID: <code>{temp_id}</code>)")
         except Exception as e:
-            errors.append(f"Ошибка при добавлении @{username}: {e}")
+            errors.append(f"Ошибка при добавлении @{html.escape(username)}: {html.escape(str(e))}")
             
     res = []
     if added:
-        res.append("✅ **Участники успешно импортированы:**")
+        res.append("✅ <b>Участники успешно импортированы:</b>")
         res.extend(added)
     if errors:
-        res.append("\n⚠️ **Ошибки при импорте:**")
+        res.append("\n⚠️ <b>Ошибки при импорте:</b>")
         res.extend(errors)
         
     await update.message.reply_text(
         "\n".join(res),
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« К списку участников", callback_data="admin_list_players_page_0")]]),
-        parse_mode="Markdown"
+        parse_mode="HTML"
     )
     return ConversationHandler.END
 
@@ -3730,13 +3730,13 @@ async def admin_edit_club_start(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["admin_edit_player_id"] = player_id
     
     text = (
-        f"✏️ **Изменение клуба**\n\n"
-        f"Игрок: @{player['username']}\n"
-        f"Текущий клуб: {player['team_name'] or 'нет'}\n\n"
+        f"✏️ <b>Изменение клуба</b>\n\n"
+        f"Игрок: @{html.escape(str(player['username']))}\n"
+        f"Текущий клуб: {html.escape(player['team_name'] or 'нет')}\n\n"
         f"Введите новое название клуба для этого игрока:"
     )
     keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data=f"admin_view_player_{player_id}")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return ADMIN_EXPECT_NEW_CLUB
 
 @admin_only
@@ -3960,12 +3960,12 @@ async def admin_delete_options(update: Update, context: ContextTypes.DEFAULT_TYP
         return
         
     text = (
-        f"❌ **Удаление участника @{player['username']}**\n\n"
+        f"❌ <b>Удаление участника @{html.escape(str(player['username']))}</b>\n\n"
         f"Выберите тип удаления:\n\n"
-        f"1. **Исключить (матчи сохранить)**:\n"
+        f"1. <b>Исключить (матчи сохранить)</b>:\n"
         f"Сыгранные матчи остаются в истории лиги, несыгранные — в расписании и ждут нового владельца клуба.\n\n"
-        f"2. **Стереть полностью (Без следов)**:\n"
-        f"Полностью удаляет игрока и **все матчи с его участием** (включая уже сыгранные)."
+        f"2. <b>Стереть полностью (Без следов)</b>:\n"
+        f"Полностью удаляет игрока и <b>все матчи с его участием</b> (включая уже сыгранные)."
     )
 
     keyboard = [
@@ -3973,7 +3973,7 @@ async def admin_delete_options(update: Update, context: ContextTypes.DEFAULT_TYP
         [InlineKeyboardButton("🔥 2. Стереть полностью (Без следов)", callback_data=f"admin_confirm_wipe_player_{player_id}")],
         [InlineKeyboardButton("« Назад к карточке", callback_data=f"admin_view_player_{player_id}")]
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 @admin_only
 async def admin_confirm_wipe_player(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -3992,17 +3992,17 @@ async def admin_confirm_wipe_player(update: Update, context: ContextTypes.DEFAUL
         return
         
     text = (
-        f"⚠️ **ВНИМАНИЕ: ПОЛНОЕ УДАЛЕНИЕ**\n\n"
-        f"Вы действительно хотите безвозвратно стереть игрока @{player['username']} "
+        f"⚠️ <b>ВНИМАНИЕ: ПОЛНОЕ УДАЛЕНИЕ</b>\n\n"
+        f"Вы действительно хотите безвозвратно стереть игрока @{html.escape(str(player['username']))} "
         f"и ВСЕ матчи с его участием?\n\n"
-        f"**Это действие удалит сыгранные им матчи и изменит турнирные расклады остальных участников!**"
+        f"<b>Это действие удалит сыгранные им матчи и изменит турнирные расклады остальных участников!</b>"
     )
     
     keyboard = [
         [InlineKeyboardButton("🔥 Да, стереть полностью", callback_data=f"admin_wipe_player_execute_{player_id}")],
         [InlineKeyboardButton("❌ Отмена", callback_data=f"admin_view_player_{player_id}")]
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 @admin_only
 async def admin_wipe_player_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -4017,12 +4017,12 @@ async def admin_wipe_player_execute(update: Update, context: ContextTypes.DEFAUL
     
     keyboard = [[InlineKeyboardButton("« Назад к списку", callback_data="admin_list_players_page_0")]]
     if success:
-        await query.edit_message_text(f"✅ {msg}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+        await query.edit_message_text(f"✅ {html.escape(msg)}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
         
         group_id = await asyncio.to_thread(database.get_group_id)
         if group_id:
             try:
-                await context.bot.send_message(chat_id=group_id, text=f"📢 **Полное удаление участника!**\n\n{msg}", parse_mode="Markdown")
+                await context.bot.send_message(chat_id=group_id, text=f"📢 <b>Полное удаление участника!</b>\n\n{html.escape(msg)}", parse_mode="HTML")
             except Exception as e:
                 logger.exception("Не удалось отправить уведомление в группу")
     else:
@@ -4050,13 +4050,13 @@ async def admin_edit_username_start(update: Update, context: ContextTypes.DEFAUL
     context.user_data["admin_edit_player_id"] = player_id
     
     text = (
-        f"✏️ **Изменение юзернейма**\n\n"
-        f"Игрок: @{player['username']}\n"
-        f"Текущий юзернейм: @{player['username'] or 'нет'}\n\n"
-        f"Введите новый Telegram-юзернейм (например, `@username`):"
+        f"✏️ <b>Изменение юзернейма</b>\n\n"
+        f"Игрок: @{html.escape(str(player['username']))}\n"
+        f"Текущий юзернейм: @{html.escape(player['username'] or 'нет')}\n\n"
+        f"Введите новый Telegram-юзернейм (например, <code>@username</code>):"
     )
     keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data=f"admin_view_player_{player_id}")]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
     return ADMIN_EXPECT_NEW_USERNAME
 
 @admin_only
@@ -4162,7 +4162,7 @@ async def admin_remove_player_command(update: Update, context: ContextTypes.DEFA
         
     args = context.args
     if not args:
-        await update.message.reply_text("❌ Использование: `/remove_player @username`", parse_mode="Markdown")
+        await update.message.reply_text("❌ Использование: <code>/remove_player @username</code>", parse_mode="HTML")
         return
         
     target = args[0].strip()
@@ -4171,7 +4171,7 @@ async def admin_remove_player_command(update: Update, context: ContextTypes.DEFA
 
     success, msg = await asyncio.to_thread(database.remove_player, target)
     if success:
-        await update.message.reply_text(f"✅ {msg}", parse_mode="Markdown")
+        await update.message.reply_text(f"✅ {html.escape(msg)}", parse_mode="HTML")
         if player:
             username_str = f"@{player['username']}" if player.get("username") else f"ID: {player['telegram_id']}"
             await _announce_player_exclusion(

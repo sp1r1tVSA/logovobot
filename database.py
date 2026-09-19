@@ -4098,7 +4098,7 @@ def remove_player(player_ref: str) -> tuple[bool, str]:
         cursor.execute("DELETE FROM users WHERE telegram_id = ?", (p_id,))
         
         display_name = f"@{uname}" if uname else f"ID {p_id}"
-        return True, f"Игрок **{display_name}** ({team or 'без названия'}) успешно удален из лиги."
+        return True, f"Игрок {display_name} ({team or 'без названия'}) успешно удален из лиги."
 
 def set_player_club(player_ref: str, new_club: str) -> tuple[bool, str]:
     """Bind a coach to a club, taking it away from its previous owner if it has one.
@@ -4253,7 +4253,7 @@ def delete_player_completely(telegram_id: int) -> tuple[bool, str]:
         """, (telegram_id, telegram_id))
         cursor.execute("DELETE FROM matches WHERE player1_id = ? OR player2_id = ?", (telegram_id, telegram_id))
         cursor.execute("DELETE FROM users WHERE telegram_id = ?", (telegram_id,))
-        return True, f"Игрок **@{nickname}** и все матчи с его участием полностью стерты из базы данных."
+        return True, f"Игрок @{nickname} и все матчи с его участием полностью стерты из базы данных."
 
 def clear_entire_league() -> None:
     """Clear all matches and users (retaining users with admin role)."""

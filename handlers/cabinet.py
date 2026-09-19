@@ -1732,7 +1732,7 @@ async def save_custom_match_time(update: Update, context: ContextTypes.DEFAULT_T
             kb = [[InlineKeyboardButton("🏟 Открыть карточку матча", callback_data=f"cabinet_view_match_{match_id}")]]
             await safe_send_notification(context.bot, opp_id, pm_text, InlineKeyboardMarkup(kb))
 
-    await update.message.reply_text(f"✅ Время матча #{match_id} успешно предложено: **{time_str}**", parse_mode="Markdown")
+    await update.message.reply_text(f"✅ Время матча #{match_id} успешно предложено: <b>{html.escape(time_str)}</b>", parse_mode="HTML")
     
     # Render updated match card
     m_info = await asyncio.to_thread(database.get_match, match_id)
@@ -1757,16 +1757,16 @@ async def save_custom_match_time(update: Update, context: ContextTypes.DEFAULT_T
             kb_match.insert(1, [InlineKeyboardButton("📝 Ввести результат", callback_data=f"cabinet_report_score_{match_id}")])
 
         card_text = (
-            f"🏟 **МАТЧ #{match_id} | Тур {m_info['round_number']}**\n"
+            f"🏟 <b>МАТЧ #{match_id} | Тур {m_info['round_number']}</b>\n"
             f"Статус: ⏳ Ожидает ввода результата\n"
         )
         if deadline_text:
-            card_text += f"⏳ Дедлайн: {deadline_text}\n"
-        card_text += f"⏰ **Предложено вами:** {html.escape(time_str)} *(ожидание ответа)*\n"
-        card_text += f"\n🏠 **Вы** {score_str} **{opp_team}** ✈️\n────────────────────────\n\n"
+            card_text += f"⏳ Дедлайн: {html.escape(str(deadline_text))}\n"
+        card_text += f"⏰ <b>Предложено вами:</b> {html.escape(time_str)} <i>(ожидание ответа)</i>\n"
+        card_text += f"\n🏠 <b>Вы</b> {score_str} <b>{html.escape(str(opp_team or 'Соперник'))}</b> ✈️\n────────────────────────\n\n"
         card_text += "⏳ Предложение времени отправлено сопернику."
 
-        await update.message.reply_text(card_text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_match))
+        await update.message.reply_text(card_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(kb_match))
 
     return ConversationHandler.END
 
@@ -1779,7 +1779,7 @@ async def show_game_history(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     user_id = query.from_user.id
     matches = await asyncio.to_thread(database.get_match_history, user_id)
 
-    text = "📜 **Ваша история игр:**\n\n"
+    text = "📜 <b>Ваша история игр:</b>\n\n"
     if not matches:
         text += "Вы еще не сыграли ни одного матча."
     else:
@@ -1787,11 +1787,11 @@ async def show_game_history(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             opp = m['opponent_team'] or m['opponent_username']
             user_score = m['player1_score'] if m['player1_id'] == user_id else m['player2_score']
             opp_score = m['player2_score'] if m['player1_id'] == user_id else m['player1_score']
-            text += f"Тур {m['round_number']}: *Вы* {user_score} : {opp_score} *{opp}*\n"
+            text += f"Тур {m['round_number']}: <b>Вы</b> {user_score} : {opp_score} <b>{html.escape(str(opp or 'Соперник'))}</b>\n"
 
     keyboard = [[InlineKeyboardButton("« Назад в кабинет", callback_data="menu_cabinet")]]
     markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
 
 
 # ==========================================
