@@ -341,6 +341,11 @@ class TestAdminBetsTracking(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"Новая ставка #{bet_id}!", kwargs.get("text"))
         self.assertIn("bettor_one", kwargs.get("text"))
 
+        # Время ставки — по Москве, а не сырое UTC из CURRENT_TIMESTAMP
+        from handlers.admin_bets import _fmt_dt
+        created_at = database.get_bet_by_id(bet_id)["created_at"]
+        self.assertIn(f"Поставлена:</b> {_fmt_dt(created_at)} МСК", kwargs.get("text"))
+
 
 if __name__ == "__main__":
     unittest.main()

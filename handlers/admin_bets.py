@@ -721,6 +721,7 @@ async def notify_super_admins_new_bet(bot=None, bet_id: int = 0) -> None:
             f"👤 <b>Игрок:</b> {html.escape(u_name)}{team_str}",
             f"💵 <b>Сумма:</b> <code>{amount:,} 🪙</code> | Кэф: <b>{odd:.2f}</b>",
             f"🎯 <b>Потенц. выигрыш:</b> <code>{potential_win:,} 🪙</code>",
+            f"🕒 <b>Поставлена:</b> {_fmt_dt(bet.get('created_at'))} МСК",
             "",
             "⚽ <b>События:</b>"
         ]
