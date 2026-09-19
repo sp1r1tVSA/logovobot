@@ -9,6 +9,7 @@ handlers/admin_bets.py
 import asyncio
 import html
 import logging
+from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
@@ -47,6 +48,8 @@ ITEM_RESULT_TITLES = {
 }
 
 PAGE_SIZE = 5
+
+MSK = timezone(timedelta(hours=3), "МСК")
 
 
 def _ensure_private_chat_and_super_admin(update: Update) -> tuple[bool, int | None]:
@@ -100,11 +103,19 @@ def _build_overview_header(stats: dict, filter_status: str | None = None, filter
 
 
 def _fmt_dt(value) -> str:
-    """'2026-09-19 08:42:11' → '19.09 08:42'. Непонятный формат отдаём как есть."""
+    """UTC из SQLite (CURRENT_TIMESTAMP) → московское время: '2026-09-19 08:42:11' → '19.09 11:42'.
+
+    Москва живёт в UTC+3 без перехода на летнее время, поэтому фиксированный сдвиг
+    точен и не требует tzdata. Непонятный формат отдаём как есть.
+    """
     raw = str(value or "").strip()
-    if len(raw) >= 16 and raw[4] == "-" and raw[7] == "-":
-        return f"{raw[8:10]}.{raw[5:7]} {raw[11:16]}"
-    return raw or "—"
+    try:
+        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return raw or "—"
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(MSK).strftime("%d.%m %H:%M")
 
 
 def _fmt_coins(n: int) -> str:
@@ -172,7 +183,7 @@ def _time_line(bet: dict) -> str:
     if settled:
         verb = "кэшаут" if bet.get("status") == "cashed_out" else "рассчитана"
         line += f" · {verb} {_fmt_dt(settled)}"
-    return line
+    return line + " (МСК)"
 
 
 def _leg_teams(item: dict) -> tuple[str, str]:
@@ -526,11 +537,11 @@ def _format_bet_card(bet: dict, player_stats: dict) -> str:
         lines.append(f"💰 <b>Выплачено:</b> <code>{_fmt_coins(_bet_payout(bet))}</code>")
     net = _player_net(bet)
     lines.append(f"📈 <b>Итог для игрока:</b> {_fmt_net(net)}" if net is not None else "📈 <b>Итог для игрока:</b> <i>ждёт расчёта</i>")
-    lines.append(f"🕒 <b>Поставлена:</b> {_fmt_dt(bet.get('created_at'))}")
+    lines.append(f"🕒 <b>Поставлена:</b> {_fmt_dt(bet.get('created_at'))} МСК")
     settled = _settled_time(bet)
     if settled:
         label = "Кэшаут сделан" if status == "cashed_out" else "Рассчитана"
-        lines.append(f"🏁 <b>{label}:</b> {_fmt_dt(settled)}")
+        lines.append(f"🏁 <b>{label}:</b> {_fmt_dt(settled)} МСК")
 
     if status == "cashed_out":
         lines.append("")
