@@ -995,59 +995,6 @@ async def admin_manage_players_info(update: Update, context: ContextTypes.DEFAUL
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
 @admin_only
-async def admin_list_players_page(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Show a paginated list of all players (8 per page)."""
-    query = update.callback_query
-    if not query or not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    
-    page = 0
-    if query.data.startswith("admin_list_players_page_"):
-        page = int(query.data.replace("admin_list_players_page_", ""))
-
-    if context.user_data is not None:
-        context.user_data["admin_player_back_cb"] = f"admin_list_players_page_{page}"
-
-    players = await asyncio.to_thread(database.list_users)
-    if not players:
-        keyboard = [[InlineKeyboardButton("« Назад", callback_data="admin_manage_players_info")]]
-        await query.edit_message_text("👥 Нет зарегистрированных игроков.", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-        
-    per_page = 8
-    total_pages = (len(players) + per_page - 1) // per_page
-    if page < 0:
-        page = 0
-    if page >= total_pages:
-        page = total_pages - 1
-        
-    start_idx = page * per_page
-    end_idx = start_idx + per_page
-    page_players = players[start_idx:end_idx]
-    
-    keyboard = []
-    for p in page_players:
-        username_val = p['username'] or str(p['telegram_id'])
-        team_val = f" ({p['team_name']})" if p['team_name'] else ""
-        btn_text = f"👤 @{username_val}{team_val}"
-        keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"admin_view_player_{p['telegram_id']}")])
-        
-    # Navigation row
-    nav_row = []
-    if page > 0:
-        nav_row.append(InlineKeyboardButton("⬅️ Назад", callback_data=f"admin_list_players_page_{page - 1}"))
-    nav_row.append(InlineKeyboardButton(f"{page + 1} / {total_pages}", callback_data="noop"))
-    if page < total_pages - 1:
-        nav_row.append(InlineKeyboardButton("➡️ Вперед", callback_data=f"admin_list_players_page_{page + 1}"))
-    keyboard.append(nav_row)
-    
-    keyboard.append([InlineKeyboardButton("« Управление участниками", callback_data="admin_manage_players_info")])
-    
-    text = f"📋 **Список участников лиги** (Всего: {len(players)}):\n\nВыберите игрока для редактирования или удаления:"
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-
-@admin_only
 async def admin_div_players_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Hub menu showing participant counts by division and allowing filtered listing."""
     query = update.callback_query
@@ -2257,49 +2204,6 @@ async def admin_set_div_topic_cmd(update: Update, context: ContextTypes.DEFAULT_
         f"✅ Тема «{topic_type}» для дивизиона <b>{html.escape(division['name'])}</b> успешно привязана к этому топику (ID: <code>{thread_id}</code>)!",
         parse_mode="HTML"
     )
-
-@admin_only
-async def admin_view_player(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """View details of a single player with actions."""
-    query = update.callback_query
-    if not query or not is_admin(query.from_user.id):
-        return
-    await query.answer()
-    
-    player_id = int(query.data.replace("admin_view_player_", ""))
-    player = await asyncio.to_thread(database.get_user, player_id)
-    
-    if not player:
-        keyboard = [[InlineKeyboardButton("« Назад к списку", callback_data="admin_list_players_page_0")]]
-        await query.edit_message_text("❌ Игрок не найден.", reply_markup=InlineKeyboardMarkup(keyboard))
-        return
-        
-    text = (
-        f"👤 <b>Карточка участника лиги</b>\n\n"
-        f"• <b>Telegram:</b> @{html.escape(player['username'] or 'нет')}\n"
-        f"• <b>Клуб:</b> {html.escape(player['team_name'] or 'нет')}\n"
-        f"• <b>Роль:</b> {html.escape(str(player['role']).capitalize())}\n"
-        f"• <b>ID в боте:</b> <code>{player['telegram_id']}</code>"
-    )
-    
-    role_btn = (
-        InlineKeyboardButton("🔑 Снять админку", callback_data=f"admin_toggle_role_{player_id}_player")
-        if player['role'] == 'admin'
-        else InlineKeyboardButton("🔑 Сделать админом", callback_data=f"admin_toggle_role_{player_id}_admin")
-    )
-    
-    keyboard = [
-        [
-            InlineKeyboardButton("✏️ Клуб", callback_data=f"admin_edit_club_start_{player_id}"),
-            InlineKeyboardButton("✏️ Юзернейм", callback_data=f"admin_edit_username_start_{player_id}")
-        ],
-        [
-            role_btn
-        ],
-        [InlineKeyboardButton("❌ Удалить из лиги", callback_data=f"admin_delete_options_{player_id}")],
-        [InlineKeyboardButton("« Назад к списку", callback_data="admin_list_players_page_0")]
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
 @admin_only
 async def admin_confirm_delete_player(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
