@@ -186,7 +186,9 @@ async def safe_query_answer(query, text: str | None = None, show_alert: bool = F
 
 async def safe_send_notification(bot, chat_id: int, text: str, reply_markup=None, parse_mode: str = "HTML") -> bool:
     """
-    Safely send messages with Telegram rate limit (RetryAfter), Forbidden, and UserDeactivated handling.
+    Safely send messages with Telegram rate limit (RetryAfter) and Forbidden handling.
+    A deactivated account also arrives as Forbidden — PTB has no separate class for it.
+    If the markup fails to parse, the message is resent as plain text so it is not lost.
 
     Personal messages only: a non-positive chat_id is a pre-registered coach's
     temporary id (see database.pre_register_player) with no private chat yet, so
@@ -206,13 +208,16 @@ async def safe_send_notification(bot, chat_id: int, text: str, reply_markup=None
     except telegram.error.Forbidden:
         logger.warning(f"User {chat_id} has blocked the bot (Forbidden).")
         return False
-    except telegram.error.UserDeactivated:
-        logger.warning(f"User {chat_id} account is deactivated.")
-        return False
     except telegram.error.RetryAfter as e:
         logger.warning(f"Rate limited by Telegram API. Waiting {e.retry_after}s...")
         await asyncio.sleep(e.retry_after)
         return await safe_send_notification(bot, chat_id, text, reply_markup, parse_mode)
+    except telegram.error.BadRequest as e:
+        if parse_mode and "parse entities" in str(e).lower():
+            logger.warning(f"Bad {parse_mode} markup in notification to {chat_id}, resending as plain text: {e}")
+            return await safe_send_notification(bot, chat_id, text, reply_markup, parse_mode=None)
+        logger.exception(f"Telegram error sending to {chat_id}")
+        return False
     except telegram.error.TelegramError as e:
         logger.exception(f"Telegram error sending to {chat_id}")
         return False

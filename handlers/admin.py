@@ -3384,13 +3384,14 @@ async def admin_reset_match_execute(update: Update, context: ContextTypes.DEFAUL
     await asyncio.to_thread(database.reset_match, match_id)
     
     player_text = (
-        f"🔄 **Результат вашего матча в Туре {match['round_number']} был сброшен администратором!**\n\n"
-        f"⚔️ **{match['player1_nickname']}** vs **{match['player2_nickname']}**\n\n"
+        f"🔄 <b>Результат вашего матча в Туре {match['round_number']} был сброшен администратором!</b>\n\n"
+        f"⚔️ <b>{html.escape(str(match['player1_nickname'] or '—'))}</b> vs "
+        f"<b>{html.escape(str(match['player2_nickname'] or '—'))}</b>\n\n"
         f"Вы можете сыграть матч заново и ввести результаты через меню кабинета."
     )
     for p_id in (match["player1_id"], match["player2_id"]):
         if p_id:
-            await safe_send_notification(context.bot, p_id, player_text, parse_mode="Markdown")
+            await safe_send_notification(context.bot, p_id, player_text)
             
     # Refresh view
     await admin_view_match(update, context, match_id=match_id)
@@ -3820,18 +3821,20 @@ async def admin_set_score_text(update: Update, context: ContextTypes.DEFAULT_TYP
         debt_note = ""
 
     await update.message.reply_text(
-        f"✅ Счет матча #{match_id} изменен: **{s1}:{s2}**!",
+        f"✅ Счет матча #{match_id} изменен: <b>{s1}:{s2}</b>!",
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« К карточке матча", callback_data=f"admin_view_match_{match_id}")]])
     )
 
     # Notify players
     player_text = (
-        f"⚙️ **Администратор вручную установил результат вашего матча (Тур {match['round_number']})!**\n\n"
-        f"⚔️ **{match['player1_nickname']}**  `{s1} : {s2}`  **{match['player2_nickname']}**\n\n"
+        f"⚙️ <b>Администратор вручную установил результат вашего матча (Тур {match['round_number']})!</b>\n\n"
+        f"⚔️ <b>{html.escape(str(match['player1_nickname'] or '—'))}</b>  <code>{s1} : {s2}</code>  "
+        f"<b>{html.escape(str(match['player2_nickname'] or '—'))}</b>\n\n"
         f"Результат подтвержден и обновлен в таблице."
-    ) + debt_note.replace("<b>", "**").replace("</b>", "**")
+    ) + debt_note
     for p_id in (match["player1_id"], match["player2_id"]):
-        await safe_send_notification(context.bot, p_id, player_text, parse_mode="Markdown")
+        await safe_send_notification(context.bot, p_id, player_text)
 
     # Notify Telegram Group (scoped to division topic)
     group_id, target_topic = await resolve_division_target(
