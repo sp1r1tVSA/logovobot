@@ -106,6 +106,42 @@ def _notify_bet_refunded(cursor, user_id: int, bet_id: int, bet_type: Optional[s
     )
 
 
+def _notify_bet_lost(cursor, user_id: int, bet_id: int, bet_type: Optional[str], odd: float, stake: int,
+                     potential_win: int, prev_payout: int = 0, resettle: bool = False) -> None:
+    legs, _ = _leg_lines(cursor, bet_id)
+    try:
+        cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+        row = cursor.fetchone()
+        balance = row["balance"] if row else None
+    except Exception as e:
+        logger.warning("Could not load balance for bet #%s notice: %s", bet_id, e)
+        balance = None
+
+    parts = []
+    if resettle:
+        note = "Счёт матча исправлен — ставка рассчитана заново."
+        if prev_payout > 0:
+            note += f" Ранее начисленные <b>{_coins(prev_payout)} 🪙</b> списаны."
+        parts.append(f"<i>{note}</i>")
+    if legs:
+        parts.append("\n".join(legs))
+    money = [f"💵 Ставка: <b>{_coins(stake)} 🪙</b> × {odd:.2f}"]
+    if potential_win:
+        money.append(f"🎯 Возможный выигрыш был: {_coins(potential_win)} 🪙")
+    if balance is not None:
+        money.append(f"👛 Баланс: <b>{_coins(balance)} 🪙</b>")
+    parts.append("\n".join(money))
+    parts.append("<i>Темшик верит: следующий прогноз зайдёт! 💪</i>")
+
+    head = "пересчитана: проигрыш" if resettle else "не сыграла"
+    database.enqueue_bet_settled_notice(
+        cursor, user_id, bet_id,
+        title=f"😔 Ставка #{bet_id} ({_bet_type_label(bet_type)}) {head}",
+        body="\n\n".join(parts),
+        resettle=resettle,
+    )
+
+
 def settle_match_predictions(
     match_id: int,
     score1: int,
@@ -241,6 +277,8 @@ def settle_match_predictions(
                     WHERE id = ? AND settled_at IS NULL
                 """, (b_id,))
                 if cursor.rowcount > 0:
+                    _notify_bet_lost(cursor, u_id, b_id, bet["bet_type"], float(bet["total_odd"] or 1.0),
+                                     stake, bet["potential_win"] or 0)
                     try:
                         from services.player_rating import PlayerRatingEngine
                         from services.streak_engine import StreakEngine
@@ -591,13 +629,8 @@ def resettle_match_predictions(
                     WHERE id = ?
                 """, (b_id,))
                 if prev_status != "lost":
-                    database.enqueue_bet_settled_notice(
-                        cursor, u_id, b_id,
-                        title=f"⚖️ Ставка #{b_id} ({_bet_type_label(bet['bet_type'])}) пересчитана: проигрыш",
-                        body=(f"Счёт матча исправлен. Ранее начисленные <b>{_coins(prev_payout)} 🪙</b> списаны."
-                              if prev_payout > 0 else "Счёт матча исправлен."),
-                        resettle=True,
-                    )
+                    _notify_bet_lost(cursor, u_id, b_id, bet["bet_type"], float(bet["total_odd"] or 1.0),
+                                     stake, bet["potential_win"] or 0, prev_payout=prev_payout, resettle=True)
                 notifications.append({
                     "user_id": u_id,
                     "bet_id": b_id,

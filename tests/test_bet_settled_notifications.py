@@ -1,7 +1,7 @@
 """
 tests/test_bet_settled_notifications.py
 
-Telegram notices for won/refunded bets. Settlement enqueues a BET_SETTLED row in
+Telegram notices for won/lost/refunded bets. Settlement enqueues a BET_SETTLED row in
 `notification_events` inside the payout transaction, and
 `process_notification_queue_job` delivers it even with SMART_NOTIFICATIONS_ENABLED
 off (the other smart notifications stay behind the flag).
@@ -147,10 +147,33 @@ class TestBetSettledNotifications(unittest.TestCase):
         self.assertIn("Арсенал", body)
         self.assertIn(f"Баланс: <b>{settlement_engine._coins(balance)} 🪙</b>", body)
 
-    def test_lost_bet_is_silent(self):
-        self._place([(MATCH_ID, "p1", 2.5)])
+    def test_lost_bet_enqueues_one_notice_with_details(self):
+        bet_id = self._place([(MATCH_ID, "p1", 2.5)])
         settlement_engine.settle_match_predictions(MATCH_ID, 0, 1, "finished")
-        self.assertEqual(_events(), [])
+        settlement_engine.settle_match_predictions(MATCH_ID, 0, 1, "finished")
+        events = _events()
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["source_event_id"], f"bet_{bet_id}")
+        self.assertIn(f"#{bet_id}", events[0]["title"])
+        self.assertIn("не сыграла", events[0]["title"])
+        body = events[0]["body"]
+        balance = database.get_or_create_wallet(USER_ID)["balance"]
+        self.assertIn("<b>Арсенал 0:1 Челси</b>", body)
+        self.assertIn("❌ Победит Арсенал (П1) · @2.50", body)
+        self.assertIn("Ставка: <b>200 🪙</b> × 2.50", body)
+        self.assertIn("Возможный выигрыш был: 500 🪙", body)
+        self.assertIn(f"Баланс: <b>{settlement_engine._coins(balance)} 🪙</b>", body)
+
+    def test_express_lost_leg_notifies_at_once_and_only_once(self):
+        self._place([(MATCH_ID, "p1", 2.0), (MATCH_ID_2, "p2", 1.5)], bet_type="express", amount=100)
+        settlement_engine.settle_match_predictions(MATCH_ID, 0, 1, "finished")
+        events = _events()
+        self.assertEqual(len(events), 1)
+        self.assertIn("Экспресс", events[0]["title"])
+        self.assertIn("❌ Победит Арсенал", events[0]["body"])
+        self.assertIn("⏳ Победит Эвертон", events[0]["body"])
+        settlement_engine.settle_match_predictions(MATCH_ID_2, 0, 3, "finished")
+        self.assertEqual(len(_events()), 1)
 
     def test_express_notifies_only_when_the_last_leg_settles(self):
         bet_id = self._place([(MATCH_ID, "p1", 2.0), (MATCH_ID_2, "p2", 1.5)], bet_type="express", amount=100)
@@ -181,6 +204,7 @@ class TestBetSettledNotifications(unittest.TestCase):
         self.assertEqual(len(events), 2)
         self.assertIn("проигрыш", events[1]["title"])
         self.assertIn("500", events[1]["body"])
+        self.assertIn("Арсенал 0:2 Челси", events[1]["body"])
 
     def test_opted_out_user_gets_no_notice_but_still_gets_paid(self):
         with database.transaction() as conn:
