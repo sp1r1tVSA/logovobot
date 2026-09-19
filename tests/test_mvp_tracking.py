@@ -303,6 +303,117 @@ class TestMvpDatabase(unittest.TestCase):
         # Корона соперника в общем матче не засчитывается чужому клубу.
         self.assertIsNone(database.get_cabinet_squad_stats(self.team_a2)["top_mvp"])
 
+    def test_cabinet_squad_stats_shows_mvp_without_goals(self):
+        """Корона вратарю: ни гола, ни ассиста — строка игрока всё равно нужна."""
+        keeper = f"MVP Keeper {self.uid}"
+        database.add_squad(self.team_a1, [keeper])
+        m_id = self._create_match(self.div_a, self.team_a1, self.team_a2,
+                                  self.coach_a1, self.coach_a2)
+        database.confirm_and_finalize_match(
+            m_id, 0, 0, [], reporter_id=self.coach_a1, mvp_player=keeper,
+        )
+
+        squad = database.get_cabinet_squad_stats(self.team_a1)
+        by_name = {p["player_name"]: p for p in squad["players"]}
+        self.assertEqual(by_name[keeper]["mvp_count"], 1)
+        self.assertEqual(squad["top_mvp"], {"player_name": keeper, "mvp_count": 1})
+
+    def test_cabinet_squad_stats_shows_mvp_outside_the_roster(self):
+        """Игрок забил и получил корону раньше, чем состав попал в squad_players."""
+        newcomer = f"MVP Newcomer {self.uid}"
+        m_id = self._create_match(self.div_a, self.team_a1, self.team_a2,
+                                  self.coach_a1, self.coach_a2)
+        database.confirm_and_finalize_match(
+            m_id, 1, 0, [(self.team_a1, newcomer, "goal", 1)],
+            reporter_id=self.coach_a1, mvp_player=newcomer,
+        )
+
+        squad = database.get_cabinet_squad_stats(self.team_a1)
+        by_name = {p["player_name"]: p for p in squad["players"]}
+        self.assertEqual(by_name[newcomer]["mvp_count"], 1)
+        self.assertEqual(by_name[newcomer]["goals"], 1)
+
+    def test_admin_score_correction_clears_the_crown(self):
+        """Админ переписал счёт: события снесены, значит и корона недействительна."""
+        m_id = self._create_match(self.div_a, self.team_a1, self.team_a2,
+                                  self.coach_a1, self.coach_a2)
+        database.confirm_and_finalize_match(
+            m_id, 2, 0, [(self.team_a1, self.star, "goal", 2)],
+            reporter_id=self.coach_a1, mvp_player=self.star,
+        )
+        self.assertEqual(self._read_mvp(m_id), self.star)
+
+        database.admin_set_match_score(m_id, 0, 3)
+        self.assertIsNone(self._read_mvp(m_id))
+        self.assertIsNone(database.get_cabinet_squad_stats(self.team_a1)["top_mvp"])
+
+    def test_technical_result_clears_the_crown(self):
+        """Техническое поражение отменяет разбор матча вместе с наградой."""
+        m_id = self._create_match(self.div_a, self.team_a1, self.team_a2,
+                                  self.coach_a1, self.coach_a2)
+        database.confirm_and_finalize_match(
+            m_id, 2, 0, [(self.team_a1, self.star, "goal", 2)],
+            reporter_id=self.coach_a1, mvp_player=self.star,
+        )
+        database.set_technical_result(m_id, 0, 3, technical_type="tp_away")
+        self.assertIsNone(self._read_mvp(m_id))
+
+
+class TestMvpNameResolution(unittest.TestCase):
+    """Имя с короны приводится к написанию состава — как голы и ассисты."""
+
+    def setUp(self):
+        database.init_db()
+        self.uid = uuid.uuid4().hex[:6].upper()
+        self.home = f"MVP Res Home {self.uid}"
+        self.away = f"MVP Res Away {self.uid}"
+        database.add_squad(self.home, ["Harry Kane", "Joshua Kimmich"])
+        database.add_squad(self.away, ["Vinicius Junior"])
+
+    def tearDown(self):
+        with database.transaction() as conn:
+            conn.cursor().execute(
+                "DELETE FROM squad_players WHERE team_name IN (?, ?)", (self.home, self.away)
+            )
+
+    def test_ocr_form_maps_to_the_declared_spelling(self):
+        resolved = cabinet.resolve_mvp_player_name("H. Kane", self.home, self.away)
+        self.assertEqual(resolved, "Harry Kane")
+
+    def test_crown_of_the_away_side_is_resolved_too(self):
+        """Корона достаётся сопернику не реже, чем хозяину."""
+        self.assertEqual(
+            cabinet.resolve_mvp_player_name("Vinicius", self.home, self.away),
+            "Vinicius Junior",
+        )
+
+    def test_unknown_name_is_kept_as_read(self):
+        """Игрока нет ни в одной заявке — сырое имя лучше потерянной короны."""
+        self.assertEqual(
+            cabinet.resolve_mvp_player_name("Lamine Yamal", self.home, self.away),
+            "Lamine Yamal",
+        )
+
+    def test_ambiguous_name_is_not_guessed(self):
+        """Тёзки в обоих составах: угадывать клуб опаснее, чем оставить как есть."""
+        twin_home = f"MVP Twin Home {self.uid}"
+        twin_away = f"MVP Twin Away {self.uid}"
+        database.add_squad(twin_home, ["Rodrigo Silva"])
+        database.add_squad(twin_away, ["Rodrigo Costa"])
+        try:
+            self.assertEqual(
+                cabinet.resolve_mvp_player_name("Rodrigo", twin_home, twin_away), "Rodrigo"
+            )
+        finally:
+            with database.transaction() as conn:
+                conn.cursor().execute(
+                    "DELETE FROM squad_players WHERE team_name IN (?, ?)", (twin_home, twin_away)
+                )
+
+    def test_missing_crown_stays_none(self):
+        for raw in (None, "", "   "):
+            self.assertIsNone(cabinet.resolve_mvp_player_name(raw, self.home, self.away))
+
 
 class TestMvpApi(AioHTTPTestCase):
     """Оба эндпоинта Mini App, которым нужны короны."""

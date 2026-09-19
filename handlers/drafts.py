@@ -8,7 +8,7 @@ import database
 import config
 from services.topic_cache import topic_cache
 from services.ai.ai_recognizer import recognize_match_screenshots_bytes
-from handlers.cabinet import match_and_enrich_squad, build_formatted_match_post
+from handlers.cabinet import match_and_enrich_squad, build_formatted_match_post, resolve_mvp_player_name
 
 logger = logging.getLogger(__name__)
 
@@ -216,6 +216,10 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
             await status_msg.edit_text("❌ Ошибка при сопоставлении состава. Возможно, игроки не зарегистрированы.")
             return
             
+        mvp_player = await asyncio.to_thread(
+            resolve_mvp_player_name, m_info.get("mvp_player"), home_team, away_team
+        )
+
         l_score = int(m_info.get("left_score", 0))
         r_score = int(m_info.get("right_score", 0))
         h_g_count = sum(h_goals.values())
@@ -302,7 +306,7 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
             "a_assists": a_assists,
             "is_single_timeline": is_single_timeline,
             "events": events,
-            "mvp_player": m_info.get("mvp_player"),
+            "mvp_player": mvp_player,
             "reporter_id": user_id,
             "photo_id": photo_file_ids[idx] if idx < len(photo_file_ids) else (photo_file_ids[0] if photo_file_ids else None),
             "division_id": cur_match.get("division_id") or division_id

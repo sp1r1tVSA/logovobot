@@ -61,6 +61,51 @@ def _normalize_name_translit(text: str) -> str:
         res.append(CYR_LAT_MAP.get(ch, ch))
     return "".join(res)
 
+def find_squad_match(raw_name, squad_list):
+    """Resolve an OCR-read player name to the squad's own spelling (or None)."""
+    if not raw_name:
+        return None
+    raw_lower = raw_name.lower().strip()
+    raw_norm = _normalize_name_translit(raw_lower)
+    for squad_p in squad_list:
+        sp_lower = squad_p.lower().strip()
+        sp_norm = _normalize_name_translit(sp_lower)
+        # 1. Exact match (case / translit)
+        if raw_lower == sp_lower or raw_norm == sp_norm:
+            return squad_p
+        # 2. Substring match only for meaningful length (>=4) to prevent false matches on short words
+        if len(raw_lower) >= 4 and (raw_lower in sp_lower or sp_lower in raw_lower):
+            return squad_p
+        if len(raw_norm) >= 4 and (raw_norm in sp_norm or sp_norm in raw_norm):
+            return squad_p
+        # 3. Token-level matching
+        raw_parts = [p for p in raw_norm.split() if len(p) >= 3]
+        sp_parts = [p for p in sp_norm.split() if len(p) >= 3]
+        if raw_parts and sp_parts:
+            if any(p in sp_parts or any(p == spp for spp in sp_parts) for p in raw_parts):
+                return squad_p
+    return None
+
+
+def resolve_mvp_player_name(raw_mvp: str | None, home_team: str | None, away_team: str | None) -> str | None:
+    """Bring the crown name to the squad's spelling, the way goals and assists are.
+
+    `matches.mvp_player` stores a bare name, so the MVP tables join it by name:
+    an OCR form that differs from the declared squad («H. Kane» vs «Harry Kane»)
+    splits one player's awards in two and leaves the club column empty. Both
+    squads are searched — the crown may belong to either side — and a name that
+    fits both is left as read, because guessing the club is worse than a raw name.
+    """
+    raw = (raw_mvp or "").strip()
+    if not raw:
+        return None
+    home_match = find_squad_match(raw, database.get_squad(home_team) or []) if home_team else None
+    away_match = find_squad_match(raw, database.get_squad(away_team) or []) if away_team else None
+    if home_match and away_match and home_match != away_match:
+        return raw
+    return home_match or away_match or raw
+
+
 def match_and_enrich_squad(raw_side1_goals: list[str], raw_side2_goals: list[str], raw_side1_assists: list[str], raw_side2_assists: list[str], home_team: str, away_team: str, is_single_timeline: bool = False):
     """
     Handles both screenshot formats:
@@ -69,30 +114,6 @@ def match_and_enrich_squad(raw_side1_goals: list[str], raw_side2_goals: list[str
     """
     home_squad = database.get_squad(home_team) or []
     away_squad = database.get_squad(away_team) or []
-
-    def find_squad_match(raw_name, squad_list):
-        if not raw_name:
-            return None
-        raw_lower = raw_name.lower().strip()
-        raw_norm = _normalize_name_translit(raw_lower)
-        for squad_p in squad_list:
-            sp_lower = squad_p.lower().strip()
-            sp_norm = _normalize_name_translit(sp_lower)
-            # 1. Exact match (case / translit)
-            if raw_lower == sp_lower or raw_norm == sp_norm:
-                return squad_p
-            # 2. Substring match only for meaningful length (>=4) to prevent false matches on short words
-            if len(raw_lower) >= 4 and (raw_lower in sp_lower or sp_lower in raw_lower):
-                return squad_p
-            if len(raw_norm) >= 4 and (raw_norm in sp_norm or sp_norm in raw_norm):
-                return squad_p
-            # 3. Token-level matching
-            raw_parts = [p for p in raw_norm.split() if len(p) >= 3]
-            sp_parts = [p for p in sp_norm.split() if len(p) >= 3]
-            if raw_parts and sp_parts:
-                if any(p in sp_parts or any(p == spp for spp in sp_parts) for p in raw_parts):
-                    return squad_p
-        return None
 
     # If single timeline had everything dumped into one list and second list is empty
     if is_single_timeline and (not raw_side1_goals or not raw_side2_goals) and (raw_side1_goals or raw_side2_goals):
@@ -2461,7 +2482,11 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             context.user_data["away_assists_count"] = a_assists
             context.user_data["is_single_timeline"] = bool(is_single_timeline)
             context.user_data["report_photo_id"] = photos_list[0] if photos_list else context.user_data.get("report_photo_id")
-            mvp_player = ai_recognizer.clean_mvp_name(ai_res.get("mvp_player"))
+            mvp_player = await asyncio.to_thread(
+                resolve_mvp_player_name,
+                ai_recognizer.clean_mvp_name(ai_res.get("mvp_player")),
+                home_team, away_team,
+            )
             if mvp_player:
                 context.user_data["report_mvp_player"] = mvp_player
             else:

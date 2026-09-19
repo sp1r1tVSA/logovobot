@@ -3204,8 +3204,11 @@ def admin_set_match_score(match_id: int, player1_score: int, player2_score: int,
         old_score_str = f"{old_m['player1_score']}:{old_m['player2_score']}" if is_correction else None
 
         cursor.execute("DELETE FROM match_events WHERE match_id = ?", (match_id,))
+        # Корона пришла с того же скриншота, что и снесённые события: после
+        # ручной правки счёта она осталась бы наградой за отменённый разбор.
         cursor.execute(
-            "UPDATE matches SET player1_score = ?, player2_score = ?, status = 'confirmed', played_at = ? WHERE id = ?",
+            "UPDATE matches SET player1_score = ?, player2_score = ?, status = 'confirmed', "
+            "played_at = ?, mvp_player = NULL WHERE id = ?",
             (player1_score, player2_score, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), match_id)
         )
 
@@ -11509,9 +11512,11 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
             bucket[row["player_name"]] = int(row["total"] or 0)
 
         # 👑 Награды «Игрок матча» во всех подтверждённых матчах клуба.
-        # Корона могла достаться сопернику, поэтому ниже строки фильтруются по
-        # принадлежности к этому клубу — имя, которого нет ни в составе, ни в
-        # событиях клуба, не засчитывается.
+        # Корона могла достаться сопернику, поэтому принадлежность проверяется
+        # прямо в запросе: имя должно быть либо в событиях этого клуба в том же
+        # матче, либо в его заявленном составе. Имя, не подошедшее ни одному
+        # клубу, не засчитывается никому — это надёжнее, чем отдать корону
+        # тёзке из другой команды.
         cursor.execute(
             """
             SELECT TRIM(m.mvp_player) AS player_name, COUNT(*) AS total
@@ -11521,9 +11526,20 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
               AND TRIM(m.mvp_player) <> ''
               AND (LOWER(TRIM(m.player1_team)) = LOWER(TRIM(?))
                    OR LOWER(TRIM(m.player2_team)) = LOWER(TRIM(?)))
+              AND (EXISTS (
+                       SELECT 1 FROM match_events me
+                       WHERE me.match_id = m.id
+                         AND LOWER(TRIM(me.team_name)) = LOWER(TRIM(?))
+                         AND LOWER(TRIM(me.player_name)) = LOWER(TRIM(m.mvp_player))
+                   )
+                   OR EXISTS (
+                       SELECT 1 FROM squad_players sp
+                       WHERE LOWER(TRIM(sp.team_name)) = LOWER(TRIM(?))
+                         AND LOWER(TRIM(sp.player_name)) = LOWER(TRIM(m.mvp_player))
+                   ))
             GROUP BY LOWER(TRIM(m.mvp_player))
             """,
-            (team_name.strip(), team_name.strip())
+            (team_name.strip(), team_name.strip(), team_name.strip(), team_name.strip())
         )
         for row in cursor.fetchall():
             raw_mvps[row["player_name"]] = int(row["total"] or 0)
@@ -11539,6 +11555,17 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
     # Награды сопоставляются с игроками клуба без учёта регистра: OCR пишет имя
     # так, как оно видно на экране, а состав мог быть заявлен иначе.
     mvps_by_key = {k.strip().lower(): v for k, v in raw_mvps.items()}
+
+    # Короной могли отметить игрока, которого нет ни в заявке, ни среди
+    # бомбардиров (вратарь, защитник без очков) — без своей строки его награда
+    # просто исчезла бы из карточки.
+    known_keys = {(n or "").strip().lower() for n in names}
+    for mvp_name in raw_mvps:
+        key = mvp_name.strip().lower()
+        if key and key not in known_keys:
+            known_keys.add(key)
+            names.append(mvp_name)
+            positions[mvp_name] = None
 
     players = [
         {
