@@ -107,6 +107,46 @@ class TestBetSettledNotifications(unittest.TestCase):
         self.assertIn("Ординар", events[0]["title"])
         self.assertIn("+500", events[0]["body"])
 
+    def test_won_notice_details_pick_score_stake_profit_and_balance(self):
+        self._place([(MATCH_ID, "p1", 2.5)])
+        settlement_engine.settle_match_predictions(MATCH_ID, 2, 0, "finished")
+        body = _events()[0]["body"]
+        balance = database.get_or_create_wallet(USER_ID)["balance"]
+
+        self.assertIn("<b>Арсенал 2:0 Челси</b>", body)
+        self.assertIn("✅ Победит Арсенал (П1) · @2.50", body)
+        self.assertIn("Ставка: <b>200 🪙</b> × 2.50", body)
+        self.assertIn("Выигрыш: <b>+500 🪙</b>", body)
+        self.assertIn("Чистая прибыль: <b>+300 🪙</b>", body)
+        self.assertIn(f"Баланс: <b>{settlement_engine._coins(balance)} 🪙</b>", body)
+
+    def test_express_notice_lists_every_leg(self):
+        self._place([(MATCH_ID, "p1", 2.0), (MATCH_ID_2, "p2", 1.5)], bet_type="express", amount=100)
+        settlement_engine.settle_match_predictions(MATCH_ID, 1, 0, "finished")
+        settlement_engine.settle_match_predictions(MATCH_ID_2, 0, 3, "finished")
+        body = _events()[0]["body"]
+        self.assertIn("Арсенал 1:0 Челси", body)
+        self.assertIn("Ливерпуль 0:3 Эвертон", body)
+        self.assertIn("Победит Эвертон (П2) · @1.50", body)
+        self.assertIn("Чистая прибыль: <b>+200 🪙</b>", body)
+
+    def test_team_names_are_html_escaped(self):
+        with database.transaction() as conn:
+            conn.execute("UPDATE matches SET player1_team = 'A<b>&' WHERE id = ?", (MATCH_ID,))
+        self._place([(MATCH_ID, "p1", 2.5)])
+        settlement_engine.settle_match_predictions(MATCH_ID, 2, 0, "finished")
+        body = _events()[0]["body"]
+        self.assertIn("A&lt;b&gt;&amp; 2:0 Челси", body)
+        self.assertNotIn("A<b>&", body)
+
+    def test_refund_notice_shows_balance(self):
+        self._place([(MATCH_ID, "p1", 2.5)])
+        settlement_engine.settle_match_predictions(MATCH_ID, 3, 0, "voided")
+        body = _events()[0]["body"]
+        balance = database.get_or_create_wallet(USER_ID)["balance"]
+        self.assertIn("Арсенал", body)
+        self.assertIn(f"Баланс: <b>{settlement_engine._coins(balance)} 🪙</b>", body)
+
     def test_lost_bet_is_silent(self):
         self._place([(MATCH_ID, "p1", 2.5)])
         settlement_engine.settle_match_predictions(MATCH_ID, 0, 1, "finished")

@@ -9,10 +9,12 @@ Handles atomic, idempotent settlement for:
 4. Automatic wallet crediting, transaction auditing, and notification queues.
 """
 
+import html
 import math
 import logging
 from typing import Optional
 import database
+from services.bet_outcome_text import describe_selection
 from services.market_settler import evaluate_market_selection
 
 logger = logging.getLogger(__name__)
@@ -26,25 +28,80 @@ def _bet_type_label(bet_type: Optional[str]) -> str:
     return "Экспресс" if bet_type == "express" else "Ординар"
 
 
+_LEG_STATUS_EMOJI = {"won": "✅", "lost": "❌", "refunded": "🔄", "voided": "🔄", "pending": "⏳"}
+_MAX_NOTICE_LEGS = 10
+
+
+def _leg_lines(cursor, bet_id: int) -> tuple[list[str], bool]:
+    """Строки событий купона и признак, что среди них есть отменённые.
+
+    Уведомление — не повод откатывать расчёт: при любой ошибке события просто
+    не попадут в текст.
+    """
+    try:
+        legs = database.get_bet_legs_for_notice(cursor, bet_id)
+    except Exception as e:
+        logger.warning("Could not load legs for bet #%s notice: %s", bet_id, e)
+        return [], False
+
+    lines = []
+    for leg in legs[:_MAX_NOTICE_LEGS]:
+        t1, t2 = leg["team1_name"], leg["team2_name"]
+        s1, s2 = leg["player1_score"], leg["player2_score"]
+        match = f"{t1} {s1}:{s2} {t2}" if s1 is not None and s2 is not None else f"{t1} — {t2}"
+        pick = describe_selection(leg["outcome_type"], t1, t2,
+                                  market_key=leg["market_key"], selection_name=leg["selection_name"])
+        status = leg["status"]
+        odd = "возврат" if status in ("refunded", "voided") else f"@{float(leg['odd'] or 1.0):.2f}"
+        lines.append(f"⚽ <b>{html.escape(match)}</b>\n"
+                     f"   {_LEG_STATUS_EMOJI.get(status, '•')} {html.escape(pick)} · {odd}")
+    if len(legs) > _MAX_NOTICE_LEGS:
+        lines.append(f"<i>…и ещё {len(legs) - _MAX_NOTICE_LEGS} событ.</i>")
+    has_voided = any(leg["status"] in ("refunded", "voided") for leg in legs)
+    return lines, has_voided
+
+
 def _notify_bet_won(cursor, user_id: int, bet_id: int, bet_type: Optional[str], odd: float, payout: int,
-                    resettle: bool = False) -> None:
+                    stake: int, balance_after: int, resettle: bool = False) -> None:
     head = "пересчитана и сыграла" if resettle else "сыграла"
+    legs, has_voided = _leg_lines(cursor, bet_id)
+
+    parts = []
+    if resettle:
+        parts.append("<i>Счёт матча исправлен — ставка рассчитана заново.</i>")
+    if legs:
+        parts.append("\n".join(legs))
+    money = [
+        f"💵 Ставка: <b>{_coins(stake)} 🪙</b> × {odd:.2f}",
+        f"💸 Выигрыш: <b>+{_coins(payout)} 🪙</b> зачислен на баланс!",
+        f"📈 Чистая прибыль: <b>+{_coins(payout - stake)} 🪙</b>",
+        f"👛 Баланс: <b>{_coins(balance_after)} 🪙</b>",
+    ]
+    if has_voided:
+        money.append("<i>Отменённые события посчитаны с кэфом 1.00.</i>")
+    parts.append("\n".join(money))
+    parts.append("<i>Темшик поздравляет с победным прогнозом! 🎰</i>")
+
     database.enqueue_bet_settled_notice(
         cursor, user_id, bet_id,
         title=f"🎉 Ваша ставка #{bet_id} ({_bet_type_label(bet_type)}) {head}!",
-        body=(f"🔥 Итоговый кэф: <b>{odd:.2f}</b>\n"
-              f"💸 Выигрыш: <b>+{_coins(payout)} 🪙</b> зачислен на баланс!\n\n"
-              f"<i>Темшик поздравляет с победным прогнозом! 🎰</i>"),
+        body="\n\n".join(parts),
         resettle=resettle,
     )
 
 
 def _notify_bet_refunded(cursor, user_id: int, bet_id: int, bet_type: Optional[str], stake: int,
-                         resettle: bool = False) -> None:
+                         balance_after: int, resettle: bool = False) -> None:
+    legs, _ = _leg_lines(cursor, bet_id)
+    parts = []
+    if legs:
+        parts.append("\n".join(legs))
+    parts.append(f"Матч аннулирован — ставка <b>{_coins(stake)} 🪙</b> вернулась на баланс.\n"
+                 f"👛 Баланс: <b>{_coins(balance_after)} 🪙</b>")
     database.enqueue_bet_settled_notice(
         cursor, user_id, bet_id,
         title=f"🔄 Возврат по ставке #{bet_id} ({_bet_type_label(bet_type)})",
-        body=(f"Матч аннулирован — ставка <b>{_coins(stake)} 🪙</b> вернулась на баланс."),
+        body="\n\n".join(parts),
         resettle=resettle,
     )
 
@@ -227,7 +284,7 @@ def settle_match_predictions(
                     INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
                     VALUES (?, ?, 'refund', ?, 'bet', ?)
                 """, (u_id, stake, b_id, bal_after))
-                _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake)
+                _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after)
 
                 try:
                     from services.player_rating import PlayerRatingEngine
@@ -287,7 +344,7 @@ def settle_match_predictions(
                 INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
                 VALUES (?, ?, 'bet_won', ?, 'bet', ?)
             """, (u_id, payout, b_id, bal_after))
-            _notify_bet_won(cursor, u_id, b_id, bet["bet_type"], effective_odd_rounded, payout)
+            _notify_bet_won(cursor, u_id, b_id, bet["bet_type"], effective_odd_rounded, payout, stake, bal_after)
 
             # Trigger progression, streak, rating & achievement hooks
             try:
@@ -375,7 +432,7 @@ def refund_match_bets(match_id: int) -> list[dict]:
                         INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
                         VALUES (?, ?, 'bet_refund', ?, 'bet', ?)
                     """, (u_id, stake, b_id, bal_after))
-                    _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake)
+                    _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after)
 
                     refund_notifications.append({
                         "user_id": u_id,
@@ -594,7 +651,7 @@ def resettle_match_predictions(
                     VALUES (?, ?, 'resettle_refund', ?, 'bet', ?)
                 """, (u_id, stake, b_id, bal_after))
                 if (prev_status, prev_payout) != ("refunded", stake):
-                    _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, resettle=True)
+                    _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after, resettle=True)
 
                 notifications.append({
                     "user_id": u_id,
@@ -636,7 +693,8 @@ def resettle_match_predictions(
                 VALUES (?, ?, 'resettle_payout', ?, 'bet', ?)
             """, (u_id, payout, b_id, bal_after))
             if (prev_status, prev_payout) != ("won", payout):
-                _notify_bet_won(cursor, u_id, b_id, bet["bet_type"], effective_odd_rounded, payout, resettle=True)
+                _notify_bet_won(cursor, u_id, b_id, bet["bet_type"], effective_odd_rounded, payout, stake, bal_after,
+                                resettle=True)
 
             notifications.append({
                 "user_id": u_id,

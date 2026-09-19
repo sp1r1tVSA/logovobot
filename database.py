@@ -5154,6 +5154,36 @@ def enqueue_bet_settled_notice(
         return False
 
 
+def get_bet_legs_for_notice(cursor, bet_id: int) -> list[dict]:
+    """События купона с командами и счётом — для текста уведомления о расчёте.
+
+    Читает на курсоре транзакции расчёта, поэтому видит уже проставленные статусы
+    событий и счёт. Команды старых матчей без строки в `matches` берутся из
+    `bet_markets` подзапросом: JOIN по match_id размножал бы события.
+    """
+    cursor.execute(
+        """
+        SELECT bi.outcome_type, bi.odd, bi.status,
+               COALESCE(m.player1_team,
+                        (SELECT bm.team1_name FROM bet_markets bm WHERE bm.match_id = bi.match_id LIMIT 1),
+                        'Хозяева') AS team1_name,
+               COALESCE(m.player2_team,
+                        (SELECT bm.team2_name FROM bet_markets bm WHERE bm.match_id = bi.match_id LIMIT 1),
+                        'Гости') AS team2_name,
+               m.player1_score, m.player2_score,
+               mkt.market_key, ms.selection_name
+        FROM bet_items bi
+        LEFT JOIN matches m ON bi.match_id = m.id
+        LEFT JOIN markets mkt ON bi.market_id = mkt.id
+        LEFT JOIN market_selections ms ON bi.selection_id = ms.id
+        WHERE bi.bet_id = ?
+        ORDER BY bi.id
+        """,
+        (bet_id,),
+    )
+    return [dict(r) for r in cursor.fetchall()]
+
+
 def get_pending_notification_events(limit: int = 25, event_types: tuple | None = None) -> list[dict]:
     """Ожидающие отправки уведомления, важные первыми.
 
