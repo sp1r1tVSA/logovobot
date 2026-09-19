@@ -249,6 +249,42 @@ def calculate_match_odds(
     }
 
 
+# Line tile field -> (market_key, selection_key) in market_selections.
+_TILE_SELECTIONS = {
+    "odd_p1": ("1x2", "p1"),
+    "odd_x": ("1x2", "x"),
+    "odd_p2": ("1x2", "p2"),
+    "odd_tb25": ("total_goals", "over_2.5"),
+    "odd_tm25": ("total_goals", "under_2.5"),
+    "odd_btts_yes": ("btts", "btts_yes"),
+    "odd_btts_no": ("btts", "btts_no"),
+}
+
+
+def _price_match(match_id: int, t1: str, t2: str, odds: dict) -> dict:
+    """Reprice the match's relational markets and return the tile odds.
+
+    The relational markets step toward the model by at most ±15% per model
+    change (odds_engine.smooth_match_repricing), and placement validates line
+    picks against them — so the tile shows their odds, not the raw model ones.
+    The raw ``odds`` stay only as a fallback if the markets cannot be built.
+    """
+    try:
+        from services.odds_engine import generate_match_markets
+        markets = generate_match_markets(match_id, t1, t2)
+    except Exception as e:
+        logger.debug(f"Could not update relational markets for match #{match_id}: {e}")
+        return odds
+    priced = {
+        (m["market_key"], s["selection_key"]): s["odds_value"]
+        for m in markets for s in m["selections"]
+    }
+    return {
+        field: priced.get(key, odds[field])
+        for field, key in _TILE_SELECTIONS.items()
+    }
+
+
 def generate_round_markets(tour: int, division_id: int | None = None, season_id: int | None = None) -> list[dict]:
     """
     Generate or update odds markets for the central matches of a tour, optionally filtered by division and season.
@@ -290,6 +326,12 @@ def generate_round_markets(tour: int, division_id: int | None = None, season_id:
             p1_nick=p1_nick,
             p2_nick=p2_nick
         )
+        try:
+            # Матч мог быть погашен раньше, когда не входил в центральные.
+            database.reopen_match_markets(m_id)
+        except Exception as e:
+            logger.debug(f"Could not reopen markets for match #{m_id}: {e}")
+        odds = _price_match(m_id, t1, t2, odds)
         database.save_bet_market(
             match_id=m_id,
             tour=tour,
@@ -303,13 +345,6 @@ def generate_round_markets(tour: int, division_id: int | None = None, season_id:
             odd_btts_yes=odds["odd_btts_yes"],
             odd_btts_no=odds["odd_btts_no"]
         )
-        try:
-            # Матч мог быть погашен раньше, когда не входил в центральные.
-            database.reopen_match_markets(m_id)
-            from services.odds_engine import generate_match_markets
-            generate_match_markets(m_id, t1, t2)
-        except Exception as e:
-            logger.debug(f"Could not generate relational markets for match #{m_id}: {e}")
 
         markets.append({
             "match_id": m_id,
@@ -366,6 +401,7 @@ def regenerate_all_active_markets() -> int:
             p1_nick=p1_nick,
             p2_nick=p2_nick
         )
+        odds = _price_match(m_id, t1, t2, odds)
         database.save_bet_market(
             match_id=m_id,
             tour=m.get("round_number") or 1,
@@ -379,11 +415,6 @@ def regenerate_all_active_markets() -> int:
             odd_btts_yes=odds["odd_btts_yes"],
             odd_btts_no=odds["odd_btts_no"]
         )
-        try:
-            from services.odds_engine import generate_match_markets
-            generate_match_markets(m_id, t1, t2)
-        except Exception as e:
-            logger.debug(f"Could not update relational markets for match #{m_id}: {e}")
         updated_count += 1
 
     logger.info(f"🔄 Recalculated Poisson betting markets for {updated_count} active matches.")

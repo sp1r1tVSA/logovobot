@@ -885,6 +885,12 @@ def init_db() -> None:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_selections_market ON market_selections(market_id, status)")
+        # Last raw (unsmoothed) model price: repricing steps toward it at most
+        # ±15% per model change, so re-fetching the line does not keep stepping.
+        try:
+            cursor.execute("ALTER TABLE market_selections ADD COLUMN model_odds REAL")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS odds_history (

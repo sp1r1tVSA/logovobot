@@ -301,6 +301,13 @@ requests — keep it off the request path.
 `coin_transactions`, `markets`/`market_selections`, `user_bets`/`bet_items`, plus risk,
 exposure, cashout and settlement engines. No real money is involved anywhere.
 
+Automatic repricing (`odds_engine.generate_match_markets`) is smoothed by
+`smooth_match_repricing`: each model change moves every odd of a match by at most ±15%
+(`MAX_REPRICE_STEP`), using one shared blend factor so the line never loses its margin.
+`market_selections.model_odds` keeps the raw model price, so re-fetching the line does not
+keep stepping toward it. Line tiles (`bet_markets`) take their odds from the smoothed
+selections, which placement validates against — never save raw model odds into a tile.
+
 ---
 
 ## Roles and access

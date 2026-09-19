@@ -20,6 +20,11 @@ logger = logging.getLogger(__name__)
 # Shared with services.betting_engine: the line tiles and market_selections must agree.
 BOOKMAKER_MARGIN = TARGET_MARGIN
 
+# Автоматический пересчёт двигает любой коэффициент матча не больше чем на ±15%
+# (в 1.15 раза в любую сторону) за одно изменение модели. В начале сезона
+# таблица из 1–2 игр раскачивала линию в разы за вечер.
+MAX_REPRICE_STEP = 0.15
+
 
 def get_or_create_market(
     match_id: int,
@@ -53,9 +58,14 @@ def get_or_create_selection(
     selection_key: str,
     selection_name: str,
     initial_odds: float,
-    update_odds: bool = False
+    update_odds: bool = False,
+    model_odds: Optional[float] = None
 ) -> dict:
-    """Ensure a selection exists within a market and return its record."""
+    """Ensure a selection exists within a market and return its record.
+
+    ``model_odds`` stores the raw model price the (possibly smoothed)
+    ``initial_odds`` was derived from; see ``smooth_match_repricing``.
+    """
     initial_odds = round(float(initial_odds), 2)
     with database.transaction() as conn:
         cursor = conn.cursor()
@@ -65,6 +75,15 @@ def get_or_create_selection(
         )
         row = cursor.fetchone()
         if row:
+            if model_odds is not None and (
+                row["model_odds"] is None or abs(float(row["model_odds"]) - model_odds) > 0.001
+            ):
+                cursor.execute(
+                    "UPDATE market_selections SET model_odds = ? WHERE id = ?",
+                    (model_odds, row["id"]),
+                )
+                cursor.execute("SELECT * FROM market_selections WHERE id = ?", (row["id"],))
+                row = cursor.fetchone()
             if update_odds and (abs(float(row["odds_value"]) - initial_odds) > 0.001 or row["selection_name"] != selection_name):
                 old_val = float(row["odds_value"])
                 new_version = row["odds_version"] + 1
@@ -103,9 +122,9 @@ def get_or_create_selection(
             return dict(row)
 
         cursor.execute("""
-            INSERT INTO market_selections (market_id, selection_key, selection_name, odds_value, odds_version, status, previous_odds)
-            VALUES (?, ?, ?, ?, 1, 'active', NULL)
-        """, (market_id, selection_key, selection_name, initial_odds))
+            INSERT INTO market_selections (market_id, selection_key, selection_name, odds_value, odds_version, status, previous_odds, model_odds)
+            VALUES (?, ?, ?, ?, 1, 'active', NULL, ?)
+        """, (market_id, selection_key, selection_name, initial_odds, model_odds))
         sel_id = cursor.lastrowid
         cursor.execute("SELECT * FROM market_selections WHERE id = ?", (sel_id,))
         return dict(cursor.fetchone())
@@ -331,6 +350,66 @@ def validate_odds(
         return current_odd
 
 
+def _current_selection_prices(match_id: int) -> dict:
+    """{(market_key, selection_key): (odds_value, model_odds)} for a match."""
+    with database.transaction() as conn:
+        rows = conn.execute("""
+            SELECT m.market_key, s.selection_key, s.odds_value, s.model_odds
+            FROM market_selections s
+            JOIN markets m ON m.id = s.market_id
+            WHERE m.match_id = ?
+        """, (match_id,)).fetchall()
+    return {
+        (r["market_key"], r["selection_key"]): (float(r["odds_value"]), r["model_odds"])
+        for r in rows
+    }
+
+
+def smooth_match_repricing(current: dict, targets: dict, max_step: float = MAX_REPRICE_STEP) -> dict:
+    """Step a match's odds toward the fresh model prices by at most ±max_step.
+
+    ``current`` maps key -> (odds_value, model_odds) for selections that already
+    exist; ``targets`` maps key -> fresh model odd. Returns key -> odd to write.
+
+    * A selection with no row yet gets its target straight away.
+    * If the model has not changed since the last reprice (every stored
+      model_odds equals its target), the line stays put: re-opening the line
+      in the Mini App must not keep stepping toward the target.
+    * Otherwise every selection of the match moves by the same fraction ``t``
+      of the way from its current to its target implied probability, ``t``
+      being the largest value that keeps each odd within x(1 +/- max_step).
+      A shared ``t`` keeps the line a blend of two margin-bearing books, so no
+      set of outcomes covering the match can be priced below 100% (no
+      arbitrage), which clamping every odd on its own would not guarantee.
+    """
+    existing = {k: v for k, v in current.items() if k in targets}
+    model_changed = any(
+        model is None or abs(float(model) - targets[k]) > 0.001
+        for k, (_, model) in existing.items()
+    )
+
+    t = 1.0
+    if existing and model_changed:
+        for k, (cur, _) in existing.items():
+            p0, p1 = 1.0 / cur, 1.0 / targets[k]
+            if abs(p1 - p0) < 1e-12:
+                continue
+            bound = p0 * (1 + max_step) if p1 > p0 else p0 / (1 + max_step)
+            t = min(t, (bound - p0) / (p1 - p0))
+        t = max(0.0, t)
+
+    result = {}
+    for k, target in targets.items():
+        if k not in existing:
+            result[k] = target
+        elif not model_changed:
+            result[k] = existing[k][0]
+        else:
+            p0, p1 = 1.0 / existing[k][0], 1.0 / target
+            result[k] = max(1.01, round(1.0 / (p0 + t * (p1 - p0)), 2))
+    return result
+
+
 def get_match_markets(match_id: int) -> list[dict]:
     """Retrieve all markets and selections for a match formatted for API & UI."""
     with database.transaction() as conn:
@@ -421,57 +500,59 @@ def generate_match_markets(
     odd_h1_plus = odds["odd_h1_plus_1.5"]
     odd_h2_minus = odds["odd_h2_minus_1.5"]
 
+    # (market_key, market_name, category, sort_order, [(selection_key, name, odd)])
+    spec = [
+        ("1x2", "Исход матча", "main", 1, [
+            ("p1", f"П1 ({team1_name})", odd_p1),
+            ("x", "Ничья (X)", odd_x),
+            ("p2", f"П2 ({team2_name})", odd_p2),
+        ]),
+        ("double_chance", "Двойной шанс", "main", 2, [
+            ("1x", "1X (П1 или Х)", odd_1x),
+            ("12", "12 (П1 или П2)", odd_12),
+            ("x2", "X2 (Х или П2)", odd_x2),
+        ]),
+        ("total_goals", "Тотал голов", "goals", 3, [
+            ("over_1.5", "Тотал больше (1.5)", odd_tb15),
+            ("under_1.5", "Тотал меньше (1.5)", odd_tm15),
+            ("over_2.5", "Тотал больше (2.5)", odd_tb25),
+            ("under_2.5", "Тотал меньше (2.5)", odd_tm25),
+            ("over_3.5", "Тотал больше (3.5)", odd_tb35),
+            ("under_3.5", "Тотал меньше (3.5)", odd_tm35),
+        ]),
+        ("btts", "Обе забьют", "goals", 4, [
+            ("btts_yes", "Обе забьют: Да", odd_btts_yes),
+            ("btts_no", "Обе забьют: Нет", odd_btts_no),
+        ]),
+        ("individual_total_1", f"Инд. тотал: {team1_name}", "goals", 5, [
+            ("it1_over_1.5", "ИТБ1 (1.5)", ind1_over),
+            ("it1_under_1.5", "ИТМ1 (1.5)", ind1_under),
+        ]),
+        ("individual_total_2", f"Инд. тотал: {team2_name}", "goals", 6, [
+            ("it2_over_1.5", "ИТБ2 (1.5)", ind2_over),
+            ("it2_under_1.5", "ИТМ2 (1.5)", ind2_under),
+        ]),
+        ("handicap", "Фора (1.5)", "main", 7, [
+            ("h1_minus_1.5", "Фора 1 (-1.5)", odd_h1_minus),
+            ("h2_plus_1.5", "Фора 2 (+1.5)", odd_h2_plus),
+            ("h1_plus_1.5", "Фора 1 (+1.5)", odd_h1_plus),
+            ("h2_minus_1.5", "Фора 2 (-1.5)", odd_h2_minus),
+        ]),
+    ]
+
+    targets = {
+        (mk, sk): round(float(odd), 2)
+        for mk, _, _, _, sels in spec for sk, _, odd in sels
+    }
+    priced = smooth_match_repricing(_current_selection_prices(match_id), targets)
+
     # Create / Update Markets (with update_odds=True for dynamic repricing)
-    created_markets = []
-
-    # Market 1: 1X2
-    m_1x2 = get_or_create_market(match_id, "1x2", "Исход матча", category="main", sort_order=1)
-    get_or_create_selection(m_1x2["id"], "p1", f"П1 ({team1_name})", odd_p1, update_odds=True)
-    get_or_create_selection(m_1x2["id"], "x", "Ничья (X)", odd_x, update_odds=True)
-    get_or_create_selection(m_1x2["id"], "p2", f"П2 ({team2_name})", odd_p2, update_odds=True)
-    created_markets.append(m_1x2)
-
-    # Market 2: Double Chance
-    m_dc = get_or_create_market(match_id, "double_chance", "Двойной шанс", category="main", sort_order=2)
-    get_or_create_selection(m_dc["id"], "1x", "1X (П1 или Х)", odd_1x, update_odds=True)
-    get_or_create_selection(m_dc["id"], "12", "12 (П1 или П2)", odd_12, update_odds=True)
-    get_or_create_selection(m_dc["id"], "x2", "X2 (Х или П2)", odd_x2, update_odds=True)
-    created_markets.append(m_dc)
-
-    # Market 3: Total Goals
-    m_tot = get_or_create_market(match_id, "total_goals", "Тотал голов", category="goals", sort_order=3)
-    get_or_create_selection(m_tot["id"], "over_1.5", "Тотал больше (1.5)", odd_tb15, update_odds=True)
-    get_or_create_selection(m_tot["id"], "under_1.5", "Тотал меньше (1.5)", odd_tm15, update_odds=True)
-    get_or_create_selection(m_tot["id"], "over_2.5", "Тотал больше (2.5)", odd_tb25, update_odds=True)
-    get_or_create_selection(m_tot["id"], "under_2.5", "Тотал меньше (2.5)", odd_tm25, update_odds=True)
-    get_or_create_selection(m_tot["id"], "over_3.5", "Тотал больше (3.5)", odd_tb35, update_odds=True)
-    get_or_create_selection(m_tot["id"], "under_3.5", "Тотал меньше (3.5)", odd_tm35, update_odds=True)
-    created_markets.append(m_tot)
-
-    # Market 4: BTTS
-    m_btts = get_or_create_market(match_id, "btts", "Обе забьют", category="goals", sort_order=4)
-    get_or_create_selection(m_btts["id"], "btts_yes", "Обе забьют: Да", odd_btts_yes, update_odds=True)
-    get_or_create_selection(m_btts["id"], "btts_no", "Обе забьют: Нет", odd_btts_no, update_odds=True)
-    created_markets.append(m_btts)
-
-    # Market 5: Individual Total 1
-    m_it1 = get_or_create_market(match_id, "individual_total_1", f"Инд. тотал: {team1_name}", category="goals", sort_order=5)
-    get_or_create_selection(m_it1["id"], "it1_over_1.5", "ИТБ1 (1.5)", ind1_over, update_odds=True)
-    get_or_create_selection(m_it1["id"], "it1_under_1.5", "ИТМ1 (1.5)", ind1_under, update_odds=True)
-    created_markets.append(m_it1)
-
-    # Market 6: Individual Total 2
-    m_it2 = get_or_create_market(match_id, "individual_total_2", f"Инд. тотал: {team2_name}", category="goals", sort_order=6)
-    get_or_create_selection(m_it2["id"], "it2_over_1.5", "ИТБ2 (1.5)", ind2_over, update_odds=True)
-    get_or_create_selection(m_it2["id"], "it2_under_1.5", "ИТМ2 (1.5)", ind2_under, update_odds=True)
-    created_markets.append(m_it2)
-
-    # Market 7: Handicap
-    m_handicap = get_or_create_market(match_id, "handicap", "Фора (1.5)", category="main", sort_order=7)
-    get_or_create_selection(m_handicap["id"], "h1_minus_1.5", "Фора 1 (-1.5)", odd_h1_minus, update_odds=True)
-    get_or_create_selection(m_handicap["id"], "h2_plus_1.5", "Фора 2 (+1.5)", odd_h2_plus, update_odds=True)
-    get_or_create_selection(m_handicap["id"], "h1_plus_1.5", "Фора 1 (+1.5)", odd_h1_plus, update_odds=True)
-    get_or_create_selection(m_handicap["id"], "h2_minus_1.5", "Фора 2 (-1.5)", odd_h2_minus, update_odds=True)
-    created_markets.append(m_handicap)
+    for mk, m_name, category, sort_order, sels in spec:
+        market = get_or_create_market(match_id, mk, m_name, category=category, sort_order=sort_order)
+        for sk, s_name, _ in sels:
+            get_or_create_selection(
+                market["id"], sk, s_name, priced[(mk, sk)],
+                update_odds=True, model_odds=targets[(mk, sk)],
+            )
 
     return get_match_markets(match_id)
