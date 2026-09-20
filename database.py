@@ -391,19 +391,50 @@ def init_db() -> None:
             logger.exception(f"Error during rounds table migration check: {e}")
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_rounds_season_div_round ON rounds(season_id, division_id, round_number)")
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS round_reminders (
-                division_id INTEGER DEFAULT 1,
-                round_number INTEGER,
-                reminder_type TEXT,
-                sent_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
-                PRIMARY KEY(division_id, round_number, reminder_type)
-            )
-        """)
+        # Migration: ensure round_reminders has composite PRIMARY KEY (division_id, round_number, reminder_type)
         try:
-            cursor.execute("ALTER TABLE round_reminders ADD COLUMN division_id INTEGER DEFAULT 1")
-        except sqlite3.OperationalError:
-            pass
+            cursor.execute("PRAGMA table_info(round_reminders)")
+            rem_cols = cursor.fetchall()
+            if rem_cols:
+                rem_pk_cols = [c["name"] if isinstance(c, sqlite3.Row) else c[1] for c in rem_cols if (c["pk"] if isinstance(c, sqlite3.Row) else c[5]) > 0]
+                if "division_id" not in rem_pk_cols:
+                    cursor.execute("""
+                        CREATE TABLE IF NOT EXISTS round_reminders_v2 (
+                            division_id INTEGER NOT NULL DEFAULT 1,
+                            round_number INTEGER NOT NULL,
+                            reminder_type TEXT NOT NULL,
+                            sent_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
+                            PRIMARY KEY(division_id, round_number, reminder_type)
+                        )
+                    """)
+                    rem_col_names = [c["name"] if isinstance(c, sqlite3.Row) else c[1] for c in rem_cols]
+                    if "division_id" in rem_col_names:
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO round_reminders_v2 (division_id, round_number, reminder_type, sent_at)
+                            SELECT COALESCE(division_id, 1), round_number, reminder_type, sent_at
+                            FROM round_reminders
+                        """)
+                    else:
+                        cursor.execute("""
+                            INSERT OR IGNORE INTO round_reminders_v2 (division_id, round_number, reminder_type, sent_at)
+                            SELECT 1, round_number, reminder_type, sent_at
+                            FROM round_reminders
+                        """)
+                    cursor.execute("DROP TABLE round_reminders")
+                    cursor.execute("ALTER TABLE round_reminders_v2 RENAME TO round_reminders")
+                    logger.info("Migrated 'round_reminders' table to composite (division_id, round_number, reminder_type) PK schema successfully.")
+            else:
+                cursor.execute("""
+                    CREATE TABLE IF NOT EXISTS round_reminders (
+                        division_id INTEGER NOT NULL DEFAULT 1,
+                        round_number INTEGER NOT NULL,
+                        reminder_type TEXT NOT NULL,
+                        sent_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
+                        PRIMARY KEY(division_id, round_number, reminder_type)
+                    )
+                """)
+        except Exception as e:
+            logger.exception(f"Error during round_reminders table migration check: {e}")
         # Idempotency ledger for the auto-posted round preview / digest.
         # Deliberately NOT round_reminders: update_round_status() wipes that table
         # whenever a deadline is (re)set, which would re-post the same content.
@@ -3354,7 +3385,7 @@ def has_reminder_been_sent(round_number: int, reminder_type: str, division_id: i
         cursor = conn.cursor()
         if division_id is not None:
             cursor.execute(
-                "SELECT 1 FROM round_reminders WHERE round_number = ? AND reminder_type = ? AND (division_id = ? OR division_id IS NULL)",
+                "SELECT 1 FROM round_reminders WHERE round_number = ? AND reminder_type = ? AND division_id = ?",
                 (round_number, reminder_type, division_id)
             )
         else:

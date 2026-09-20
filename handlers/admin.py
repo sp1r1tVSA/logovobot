@@ -6124,38 +6124,56 @@ async def job_check_deadlines_and_remind(context: ContextTypes.DEFAULT_TYPE) -> 
 
     now = now_msk()
 
+    # Milestones every 6 hours down to 6h, plus 1h final warning
+    REMINDER_MILESTONES = [
+        (72, "72 часа"),
+        (66, "66 часов"),
+        (60, "60 часов"),
+        (54, "54 часа"),
+        (48, "48 часов"),
+        (42, "42 часа"),
+        (36, "36 часов"),
+        (30, "30 часов"),
+        (24, "24 часа"),
+        (18, "18 часов"),
+        (12, "12 часов"),
+        (6, "6 часов"),
+    ]
+
     for r in open_rounds:
-        r_num = r["round_number"]
-        div_id = r.get("division_id") or 1
-        dl_str = r["deadline"]
+        try:
+            r_num = r["round_number"]
+            div_id = r.get("division_id") or 1
+            dl_str = r["deadline"]
 
-        dl_dt = database.parse_flexible_datetime(dl_str)
-        if not dl_dt:
-            continue
+            dl_dt = database.parse_flexible_datetime(dl_str)
+            if not dl_dt:
+                continue
 
-        time_diff = dl_dt - now
-        hours_left = time_diff.total_seconds() / 3600.0
+            time_diff = dl_dt - now
+            hours_left = time_diff.total_seconds() / 3600.0
 
-        if hours_left <= 0:
-            continue  # Deadline already passed
+            if hours_left <= 0:
+                continue  # Deadline already passed
 
-        # 24h reminder (between 23h and 25h left)
-        if 23.0 <= hours_left <= 25.0:
-            if not (await asyncio.to_thread(database.has_reminder_been_sent, r_num, "24h", div_id)):
-                await send_round_reminders(context, r_num, time_left_str="24 часа", division_id=div_id)
-                await asyncio.to_thread(database.record_reminder_sent, r_num, "24h", div_id)
+            # 1. Check 6-hour cycle milestones (from 72h down to 6h)
+            matched = False
+            for m_hours, m_label in REMINDER_MILESTONES:
+                if (m_hours - 1.5) <= hours_left <= (m_hours + 1.5):
+                    tag = f"{m_hours}h"
+                    if not (await asyncio.to_thread(database.has_reminder_been_sent, r_num, tag, div_id)):
+                        await send_round_reminders(context, r_num, time_left_str=m_label, division_id=div_id)
+                        await asyncio.to_thread(database.record_reminder_sent, r_num, tag, div_id)
+                    matched = True
+                    break
 
-        # 6h reminder (between 5h and 7h left)
-        elif 5.0 <= hours_left <= 7.0:
-            if not (await asyncio.to_thread(database.has_reminder_been_sent, r_num, "6h", div_id)):
-                await send_round_reminders(context, r_num, time_left_str="6 часов", division_id=div_id)
-                await asyncio.to_thread(database.record_reminder_sent, r_num, "6h", div_id)
-
-        # 1h reminder (between 0.5h and 1.5h left)
-        elif 0.5 <= hours_left <= 1.5:
-            if not (await asyncio.to_thread(database.has_reminder_been_sent, r_num, "1h", div_id)):
-                await send_round_reminders(context, r_num, time_left_str="1 час! 🚨", division_id=div_id)
-                await asyncio.to_thread(database.record_reminder_sent, r_num, "1h", div_id)
+            # 2. Final urgent reminder (between 0.5h and 1.5h left)
+            if not matched and 0.5 <= hours_left <= 1.5:
+                if not (await asyncio.to_thread(database.has_reminder_been_sent, r_num, "1h", div_id)):
+                    await send_round_reminders(context, r_num, time_left_str="1 час! 🚨", division_id=div_id)
+                    await asyncio.to_thread(database.record_reminder_sent, r_num, "1h", div_id)
+        except Exception as e:
+            logger.exception(f"Error checking deadline reminder for round {r.get('round_number')} div {r.get('division_id')}: {e}")
 
 async def job_post_debts_to_warns(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic job (every 12 hours) posting/updating the debts summary in the ПРЕДЫ thread."""
