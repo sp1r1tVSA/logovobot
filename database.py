@@ -3005,12 +3005,19 @@ def get_matches_in_rounds(round_numbers: list[int], division_id: int | None = No
         cursor = conn.cursor()
         cursor.execute(f"""
             SELECT
-                m.id, m.round_number, m.division_id, u1.telegram_id AS player1_id, u2.telegram_id AS player2_id, m.status,
-                u1.username AS player1_username, u1.team_name AS player1_team,
-                u2.username AS player2_username, u2.team_name AS player2_team
+                m.id, m.round_number, m.division_id,
+                COALESCE(m.player1_id, u1_id.telegram_id, u1_team.telegram_id) AS player1_id,
+                COALESCE(m.player2_id, u2_id.telegram_id, u2_team.telegram_id) AS player2_id,
+                m.status,
+                COALESCE(u1_id.username, u1_team.username) AS player1_username,
+                COALESCE(u1_id.team_name, u1_team.team_name, m.player1_team) AS player1_team,
+                COALESCE(u2_id.username, u2_team.username) AS player2_username,
+                COALESCE(u2_id.team_name, u2_team.team_name, m.player2_team) AS player2_team
             FROM matches m
-            LEFT JOIN users u1 ON LOWER(m.player1_team) = LOWER(u1.team_name)
-            LEFT JOIN users u2 ON LOWER(m.player2_team) = LOWER(u2.team_name)
+            LEFT JOIN users u1_id ON m.player1_id = u1_id.telegram_id
+            LEFT JOIN users u1_team ON LOWER(m.player1_team) = LOWER(u1_team.team_name) AND (u1_team.division_id = m.division_id OR m.division_id IS NULL)
+            LEFT JOIN users u2_id ON m.player2_id = u2_id.telegram_id
+            LEFT JOIN users u2_team ON LOWER(m.player2_team) = LOWER(u2_team.team_name) AND (u2_team.division_id = m.division_id OR m.division_id IS NULL)
             WHERE m.round_number IN ({placeholders}){div_clause}
             ORDER BY m.round_number ASC, m.id ASC
         """, params)
@@ -3023,24 +3030,38 @@ def get_unplayed_matches_by_round(round_number: int, division_id: int | None = N
         if division_id is not None:
             cursor.execute("""
                 SELECT 
-                    m.id, m.round_number, m.division_id, u1.telegram_id AS player1_id, u2.telegram_id AS player2_id, m.status,
-                    u1.username AS player1_username, u1.team_name AS player1_team,
-                    u2.username AS player2_username, u2.team_name AS player2_team
+                    m.id, m.round_number, m.division_id,
+                    COALESCE(m.player1_id, u1_id.telegram_id, u1_team.telegram_id) AS player1_id,
+                    COALESCE(m.player2_id, u2_id.telegram_id, u2_team.telegram_id) AS player2_id,
+                    m.status,
+                    COALESCE(u1_id.username, u1_team.username) AS player1_username,
+                    COALESCE(u1_id.team_name, u1_team.team_name, m.player1_team) AS player1_team,
+                    COALESCE(u2_id.username, u2_team.username) AS player2_username,
+                    COALESCE(u2_id.team_name, u2_team.team_name, m.player2_team) AS player2_team
                 FROM matches m
-                LEFT JOIN users u1 ON LOWER(m.player1_team) = LOWER(u1.team_name)
-                LEFT JOIN users u2 ON LOWER(m.player2_team) = LOWER(u2.team_name)
+                LEFT JOIN users u1_id ON m.player1_id = u1_id.telegram_id
+                LEFT JOIN users u1_team ON LOWER(m.player1_team) = LOWER(u1_team.team_name) AND (u1_team.division_id = m.division_id OR m.division_id IS NULL)
+                LEFT JOIN users u2_id ON m.player2_id = u2_id.telegram_id
+                LEFT JOIN users u2_team ON LOWER(m.player2_team) = LOWER(u2_team.team_name) AND (u2_team.division_id = m.division_id OR m.division_id IS NULL)
                 WHERE m.round_number = ? AND m.status = 'pending' AND (m.division_id = ? OR m.division_id IS NULL)
                 ORDER BY m.id ASC
             """, (round_number, division_id))
         else:
             cursor.execute("""
                 SELECT 
-                    m.id, m.round_number, m.division_id, u1.telegram_id AS player1_id, u2.telegram_id AS player2_id, m.status,
-                    u1.username AS player1_username, u1.team_name AS player1_team,
-                    u2.username AS player2_username, u2.team_name AS player2_team
+                    m.id, m.round_number, m.division_id,
+                    COALESCE(m.player1_id, u1_id.telegram_id, u1_team.telegram_id) AS player1_id,
+                    COALESCE(m.player2_id, u2_id.telegram_id, u2_team.telegram_id) AS player2_id,
+                    m.status,
+                    COALESCE(u1_id.username, u1_team.username) AS player1_username,
+                    COALESCE(u1_id.team_name, u1_team.team_name, m.player1_team) AS player1_team,
+                    COALESCE(u2_id.username, u2_team.username) AS player2_username,
+                    COALESCE(u2_id.team_name, u2_team.team_name, m.player2_team) AS player2_team
                 FROM matches m
-                LEFT JOIN users u1 ON LOWER(m.player1_team) = LOWER(u1.team_name)
-                LEFT JOIN users u2 ON LOWER(m.player2_team) = LOWER(u2.team_name)
+                LEFT JOIN users u1_id ON m.player1_id = u1_id.telegram_id
+                LEFT JOIN users u1_team ON LOWER(m.player1_team) = LOWER(u1_team.team_name) AND (u1_team.division_id = m.division_id OR m.division_id IS NULL)
+                LEFT JOIN users u2_id ON m.player2_id = u2_id.telegram_id
+                LEFT JOIN users u2_team ON LOWER(m.player2_team) = LOWER(u2_team.team_name) AND (u2_team.division_id = m.division_id OR m.division_id IS NULL)
                 WHERE m.round_number = ? AND m.status = 'pending'
                 ORDER BY m.id ASC
             """, (round_number,))
@@ -7185,7 +7206,7 @@ def get_all_unplayed_league_matches(division_id: int | None = None, season_id: i
         if division_id is not None:
             cursor.execute("""
                 SELECT 
-                    m.id, m.round_number, m.player1_team, m.player2_team, m.division_id, m.season_id
+                    m.id, m.round_number, m.player1_id, m.player2_id, m.player1_team, m.player2_team, m.division_id, m.season_id
                 FROM matches m
                 WHERE (m.tournament_type IS NULL OR m.tournament_type = 'league')
                   AND m.status = 'pending'
@@ -7196,7 +7217,7 @@ def get_all_unplayed_league_matches(division_id: int | None = None, season_id: i
         else:
             cursor.execute("""
                 SELECT 
-                    m.id, m.round_number, m.player1_team, m.player2_team, m.division_id, m.season_id
+                    m.id, m.round_number, m.player1_id, m.player2_id, m.player1_team, m.player2_team, m.division_id, m.season_id
                 FROM matches m
                 WHERE (m.tournament_type IS NULL OR m.tournament_type = 'league')
                   AND m.status = 'pending'
@@ -7210,16 +7231,18 @@ def get_all_unplayed_league_matches(division_id: int | None = None, season_id: i
         else:
             cursor.execute("SELECT telegram_id, username, team_name, division_id FROM users WHERE team_name IS NOT NULL")
         user_rows = [dict(r) for r in cursor.fetchall()]
+        user_by_id = {u["telegram_id"]: u for u in user_rows if u.get("telegram_id")}
 
-        def get_team_owner(t_name: str | None) -> dict | None:
+        def get_team_owner(t_name: str | None, match_div_id: int | None = None) -> dict | None:
             if not t_name:
                 return None
             t_clean = t_name.strip().lower()
-            for u in user_rows:
+            scoped_users = [u for u in user_rows if match_div_id is None or u.get("division_id") == match_div_id or u.get("division_id") is None]
+            for u in scoped_users:
                 ut = (u.get("team_name") or "").strip().lower()
                 if ut == t_clean:
                     return u
-            for u in user_rows:
+            for u in scoped_users:
                 ut = (u.get("team_name") or "").strip()
                 if teams_match(ut, t_name):
                     return u
@@ -7238,14 +7261,18 @@ def get_all_unplayed_league_matches(division_id: int | None = None, season_id: i
 
             t1 = m.get("player1_team")
             t2 = m.get("player2_team")
-            u1 = get_team_owner(t1)
-            u2 = get_team_owner(t2)
+            u1 = user_by_id.get(m.get("player1_id")) if m.get("player1_id") else None
+            if not u1:
+                u1 = get_team_owner(t1, m_div)
+            u2 = user_by_id.get(m.get("player2_id")) if m.get("player2_id") else None
+            if not u2:
+                u2 = get_team_owner(t2, m_div)
 
-            m["player1_id"] = u1.get("telegram_id") if u1 else None
+            m["player1_id"] = m.get("player1_id") or (u1.get("telegram_id") if u1 else None)
             m["p1_username"] = u1.get("username") if u1 else None
             m["p1_team"] = t1
 
-            m["player2_id"] = u2.get("telegram_id") if u2 else None
+            m["player2_id"] = m.get("player2_id") or (u2.get("telegram_id") if u2 else None)
             m["p2_username"] = u2.get("username") if u2 else None
             m["p2_team"] = t2
 
@@ -7392,6 +7419,7 @@ def get_detailed_overdue_matches(division_id: int | None = None, season_id: int 
                     m.id, m.round_number, COALESCE(m.is_extended, 0) AS is_extended,
                     COALESCE(m.frozen_seconds, 0) AS frozen_seconds,
                     m.frozen_at, m.extended_until,
+                    m.player1_id, m.player2_id,
                     m.player1_team, m.player2_team, m.division_id, m.season_id
                 FROM matches m
                 WHERE (m.tournament_type IS NULL OR m.tournament_type = 'league')
@@ -7406,6 +7434,7 @@ def get_detailed_overdue_matches(division_id: int | None = None, season_id: int 
                     m.id, m.round_number, COALESCE(m.is_extended, 0) AS is_extended,
                     COALESCE(m.frozen_seconds, 0) AS frozen_seconds,
                     m.frozen_at, m.extended_until,
+                    m.player1_id, m.player2_id,
                     m.player1_team, m.player2_team, m.division_id, m.season_id
                 FROM matches m
                 WHERE (m.tournament_type IS NULL OR m.tournament_type = 'league')
@@ -7421,16 +7450,18 @@ def get_detailed_overdue_matches(division_id: int | None = None, season_id: int 
         else:
             cursor.execute("SELECT telegram_id, username, team_name, warn_count, division_id FROM users WHERE team_name IS NOT NULL")
         user_rows = [dict(r) for r in cursor.fetchall()]
+        user_by_id = {u["telegram_id"]: u for u in user_rows if u.get("telegram_id")}
 
-        def get_team_owner(t_name: str | None) -> dict | None:
+        def get_team_owner(t_name: str | None, match_div_id: int | None = None) -> dict | None:
             if not t_name:
                 return None
             t_clean = t_name.strip().lower()
-            for u in user_rows:
+            scoped_users = [u for u in user_rows if match_div_id is None or u.get("division_id") == match_div_id or u.get("division_id") is None]
+            for u in scoped_users:
                 ut = (u.get("team_name") or "").strip().lower()
                 if ut == t_clean:
                     return u
-            for u in user_rows:
+            for u in scoped_users:
                 ut = (u.get("team_name") or "").strip()
                 if teams_match(ut, t_name):
                     return u
@@ -7448,14 +7479,18 @@ def get_detailed_overdue_matches(division_id: int | None = None, season_id: int 
 
             t1 = m.get("player1_team")
             t2 = m.get("player2_team")
-            u1 = get_team_owner(t1)
-            u2 = get_team_owner(t2)
+            u1 = user_by_id.get(m.get("player1_id")) if m.get("player1_id") else None
+            if not u1:
+                u1 = get_team_owner(t1, m_div)
+            u2 = user_by_id.get(m.get("player2_id")) if m.get("player2_id") else None
+            if not u2:
+                u2 = get_team_owner(t2, m_div)
 
-            m["player1_id"] = u1.get("telegram_id") if u1 else None
+            m["player1_id"] = m.get("player1_id") or (u1.get("telegram_id") if u1 else None)
             m["p1_username"] = u1.get("username") if u1 else None
             m["p1_warns"] = u1.get("warn_count", 0) if u1 else 0
 
-            m["player2_id"] = u2.get("telegram_id") if u2 else None
+            m["player2_id"] = m.get("player2_id") or (u2.get("telegram_id") if u2 else None)
             m["p2_username"] = u2.get("username") if u2 else None
             m["p2_warns"] = u2.get("warn_count", 0) if u2 else 0
 
@@ -7557,14 +7592,17 @@ def division_has_played_matches(division_id: int | None = None, season_id: int |
         return cursor.fetchone() is not None
 
 
-def find_user_by_team(team_name: str | None) -> dict | None:
-    """Find a user record by assigned team name using case-insensitive and smart alias/fuzzy matching."""
+def find_user_by_team(team_name: str | None, division_id: int | None = None) -> dict | None:
+    """Find a user record by assigned team name using case-insensitive and smart alias/fuzzy matching, optionally scoped to a division."""
     if not team_name:
         return None
     tn_target = team_name.strip().lower()
     with transaction() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM users WHERE team_name IS NOT NULL")
+        if division_id is not None:
+            cursor.execute("SELECT * FROM users WHERE team_name IS NOT NULL AND (division_id = ? OR division_id IS NULL)", (division_id,))
+        else:
+            cursor.execute("SELECT * FROM users WHERE team_name IS NOT NULL")
         users = [dict(r) for r in cursor.fetchall()]
         
         # 1. Exact case-insensitive match

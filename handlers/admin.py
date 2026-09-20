@@ -479,10 +479,16 @@ async def _build_debts_summary(division_id: int | None = None, season_id: int | 
     Optionally scoped to a specific division and season.
     Returns (text, total_debts_count). text is None when there are no debts.
     """
-    league_unplayed, users = await asyncio.gather(
-        asyncio.to_thread(database.get_all_unplayed_league_matches, division_id=division_id, season_id=season_id),
-        asyncio.to_thread(database.list_users),
-    )
+    if division_id is not None:
+        league_unplayed, users = await asyncio.gather(
+            asyncio.to_thread(database.get_all_unplayed_league_matches, division_id=division_id, season_id=season_id),
+            asyncio.to_thread(database.get_division_users, division_id),
+        )
+    else:
+        league_unplayed, users = await asyncio.gather(
+            asyncio.to_thread(database.get_all_unplayed_league_matches, division_id=division_id, season_id=season_id),
+            asyncio.to_thread(database.list_users),
+        )
 
     if not league_unplayed:
         return None, 0
@@ -5882,18 +5888,30 @@ async def send_round_reminders(
             if await safe_send_notification(context.bot, p2_id, text_a, InlineKeyboardMarkup(kb_a)):
                 pm_sent += 1
 
-    # 2. Public summary to Reports Topic (scoped by division)
-    main_group_id, reports_topic_id = await resolve_division_target(
-        division_id, "reports", "previews",
-        legacy_topic_keys=("reports_topic_id",),
-    )
+    # 2. Public summary to Reports Topic (strictly scoped by division)
+    # If division_id is not passed, infer from unplayed matches if all share the same division
+    if division_id is None and unplayed:
+        div_ids = {m.get("division_id") for m in unplayed if m.get("division_id")}
+        if len(div_ids) == 1:
+            division_id = list(div_ids)[0]
 
-    if main_group_id:
+    by_division: dict[int | None, list[dict]] = {}
+    for m in unplayed:
+        by_division.setdefault(m.get("division_id") or division_id, []).append(m)
+
+    for target_div, div_matches in by_division.items():
+        main_group_id, reports_topic_id = await resolve_division_target(
+            target_div, "reports", "previews",
+            legacy_topic_keys=("reports_topic_id",),
+        )
+        if not main_group_id:
+            continue
+
         lines = [
             f"⏰ <b>НАПОМИНАНИЕ! Тур {round_number}</b>{time_hdr}\n",
-            f"Несыгранные матчи ({len(unplayed)}):"
+            f"Несыгранные матчи ({len(div_matches)}):"
         ]
-        for m in unplayed:
+        for m in div_matches:
             p1_team = m['player1_team'] or 'неизвестно'
             p2_team = m['player2_team'] or 'неизвестно'
             p1_user = f"@{m['player1_username']}" if m['player1_username'] else p1_team
@@ -5908,7 +5926,7 @@ async def send_round_reminders(
             if reports_topic_id:
                 kwargs["message_thread_id"] = int(reports_topic_id)
             await context.bot.send_message(**kwargs)
-        except Exception as e:
+        except Exception:
             logger.exception("Failed to post reminder summary to group")
 
     return (pm_sent, len(unplayed))
@@ -5930,10 +5948,11 @@ async def admin_remind_round(update: Update, context: ContextTypes.DEFAULT_TYPE,
     target_chat_id = query.message.chat_id if query and query.message else query.from_user.id
     thread_id = query.message.message_thread_id if query and query.message and query.message.is_topic_message else None
 
-    # Экран напоминаний ключуется только номером тура, дивизион берём из сессии.
+    # Экран напоминаний ключуется номером тура и дивизионом из сессии
+    div_id = context.user_data.get("admin_round_div_id") if context.user_data else None
     back_cb = _round_back_cb(context, round_number)
 
-    unplayed = await asyncio.to_thread(database.get_unplayed_matches_by_round, round_number)
+    unplayed = await asyncio.to_thread(database.get_unplayed_matches_by_round, round_number, div_id)
     if not unplayed:
         keyboard = [[InlineKeyboardButton("« Назад к туру", callback_data=back_cb)]]
         try:
@@ -5942,14 +5961,20 @@ async def admin_remind_round(update: Update, context: ContextTypes.DEFAULT_TYPE,
             await context.bot.send_message(chat_id=target_chat_id, message_thread_id=thread_id, text="🎉 В этом туре нет несыгранных матчей!", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
-    selected_key = f"remind_selected_{round_number}"
+    selected_key = f"remind_selected_{div_id}_{round_number}" if div_id else f"remind_selected_{round_number}"
     if selected_key not in context.user_data:
         context.user_data[selected_key] = {m['id'] for m in unplayed}
 
     selected_ids = context.user_data[selected_key]
 
+    div_header = ""
+    if div_id:
+        div_row = await asyncio.to_thread(database.get_division, div_id)
+        if div_row and div_row.get("name"):
+            div_header = f" ({html.escape(div_row['name'])})"
+
     text = (
-        f"🔔 <b>Выбор матчей для отправки напоминаний (Тур {round_number})</b>\n\n"
+        f"🔔 <b>Выбор матчей для отправки напоминаний (Тур {round_number}){div_header}</b>\n\n"
         f"Отметьте матчи участников, которым нужно отправить напоминание о дедлайне:"
     )
 
@@ -6007,8 +6032,9 @@ async def admin_toggle_remind_match(update: Update, context: ContextTypes.DEFAUL
     round_number = int(parts[0])
     match_id = int(parts[1])
 
-    selected_key = f"remind_selected_{round_number}"
-    unplayed = await asyncio.to_thread(database.get_unplayed_matches_by_round, round_number)
+    div_id = context.user_data.get("admin_round_div_id") if context.user_data else None
+    selected_key = f"remind_selected_{div_id}_{round_number}" if div_id else f"remind_selected_{round_number}"
+    unplayed = await asyncio.to_thread(database.get_unplayed_matches_by_round, round_number, div_id)
     unplayed_ids = {m['id'] for m in unplayed}
 
     selected_ids = context.user_data.setdefault(selected_key, set(unplayed_ids))
@@ -6033,10 +6059,11 @@ async def admin_toggle_remind_all(update: Update, context: ContextTypes.DEFAULT_
         pass
 
     round_number = int(query.data.replace("admin_toggle_remind_all_", ""))
-    unplayed = await asyncio.to_thread(database.get_unplayed_matches_by_round, round_number)
+    div_id = context.user_data.get("admin_round_div_id") if context.user_data else None
+    unplayed = await asyncio.to_thread(database.get_unplayed_matches_by_round, round_number, div_id)
     unplayed_ids = {m['id'] for m in unplayed}
 
-    selected_key = f"remind_selected_{round_number}"
+    selected_key = f"remind_selected_{div_id}_{round_number}" if div_id else f"remind_selected_{round_number}"
     selected_ids = context.user_data.get(selected_key, set())
 
     if len(selected_ids) == len(unplayed_ids):
@@ -6061,14 +6088,15 @@ async def admin_send_selected_reminders(update: Update, context: ContextTypes.DE
     thread_id = query.message.message_thread_id if query and query.message and query.message.is_topic_message else None
 
     round_number = int(query.data.replace("admin_send_selected_reminders_", ""))
-    selected_key = f"remind_selected_{round_number}"
+    div_id = context.user_data.get("admin_round_div_id") if context.user_data else None
+    selected_key = f"remind_selected_{div_id}_{round_number}" if div_id else f"remind_selected_{round_number}"
     selected_ids = context.user_data.get(selected_key, set())
 
     if not selected_ids:
         await query.answer("⚠️ Не выбрано ни одного матча!", show_alert=True)
         return
 
-    pm_sent, count_matches = await send_round_reminders(context, round_number, target_match_ids=selected_ids)
+    pm_sent, count_matches = await send_round_reminders(context, round_number, target_match_ids=selected_ids, division_id=div_id)
 
     context.user_data.pop(selected_key, None)
 
@@ -6491,14 +6519,14 @@ async def _run_debt_lifecycle_tracker(context: ContextTypes.DEFAULT_TYPE) -> Non
         # Fetch current user objects or resolve by team name
         p1_user = await asyncio.to_thread(database.get_user, p1_id) if p1_id else None
         if not p1_user and m.get("player1_team"):
-            p1_user = await asyncio.to_thread(database.find_user_by_team, m.get("player1_team"))
+            p1_user = await asyncio.to_thread(database.find_user_by_team, m.get("player1_team"), m.get("division_id"))
             if p1_user:
                 p1_id = p1_user["telegram_id"]
         p1_user = dict(p1_user) if p1_user else None
 
         p2_user = await asyncio.to_thread(database.get_user, p2_id) if p2_id else None
         if not p2_user and m.get("player2_team"):
-            p2_user = await asyncio.to_thread(database.find_user_by_team, m.get("player2_team"))
+            p2_user = await asyncio.to_thread(database.find_user_by_team, m.get("player2_team"), m.get("division_id"))
             if p2_user:
                 p2_id = p2_user["telegram_id"]
         p2_user = dict(p2_user) if p2_user else None

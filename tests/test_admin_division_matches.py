@@ -15,6 +15,9 @@ from handlers.admin import (
     admin_div_round_matches,
     admin_list_overdue,
     _round_back_cb,
+    admin_remind_round,
+    admin_send_selected_reminders,
+    send_round_reminders,
 )
 
 
@@ -249,6 +252,71 @@ class TestAdminDivisionMatches(unittest.IsolatedAsyncioTestCase):
         context = MagicMock()
         context.user_data = {}
         self.assertEqual(_round_back_cb(context, 3), "admin_main_menu")
+
+    # --- напоминания должникам тура (изоляция по дивизиону) ---
+
+    async def test_admin_remind_round_scopes_matches_to_division(self):
+        """Экран выбора матчей для напоминаний должен видеть только матчи своего дивизиона."""
+        update = self._build_update("admin_remind_round_1")
+        context = MagicMock()
+        context.user_data = {"admin_round_div_id": self.div_a_id}
+        p_base, p_adm, p_glob, p_edit = self._patches()
+        with p_base, p_adm, p_glob, p_edit:
+            await admin_remind_round(update, context, round_number=1)
+
+            markup = update.callback_query.edit_message_text.call_args[1]["reply_markup"]
+            callbacks = self._callbacks(markup)
+
+        # В туре 1 не сыграны и match_a1 (Div A), и match_b1 (Div B).
+        # В экране Div A должен присутствовать только match_a1!
+        self.assertIn(f"admin_toggle_remind_match_1_{self.match_a1}", callbacks)
+        self.assertNotIn(f"admin_toggle_remind_match_1_{self.match_b1}", callbacks)
+        self.assertIn(f"admin_send_selected_reminders_1", callbacks)
+
+    async def test_admin_send_selected_reminders_passes_division_id(self):
+        """Отправка напоминаний должна передавать division_id в send_round_reminders."""
+        update = self._build_update("admin_send_selected_reminders_1")
+        context = MagicMock()
+        context.user_data = {
+            "admin_round_div_id": self.div_a_id,
+            f"remind_selected_{self.div_a_id}_1": {self.match_a1},
+        }
+        p_base, p_adm, p_glob, p_edit = self._patches()
+        with p_base, p_adm, p_glob, p_edit:
+            with patch("handlers.admin.send_round_reminders", new_callable=AsyncMock) as mock_send:
+                mock_send.return_value = (2, 1)
+                await admin_send_selected_reminders(update, context)
+
+                mock_send.assert_awaited_once_with(
+                    context, 1, target_match_ids={self.match_a1}, division_id=self.div_a_id
+                )
+
+    async def test_send_round_reminders_scopes_pms_and_topic_to_division(self):
+        """send_round_reminders рассылает ЛС только участникам указанного дивизиона."""
+        context = MagicMock()
+        context.bot = MagicMock()
+        context.bot.send_message = AsyncMock()
+
+        with patch("handlers.admin.safe_send_notification", new_callable=AsyncMock) as mock_notify, \
+             patch("handlers.admin.resolve_division_target", new_callable=AsyncMock) as mock_target:
+            mock_notify.return_value = True
+            mock_target.return_value = (-100111, 42)
+
+            pm_sent, count_matches = await send_round_reminders(
+                context, round_number=1, division_id=self.div_a_id
+            )
+
+        # Должен быть обработан только матч match_a1 (1 матч, 2 игрока: user_a1, user_a2)
+        self.assertEqual(count_matches, 1)
+        self.assertEqual(pm_sent, 2)
+        notified_users = {call.args[1] for call in mock_notify.call_args_list}
+        self.assertEqual(notified_users, {self.user_a1, self.user_a2})
+
+        # Сводка должна уходить строго в топик дивизиона A (-100111, thread 42)
+        mock_target.assert_awaited_with(self.div_a_id, "reports", "previews", legacy_topic_keys=("reports_topic_id",))
+        context.bot.send_message.assert_awaited_once()
+        self.assertEqual(context.bot.send_message.call_args[1]["chat_id"], -100111)
+        self.assertEqual(context.bot.send_message.call_args[1]["message_thread_id"], 42)
 
 
 if __name__ == "__main__":
