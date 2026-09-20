@@ -379,7 +379,9 @@ class StateStore {
       max_bet: l.max_bet || 50000,
       max_payout: l.max_payout || 10000,
       max_open_exposure: l.max_open_exposure || 20000,
-      open_exposure: l.open_exposure || 0
+      open_exposure: l.open_exposure || 0,
+      max_open_bets: l.max_open_bets || 5,
+      open_bets: l.open_bets || 0
     };
   }
 
@@ -387,6 +389,12 @@ class StateStore {
   getRemainingExposure() {
     const { max_open_exposure, open_exposure } = this.getBetLimits();
     return Math.max(0, max_open_exposure - open_exposure);
+  }
+
+  /** How many more coupons the player may keep open at once. */
+  getRemainingBetSlots() {
+    const { max_open_bets, open_bets } = this.getBetLimits();
+    return Math.max(0, max_open_bets - open_bets);
   }
 
   /**
@@ -398,6 +406,28 @@ class StateStore {
     if (!user) return;
     const l = user.bet_limits || {};
     this.setUser({ ...user, bet_limits: { ...l, open_exposure: (l.open_exposure || 0) + Math.max(0, win || 0) } });
+  }
+
+  /**
+   * One placed coupon takes one slot — an express of five matches counts once,
+   * exactly as the server counts it. Bootstrap refreshes the exact figure.
+   */
+  addOpenBet(count = 1) {
+    const user = this.state.user;
+    if (!user) return;
+    const l = user.bet_limits || {};
+    this.setUser({ ...user, bet_limits: { ...l, open_bets: (l.open_bets || 0) + Math.max(0, count) } });
+  }
+
+  /** Resync the slot counter from a server rejection, without waiting for bootstrap. */
+  setOpenBets(openBets, maxOpenBets) {
+    const user = this.state.user;
+    if (!user) return;
+    const l = user.bet_limits || {};
+    const next = { ...l };
+    if (Number.isFinite(openBets)) next.open_bets = openBets;
+    if (Number.isFinite(maxOpenBets)) next.max_open_bets = maxOpenBets;
+    this.setUser({ ...user, bet_limits: next });
   }
 
   /**

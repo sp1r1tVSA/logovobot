@@ -343,6 +343,22 @@ Automatic repricing (`odds_engine.generate_match_markets`) is smoothed by
 keep stepping toward it. Line tiles (`bet_markets`) take their odds from the smoothed
 selections, which placement validates against — never save raw model odds into a tile.
 
+Every limit resolves through `BettingLimitsService` (user → division → global, falling back
+to the `DEFAULT_*` constants), and `RiskEngine.evaluate_bet` is the only gate — Telegram,
+Mini App and REST all reach it through `database.place_user_bet`, fail-closed. Besides the
+amount limits there is a **count** limit: `DEFAULT_MAX_OPEN_BETS = 5` caps how many coupons
+a player may keep pending at once, counted per player across divisions by
+`get_user_open_bets_count`. The unit is the coupon, not the outcome — an express of five
+matches is one `user_bets` row and one slot — and any terminal status (`won`, `lost`,
+`refunded`, `cancelled`, `cashed_out`) frees it. Coupons placed before the limit existed are
+**not** cancelled but do occupy slots: unlike `legacy_limits`, which exempts old bets from
+the *payout* ceiling, a pending coupon holds a slot however it was accepted. The check
+returns `REJECT` and never `LIMITED` — there is nothing to shrink. A rejection carries
+`max_open_bets` / `open_bets` so the Mini App, which shows «Открытых купонов: N из M» in the
+coupon at all times, can resync without waiting for the next bootstrap. A batch of singles
+is N separate placements, so it is accepted up to the remaining slots and the rest are
+reported per item. `tests/test_open_bets_limit.py` covers it.
+
 **Gamification** pays out of the same closed economy, so rewards are calibrated against it
 rather than against round numbers: the starting wallet is `INITIAL_WALLET_BALANCE` (677 🪙),
 the daily bonus 250 🪙, the payout ceiling 10 000 🪙. `seed_gamification_catalog` therefore

@@ -27,7 +27,7 @@ def _resolve_user_bet_limits(user_id: int) -> dict:
     """
     from services.betting_limits import (
         BettingLimitsService, DEFAULT_MIN_BET, DEFAULT_MAX_BET, DEFAULT_MAX_PAYOUT,
-        DEFAULT_MAX_OPEN_EXPOSURE,
+        DEFAULT_MAX_OPEN_EXPOSURE, DEFAULT_MAX_OPEN_BETS,
     )
     try:
         limits = BettingLimitsService.get_user_effective_limits(user_id)
@@ -37,6 +37,8 @@ def _resolve_user_bet_limits(user_id: int) -> dict:
             "max_payout": int(limits["max_payout"]),
             "max_open_exposure": int(limits["max_open_exposure"]),
             "open_exposure": database.get_user_open_exposure(user_id),
+            "max_open_bets": int(limits["max_open_bets"]),
+            "open_bets": database.get_user_open_bets_count(user_id),
         }
     except Exception as e:
         logger.warning(f"Could not resolve bet limits for user #{user_id}: {e}")
@@ -46,6 +48,8 @@ def _resolve_user_bet_limits(user_id: int) -> dict:
             "max_payout": DEFAULT_MAX_PAYOUT,
             "max_open_exposure": DEFAULT_MAX_OPEN_EXPOSURE,
             "open_exposure": 0,
+            "max_open_bets": DEFAULT_MAX_OPEN_BETS,
+            "open_bets": 0,
         }
 
 

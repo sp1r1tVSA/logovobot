@@ -5,7 +5,7 @@ Logovo.bet — Centralized Betting & Exposure Limits Service.
 Single authoritative source of truth for:
 - Stake limits (MIN_BET, MAX_BET)
 - Payout caps (MAX_PAYOUT)
-- User limits (MAX_DAILY_STAKE, MAX_DAILY_LOSS, MAX_OPEN_EXPOSURE)
+- User limits (MAX_DAILY_STAKE, MAX_DAILY_LOSS, MAX_OPEN_EXPOSURE, MAX_OPEN_BETS)
 - Exposure caps (MARKET_EXPOSURE_LIMIT, DIVISION_EXPOSURE_LIMIT, GLOBAL_EXPOSURE_LIMIT)
 
 Server-authoritative: Used across API, Mini App, Handlers, and Risk Engine.
@@ -25,6 +25,9 @@ DEFAULT_MAX_PAYOUT: int = 10_000
 DEFAULT_MAX_DAILY_STAKE: int = 100_000
 DEFAULT_MAX_DAILY_LOSS: int = 50_000
 DEFAULT_MAX_OPEN_EXPOSURE: int = 20_000
+# Сколько купонов игрок может держать открытыми одновременно. Экспресс из пяти
+# матчей — это один купон: ограничиваем число пари, а не число исходов.
+DEFAULT_MAX_OPEN_BETS: int = 5
 DEFAULT_MARKET_EXPOSURE_LIMIT: int = 250_000
 DEFAULT_DIVISION_EXPOSURE_LIMIT: int = 1_000_000
 DEFAULT_GLOBAL_EXPOSURE_LIMIT: int = 5_000_000
@@ -43,6 +46,7 @@ class BettingLimitsService:
             "max_daily_stake": cls.get_limit("global", 0, "max_daily_stake", DEFAULT_MAX_DAILY_STAKE),
             "max_daily_loss": cls.get_limit("global", 0, "max_daily_loss", DEFAULT_MAX_DAILY_LOSS),
             "max_open_exposure": cls.get_limit("global", 0, "max_open_exposure", DEFAULT_MAX_OPEN_EXPOSURE),
+            "max_open_bets": cls.get_limit("global", 0, "max_open_bets", DEFAULT_MAX_OPEN_BETS),
             "market_exposure_limit": cls.get_limit("global", 0, "market_exposure_limit", DEFAULT_MARKET_EXPOSURE_LIMIT),
             "division_exposure_limit": cls.get_limit("global", 0, "division_exposure_limit", DEFAULT_DIVISION_EXPOSURE_LIMIT),
             "global_exposure_limit": cls.get_limit("global", 0, "global_exposure_limit", DEFAULT_GLOBAL_EXPOSURE_LIMIT),
@@ -56,12 +60,16 @@ class BettingLimitsService:
         div_max_payout = cls.get_limit("division", division_id, "max_payout", sys_limits["max_payout"])
         div_market_limit = cls.get_limit("division", division_id, "market_exposure_limit", sys_limits["market_exposure_limit"])
         div_exposure_limit = cls.get_limit("division", division_id, "division_exposure_limit", sys_limits["division_exposure_limit"])
+        # Само число открытых купонов считается по игроку целиком, а не по дивизиону;
+        # здесь настраивается только потолок — чтобы его можно было поднять одной лиге.
+        div_open_bets = cls.get_limit("division", division_id, "max_open_bets", sys_limits["max_open_bets"])
 
         return {
             **sys_limits,
             "division_id": division_id,
             "max_bet": div_max_bet,
             "max_payout": div_max_payout,
+            "max_open_bets": div_open_bets,
             "market_exposure_limit": div_market_limit,
             "division_exposure_limit": div_exposure_limit,
         }
@@ -98,6 +106,9 @@ class BettingLimitsService:
 
         user_max_payout = cls.get_limit("user", user_id, "max_payout", base["max_payout"])
         base["max_payout"] = min(base["max_payout"], user_max_payout)
+
+        user_open_bets = cls.get_limit("user", user_id, "max_open_bets", base["max_open_bets"])
+        base["max_open_bets"] = min(base["max_open_bets"], user_open_bets)
 
         return base
 

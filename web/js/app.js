@@ -820,6 +820,7 @@ class AppController {
                 if (res.status === 'ok') {
                   placed.push({ id: res.bet_id, amt, win: Math.round(amt * item.odd) });
                   store.addOpenExposure(Math.round(amt * item.odd));
+                  store.addOpenBet();
                   if (res.new_balance !== undefined) {
                     store.setUser({ ...store.state.user, balance: res.new_balance });
                   }
@@ -829,6 +830,11 @@ class AppController {
                   failedItems.push({ item, error: res.message || 'Ошибка размещения ставки' });
                 }
               } catch (err) {
+                // Слоты кончились — сервер назвал точное число; берём его,
+                // чтобы счётчик в купоне не врал до следующего bootstrap.
+                if (err.data?.error === 'OPEN_BETS_LIMIT') {
+                  store.setOpenBets(err.data.open_bets, err.data.max_open_bets);
+                }
                 failedItems.push({ item, error: err.data?.message || err.message || 'Не удалось разместить ставку' });
               }
             }
@@ -857,6 +863,7 @@ class AppController {
             if (res.status === 'ok') {
               store.setUser({ ...store.state.user, balance: res.new_balance });
               store.addOpenExposure(Math.round(amt * totalOdd));
+              store.addOpenBet();
               store.clearSlip();
               refreshBets();
               this.showBetAccepted({
@@ -870,6 +877,9 @@ class AppController {
             }
           }
         } catch (err) {
+          if (err.data && err.data.error === 'OPEN_BETS_LIMIT') {
+            store.setOpenBets(err.data.open_bets, err.data.max_open_bets);
+          }
           if (err.data && err.data.error === 'ODDS_CHANGED') {
             const { old_odd, new_odd, match_id, outcome } = err.data;
             UIRenderer.showOddsChangedModal(

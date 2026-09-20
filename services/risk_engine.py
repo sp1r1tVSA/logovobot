@@ -202,6 +202,29 @@ class RiskEngine:
                     details={"max_daily_loss": limits["max_daily_loss"], "today_lost": today_net_loss, "remaining": remaining_loss}
                 )
 
+            # 6c. User Open Bets Count Limit
+            #
+            # Потолок на число одновременно открытых купонов, а не на их сумму:
+            # экспресс из пяти матчей занимает один слот, как и ординар.
+            #
+            # Проверка стоит до разбора исходов и не зависит от суммы ставки:
+            # свободных слотов нет — значит не примем купон ни за какие деньги,
+            # и сказать об этом надо прямо, а не после разговора о коэффициентах.
+            # Поэтому здесь всегда REJECT и никогда LIMITED: уменьшать нечего,
+            # нужно дождаться расчёта уже сделанных пари.
+            open_bets = database.get_user_open_bets_count(user_id, cursor=cursor)
+            if open_bets >= limits["max_open_bets"]:
+                return RiskDecision(
+                    decision="REJECT",
+                    allowed=False,
+                    reason="OPEN_BETS_LIMIT",
+                    message=(
+                        f"Одновременно можно держать не больше {limits['max_open_bets']} "
+                        f"открытых купонов. Дождитесь расчёта — сейчас открыто {open_bets}."
+                    ),
+                    details={"max_open_bets": limits["max_open_bets"], "open_bets": open_bets}
+                )
+
             # 7. Selections Validation (Market State, Selection State, Odds Validity & Freshness)
             total_odd = 1.0
             resolved_selections = []

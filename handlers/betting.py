@@ -14,7 +14,7 @@ from telegram.ext import ContextTypes, CommandHandler, CallbackQueryHandler
 
 from handlers.base import is_admin
 import database
-from services.betting_limits import DEFAULT_MAX_PAYOUT
+from services.betting_limits import BettingLimitsService, DEFAULT_MAX_PAYOUT
 from services.betting_engine import generate_round_markets
 
 logger = logging.getLogger(__name__)
@@ -351,6 +351,12 @@ async def cb_bet_add_outcome(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await cb_bet_view_slip(update, context)
 
 
+def _open_bets_state(user_id: int) -> tuple[int, int]:
+    """(открыто сейчас, потолок) — для счётчика слотов в купоне."""
+    limits = BettingLimitsService.get_user_effective_limits(user_id)
+    return database.get_user_open_bets_count(user_id), int(limits["max_open_bets"])
+
+
 async def cb_bet_view_slip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """View coupon with current selections and bet placement buttons."""
     query = update.callback_query
@@ -393,6 +399,15 @@ async def cb_bet_view_slip(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     lines.append(f"\n🏷️ <b>Тип:</b> {bet_type}")
     lines.append(f"🔥 <b>Итоговый Коэффициент:</b> <code>{total_odd:.2f}</code>")
     lines.append(f"🪙 <b>Ваш баланс:</b> <code>{bal:,} 🪙</code>")
+
+    # Счётчик слотов виден всегда, как и в Mini App: уже открытые купоны
+    # занимают слоты, и человек должен понимать, почему их нет, ещё до отказа.
+    open_bets, max_open_bets = await asyncio.to_thread(_open_bets_state, user_id)
+    slots_line = f"🎫 <b>Открытых купонов:</b> <code>{open_bets} из {max_open_bets}</code>"
+    if open_bets >= max_open_bets:
+        slots_line += "\n⚠️ <i>Свободных слотов нет — дождитесь расчёта.</i>"
+    lines.append(slots_line)
+
     lines.append("\n<b>Выберите сумму ставки:</b>")
 
     text = "\n".join(lines)

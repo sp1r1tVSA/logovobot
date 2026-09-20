@@ -1641,7 +1641,7 @@ export class UIRenderer {
     const totalOdd = store.getTotalOdd();
     const totalStake = store.getTotalStake();
     const potentialWin = store.getPotentialWin();
-    const { min_bet, max_payout, max_open_exposure } = store.getBetLimits();
+    const { min_bet, max_payout, max_open_exposure, max_open_bets, open_bets } = store.getBetLimits();
     const balance = Math.floor(store.state.user?.balance || 0);
     const fmt = (n) => this.formatNumber(n);
     const setText = (id, text) => {
@@ -1738,13 +1738,27 @@ export class UIRenderer {
     setText('coupon-summary-max-label', `Макс. ставка (выигрыш до ${fmt(max_payout)})`);
     setText('coupon-summary-max', `${fmt(store.getMaxStakeByPayout())} 🪙`);
 
+    // Счётчик слотов показываем всегда, а не только при отказе: уже открытые
+    // купоны занимают слоты, и без счётчика непонятно, куда они делись.
+    const freeSlots = store.getRemainingBetSlots();
+    setText('coupon-summary-slots', `${open_bets} из ${max_open_bets}`);
+    document.getElementById('coupon-slots-row')?.classList.toggle('is-full', freeSlots === 0);
+
     // ─── Validation ───
+    // `warning` гасит кнопку, `notice` — просто предупреждает: пачку ординаров,
+    // которая не влезает в остаток слотов, сервер примет частично, и мешать
+    // отправке не нужно — надо лишь честно сказать, сколько уйдёт.
     let warning = '';
+    let notice = '';
     if (count > 0) {
       const stakes = batchSingles ? slip.map(s => store.getSingleStake(s.match_id)) : [stakeAmount];
       const odds = batchSingles ? slip.map(s => s.odd) : [totalOdd];
       const remaining = store.getRemainingExposure();
-      if (stakes.some(v => v < min_bet)) warning = `Минимальная ставка — ${fmt(min_bet)} 🪙`;
+      // Купонов на ставку: экспресс — один, пачка ординаров — по одному на событие.
+      const neededSlots = batchSingles ? count : 1;
+      if (freeSlots === 0) {
+        warning = `Открыто ${open_bets} из ${max_open_bets} купонов — дождитесь расчёта`;
+      } else if (stakes.some(v => v < min_bet)) warning = `Минимальная ставка — ${fmt(min_bet)} 🪙`;
       else if (totalStake > balance) warning = `Недостаточно средств: нужно ${fmt(totalStake)} 🪙, на балансе ${fmt(balance)} 🪙`;
       else if (stakes.some((v, i) => Math.round(v * odds[i]) > max_payout)) {
         warning = `Выигрыш с одной ставки — не больше ${fmt(max_payout)} 🪙. Макс. ставка при этом кэфе: ${fmt(store.getMaxStakeByPayout())} 🪙`;
@@ -1753,8 +1767,12 @@ export class UIRenderer {
           ? `Лимит открытых ставок (${fmt(max_open_exposure)} 🪙 выигрыша) исчерпан — дождитесь расчёта`
           : `Лимит открытых ставок: осталось ${fmt(remaining)} 🪙 выигрыша. Макс. ставка: ${fmt(store.getMaxStake())} 🪙`;
       }
+      if (!warning && neededSlots > freeSlots) {
+        notice = `Свободно слотов: ${freeSlots} — примем ${freeSlots} ${this._pluralOrdinar(freeSlots)} из ${count}`;
+      }
     }
-    setText('coupon-warning', warning);
+    setText('coupon-warning', warning || notice);
+    document.getElementById('coupon-warning')?.classList.toggle('is-notice', !warning && !!notice);
 
     // ─── CTA ───
     const submitBtn = document.getElementById('btn-submit-prediction');

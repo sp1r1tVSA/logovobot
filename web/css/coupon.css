@@ -658,6 +658,11 @@ body.coupon-open {
   font-size: 0.78rem;
   color: var(--text-secondary, #9ca3af);
 }
+/* Счётчик слотов виден всегда: старые купоны занимают слоты, и человек должен
+   видеть, почему их нет, ещё до отказа. Краснеет, когда свободных не осталось. */
+.coupon-totals-row.limit.is-full b {
+  color: var(--color-danger, #ef4444);
+}
 .coupon-warning {
   margin-top: 10px;
   padding: 9px 12px;
@@ -668,6 +673,13 @@ body.coupon-open {
   font-size: 0.78rem;
   font-weight: 600;
   text-align: center;
+}
+/* Предупреждение, которое не мешает отправить купон: пачку ординаров сервер
+   примет частично, и красный «отказ» здесь был бы неправдой. */
+.coupon-warning.is-notice {
+  background: rgba(245, 176, 39, 0.1);
+  border-color: rgba(245, 176, 39, 0.35);
+  color: var(--accent-gold, #f5b027);
 }
 .coupon-warning:empty {
   display: none;

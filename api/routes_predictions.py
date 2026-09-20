@@ -146,6 +146,16 @@ async def handle_place_prediction(request: web.Request) -> web.Response:
                     "error": "SELF_BET_PROHIBITED",
                     "message": result.get("message", "Запрещено делать ставки на матчи с собственным участием.")
                 }, status=400)
+            if error_code == "OPEN_BETS_LIMIT":
+                # Отдаём счётчик слотов: Mini App показывает его постоянно и
+                # поправит по отказу, не дожидаясь следующего bootstrap.
+                return web.json_response({
+                    "status": "error",
+                    "error": "OPEN_BETS_LIMIT",
+                    "max_open_bets": result.get("max_open_bets"),
+                    "open_bets": result.get("open_bets"),
+                    "message": result.get("message", "Слишком много открытых купонов.")
+                }, status=400)
             if error_code in ("MAX_BET_EXCEEDED", "MAX_PAYOUT_EXCEEDED"):
                 return web.json_response({
                     "status": "error",

@@ -7862,6 +7862,33 @@ def get_user_open_exposure(user_id: int, cursor=None) -> int:
         return int(row["open_exposure"])
 
 
+def get_user_open_bets_count(user_id: int, cursor=None) -> int:
+    """
+    Сколько купонов игрока сейчас открыто (ждут расчёта).
+
+    Считаются именно купоны, а не исходы: экспресс из пяти матчей — одна строка
+    в `user_bets` и один занятый слот.
+
+    В отличие от `get_user_open_exposure`, флаг `legacy_limits` здесь не
+    учитывается. Тот флаг выводит купоны, принятые до потолка выплат, из лимита
+    *суммы* — их считали по старым правилам, и задним числом занимать ими
+    ответственность было бы нечестно. Лимит *количества* — про другое: он
+    ограничивает, сколько пари человек ведёт одновременно, и открытый купон
+    занимает слот независимо от того, по каким правилам его приняли.
+    """
+    sql = """
+        SELECT COUNT(*) AS open_bets
+        FROM user_bets
+        WHERE user_id = ? AND status = 'pending'
+    """
+    if cursor is not None:
+        cursor.execute(sql, (user_id,))
+        return int(cursor.fetchone()["open_bets"])
+    with transaction() as conn:
+        row = conn.execute(sql, (user_id,)).fetchone()
+        return int(row["open_bets"])
+
+
 def get_or_create_wallet(user_id: int) -> dict:
     """Get user's betting wallet or initialize a new one with INITIAL_WALLET_BALANCE coins."""
     with transaction() as conn:
@@ -8555,6 +8582,19 @@ def place_user_bet(
                     "old_odd": details.get("old_odd"),
                     "new_odd": details.get("new_odd"),
                     "message": risk_decision.message or f"Коэффициент изменился: {details.get('old_odd')} → {details.get('new_odd')}"
+                }
+
+            if risk_decision.reason == "OPEN_BETS_LIMIT":
+                # Отдаём и сам потолок, и фактическое число открытых купонов:
+                # Mini App показывает счётчик слотов и поправит его по ответу,
+                # не дожидаясь следующего bootstrap.
+                details = risk_decision.details or {}
+                return False, {
+                    "error": "OPEN_BETS_LIMIT",
+                    "max_open_bets": details.get("max_open_bets"),
+                    "open_bets": details.get("open_bets"),
+                    "message": risk_decision.message
+                    or "Слишком много открытых купонов. Дождитесь расчёта."
                 }
 
             err_dict = {
