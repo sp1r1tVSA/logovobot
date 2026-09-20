@@ -2936,6 +2936,17 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def submit_report_to_guest(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Finalize a reported result immediately — no opponent confirmation.
+
+    Historically a non-admin report was parked in `pending_reports` and sent to
+    the opponent (and, failing that, to the admins) for approval. A submitted
+    result is now final for everyone: it lands in the table the moment the
+    reporter presses the confirm button, exactly like the AI-recognition flow.
+    A mistake is fixed by an admin from the match panel.
+
+    The callback data is still `cb_submit_report_to_guest_<id>` so confirmation
+    cards already sitting in players' chats keep working.
+    """
     query = update.callback_query
     if not query:
         return
@@ -2960,131 +2971,41 @@ async def submit_report_to_guest(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     submitter_id = query.from_user.id
-
-    # Admin-entered results are final by definition: save immediately instead
-    # of routing through the opponent-confirmation / admin-review pipeline.
-    if is_admin(submitter_id) or context.user_data.get("is_admin_reporting"):
-        payload = collect_report_payload(context, match)
-        events = _pending_report_events(match, payload)
-        next_stage = await asyncio.to_thread(
-            database.confirm_and_finalize_match,
-            match_id, payload["h_score"], payload["a_score"], events,
-            reporter_id=submitter_id,
-            photo_id=payload.get("photo_id"),
-            mvp_player=payload.get("mvp_player"),
-        )
-        await asyncio.to_thread(database.delete_pending_report, match_id)
-        await notify_match_confirmed(context, match_id)
-        await refresh_debts_summary(context)
-        await refresh_league_table(context, division_id=match.get("division_id"))
-
-        try:
-            await query.edit_message_caption(
-                caption=f"✅ <b>Результат матча #{match_id} занесён в таблицу!</b>",
-                parse_mode="HTML",
-                reply_markup=None,
-            )
-        except Exception:
-            try:
-                await query.edit_message_text(
-                    f"✅ <b>Результат матча #{match_id} занесён в таблицу!</b>",
-                    parse_mode="HTML",
-                    reply_markup=None,
-                )
-            except Exception:
-                pass
-        return
-
-    is_submitter_home = (submitter_id == match['player1_id'])
-    opp_id = match['player2_id'] if is_submitter_home else match['player1_id']
-    opp_team = match['player2_team'] if is_submitter_home else match['player1_team']
-
-    if not opp_id:
-        await query.answer("⚠️ Соперник не зарегистрирован в боте. Результат будет отправлен администратору.", show_alert=True)
-        await submit_report_to_admin(update, context)
-        return
-
-    # Check opponent user status
-    opp_user = await asyncio.to_thread(database.get_user, opp_id)
-    opp_user = dict(opp_user) if opp_user else None
-    if not opp_user or not opp_user.get("telegram_id"):
-        await query.answer("⚠️ У соперника не найден Telegram ID. Отправляем администратору.", show_alert=True)
-        await submit_report_to_admin(update, context)
-        return
-
-    # Fetch recorded report details (real keys written by AI/manual flows)
     payload = collect_report_payload(context, match)
-    home_team = match['player1_team'] or match['player1_nickname']
-    away_team = match['player2_team'] or match['player2_nickname']
-    h_score = payload["h_score"]
-    a_score = payload["a_score"]
-    scorers = payload["scorers"]
-    assists = payload["assists"]
-    photo_id = payload.get("photo_id")
+    events = _pending_report_events(match, payload)
 
-    # Persist report so the opponent (or an admin) can finalize it later from their own chat
-    await asyncio.to_thread(database.save_pending_report, match_id, submitter_id, payload)
-
-    # Format text for opponent confirmation
-    sc_text = "\n".join([f"⚽ {s['player_name']} ({s['team_name']}) — {s['count']}" for s in scorers]) if scorers else "<i>(нет голов)</i>"
-    ast_text = "\n".join([f"🎯 {a['player_name']} ({a['team_name']}) — {a['count']}" for a in assists]) if assists else "<i>(нет ассистов)</i>"
-
-    text = (
-        f"🔔 <b>ПОДТВЕРЖДЕНИЕ РЕЗУЛЬТАТА МАТЧА #{match_id}</b>\n\n"
-        f"Соперник отправил результат вашей очной встречи:\n"
-        f"🏠 <b>{safe_escape(home_team)}</b> <b>{h_score} : {a_score}</b> <b>{safe_escape(away_team)}</b> ✈️\n\n"
-        f"<b>Авторы голов:</b>\n{sc_text}\n\n"
-        f"<b>Ассистенты:</b>\n{ast_text}\n\n"
-        f"{_mvp_card_line(payload)}"
-        f"Пожалуйста, подтвердите результат или отклоните его, если данные неверны."
+    await asyncio.to_thread(
+        database.confirm_and_finalize_match,
+        match_id, payload["h_score"], payload["a_score"], events,
+        reporter_id=submitter_id,
+        photo_id=payload.get("photo_id"),
+        mvp_player=payload.get("mvp_player"),
     )
+    # Clear any report parked by an older build before confirmation was dropped.
+    await asyncio.to_thread(database.delete_pending_report, match_id)
 
-    keyboard = [
-        [
-            InlineKeyboardButton("✅ Подтвердить", callback_data=f"cb_guest_confirm_{match_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"cb_guest_reject_{match_id}")
+    await notify_match_confirmed(context, match_id)
+    await refresh_debts_summary(context)
+    await refresh_league_table(context, division_id=match.get("division_id"))
+
+    is_admin_user = is_admin(submitter_id) or context.user_data.get("is_admin_reporting", False)
+    if is_admin_user:
+        back_buttons = [
+            [InlineKeyboardButton("« Назад к матчу", callback_data=f"admin_view_match_{match_id}")],
+            [InlineKeyboardButton("« Назад к туру", callback_data=f"admin_round_matches_{match['round_number']}")],
         ]
-    ]
-    markup = InlineKeyboardMarkup(keyboard)
+    else:
+        back_buttons = [[InlineKeyboardButton("« К своим матчам", callback_data="cabinet_my_matches")]]
+    markup = InlineKeyboardMarkup(back_buttons)
+    done_text = f"✅ <b>Результат матча #{match_id} занесён в таблицу!</b>"
 
     try:
-        if photo_id:
-            await context.bot.send_photo(chat_id=opp_id, photo=photo_id, caption=text, parse_mode="HTML", reply_markup=markup)
-        else:
-            await context.bot.send_message(chat_id=opp_id, text=text, parse_mode="HTML", reply_markup=markup)
-        
-        await safe_edit_or_reply(
-            query, context,
-            f"✅ <b>Результат матча #{match_id} отправлен сопернику на подтверждение!</b>\n\n"
-            f"Ожидайте подтверждения от второго игрока.",
-            parse_mode="HTML",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Назад в кабинет", callback_data="menu_cabinet")]])
-        )
-    except Exception as e:
-        logger.warning(f"Could not send match confirmation to opponent {opp_id}: {e}")
-        await query.answer("⚠️ Не удалось связаться с соперником. Отправляем администратору.", show_alert=True)
-        await submit_report_to_admin(update, context)
-
-
-async def _build_pending_report_card(context: ContextTypes.DEFAULT_TYPE, match: dict, pending: dict) -> tuple[str, str | None]:
-    """Build the human-readable confirmation card from a stored pending report."""
-    home_team = match['player1_team'] or match['player1_nickname']
-    away_team = match['player2_team'] or match['player2_nickname']
-    h_score = pending.get("h_score", 0)
-    a_score = pending.get("a_score", 0)
-    scorers = pending.get("scorers") or []
-    assists = pending.get("assists") or []
-    sc_text = "\n".join([f"⚽ {s['player_name']} ({s['team_name']}) — {s['count']}" for s in scorers]) if scorers else "<i>(нет голов)</i>"
-    ast_text = "\n".join([f"🎯 {a['player_name']} ({a['team_name']}) — {a['count']}" for a in assists]) if assists else "<i>(нет ассистов)</i>"
-    text = (
-        f"🔔 <b>ПОДТВЕРЖДЕНИЕ РЕЗУЛЬТАТА МАТЧА #{match['id']}</b>\n\n"
-        f"🏠 <b>{safe_escape(str(home_team))}</b> <b>{h_score} : {a_score}</b> <b>{safe_escape(str(away_team))}</b> ✈️\n\n"
-        f"<b>Авторы голов:</b>\n{sc_text}\n\n"
-        f"<b>Ассистенты:</b>\n{ast_text}\n\n"
-        f"{_mvp_card_line(pending)}"
-        f"Пожалуйста, подтвердите результат или отклоните его."
-    )
-    return text, pending.get("photo_id")
+        await query.edit_message_caption(caption=done_text, parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        try:
+            await query.edit_message_text(done_text, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            pass
 
 
 def _mvp_card_line(report: dict) -> str:
@@ -3107,180 +3028,40 @@ def _pending_report_events(match: dict, pending: dict) -> list:
     return events
 
 
-async def cb_guest_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Opponent (or admin) confirms a manually submitted result stored in pending_reports."""
+_OBSOLETE_GUEST_BUTTON_NOTE = (
+    "Подтверждение соперником больше не требуется — "
+    "результат уже зафиксирован или матч обновлён."
+)
+
+
+async def _answer_obsolete_guest_button(update: Update) -> None:
+    """Answer a stale confirm/reject callback and strip its keyboard."""
     query = update.callback_query
     if not query:
         return
-    await query.answer()
-
     try:
-        match_id = int(query.data.rsplit("_", 1)[-1])
-    except ValueError:
-        return
-
-    presser_id = query.from_user.id
-    match = await asyncio.to_thread(database.get_match, match_id)
-    if not match:
-        await query.answer("❌ Матч не найден.", show_alert=True)
-        return
-
-    is_participant = presser_id in (match['player1_id'], match['player2_id'])
-    if not (is_participant or is_admin(presser_id)):
-        await query.answer("⛔ Подтвердить результат могут только участники матча или администраторы.", show_alert=True)
-        return
-
-    if match['status'] == 'confirmed':
-        await query.answer("✅ Результат уже зафиксирован!", show_alert=True)
-        try:
-            await query.edit_message_reply_markup(reply_markup=None)
-        except Exception:
-            pass
-        return
-
-    pending = await asyncio.to_thread(database.get_pending_report, match_id)
-    if not pending:
-        await query.answer("⚠️ Данные отчёта не найдены. Попросите соперника отправить результат заново.", show_alert=True)
-        return
-
-    h_score = int(pending.get("h_score", 0))
-    a_score = int(pending.get("a_score", 0))
-    events = _pending_report_events(match, pending)
-
-    await asyncio.to_thread(
-        database.confirm_and_finalize_match,
-        match_id, h_score, a_score, events,
-        reporter_id=pending.get("reporter_id"),
-        photo_id=pending.get("photo_id"),
-        mvp_player=pending.get("mvp_player"),
-    )
-    await asyncio.to_thread(database.delete_pending_report, match_id)
-
-    # Full post-confirmation pipeline: PMs to both players, debt rewards, group post
-    await notify_match_confirmed(context, match_id)
-    await refresh_debts_summary(context)
-    await refresh_league_table(context, division_id=match.get("division_id"))
-
-    reporter_tag = f"@{pending['reporter_id']}"
-    try:
-        await query.edit_message_caption(
-            caption=f"✅ <b>Результат матча #{match_id} подтверждён и занесён в таблицу!</b>",
-            parse_mode="HTML",
-            reply_markup=None,
-        )
+        await query.answer(_OBSOLETE_GUEST_BUTTON_NOTE, show_alert=True)
     except Exception:
-        try:
-            await query.edit_message_text(
-                f"✅ <b>Результат матча #{match_id} подтверждён и занесён в таблицу!</b>",
-                parse_mode="HTML",
-                reply_markup=None,
-            )
-        except Exception:
-            pass
-
-
-async def cb_guest_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Opponent (or admin) rejects a manually submitted result."""
-    query = update.callback_query
-    if not query:
-        return
-    await query.answer()
-
+        pass
     try:
-        match_id = int(query.data.rsplit("_", 1)[-1])
-    except ValueError:
-        return
-
-    presser_id = query.from_user.id
-    match = await asyncio.to_thread(database.get_match, match_id)
-    if not match:
-        await query.answer("❌ Матч не найден.", show_alert=True)
-        return
-
-    is_participant = presser_id in (match['player1_id'], match['player2_id'])
-    if not (is_participant or is_admin(presser_id)):
-        await query.answer("⛔ Отклонить результат могут только участники матча или администраторы.", show_alert=True)
-        return
-
-    pending = await asyncio.to_thread(database.get_pending_report, match_id)
-    await asyncio.to_thread(database.delete_pending_report, match_id)
-
-    try:
-        await query.edit_message_text(
-            f"❌ <b>Результат матча #{match_id} отклонён.</b>\n\n"
-            f"Матч остаётся несыгранным. Свяжитесь с соперником и согласуйте верный счёт.",
-            parse_mode="HTML",
-            reply_markup=None,
-        )
+        await query.edit_message_reply_markup(reply_markup=None)
     except Exception:
         pass
 
-    reporter_id = pending.get("reporter_id") if pending else None
-    if reporter_id and reporter_id != presser_id:
-        try:
-            await context.bot.send_message(
-                chat_id=reporter_id,
-                text=(
-                    f"❌ <b>Ваш результат матча #{match_id} был отклонён</b> "
-                    f"({'администратором' if is_admin(presser_id) else 'соперником'})."
-                ),
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
+
+async def cb_guest_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stub for «✅ Подтвердить» buttons left over in players' chats.
+
+    Opponent confirmation was removed — a reported result is final on submit.
+    The handler stays registered so an old inline button gets an answer instead
+    of raising an unhandled callback query.
+    """
+    await _answer_obsolete_guest_button(update)
 
 
-async def submit_report_to_admin(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Fallback route: send the entered result card to all admins with apply/reject buttons."""
-    from config import ADMIN_IDS
-
-    query = update.callback_query
-    match_id = context.user_data.get("reporting_match_id")
-    if not match_id and query and query.data:
-        try:
-            match_id = int(query.data.rsplit("_", 1)[-1])
-        except ValueError:
-            match_id = None
-    if not match_id:
-        return
-
-    match = await asyncio.to_thread(database.get_match, match_id)
-    if not match or match['status'] == 'confirmed':
-        return
-
-    submitter_id = query.from_user.id if query and query.from_user else 0
-    payload = collect_report_payload(context, match)
-    await asyncio.to_thread(database.save_pending_report, match_id, submitter_id, payload)
-
-    text, photo_id = await _build_pending_report_card(context, match, payload)
-    text += "\n\n<i>Отправлено администратору на проверку.</i>"
-    markup = InlineKeyboardMarkup([
-        [
-            InlineKeyboardButton("✅ Занести результат", callback_data=f"cb_guest_confirm_{match_id}"),
-            InlineKeyboardButton("❌ Отклонить", callback_data=f"cb_guest_reject_{match_id}"),
-        ]
-    ])
-
-    sent_any = False
-    for aid in set(ADMIN_IDS):
-        try:
-            if photo_id:
-                await context.bot.send_photo(chat_id=aid, photo=photo_id, caption=text, parse_mode="HTML", reply_markup=markup)
-            else:
-                await context.bot.send_message(chat_id=aid, text=text, parse_mode="HTML", reply_markup=markup)
-            sent_any = True
-        except Exception as e:
-            logger.warning(f"Failed to forward report #{match_id} to admin {aid}: {e}")
-
-    if submitter_id and sent_any:
-        try:
-            await context.bot.send_message(
-                chat_id=submitter_id,
-                text=f"📨 Результат матча #{match_id} отправлен администрации на проверку.",
-                parse_mode="HTML",
-            )
-        except Exception:
-            pass
+async def cb_guest_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Stub for «❌ Отклонить» buttons. See `cb_guest_confirm`."""
+    await _answer_obsolete_guest_button(update)
 
 
 async def refresh_debts_summary(context: ContextTypes.DEFAULT_TYPE) -> None:

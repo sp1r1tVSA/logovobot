@@ -516,6 +516,8 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(cb_pick_assist, pattern="^cb_pick_assist_idx_\\d+$"))
     app.add_handler(CallbackQueryHandler(cb_skip_assists, pattern="^cb_skip_assists$"))
     app.add_handler(CallbackQueryHandler(submit_report_to_guest, pattern="^cb_submit_report_to_guest(_\\d+)?$"))
+    # Opponent confirmation is gone; these two only defuse buttons still sitting
+    # in players' chats from before the change.
     app.add_handler(CallbackQueryHandler(cb_guest_confirm, pattern="^cb_guest_confirm_\\d+$"))
     app.add_handler(CallbackQueryHandler(cb_guest_reject, pattern="^cb_guest_reject_\\d+$"))
     app.add_handler(CallbackQueryHandler(cb_skip_report_photo, pattern="^cb_skip_report_photo$"))

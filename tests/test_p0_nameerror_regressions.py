@@ -11,7 +11,7 @@ exactly those branches — that is their entire purpose. Keep them narrow.
 | Test | Guards | Original failure |
 |---|---|---|
 | `test_ai_chat_builds_full_context_and_replies` | `handlers/chat.py` | `cup_info_text` referenced but never assigned → AI chat 100% dead |
-| `test_guest_report_sends_photo_when_present` / `..._text_when_absent` | `handlers/cabinet.py` | `photo_id` (and the score/scorer names) never bound from `payload` |
+| `test_player_report_is_finalized_immediately` / `..._does_not_ask_the_opponent` | `handlers/cabinet.py` | `photo_id` (and the score/scorer names) never bound from `payload` |
 | `test_evaluate_bet_handles_round_with_deadline` | `services/risk_engine.py` | missing `import datetime` → crash on any round carrying a deadline |
 | `test_club_schedule_sorts_pending_fixtures` | `database.py` | `lambda x: l[...]` — comprehension variable does not leak in Python 3 |
 """
@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import database
 from handlers.chat import handle_ai_chat
-from handlers.cabinet import submit_report_to_guest
+from handlers.cabinet import submit_report_to_guest, cb_guest_confirm, cb_guest_reject
 from services.risk_engine import RiskEngine
 
 
@@ -95,7 +95,14 @@ class TestAiChatContextAssembly(unittest.IsolatedAsyncioTestCase):
 
 
 class TestGuestReportPayloadBinding(unittest.IsolatedAsyncioTestCase):
-    """P0-2 — `handlers/cabinet.py`: `photo_id` & friends were never bound from `payload`."""
+    """P0-2 — `handlers/cabinet.py`: `photo_id` & friends were never bound from `payload`.
+
+    Opponent confirmation has since been removed: a player's report is written
+    straight to the table on submit, exactly like an admin's. The payload
+    binding this test was written for is therefore checked at the
+    `confirm_and_finalize_match` call instead of at the message sent to the
+    opponent — and the absence of that message is now part of the contract.
+    """
 
     def setUp(self):
         database.init_db()
@@ -142,46 +149,97 @@ class TestGuestReportPayloadBinding(unittest.IsolatedAsyncioTestCase):
         ctx = _make_context()
         self._fill_report(ctx, photo_id=photo_id)
 
-        escalate = AsyncMock()
+        notify = AsyncMock()
+        finalize = MagicMock(wraps=database.confirm_and_finalize_match)
         with patch("handlers.cabinet.is_admin", return_value=False), \
-             patch("handlers.cabinet.submit_report_to_admin", new=escalate), \
-             patch("handlers.cabinet.safe_edit_or_reply", new=AsyncMock()):
+             patch.object(database, "confirm_and_finalize_match", new=finalize), \
+             patch("handlers.cabinet.notify_match_confirmed", new=notify), \
+             patch("handlers.cabinet.refresh_debts_summary", new=AsyncMock()), \
+             patch("handlers.cabinet.refresh_league_table", new=AsyncMock()):
             await submit_report_to_guest(update, ctx)
 
-        # C-2's observable symptom was that this path always fell through to the admin.
-        escalate.assert_not_awaited()
-        return ctx
+        return ctx, query, finalize, notify
 
-    async def test_guest_report_sends_photo_when_present(self):
-        ctx = await self._run(photo_id="AgACAgIAAxkBAAI_TEST_PHOTO")
+    async def test_player_report_is_finalized_immediately(self):
+        """A non-admin submit must write the result itself, not park it."""
+        ctx, query, finalize, notify = await self._run(photo_id="AgACAgIAAxkBAAI_TEST_PHOTO")
 
-        ctx.bot.send_photo.assert_awaited_once()
-        ctx.bot.send_message.assert_not_awaited()
-        kwargs = ctx.bot.send_photo.await_args.kwargs
-        self.assertEqual(kwargs["photo"], "AgACAgIAAxkBAAI_TEST_PHOTO")
-        self.assertEqual(kwargs["chat_id"], self.away_id)
-        # Scores and scorer lines come from the same payload unpack that was missing.
-        self.assertIn("3 : 1", kwargs["caption"])
-        self.assertIn("Igor Paixao", kwargs["caption"])
-        self.assertIn("Ndoye", kwargs["caption"])
+        finalize.assert_called_once()
+        args, kwargs = finalize.call_args
+        self.assertEqual(args[0], self.match_id)
+        self.assertEqual((args[1], args[2]), (3, 1))
+        self.assertEqual(kwargs["photo_id"], "AgACAgIAAxkBAAI_TEST_PHOTO")
+        self.assertEqual(kwargs["reporter_id"], self.home_id)
 
-    async def test_guest_report_sends_text_when_photo_absent(self):
-        ctx = await self._run(photo_id=None)
+        # Scorers and assists come from the same payload unpack that was missing.
+        events = {(e[1], e[2], e[3]) for e in args[3]}
+        self.assertIn(("Igor Paixao", "goal", 2), events)
+        self.assertIn(("Gittens", "goal", 1), events)
+        self.assertIn(("Bardghji", "goal", 1), events)
+        self.assertIn(("Ndoye", "assist", 1), events)
 
-        ctx.bot.send_message.assert_awaited_once()
+        # The match is confirmed in the DB, not waiting on anyone.
+        match = database.get_match(self.match_id)
+        self.assertEqual(match["status"], "confirmed")
+        self.assertEqual((match["player1_score"], match["player2_score"]), (3, 1))
+
+        notify.assert_awaited_once()
+        query.edit_message_caption.assert_awaited_once()
+        self.assertIn(
+            f"#{self.match_id}",
+            query.edit_message_caption.await_args.kwargs["caption"],
+        )
+
+    async def test_player_report_does_not_ask_the_opponent(self):
+        """No confirmation card to the opponent, no pending row left behind."""
+        ctx, _query, _finalize, _notify = await self._run(photo_id=None)
+
         ctx.bot.send_photo.assert_not_awaited()
-        kwargs = ctx.bot.send_message.await_args.kwargs
-        self.assertEqual(kwargs["chat_id"], self.away_id)
-        self.assertIn("3 : 1", kwargs["text"])
+        ctx.bot.send_message.assert_not_awaited()
+        self.assertIsNone(database.get_pending_report(self.match_id))
 
-    async def test_guest_report_persists_pending_payload(self):
-        """The stored payload must carry the photo through for later finalization."""
-        await self._run(photo_id="AgACAgIAAxkBAAI_TEST_PHOTO")
-        pending = database.get_pending_report(self.match_id)
-        self.assertIsNotNone(pending)
-        self.assertEqual(pending.get("photo_id"), "AgACAgIAAxkBAAI_TEST_PHOTO")
-        self.assertEqual(pending.get("h_score"), 3)
-        self.assertEqual(pending.get("a_score"), 1)
+    async def test_confirmed_match_is_not_finalized_twice(self):
+        """The duplicate guard is the only thing standing in for confirmation."""
+        await self._run(photo_id=None)
+
+        update, query = self._make_update()
+        ctx = _make_context()
+        self._fill_report(ctx)
+        finalize = MagicMock(wraps=database.confirm_and_finalize_match)
+        with patch("handlers.cabinet.is_admin", return_value=False), \
+             patch.object(database, "confirm_and_finalize_match", new=finalize), \
+             patch("handlers.cabinet.notify_match_confirmed", new=AsyncMock()), \
+             patch("handlers.cabinet.refresh_debts_summary", new=AsyncMock()), \
+             patch("handlers.cabinet.refresh_league_table", new=AsyncMock()):
+            await submit_report_to_guest(update, ctx)
+
+        finalize.assert_not_called()
+
+
+class TestObsoleteGuestButtons(unittest.IsolatedAsyncioTestCase):
+    """Stale «Подтвердить»/«Отклонить» buttons must answer, not raise."""
+
+    async def _press(self, handler, data):
+        update = MagicMock()
+        query = MagicMock()
+        query.data = data
+        query.from_user = MagicMock(id=92000201)
+        query.answer = AsyncMock()
+        query.edit_message_reply_markup = AsyncMock()
+        update.callback_query = query
+        await handler(update, _make_context())
+        return query
+
+    async def test_stale_confirm_button_is_answered(self):
+        query = await self._press(cb_guest_confirm, "cb_guest_confirm_1")
+        query.answer.assert_awaited_once()
+        self.assertTrue(query.answer.await_args.kwargs.get("show_alert"))
+        query.edit_message_reply_markup.assert_awaited_once()
+
+    async def test_stale_reject_button_is_answered(self):
+        query = await self._press(cb_guest_reject, "cb_guest_reject_1")
+        query.answer.assert_awaited_once()
+        query.edit_message_reply_markup.assert_awaited_once()
 
 
 class TestRiskEngineDeadlineBranch(unittest.TestCase):

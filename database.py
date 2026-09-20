@@ -2817,7 +2817,13 @@ def set_technical_result(
     return None
 
 def save_pending_report(match_id: int, reporter_id: int, payload: dict) -> None:
-    """Persist a pending match report payload (JSON) awaiting opponent/admin confirmation."""
+    """DEPRECATED. Persist a match report payload (JSON) for later confirmation.
+
+    Opponent confirmation was removed — a reported result is finalized on the
+    spot by `confirm_and_finalize_match`, so nothing in the bot writes here any
+    more. The table, the readers and this writer stay for the rows older
+    databases still carry and for the purge/reset scripts that clean them.
+    """
     import json
     with transaction() as conn:
         conn.execute(
@@ -2827,7 +2833,10 @@ def save_pending_report(match_id: int, reporter_id: int, payload: dict) -> None:
 
 
 def get_pending_report(match_id: int) -> dict | None:
-    """Load a pending report payload. Returns dict with reporter_id and parsed payload fields."""
+    """DEPRECATED (see `save_pending_report`). Load a stored report payload.
+
+    Returns a dict with reporter_id and the parsed payload fields.
+    """
     import json
     with transaction() as conn:
         row = conn.execute(
@@ -2844,7 +2853,8 @@ def get_pending_report(match_id: int) -> dict | None:
 
 
 def delete_pending_report(match_id: int) -> None:
-    """Remove a stored pending report after final decision."""
+    """Remove a stored report payload. Still called when a result is finalized,
+    to clear rows parked by builds that predate the removal of confirmation."""
     with transaction() as conn:
         conn.execute("DELETE FROM pending_reports WHERE match_id = ?", (match_id,))
 
