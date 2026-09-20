@@ -2469,6 +2469,8 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         match_id = int(query.data.replace("ai_recognize_now_", ""))
     except (ValueError, TypeError):
         match_id = context.user_data.get("reporting_match_id")
+    if match_id:
+        context.user_data["reporting_match_id"] = match_id
 
     photos_list = context.user_data.get("ai_photos_list", [])
     if not photos_list:
@@ -2777,31 +2779,60 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
     query = update.callback_query
     if not query:
         return
-    await query.answer()
 
-    match_id = int(query.data.replace("cb_confirm_ai_final_", ""))
+    try:
+        match_id = int(query.data.replace("cb_confirm_ai_final_", ""))
+    except (ValueError, TypeError):
+        await query.answer("❌ Неверный ID матча.", show_alert=True)
+        return
+
     match = await asyncio.to_thread(database.get_match, match_id)
     if not match:
         await query.answer("❌ Матч не найден.", show_alert=True)
         return
 
-    if match['status'] == 'confirmed':
+    if match.get('status') == 'confirmed':
         await query.answer("✅ Результат уже зафиксирован!", show_alert=True)
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
         return
 
     user_id = query.from_user.id
-    h_score = context.user_data.get("report_home_goals", 0)
-    a_score = context.user_data.get("report_away_goals", 0)
-    h_goals = context.user_data.get("home_goals_count", {})
-    a_goals = context.user_data.get("away_goals_count", {})
-    h_assists = context.user_data.get("home_assists_count", {})
-    a_assists = context.user_data.get("away_assists_count", {})
+    is_admin_user = is_admin(user_id) or context.user_data.get("is_admin_reporting", False)
+    is_participant = user_id in (match.get('player1_id'), match.get('player2_id'))
+    if not (is_admin_user or is_participant):
+        await query.answer("⛔ Занести результат могут только участники матча или администраторы.", show_alert=True)
+        return
+
+    # Guard against bot restart / state wipe
+    if "report_home_goals" not in context.user_data or "report_away_goals" not in context.user_data:
+        await query.answer(
+            "⚠️ Данные отчёта устарели (бот перезапускался). Пожалуйста, отправьте скриншот заново.",
+            show_alert=True
+        )
+        return
+
+    reporting_match_id = context.user_data.get("reporting_match_id")
+    if reporting_match_id and reporting_match_id != match_id:
+        await query.answer("⚠️ Несоответствие матча. Отправьте результат заново.", show_alert=True)
+        return
+
+    await query.answer()
+
+    h_score = int(context.user_data.get("report_home_goals", 0))
+    a_score = int(context.user_data.get("report_away_goals", 0))
+    h_goals = context.user_data.get("home_goals_count", {}) or {}
+    a_goals = context.user_data.get("away_goals_count", {}) or {}
+    h_assists = context.user_data.get("home_assists_count", {}) or {}
+    a_assists = context.user_data.get("away_assists_count", {}) or {}
     photo_id = context.user_data.get("report_photo_id")
     is_single_tl = bool(context.user_data.get("is_single_timeline", False))
     mvp_player = context.user_data.get("report_mvp_player")
 
-    home_team = match['player1_team'] or match['player1_nickname']
-    away_team = match['player2_team'] or match['player2_nickname']
+    home_team = match.get('player1_team') or match.get('player1_nickname') or "Хозяева"
+    away_team = match.get('player2_team') or match.get('player2_nickname') or "Гости"
 
     events = []
     for p, c in h_goals.items():
@@ -2817,7 +2848,19 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
         database.confirm_and_finalize_match, match_id, h_score, a_score, events,
         reporter_id=user_id, photo_id=photo_id, mvp_player=mvp_player,
     )
-    context.user_data.pop("report_mvp_player", None)
+
+    # Clean up reporting session keys from user_data
+    for key in (
+        "report_home_goals", "report_away_goals",
+        "home_goals_count", "away_goals_count",
+        "home_assists_count", "away_assists_count",
+        "report_photo_id", "is_single_timeline",
+        "report_mvp_player", "reporting_match_id",
+        "ai_photos_list", "awaiting_report_photo",
+        "report_home_team", "report_away_team"
+    ):
+        context.user_data.pop(key, None)
+
     await refresh_debts_summary(context)
     await refresh_league_table(context, division_id=match.get("division_id"))
 
@@ -2842,7 +2885,6 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
         mvp_player=mvp_player
     ) + debt_note
 
-    is_admin_user = is_admin(user_id) or context.user_data.get("is_admin_reporting", False)
     if is_admin_user:
         back_buttons = [
             [InlineKeyboardButton("« Назад к матчу", callback_data=f"admin_view_match_{match_id}")],
@@ -2851,20 +2893,32 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
     else:
         back_buttons = [[InlineKeyboardButton("« К своим матчам", callback_data="cabinet_my_matches")]]
 
-    try:
-        await query.edit_message_caption(caption=reporter_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(back_buttons))
-    except Exception:
-        await context.bot.send_message(chat_id=user_id, text=reporter_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(back_buttons))
+    markup = InlineKeyboardMarkup(back_buttons)
+    if photo_id and len(reporter_text) <= 1024:
+        try:
+            await query.edit_message_caption(caption=reporter_text, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            try:
+                await query.edit_message_reply_markup(reply_markup=None)
+            except Exception:
+                pass
+            await context.bot.send_message(chat_id=user_id, text=reporter_text, parse_mode="HTML", reply_markup=markup)
+    else:
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except Exception:
+            pass
+        await context.bot.send_message(chat_id=user_id, text=reporter_text, parse_mode="HTML", reply_markup=markup)
 
     # 2. PM to players
     players_to_notify = []
-    if user_id == match['player1_id']:
-        if match['player2_id']: players_to_notify.append(match['player2_id'])
-    elif user_id == match['player2_id']:
-        if match['player1_id']: players_to_notify.append(match['player1_id'])
+    if user_id == match.get('player1_id'):
+        if match.get('player2_id'): players_to_notify.append(match['player2_id'])
+    elif user_id == match.get('player2_id'):
+        if match.get('player1_id'): players_to_notify.append(match['player1_id'])
     else:
-        if match['player1_id']: players_to_notify.append(match['player1_id'])
-        if match['player2_id']: players_to_notify.append(match['player2_id'])
+        if match.get('player1_id'): players_to_notify.append(match['player1_id'])
+        if match.get('player2_id'): players_to_notify.append(match['player2_id'])
 
     opp_text = build_formatted_match_post(
         round_number=match['round_number'],
@@ -2902,8 +2956,8 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
             away_team=away_team,
             h_score=h_score,
             a_score=a_score,
-            p1_username=match['player1_username'],
-            p2_username=match['player2_username'],
+            p1_username=match.get('player1_username'),
+            p2_username=match.get('player2_username'),
             h_goals=h_goals,
             a_goals=a_goals,
             h_assists=h_assists,
@@ -2914,17 +2968,29 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
             mvp_player=mvp_player
         ) + debt_note
         try:
-            kwargs = {"chat_id": target_chat_id, "caption": group_text, "parse_mode": "HTML"}
+            kwargs = {"chat_id": target_chat_id, "parse_mode": "HTML"}
             if target_topic_id:
                 kwargs["message_thread_id"] = int(target_topic_id)
-            if photo_id:
-                await context.bot.send_photo(photo=photo_id, **kwargs)
+            if photo_id and len(group_text) <= 1024:
+                kwargs["caption"] = group_text
+                kwargs["photo"] = photo_id
+                await context.bot.send_photo(**kwargs)
+            elif photo_id:
+                try:
+                    await context.bot.send_photo(
+                        chat_id=target_chat_id,
+                        photo=photo_id,
+                        message_thread_id=int(target_topic_id) if target_topic_id else None
+                    )
+                except Exception as ep:
+                    logger.warning(f"Could not send match photo to group topic: {ep}")
+                kwargs["text"] = group_text
+                await context.bot.send_message(**kwargs)
             else:
                 kwargs["text"] = group_text
-                kwargs.pop("caption", None)
                 await context.bot.send_message(**kwargs)
         except Exception as e:
-            logger.exception("Failed to post result to group")
+            logger.exception(f"Failed to post result to group: {e}")
 
     # Process debt reward (-1 warn) and all-debts-cleared notification
     await handle_debt_played_rewards(
