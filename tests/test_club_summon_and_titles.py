@@ -152,6 +152,43 @@ class TestClubSummonAndTitles(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(stats["total"], 1)
         self.assertGreaterEqual(stats["success"], 1)
 
+    async def test_bulk_update_tags_with_bare_division_number(self):
+        update, msg = _make_msg_update(self.admin_id, f"Темшик обновить теги {self.div_id}")
+        status_msg = MagicMock()
+        status_msg.edit_text = AsyncMock()
+        msg.reply_text = AsyncMock(return_value=status_msg)
+
+        context = MagicMock()
+        context.bot = MagicMock()
+
+        with patch("services.chat_titles.sync_division_club_titles", new=AsyncMock(return_value={
+            "total": 16, "success": 16, "skipped": 0, "failed": 0, "details": []
+        })) as mock_sync:
+            handled = await handle_temshik_command(update, context)
+            self.assertTrue(handled)
+            mock_sync.assert_awaited_once_with(context.bot, msg.chat.id, self.div_id)
+            status_msg.edit_text.assert_awaited_once()
+            report = status_msg.edit_text.await_args[0][0]
+            self.assertIn("ОБНОВЛЕНИЕ ПЛАШЕК КЛУБОВ ЗАВЕРШЕНО", report)
+            self.assertIn(f"Дивизион {self.div_id}", report)
+
+    async def test_slash_set_club_titles_bare_number(self):
+        update, msg = _make_msg_update(self.admin_id, f"/set_club_titles {self.div_id}")
+        status_msg = MagicMock()
+        status_msg.edit_text = AsyncMock()
+        msg.reply_text = AsyncMock(return_value=status_msg)
+
+        context = MagicMock()
+        context.args = [str(self.div_id)]
+        context.bot = MagicMock()
+
+        with patch("services.chat_titles.sync_division_club_titles", new=AsyncMock(return_value={
+            "total": 10, "success": 10, "skipped": 0, "failed": 0, "details": []
+        })) as mock_sync:
+            await cmd_sync_club_titles(update, context)
+            mock_sync.assert_awaited_once_with(context.bot, msg.chat.id, self.div_id)
+            status_msg.edit_text.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

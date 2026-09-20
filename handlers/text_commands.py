@@ -882,17 +882,34 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
 
         # Массовое обновление тегов для дивизиона/группы
         is_bulk = (
-            action in ("теги", "titles") or
+            action in ("теги", "плашки", "titles") or
             full_cmd.startswith(("обновить теги", "назначить теги", "теги обновить", "теги назначить"))
         )
-        is_single_user = clean_args.startswith("@") or (bool(clean_args.split() and clean_args.split()[0].isdigit()))
 
-        if is_bulk and not is_single_user:
+        if is_bulk and not (action in ("теги", "плашки", "titles") and clean_args.startswith("@")):
+            clean_div = clean_args.strip()
             division_id, _, divisions = await resolve_command_division(update, clean_args)
+            if clean_div.isdigit():
+                target = int(clean_div)
+                if any(d["id"] == target for d in divisions) or not divisions:
+                    division_id = target
+                else:
+                    div_obj = await asyncio.to_thread(database.get_division, target)
+                    if div_obj:
+                        division_id = target
+                    else:
+                        await msg.reply_text(
+                            f"❌ Дивизион с номером <code>{target}</code> не найден среди активных.\n\n"
+                            + _division_hint(divisions, f"Темшик обновить теги {divisions[0]['id'] if divisions else 1}"),
+                            parse_mode="HTML"
+                        )
+                        return True
+
             status_m = await msg.reply_text("⏳ <i>Обновляю плашки клубов для участников...</i>", parse_mode="HTML")
             stats = await sync_division_club_titles(context.bot, update.effective_chat.id, division_id)
+            div_label = f" (Дивизион {division_id})" if division_id else ""
             report_lines = [
-                "🏷 <b>ОБНОВЛЕНИЕ ПЛАШЕК КЛУБОВ ЗАВЕРШЕНО:</b>\n",
+                f"🏷 <b>ОБНОВЛЕНИЕ ПЛАШЕК КЛУБОВ ЗАВЕРШЕНО{html.escape(div_label)}:</b>\n",
                 f"• Всего тренеров в базе: <b>{stats['total']}</b>",
                 f"• ✅ Успешно установлено: <b>{stats['success']}</b>",
                 f"• ⚠️ Пропущено (не в чате / владелец): <b>{stats['skipped']}</b>",
@@ -919,7 +936,7 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
         override_club = parts_p[1].strip() if len(parts_p) > 1 else None
 
         user_row = await asyncio.to_thread(database.find_user_by_ref, target_ref)
-        target_user_id = user_row["telegram_id"] if user_row else (int(target_ref) if target_ref.isdigit() else None)
+        target_user_id = user_row["telegram_id"] if user_row else (int(target_ref) if target_ref.isdigit() and len(target_ref) >= 6 else None)
         club_to_assign = override_club or (user_row["team_name"] if user_row else None)
 
         if not target_user_id:
@@ -1007,13 +1024,30 @@ async def cmd_sync_club_titles(update: Update, context: ContextTypes.DEFAULT_TYP
     from services.chat_titles import sync_division_club_titles
 
     args_str = " ".join(context.args) if context.args else ""
-    division_id, _, _ = await resolve_command_division(update, args_str)
+    division_id, _, divisions = await resolve_command_division(update, args_str)
+    clean_div = args_str.strip()
+    if clean_div.isdigit():
+        target = int(clean_div)
+        if any(d["id"] == target for d in divisions) or not divisions:
+            division_id = target
+        else:
+            div_obj = await asyncio.to_thread(database.get_division, target)
+            if div_obj:
+                division_id = target
+            else:
+                await msg.reply_text(
+                    f"❌ Дивизион с номером <code>{target}</code> не найден среди активных.\n\n"
+                    + _division_hint(divisions, f"/set_club_titles {divisions[0]['id'] if divisions else 1}"),
+                    parse_mode="HTML"
+                )
+                return
 
     status_m = await msg.reply_text("⏳ <i>Обновляю плашки клубов для участников...</i>", parse_mode="HTML")
     stats = await sync_division_club_titles(context.bot, update.effective_chat.id, division_id)
+    div_label = f" (Дивизион {division_id})" if division_id else ""
 
     report_lines = [
-        "🏷 <b>ОБНОВЛЕНИЕ ПЛАШЕК КЛУБОВ ЗАВЕРШЕНО:</b>\n",
+        f"🏷 <b>ОБНОВЛЕНИЕ ПЛАШЕК КЛУБОВ ЗАВЕРШЕНО{html.escape(div_label)}:</b>\n",
         f"• Всего тренеров в базе: <b>{stats['total']}</b>",
         f"• ✅ Успешно установлено: <b>{stats['success']}</b>",
         f"• ⚠️ Пропущено (не в чате / владелец): <b>{stats['skipped']}</b>",
