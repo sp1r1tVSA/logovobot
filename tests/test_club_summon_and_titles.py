@@ -119,10 +119,10 @@ class TestClubSummonAndTitles(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertIn("Установлена плашка", msg)
 
-        # Verified promotion was called with safe minimal permissions
+        # Verified promotion was called with zero permissions (pure tag only)
         bot.promote_chat_member.assert_awaited_once()
         promote_kwargs = bot.promote_chat_member.await_args.kwargs
-        self.assertTrue(promote_kwargs["can_invite_users"])
+        self.assertFalse(promote_kwargs["can_invite_users"])
         self.assertFalse(promote_kwargs["can_delete_messages"])
         self.assertFalse(promote_kwargs["can_restrict_members"])
 

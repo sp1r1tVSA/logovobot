@@ -63,13 +63,14 @@ async def assign_club_title(
             await bot.promote_chat_member(
                 chat_id=chat_id,
                 user_id=user_id,
+                is_anonymous=False,
                 can_manage_chat=False,
                 can_delete_messages=False,
                 can_manage_video_chats=False,
                 can_restrict_members=False,
                 can_promote_members=False,
                 can_change_info=False,
-                can_invite_users=True,  # Minimal safe privilege to hold admin status
+                can_invite_users=False,  # 0 прав администратора: только статус для плашки клуба
                 can_pin_messages=False,
                 can_manage_topics=False,
             )
