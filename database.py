@@ -1573,6 +1573,60 @@ def init_db() -> None:
                 VALUES ('013_backfill_match_team_names', 'Fill matches.playerN_team from playerN_id for schedules generated without it')
             """)
 
+        # ─── Integrity Engine: детектор договорных матчей ───────────────────
+        # Единица анализа — нога ставки (bet_items), а не купон целиком: в
+        # экспрессе из пяти матчей договорным может быть ровно один.
+        # online_score считается сразу после размещения, post_score — после
+        # подтверждения счёта; обе половины живут в одной строке (stage).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS integrity_cases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                bet_id INTEGER NOT NULL,
+                bet_item_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                match_id INTEGER,
+                division_id INTEGER,
+                season_id INTEGER,
+                online_score REAL NOT NULL DEFAULT 0,
+                post_score REAL NOT NULL DEFAULT 0,
+                total_score REAL NOT NULL DEFAULT 0,
+                severity TEXT NOT NULL DEFAULT 'low' CHECK(severity IN ('low','medium','high','critical')),
+                stage TEXT NOT NULL DEFAULT 'online' CHECK(stage IN ('online','resolved')),
+                low_confidence INTEGER NOT NULL DEFAULT 0,
+                features TEXT,
+                status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','acknowledged','dismissed','confirmed')),
+                reviewed_by INTEGER,
+                reviewed_at TIMESTAMP,
+                note TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(bet_id, bet_item_id),
+                FOREIGN KEY(bet_id) REFERENCES user_bets(id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_integrity_open ON integrity_cases(status, total_score DESC)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_integrity_match ON integrity_cases(match_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_integrity_user ON integrity_cases(user_id)")
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_integrity_stage ON integrity_cases(stage, match_id)")
+
+        # Маркер применённого Elo. Админ может исправить счёт уже подтверждённого
+        # матча — без дельт рейтинг применился бы второй раз поверх первого.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS elo_applied_matches (
+                match_id INTEGER PRIMARY KEY,
+                team1 TEXT,
+                team2 TEXT,
+                delta1 REAL NOT NULL DEFAULT 0,
+                delta2 REAL NOT NULL DEFAULT 0,
+                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
+        cursor.execute("""
+            INSERT OR IGNORE INTO schema_migrations (version, description)
+            VALUES ('017_integrity_engine', 'Match-fixing detector: integrity_cases + elo_applied_matches')
+        """)
+
         # Standardize and migrate canonical team names across all tables
         migrate_team_names_canonical(cursor)
 
@@ -2592,6 +2646,16 @@ def confirm_and_finalize_match(match_id: int, p1_score: int, p2_score: int, even
             settle_match_bets(match_id, p1_score, p2_score)
         except Exception as e:
             logger.warning(f"Error settling bets for match {match_id}: {e}")
+        # Рейтинги и разрешение прогнозов — отдельными блоками: сбой аналитики
+        # не должен отменять уже записанный результат матча.
+        try:
+            _apply_elo_after_match(match_id, p1_score, p2_score)
+        except Exception as e:
+            logger.warning(f"Error updating Elo for match {match_id}: {e}")
+        try:
+            resolve_ai_predictions(match_id, p1_score, p2_score)
+        except Exception as e:
+            logger.warning(f"Error resolving predictions for match {match_id}: {e}")
     return None
 def _infer_technical_type(p1_score: int, p2_score: int) -> str:
     """Вид технического результата по счёту: ТП хозяевам, ТП гостям или ТН."""
@@ -3303,6 +3367,20 @@ def admin_set_match_score(match_id: int, player1_score: int, player2_score: int,
                 settle_match_bets(match_id, player1_score, player2_score, match_status=match_status)
         except Exception as e:
             logger.warning(f"Error settling bets in admin_set_match_score for match {match_id}: {e}")
+
+        # Тот же счёт — та же аналитика. _apply_elo_after_match сам откатит свою
+        # прошлую дельту, поэтому повторный вызов не сдвигает рейтинг дважды.
+        try:
+            _apply_elo_after_match(match_id, player1_score, player2_score)
+        except Exception as e:
+            logger.warning(f"Error updating Elo in admin_set_match_score for match {match_id}: {e}")
+        try:
+            if score_changed:
+                correct_ai_predictions(match_id, player1_score, player2_score)
+            else:
+                resolve_ai_predictions(match_id, player1_score, player2_score)
+        except Exception as e:
+            logger.warning(f"Error resolving predictions in admin_set_match_score for match {match_id}: {e}")
 
 def get_config(key: str) -> str | None:
     """Retrieve a configuration value by key."""
@@ -10922,6 +11000,121 @@ def update_team_elo(
             """, (team_name, division_id, season_id, round(float(new_elo), 2), cnt))
 
 
+def _elo_team_names(cursor: sqlite3.Cursor, match_id: int) -> dict | None:
+    """Read the columns _apply_elo_after_match needs, or None when the match is unusable."""
+    cursor.execute(
+        "SELECT player1_team, player2_team, division_id, season_id, is_technical "
+        "FROM matches WHERE id = ?",
+        (match_id,)
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    t1 = (row["player1_team"] or "").strip()
+    t2 = (row["player2_team"] or "").strip()
+    if not t1 or not t2:
+        return None
+    return {
+        "team1": t1,
+        "team2": t2,
+        "division_id": row["division_id"] or 1,
+        "season_id": row["season_id"] or 1,
+        "is_technical": bool(row["is_technical"]),
+    }
+
+
+def _elo_set_rating(cursor: sqlite3.Cursor, team_name: str, division_id: int,
+                    season_id: int, new_elo: float, bump_counter: bool) -> None:
+    """Write an Elo rating, controlling whether matches_counted advances.
+
+    A correction rewrites the same match, so the counter must stay put — otherwise
+    one played match would be counted twice.
+    """
+    cursor.execute(
+        "SELECT id, matches_counted FROM team_ratings "
+        "WHERE LOWER(team_name) = LOWER(?) AND division_id = ? AND season_id = ?",
+        (team_name, division_id, season_id)
+    )
+    existing = cursor.fetchone()
+    value = round(float(new_elo), 2)
+    if existing:
+        cnt = existing["matches_counted"] + (1 if bump_counter else 0)
+        cursor.execute(
+            "UPDATE team_ratings SET elo_rating = ?, matches_counted = ?, "
+            "last_updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            (value, cnt, existing["id"])
+        )
+    else:
+        cursor.execute(
+            "INSERT INTO team_ratings (team_name, division_id, season_id, elo_rating, matches_counted) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (team_name, division_id, season_id, value, 1 if bump_counter else 0)
+        )
+
+
+def _apply_elo_after_match(match_id: int, p1_score: int, p2_score: int) -> bool:
+    """Move both clubs' Elo ratings after a confirmed result.
+
+    Idempotent by design: `elo_applied_matches` stores the deltas this match
+    produced, so a later admin score correction first reverses them and then
+    applies the new ones instead of stacking a second update on top.
+
+    Technical results (ТП/ТН) are skipped — they are an administrative verdict,
+    not a played match, and must not move sporting ratings.
+    """
+    from services.elo_engine import EloEngine
+
+    with transaction() as conn:
+        cursor = conn.cursor()
+        info = _elo_team_names(cursor, match_id)
+        if info is None:
+            return False
+        if info["is_technical"]:
+            return False
+
+        team1, team2 = info["team1"], info["team2"]
+        division_id, season_id = info["division_id"], info["season_id"]
+
+        cursor.execute(
+            "SELECT delta1, delta2 FROM elo_applied_matches WHERE match_id = ?",
+            (match_id,)
+        )
+        prior = cursor.fetchone()
+
+        r1 = get_team_elo(team1, division_id, season_id)
+        r2 = get_team_elo(team2, division_id, season_id)
+
+        if prior:
+            # Rewind this match's own contribution before recomputing it.
+            r1 -= float(prior["delta1"])
+            r2 -= float(prior["delta2"])
+
+        new_r1, new_r2 = EloEngine.calculate_new_ratings(r1, r2, p1_score, p2_score)
+        delta1 = round(new_r1 - r1, 2)
+        delta2 = round(new_r2 - r2, 2)
+
+        bump = prior is None
+        _elo_set_rating(cursor, team1, division_id, season_id, new_r1, bump)
+        _elo_set_rating(cursor, team2, division_id, season_id, new_r2, bump)
+
+        cursor.execute("""
+            INSERT INTO elo_applied_matches (match_id, team1, team2, delta1, delta2, applied_at)
+            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ON CONFLICT(match_id) DO UPDATE SET
+                team1 = excluded.team1,
+                team2 = excluded.team2,
+                delta1 = excluded.delta1,
+                delta2 = excluded.delta2,
+                applied_at = CURRENT_TIMESTAMP
+        """, (match_id, team1, team2, delta1, delta2))
+
+    logger.info(
+        "Elo applied for match #%s: %s %+.2f, %s %+.2f",
+        match_id, team1, delta1, team2, delta2
+    )
+    return True
+
+
 def save_ai_prediction(
     match_id: int,
     division_id: int,
@@ -11136,6 +11329,388 @@ def correct_ai_predictions(match_id: int, new_home_score: int, new_away_score: i
             updated_count += 1
 
     return updated_count
+
+
+# ─── Integrity Engine: репозиторий дел о договорных матчах ────────────────────
+
+# Общая выборка ноги ставки со всем контекстом, который нужен движку оценки.
+# Это константа модуля, а не подстановка данных: значения всегда идут
+# параметрами, склейка тут — только с литеральным WHERE ниже.
+_INTEGRITY_ITEM_SELECT = """
+    SELECT
+        bi.id                AS bet_item_id,
+        bi.bet_id            AS bet_id,
+        bi.match_id          AS match_id,
+        bi.outcome_type      AS outcome_type,
+        bi.odd               AS odd,
+        bi.odds_at_placement AS odds_at_placement,
+        bi.market_id         AS market_id,
+        bi.selection_id      AS selection_id,
+        bi.status            AS item_status,
+        ub.user_id           AS user_id,
+        ub.amount            AS amount,
+        ub.bet_type          AS bet_type,
+        ub.status            AS bet_status,
+        ub.actual_payout     AS actual_payout,
+        ub.total_odd         AS total_odd,
+        ub.created_at        AS placed_at,
+        u.username           AS username,
+        u.team_name          AS user_team,
+        m.division_id        AS division_id,
+        m.season_id          AS season_id,
+        m.round_number       AS round_number,
+        m.status             AS match_status,
+        m.is_technical       AS is_technical,
+        m.player1_team       AS player1_team,
+        m.player2_team       AS player2_team,
+        m.player1_id         AS player1_id,
+        m.player2_id         AS player2_id,
+        m.player1_score      AS player1_score,
+        m.player2_score      AS player2_score,
+        mk.market_key        AS market_key,
+        mk.market_name       AS market_name,
+        ms.selection_key     AS selection_key,
+        ms.selection_name    AS selection_name,
+        ms.odds_value        AS current_odds,
+        ms.model_odds        AS model_odds,
+        (
+            SELECT r.bets_opened_at FROM rounds r
+            WHERE r.division_id = m.division_id
+              AND r.round_number = m.round_number
+              AND (m.season_id IS NULL OR r.season_id = m.season_id)
+            ORDER BY r.id LIMIT 1
+        ) AS bets_opened_at,
+        (
+            SELECT ct.balance_after - ct.amount FROM coin_transactions ct
+            WHERE ct.reference_type = 'bet'
+              AND ct.reference_id = ub.id
+              AND ct.transaction_type = 'bet_placed'
+            ORDER BY ct.id LIMIT 1
+        ) AS balance_before
+    FROM bet_items bi
+    JOIN user_bets ub ON ub.id = bi.bet_id
+    JOIN matches m ON m.id = bi.match_id
+    LEFT JOIN users u ON u.telegram_id = ub.user_id
+    LEFT JOIN markets mk ON mk.id = bi.market_id
+    LEFT JOIN market_selections ms ON ms.id = bi.selection_id
+"""
+
+
+def get_unscored_bet_items(limit: int = 50, min_stake: int | None = None) -> list[dict]:
+    """
+    Ноги ставок, для которых дела ещё нет: вход онлайн-прохода детектора.
+
+    Фильтр входа — главная защита от ложных срабатываний: внешние фикстуры
+    (без division_id), мелкие ставки и уже отменённые ставки не оцениваются.
+    """
+    if min_stake is None:
+        # Локальный импорт, чтобы порог читался на каждом проходе джобы,
+        # а не замораживался на момент импорта database.
+        import config as _config
+        min_stake = getattr(_config, "INTEGRITY_MIN_STAKE", 500)
+
+    sql = _INTEGRITY_ITEM_SELECT + """
+    WHERE m.division_id IS NOT NULL
+      AND ub.amount >= ?
+      AND ub.status NOT IN ('cancelled', 'refunded')
+      AND NOT EXISTS (
+          SELECT 1 FROM integrity_cases ic
+          WHERE ic.bet_id = bi.bet_id AND ic.bet_item_id = bi.id
+      )
+    ORDER BY bi.id DESC
+    LIMIT ?
+    """
+    with get_connection() as conn:
+        rows = conn.cursor().execute(sql, (int(min_stake), int(limit))).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_resolvable_integrity_cases(limit: int = 50) -> list[dict]:
+    """
+    Дела на стадии 'online', чей матч уже подтверждён, а нога рассчитана:
+    вход постматчевого прохода.
+    """
+    sql = _INTEGRITY_ITEM_SELECT + """
+    JOIN integrity_cases ic ON ic.bet_id = bi.bet_id AND ic.bet_item_id = bi.id
+    WHERE ic.stage = 'online'
+      AND bi.status IN ('won', 'lost', 'refunded')
+      AND m.status IN ('confirmed', 'finished')
+      AND m.player1_score IS NOT NULL
+      AND m.player2_score IS NOT NULL
+    ORDER BY ic.id ASC
+    LIMIT ?
+    """
+    with get_connection() as conn:
+        rows = conn.cursor().execute(sql, (int(limit),)).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_market_odds_snapshot(market_id: int) -> list[float]:
+    """Текущие коэффициенты всех живых исходов рынка — для расчёта маржи."""
+    if not market_id:
+        return []
+    with get_connection() as conn:
+        rows = conn.cursor().execute(
+            "SELECT odds_value FROM market_selections WHERE market_id = ? AND status != 'voided'",
+            (int(market_id),)
+        ).fetchall()
+    return [float(r["odds_value"]) for r in rows if r["odds_value"]]
+
+
+def get_user_bet_profile(user_id: int, before: str | None = None, limit: int = 30) -> dict:
+    """
+    Поведенческий профиль игрока на момент ставки: суммы предыдущих ставок,
+    какие рынки он уже брал и когда ставил в прошлый раз.
+
+    `before` — created_at оцениваемой ставки: профиль всегда строится по
+    прошлому, иначе ставка оценивала бы саму себя.
+    """
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        if before:
+            rows = cursor.execute("""
+                SELECT amount, created_at FROM user_bets
+                WHERE user_id = ? AND created_at < ?
+                ORDER BY created_at DESC LIMIT ?
+            """, (user_id, before, int(limit))).fetchall()
+            market_rows = cursor.execute("""
+                SELECT mk.market_key AS market_key, COUNT(*) AS n
+                FROM bet_items bi
+                JOIN user_bets ub ON ub.id = bi.bet_id
+                JOIN markets mk ON mk.id = bi.market_id
+                WHERE ub.user_id = ? AND ub.created_at < ?
+                GROUP BY mk.market_key
+            """, (user_id, before)).fetchall()
+            last_row = cursor.execute("""
+                SELECT MAX(created_at) AS last_at FROM user_bets
+                WHERE user_id = ? AND created_at < ?
+            """, (user_id, before)).fetchone()
+        else:
+            rows = cursor.execute("""
+                SELECT amount, created_at FROM user_bets
+                WHERE user_id = ? ORDER BY created_at DESC LIMIT ?
+            """, (user_id, int(limit))).fetchall()
+            market_rows = cursor.execute("""
+                SELECT mk.market_key AS market_key, COUNT(*) AS n
+                FROM bet_items bi
+                JOIN user_bets ub ON ub.id = bi.bet_id
+                JOIN markets mk ON mk.id = bi.market_id
+                WHERE ub.user_id = ?
+                GROUP BY mk.market_key
+            """, (user_id,)).fetchall()
+            last_row = cursor.execute(
+                "SELECT MAX(created_at) AS last_at FROM user_bets WHERE user_id = ?",
+                (user_id,)
+            ).fetchone()
+
+    return {
+        "amounts": [int(r["amount"]) for r in rows if r["amount"] is not None],
+        "bets_count": len(rows),
+        "market_counts": {r["market_key"]: int(r["n"]) for r in market_rows if r["market_key"]},
+        "last_bet_at": last_row["last_at"] if last_row else None,
+    }
+
+
+def get_selection_volume(match_id: int, selection_id: int | None, exclude_user_id: int | None = None) -> dict:
+    """
+    Оборот по матчу и по конкретному исходу: сколько ещё игроков зашли туда же.
+    Свою ставку исключаем — интересует поведение остальных.
+    """
+    result = {"selection_users": 0, "selection_amount": 0, "match_users": 0, "match_amount": 0}
+    with get_connection() as conn:
+        cursor = conn.cursor()
+        row = cursor.execute("""
+            SELECT COUNT(DISTINCT ub.user_id) AS users, COALESCE(SUM(ub.amount), 0) AS total
+            FROM bet_items bi
+            JOIN user_bets ub ON ub.id = bi.bet_id
+            WHERE bi.match_id = ? AND ub.status NOT IN ('cancelled', 'refunded')
+              AND (? IS NULL OR ub.user_id != ?)
+        """, (match_id, exclude_user_id, exclude_user_id)).fetchone()
+        if row:
+            result["match_users"] = int(row["users"] or 0)
+            result["match_amount"] = int(row["total"] or 0)
+
+        if selection_id:
+            row = cursor.execute("""
+                SELECT COUNT(DISTINCT ub.user_id) AS users, COALESCE(SUM(ub.amount), 0) AS total
+                FROM bet_items bi
+                JOIN user_bets ub ON ub.id = bi.bet_id
+                WHERE bi.match_id = ? AND bi.selection_id = ?
+                  AND ub.status NOT IN ('cancelled', 'refunded')
+                  AND (? IS NULL OR ub.user_id != ?)
+            """, (match_id, selection_id, exclude_user_id, exclude_user_id)).fetchone()
+            if row:
+                result["selection_users"] = int(row["users"] or 0)
+                result["selection_amount"] = int(row["total"] or 0)
+
+    return result
+
+
+def upsert_integrity_case(
+    bet_id: int,
+    bet_item_id: int,
+    user_id: int,
+    match_id: int | None,
+    division_id: int | None,
+    season_id: int | None,
+    online_score: float,
+    post_score: float,
+    total_score: float,
+    severity: str,
+    stage: str,
+    low_confidence: bool,
+    features: str | None
+) -> int:
+    """
+    Создать или обновить дело. Вердикт супер-админа (status / reviewed_by /
+    note) переоценка не трогает: разобранное дело не должно всплывать заново.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO integrity_cases (
+                bet_id, bet_item_id, user_id, match_id, division_id, season_id,
+                online_score, post_score, total_score, severity, stage,
+                low_confidence, features
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(bet_id, bet_item_id) DO UPDATE SET
+                online_score = excluded.online_score,
+                post_score = excluded.post_score,
+                total_score = excluded.total_score,
+                severity = excluded.severity,
+                stage = excluded.stage,
+                low_confidence = excluded.low_confidence,
+                features = excluded.features,
+                updated_at = CURRENT_TIMESTAMP
+        """, (
+            bet_id, bet_item_id, user_id, match_id, division_id, season_id,
+            float(online_score), float(post_score), float(total_score),
+            severity, stage, 1 if low_confidence else 0, features
+        ))
+        row = cursor.execute(
+            "SELECT id FROM integrity_cases WHERE bet_id = ? AND bet_item_id = ?",
+            (bet_id, bet_item_id)
+        ).fetchone()
+        return int(row["id"]) if row else 0
+
+
+def get_integrity_cases(
+    status: str | None = None,
+    severity: str | None = None,
+    min_score: float | None = None,
+    limit: int = 5,
+    offset: int = 0
+) -> list[dict]:
+    """Список дел для экрана «Подозрения», по убыванию балла."""
+    with get_connection() as conn:
+        rows = conn.cursor().execute("""
+            SELECT
+                ic.*,
+                u.username   AS username,
+                u.team_name  AS user_team,
+                m.player1_team AS player1_team,
+                m.player2_team AS player2_team,
+                m.player1_score AS player1_score,
+                m.player2_score AS player2_score,
+                ub.amount    AS amount,
+                bi.status    AS item_status,
+                bi.odds_at_placement AS odds_at_placement,
+                bi.outcome_type AS outcome_type,
+                ms.selection_name AS selection_name,
+                mk.market_name AS market_name
+            FROM integrity_cases ic
+            LEFT JOIN users u ON u.telegram_id = ic.user_id
+            LEFT JOIN matches m ON m.id = ic.match_id
+            LEFT JOIN user_bets ub ON ub.id = ic.bet_id
+            LEFT JOIN bet_items bi ON bi.id = ic.bet_item_id
+            LEFT JOIN market_selections ms ON ms.id = bi.selection_id
+            LEFT JOIN markets mk ON mk.id = bi.market_id
+            WHERE (? IS NULL OR ic.status = ?)
+              AND (? IS NULL OR ic.severity = ?)
+              AND (? IS NULL OR ic.total_score >= ?)
+            ORDER BY ic.total_score DESC, ic.id DESC
+            LIMIT ? OFFSET ?
+        """, (
+            status, status, severity, severity, min_score, min_score,
+            int(limit), int(offset)
+        )).fetchall()
+    return [dict(r) for r in rows]
+
+
+def count_integrity_cases(
+    status: str | None = None,
+    severity: str | None = None,
+    min_score: float | None = None
+) -> int:
+    """Счётчик дел под теми же фильтрами, что и get_integrity_cases."""
+    with get_connection() as conn:
+        row = conn.cursor().execute("""
+            SELECT COUNT(*) AS n FROM integrity_cases
+            WHERE (? IS NULL OR status = ?)
+              AND (? IS NULL OR severity = ?)
+              AND (? IS NULL OR total_score >= ?)
+        """, (status, status, severity, severity, min_score, min_score)).fetchone()
+    return int(row["n"]) if row else 0
+
+
+def get_integrity_case(case_id: int) -> dict | None:
+    """Одно дело со всем контекстом — для карточки."""
+    with get_connection() as conn:
+        row = conn.cursor().execute("""
+            SELECT
+                ic.*,
+                u.username   AS username,
+                u.team_name  AS user_team,
+                m.player1_team AS player1_team,
+                m.player2_team AS player2_team,
+                m.player1_score AS player1_score,
+                m.player2_score AS player2_score,
+                m.status     AS match_status,
+                ub.amount    AS amount,
+                ub.bet_type  AS bet_type,
+                ub.status    AS bet_status,
+                ub.actual_payout AS actual_payout,
+                ub.created_at AS placed_at,
+                bi.status    AS item_status,
+                bi.odd       AS odd,
+                bi.odds_at_placement AS odds_at_placement,
+                bi.outcome_type AS outcome_type,
+                ms.selection_name AS selection_name,
+                mk.market_name AS market_name,
+                mk.market_key AS market_key
+            FROM integrity_cases ic
+            LEFT JOIN users u ON u.telegram_id = ic.user_id
+            LEFT JOIN matches m ON m.id = ic.match_id
+            LEFT JOIN user_bets ub ON ub.id = ic.bet_id
+            LEFT JOIN bet_items bi ON bi.id = ic.bet_item_id
+            LEFT JOIN market_selections ms ON ms.id = bi.selection_id
+            LEFT JOIN markets mk ON mk.id = bi.market_id
+            WHERE ic.id = ?
+        """, (int(case_id),)).fetchone()
+    return dict(row) if row else None
+
+
+def set_integrity_case_status(
+    case_id: int,
+    status: str,
+    admin_id: int | None = None,
+    note: str | None = None
+) -> bool:
+    """Вердикт супер-админа по делу."""
+    if status not in ("open", "acknowledged", "dismissed", "confirmed"):
+        return False
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            UPDATE integrity_cases
+            SET status = ?,
+                reviewed_by = ?,
+                reviewed_at = CURRENT_TIMESTAMP,
+                note = COALESCE(?, note),
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        """, (status, admin_id, note, int(case_id)))
+        return cursor.rowcount > 0
 
 
 # ─── Phase 8: Real Sports Provider Repository Helpers ─────────────────────────

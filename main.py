@@ -91,6 +91,14 @@ def register_jobs(application: Application) -> None:
     except Exception as e:
         logger.warning(f"Could not register round analytics jobs: {e}")
 
+    # Детектор договорных матчей: только считает индекс подозрительности и
+    # показывает дела супер-админу, ставки никогда не блокирует.
+    try:
+        from services.background_sync import scan_integrity_job
+        application.job_queue.run_repeating(scan_integrity_job, interval=120, first=60)
+    except Exception as e:
+        logger.warning(f"Could not register integrity scan job: {e}")
+
 def main() -> None:
     """Initialize and run the Telegram bot application."""
     if not TOKEN:

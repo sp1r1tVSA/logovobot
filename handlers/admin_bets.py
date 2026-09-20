@@ -8,11 +8,13 @@ handlers/admin_bets.py
 
 import asyncio
 import html
+import json
 import logging
 from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
+import config
 import database
 from handlers.base import is_global_admin
 from handlers.cabinet import safe_send_notification
@@ -21,6 +23,7 @@ from services.bet_outcome_text import (
     describe_selection,
     explain_result,
 )
+from services.integrity_engine import CASE_MIN_SCORE
 
 logger = logging.getLogger(__name__)
 
@@ -295,6 +298,19 @@ def _build_monitor_keyboard(
         # Разбиваем по 3 в ряд
         for i in range(0, len(detail_buttons), 3):
             keyboard.append(detail_buttons[i:i + 3])
+
+    # Вход в детектор договорных матчей. Счётчик — только неразобранные дела
+    # выше порога; служебные строки-заглушки движка в него не попадают.
+    if config.INTEGRITY_ENABLED:
+        try:
+            pending_cases = database.count_integrity_cases(
+                status="open", min_score=CASE_MIN_SCORE
+            )
+        except Exception as e:
+            logger.debug(f"Failed to count integrity cases: {e}")
+            pending_cases = 0
+        label = f"🕵️ Подозрения ({pending_cases})" if pending_cases else "🕵️ Подозрения"
+        keyboard.append([InlineKeyboardButton(label, callback_data="admin_integrity_hub")])
 
     # Строка 4: Переключатель Live-оповещений + Сброс фильтра игрока (если включен)
     alerts_on = database.is_live_bet_alerts_enabled(admin_id)
@@ -738,3 +754,368 @@ async def notify_super_admins_new_bet(bot=None, bet_id: int = 0) -> None:
 
     except Exception as e:
         logger.debug(f"Failed to notify super admins about new bet #{bet_id}: {e}")
+
+
+# ─── Экран «Подозрения»: дела о возможных договорных матчах ──────────────────
+# Только супер-админ и только здесь: детектор не пишет никому в личку.
+
+SEVERITY_EMOJI = {
+    "critical": "⛔",
+    "high": "🔴",
+    "medium": "🟠",
+    "low": "🟡",
+}
+
+CASE_STATUS_TITLES = {
+    "open": "🆕 Не разобрано",
+    "acknowledged": "👁 Разобрано",
+    "dismissed": "🚫 Ложное",
+    "confirmed": "⛔ Сговор подтверждён",
+}
+
+# Фильтры ленты: (подпись, kwargs для get_integrity_cases/count_integrity_cases).
+# Порог CASE_MIN_SCORE отсекает служебные строки-заглушки: движок пишет дело на
+# каждую оценённую ногу, чтобы не пересчитывать её в каждом прогоне джобы.
+INTEGRITY_FILTERS = {
+    "open": ("🆕 Новые", {"status": "open", "min_score": CASE_MIN_SCORE}),
+    "high": ("🔴 Тяжёлые", {"min_score": 70.0}),
+    "all": ("Все", {"min_score": CASE_MIN_SCORE}),
+}
+
+
+def _integrity_filter(code: str) -> tuple[str, dict]:
+    label, kwargs = INTEGRITY_FILTERS.get(code, INTEGRITY_FILTERS["open"])
+    return label, dict(kwargs)
+
+
+def _case_teams(case: dict) -> str:
+    t1 = html.escape(str(case.get("player1_team") or "?"))
+    t2 = html.escape(str(case.get("player2_team") or "?"))
+    s1, s2 = case.get("player1_score"), case.get("player2_score")
+    if s1 is not None and s2 is not None:
+        return f"{t1} {s1}:{s2} {t2}"
+    return f"{t1} — {t2}"
+
+
+def _case_player(case: dict) -> str:
+    team = case.get("user_team")
+    username = case.get("username")
+    if team and username:
+        label = f"{team} (@{username})"
+    elif team:
+        label = str(team)
+    elif username:
+        label = f"@{username}"
+    else:
+        label = f"ID {case.get('user_id')}"
+    return html.escape(label)
+
+
+def _case_pick(case: dict) -> str:
+    pick = case.get("selection_name") or case.get("outcome_type") or "?"
+    return html.escape(str(pick))
+
+
+def _case_features(case: dict) -> dict:
+    raw = case.get("features")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _format_integrity_row(case: dict) -> str:
+    """Одна строка ленты дел."""
+    emoji = SEVERITY_EMOJI.get(case.get("severity"), "🟡")
+    score = float(case.get("total_score") or 0)
+    flag = " ⚠️ мало истории" if case.get("low_confidence") else ""
+    odd = float(case.get("odds_at_placement") or case.get("odd") or 0)
+    status = CASE_STATUS_TITLES.get(case.get("status"), case.get("status") or "")
+    return (
+        f"{emoji} <b>#{case['id']} · {score:.0f}/100</b>{flag}\n"
+        f"👤 {_case_player(case)} · {_fmt_coins(case.get('amount') or 0)}\n"
+        f"⚽ {_case_teams(case)}\n"
+        f"🎯 {_case_pick(case)} @ {odd:.2f} · {status}"
+    )
+
+
+def _format_integrity_card(case: dict) -> str:
+    """Карточка дела: чем ставка не похожа на обычную, построчно."""
+    emoji = SEVERITY_EMOJI.get(case.get("severity"), "🟡")
+    score = float(case.get("total_score") or 0)
+    odd = float(case.get("odds_at_placement") or case.get("odd") or 0)
+    features = _case_features(case)
+
+    lines = [
+        f"{emoji} <b>Дело #{case['id']} · индекс {score:.0f}/100</b>",
+        f"<i>{CASE_STATUS_TITLES.get(case.get('status'), case.get('status') or '')}</i>",
+        "",
+        f"👤 <b>Игрок:</b> {_case_player(case)}",
+        f"⚽ <b>Матч:</b> {_case_teams(case)}",
+        f"🎯 <b>Выбор:</b> {_case_pick(case)} @ {odd:.2f}",
+        f"💰 <b>Ставка:</b> {_fmt_coins(case.get('amount') or 0)}"
+        f" · выплата {_fmt_coins(case.get('actual_payout') or 0)}",
+        f"🕒 <b>Размещена:</b> {_fmt_dt(case.get('placed_at'))}",
+    ]
+
+    model_p = features.get("model_probability")
+    if isinstance(model_p, (int, float)):
+        lines.append(f"📉 <b>Модель давала исходу:</b> {model_p * 100:.1f}%")
+
+    if case.get("low_confidence"):
+        lines.append("")
+        lines.append("⚠️ <i>У игрока мало истории ставок — оценка ориентировочная.</i>")
+
+    gate = features.get("gate")
+    if gate == "families":
+        lines.append("")
+        lines.append("<i>Сработало только одно семейство признаков — балл обнулён.</i>")
+    elif gate == "lost":
+        lines.append("")
+        lines.append("<i>Нога не зашла — знать результат заранее было нечего.</i>")
+
+    rows = [
+        r for r in (features.get("online") or []) + (features.get("post") or [])
+        if isinstance(r, dict) and (r.get("points") or 0) > 0
+    ]
+    rows.sort(key=lambda r: r.get("points") or 0, reverse=True)
+    if rows:
+        lines.append("")
+        lines.append("🔍 <b>Что сработало:</b>")
+        for r in rows:
+            label = html.escape(str(r.get("label") or r.get("name") or "?"))
+            lines.append(f"• {label}: <b>+{float(r['points']):.1f}</b>")
+
+    online = float(case.get("online_score") or 0)
+    post = float(case.get("post_score") or 0)
+    lines.append("")
+    lines.append(f"<i>Онлайн {online:.0f} (в зачёт до 60) + после матча {post:.0f}</i>")
+
+    if case.get("reviewed_by"):
+        lines.append(
+            f"<i>Разобрал ID {case['reviewed_by']} · {_fmt_dt(case.get('reviewed_at'))}</i>"
+        )
+
+    lines.append("")
+    lines.append("<i>Индекс — повод посмотреть вручную, а не доказательство.</i>")
+    return "\n".join(lines)
+
+
+def _build_integrity_keyboard(
+    code: str, page: int, total: int, cases: list
+) -> InlineKeyboardMarkup:
+    keyboard = []
+
+    def flt_btn(c: str) -> InlineKeyboardButton:
+        label = INTEGRITY_FILTERS[c][0]
+        text = f"• {label} •" if c == code else label
+        return InlineKeyboardButton(text, callback_data=f"admin_integrity_flt:{c}:0")
+
+    keyboard.append([flt_btn(c) for c in ("open", "high", "all")])
+
+    total_pages = max(1, (total + PAGE_SIZE - 1) // PAGE_SIZE)
+    nav_row = []
+    if page > 0:
+        nav_row.append(InlineKeyboardButton(
+            "◀️ Пред", callback_data=f"admin_integrity_page:{code}:{page - 1}"
+        ))
+    nav_row.append(InlineKeyboardButton(
+        f"{page + 1}/{total_pages}", callback_data=f"admin_integrity_refresh:{code}:{page}"
+    ))
+    if page < total_pages - 1:
+        nav_row.append(InlineKeyboardButton(
+            "След ▶️", callback_data=f"admin_integrity_page:{code}:{page + 1}"
+        ))
+    keyboard.append(nav_row)
+
+    buttons = [
+        InlineKeyboardButton(
+            f"🔍 #{c['id']}",
+            callback_data=f"admin_integrity_case:{c['id']}:{code}:{page}"
+        )
+        for c in cases
+    ]
+    for i in range(0, len(buttons), 3):
+        keyboard.append(buttons[i:i + 3])
+
+    keyboard.append([
+        InlineKeyboardButton("🔄 Обновить", callback_data=f"admin_integrity_refresh:{code}:{page}"),
+        InlineKeyboardButton("💰 Ставки", callback_data="admin_bets_refresh:all:0:0"),
+    ])
+    keyboard.append([InlineKeyboardButton("« Админ-панель", callback_data="admin_main_menu")])
+    return InlineKeyboardMarkup(keyboard)
+
+
+async def _render_integrity_list(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    code: str = "open",
+    page: int = 0,
+    edit: bool = False
+) -> None:
+    """Лента дел о возможных договорных матчах."""
+    label, kwargs = _integrity_filter(code)
+    offset = page * PAGE_SIZE
+
+    cases = await asyncio.to_thread(
+        database.get_integrity_cases,
+        kwargs.get("status"), kwargs.get("severity"), kwargs.get("min_score"),
+        PAGE_SIZE, offset
+    )
+    total = await asyncio.to_thread(
+        database.count_integrity_cases,
+        kwargs.get("status"), kwargs.get("severity"), kwargs.get("min_score")
+    )
+
+    header = (
+        "🕵️ <b>Подозрительные ставки</b>\n"
+        f"<i>Фильтр: {label} · найдено: {total}</i>\n\n"
+        "Индекс считается по отклонению исхода от нашей модели и по тому, насколько "
+        "ставка не похожа на обычное поведение этого игрока. Ставки при этом не "
+        "блокируются — это повод посмотреть вручную.\n"
+    )
+
+    if not cases:
+        body = "\n<i>По этому фильтру дел нет.</i>\n"
+    else:
+        body = "\n" + "\n\n".join(_format_integrity_row(c) for c in cases) + "\n"
+
+    markup = _build_integrity_keyboard(code, page, total, cases)
+
+    if edit and update.callback_query:
+        try:
+            await update.callback_query.edit_message_text(
+                header + body, reply_markup=markup, parse_mode="HTML"
+            )
+            return
+        except Exception as e:
+            logger.debug(f"Failed to edit integrity list message: {e}")
+
+    if update.effective_message:
+        await update.effective_message.reply_text(
+            header + body, reply_markup=markup, parse_mode="HTML"
+        )
+
+
+async def cmd_admin_integrity(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Команда /integrity и вход с экрана мониторинга ставок."""
+    query = update.callback_query
+    ok, _admin_id = _ensure_private_chat_and_super_admin(update)
+
+    if not ok:
+        if query:
+            await query.answer("⛔ Доступ запрещён или чат не является приватным.", show_alert=True)
+        elif update.effective_message:
+            await update.effective_message.reply_text(
+                "⛔ <b>Доступ запрещён</b>\n\n"
+                "Экран доступен исключительно супер-администраторам лиги и только в ЛС.",
+                parse_mode="HTML"
+            )
+        return
+
+    if query:
+        await query.answer()
+
+    await _render_integrity_list(update, context, code="open", page=0, edit=bool(query))
+
+
+async def cb_admin_integrity_navigate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Пагинация, смена фильтра и обновление ленты дел."""
+    query = update.callback_query
+    if not query:
+        return
+
+    ok, _admin_id = _ensure_private_chat_and_super_admin(update)
+    if not ok:
+        await query.answer("⛔ Доступ запрещён или чат не является приватным.", show_alert=True)
+        return
+
+    await query.answer()
+    parts = (query.data or "").split(":")
+    code = parts[1] if len(parts) > 1 else "open"
+    page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+    await _render_integrity_list(update, context, code=code, page=page, edit=True)
+
+
+async def cb_admin_integrity_case(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Карточка одного дела с разбором признаков."""
+    query = update.callback_query
+    if not query:
+        return
+
+    ok, _admin_id = _ensure_private_chat_and_super_admin(update)
+    if not ok:
+        await query.answer("⛔ Доступ запрещён или чат не является приватным.", show_alert=True)
+        return
+
+    parts = (query.data or "").split(":")
+    case_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    code = parts[2] if len(parts) > 2 else "open"
+    page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+
+    case = await asyncio.to_thread(database.get_integrity_case, case_id)
+    if not case:
+        await query.answer("Дело не найдено.", show_alert=True)
+        return
+
+    await query.answer()
+
+    keyboard = InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton("✅ Разобрано", callback_data=f"admin_integrity_ack:{case_id}:{code}:{page}"),
+            InlineKeyboardButton("🚫 Ложное", callback_data=f"admin_integrity_dismiss:{case_id}:{code}:{page}"),
+        ],
+        [InlineKeyboardButton(
+            "⛔ Подтверждаю сговор",
+            callback_data=f"admin_integrity_confirm:{case_id}:{code}:{page}"
+        )],
+        [
+            InlineKeyboardButton(
+                f"🧾 Купон #{case['bet_id']}", callback_data=f"admin_bet_view:{case['bet_id']}"
+            ),
+            InlineKeyboardButton("« К списку", callback_data=f"admin_integrity_flt:{code}:{page}"),
+        ],
+    ])
+
+    try:
+        await query.edit_message_text(
+            _format_integrity_card(case), reply_markup=keyboard, parse_mode="HTML"
+        )
+    except Exception as e:
+        logger.debug(f"Failed to edit integrity card message: {e}")
+
+
+async def cb_admin_integrity_review(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Вердикт супер-админа: разобрано / ложное / сговор подтверждён."""
+    query = update.callback_query
+    if not query:
+        return
+
+    ok, admin_id = _ensure_private_chat_and_super_admin(update)
+    if not ok:
+        await query.answer("⛔ Доступ запрещён или чат не является приватным.", show_alert=True)
+        return
+
+    parts = (query.data or "").split(":")
+    action = parts[0].replace("admin_integrity_", "")
+    case_id = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+    code = parts[2] if len(parts) > 2 else "open"
+    page = int(parts[3]) if len(parts) > 3 and parts[3].isdigit() else 0
+
+    new_status = {"ack": "acknowledged", "dismiss": "dismissed", "confirm": "confirmed"}.get(action)
+    if not new_status:
+        await query.answer()
+        return
+
+    changed = await asyncio.to_thread(
+        database.set_integrity_case_status, case_id, new_status, admin_id, None
+    )
+    if changed:
+        await query.answer(CASE_STATUS_TITLES.get(new_status, "Готово"))
+    else:
+        await query.answer("Дело не найдено.", show_alert=True)
+
+    await _render_integrity_list(update, context, code=code, page=page, edit=True)

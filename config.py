@@ -195,6 +195,17 @@ def is_dev_auth_bypass_enabled() -> bool:
 
 # Mini App API: защита от флуда и спам-атак.
 # Идентификация по user_id из валидированного initData, для анонимных — по IP.
+# ─── Integrity Engine: детектор договорных матчей ────────────────────────────
+# Только наблюдение: ставки не блокируются и не замораживаются, дела видны
+# исключительно супер-админам на экране /admin_bets.
+INTEGRITY_ENABLED = os.getenv("INTEGRITY_ENABLED", "true").strip().lower() in ("true", "1", "yes")
+# Ставки мельче этого порога не анализируются: договорняк ради 100 монет
+# бессмыслен, а шум от мелких ставок топит реальные сигналы.
+INTEGRITY_MIN_STAKE = int(os.getenv("INTEGRITY_MIN_STAKE", "500"))
+# С этого балла дело дублируется в risk_alerts как SUSPICIOUS_ACTIVITY.
+INTEGRITY_ALERT_THRESHOLD = int(os.getenv("INTEGRITY_ALERT_THRESHOLD", "70"))
+
+
 API_RATE_LIMIT_ENABLED = os.getenv("API_RATE_LIMIT_ENABLED", "true").strip().lower() in ("true", "1", "yes")
 API_RATE_LIMIT_READ_RPM = int(os.getenv("API_RATE_LIMIT_READ_RPM", "60"))
 API_RATE_LIMIT_WRITE_RPM = int(os.getenv("API_RATE_LIMIT_WRITE_RPM", "20"))

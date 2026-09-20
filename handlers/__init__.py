@@ -265,6 +265,10 @@ from handlers.admin_bets import (
     cb_admin_bet_detail,
     cb_admin_bet_void_ask,
     cb_admin_bet_void_execute,
+    cmd_admin_integrity,
+    cb_admin_integrity_navigate,
+    cb_admin_integrity_case,
+    cb_admin_integrity_review,
 )
 from services.topic_cache import topic_cache
 
@@ -816,6 +820,13 @@ def _register_admin_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(cb_admin_bet_detail, pattern=r"^admin_bet_view:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_admin_bet_void_ask, pattern=r"^admin_bet_void_ask:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_admin_bet_void_execute, pattern=r"^admin_bet_void_do:\d+$"))
+
+    # 🕵️ Детектор договорных матчей — тот же приватный супер-админский контур
+    app.add_handler(CommandHandler(["integrity", "suspicions"], cmd_admin_integrity))
+    app.add_handler(CallbackQueryHandler(cmd_admin_integrity, pattern="^admin_integrity_hub$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_integrity_navigate, pattern=r"^admin_integrity_(page|flt|refresh):"))
+    app.add_handler(CallbackQueryHandler(cb_admin_integrity_case, pattern=r"^admin_integrity_case:\d+"))
+    app.add_handler(CallbackQueryHandler(cb_admin_integrity_review, pattern=r"^admin_integrity_(ack|dismiss|confirm):\d+"))
 
 def register_all_handlers(application: Application) -> None:
     """Register all command, message, and callback handlers to the application."""

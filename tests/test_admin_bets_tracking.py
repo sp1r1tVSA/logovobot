@@ -8,9 +8,11 @@ tests/test_admin_bets_tracking.py
 4. Фильтрация и пагинация.
 5. Аннулирование ставки (Void / возврат средств).
 6. Live-оповещения в ЛС о новых ставках.
+7. Экран «Подозрения» — тот же приватный супер-админский контур.
 """
 
 import asyncio
+import json
 import os
 import tempfile
 import unittest
@@ -25,6 +27,7 @@ from handlers.admin_bets import (
     cb_admin_bet_void_ask,
     cb_admin_bet_void_execute,
     notify_super_admins_new_bet,
+    cmd_admin_integrity,
 )
 from handlers.base import is_global_admin
 
@@ -345,6 +348,106 @@ class TestAdminBetsTracking(unittest.IsolatedAsyncioTestCase):
         from handlers.admin_bets import _fmt_dt
         created_at = database.get_bet_by_id(bet_id)["created_at"]
         self.assertIn(f"Поставлена:</b> {_fmt_dt(created_at)} МСК", kwargs.get("text"))
+
+    # ──────────────────────────────────────────────────────────────────────────
+    # 7. ЭКРАН «ПОДОЗРЕНИЯ» (детектор договорных матчей)
+    # ──────────────────────────────────────────────────────────────────────────
+
+    async def test_cmd_admin_integrity_rejected_in_group_chat(self):
+        """Дела о договорных матчах в групповом чате не показываются никому."""
+        update = self._build_update(self.super_id, chat_type="group")
+        context = MagicMock()
+        context.args = []
+
+        await cmd_admin_integrity(update, context)
+
+        update.effective_message.reply_text.assert_called_once()
+        args, _ = update.effective_message.reply_text.call_args
+        self.assertIn("Доступ запрещён", args[0])
+
+    async def test_cmd_admin_integrity_rejected_for_division_admin(self):
+        """Админ дивизиона к делам не допускается — экран только для супер-админов."""
+        update = self._build_update(self.div_admin_id, chat_type="private")
+        context = MagicMock()
+        context.args = []
+
+        await cmd_admin_integrity(update, context)
+
+        update.effective_message.reply_text.assert_called_once()
+        args, _ = update.effective_message.reply_text.call_args
+        self.assertIn("Доступ запрещён", args[0])
+
+    async def test_cmd_admin_integrity_rejected_for_regular_player(self):
+        """Обычный игрок не должен даже знать, что детектор существует."""
+        update = self._build_update(self.bettor1_id, chat_type="private")
+        context = MagicMock()
+        context.args = []
+
+        await cmd_admin_integrity(update, context)
+
+        update.effective_message.reply_text.assert_called_once()
+        args, _ = update.effective_message.reply_text.call_args
+        self.assertIn("Доступ запрещён", args[0])
+
+    async def test_cmd_admin_integrity_allowed_for_super_admin(self):
+        """Супер-админ в ЛС получает ленту дел, даже когда она пустая."""
+        update = self._build_update(self.super_id, chat_type="private")
+        context = MagicMock()
+        context.args = []
+
+        await cmd_admin_integrity(update, context)
+
+        update.effective_message.reply_text.assert_called_once()
+        args, kwargs = update.effective_message.reply_text.call_args
+        self.assertIn("Подозрительные ставки", args[0])
+        self.assertIsNotNone(kwargs.get("reply_markup"))
+
+    async def test_integrity_card_explains_every_triggered_feature(self):
+        """Карточка объясняет, почему дело завелось, а не только итоговый балл."""
+        from handlers.admin_bets import _format_integrity_card
+
+        card = _format_integrity_card({
+            "id": 42,
+            "bet_id": 7,
+            "status": "open",
+            "severity": "high",
+            "total_score": 78.0,
+            "online_score": 58.0,
+            "post_score": 20.0,
+            "amount": 5000,
+            "actual_payout": 47500,
+            "odds_at_placement": 9.5,
+            "placed_at": "2026-09-10 10:05:00",
+            "player1_team": "Ювентус",
+            "player2_team": "Порту",
+            "player1_score": 0,
+            "player2_score": 5,
+            "selection_name": "Победа П2",
+            "user_team": "Аякс",
+            "username": "bettor_one",
+            "low_confidence": 1,
+            "features": json.dumps({
+                "model_probability": 0.08,
+                "online": [
+                    {"name": "improbability", "label": "Невероятность исхода", "points": 20.2},
+                    {"name": "timing", "label": "Ставка сразу после открытия линии", "points": 10.0},
+                    {"name": "odds_edge", "label": "Цена лучше честной", "points": 0.0},
+                ],
+                "post": [
+                    {"name": "score_improbability", "label": "Невероятный счёт", "points": 18.0},
+                ],
+            }),
+        })
+
+        self.assertIn("Дело #42", card)
+        self.assertIn("Ювентус 0:5 Порту", card)
+        self.assertIn("мало истории", card)
+        self.assertIn("Невероятность исхода", card)
+        self.assertIn("Невероятный счёт", card)
+        # Несработавший признак карточку не засоряет.
+        self.assertNotIn("Цена лучше честной", card)
+        # Порядок — по вкладу, самое весомое первым.
+        self.assertLess(card.index("Невероятность исхода"), card.index("Невероятный счёт"))
 
 
 if __name__ == "__main__":
