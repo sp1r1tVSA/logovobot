@@ -49,7 +49,7 @@ class GamificationNotifications:
                 cursor = conn.cursor()
                 cursor.execute("""
                     INSERT INTO notifications (user_id, type, title, body, is_read, created_at)
-                    VALUES (?, ?, ?, ?, 0, CURRENT_TIMESTAMP)
+                    VALUES (?, ?, ?, ?, 0, datetime('now', '+3 hours'))
                 """, (user_id, event_type.lower(), title, message))
             return True
         except Exception as e:

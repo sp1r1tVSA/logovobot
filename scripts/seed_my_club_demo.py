@@ -305,7 +305,7 @@ def seed_cabinet_demo(user_id: int, team_name: str = "Реал Мадрид", di
                 season_id = s_row["id"]
                 cursor.execute("UPDATE seasons SET status = 'active' WHERE id = ?", (season_id,))
             else:
-                cursor.execute("INSERT INTO seasons (name, status) VALUES ('Сезон 1', 'active')")
+                cursor.execute("INSERT INTO seasons (name, status, created_at) VALUES ('Сезон 1', 'active', datetime('now', '+3 hours'))")
                 season_id = cursor.lastrowid
         else:
             season_id = s_row["id"]
@@ -323,8 +323,8 @@ def seed_cabinet_demo(user_id: int, team_name: str = "Реал Мадрид", di
         cursor.execute("UPDATE users SET team_name = NULL WHERE LOWER(team_name) = LOWER(?) AND telegram_id != ?", (team_name, user_id))
 
         cursor.execute("""
-            INSERT INTO users (telegram_id, username, team_name, division_id, warn_count, role)
-            VALUES (?, ?, ?, ?, 1, 'player')
+            INSERT INTO users (telegram_id, username, team_name, division_id, warn_count, role, registered_at)
+            VALUES (?, ?, ?, ?, 1, 'player', datetime('now', '+3 hours'))
             ON CONFLICT(telegram_id) DO UPDATE SET
                 team_name = excluded.team_name,
                 division_id = excluded.division_id,
@@ -335,8 +335,8 @@ def seed_cabinet_demo(user_id: int, team_name: str = "Реал Мадрид", di
         for opp in DEMO_OPPONENTS:
             cursor.execute("UPDATE users SET team_name = NULL WHERE LOWER(team_name) = LOWER(?) AND telegram_id != ?", (opp["team"], opp["user_id"]))
             cursor.execute("""
-                INSERT INTO users (telegram_id, username, team_name, division_id, warn_count, role)
-                VALUES (?, ?, ?, ?, 0, 'player')
+                INSERT INTO users (telegram_id, username, team_name, division_id, warn_count, role, registered_at)
+                VALUES (?, ?, ?, ?, 0, 'player', datetime('now', '+3 hours'))
                 ON CONFLICT(telegram_id) DO UPDATE SET
                     team_name = excluded.team_name,
                     division_id = excluded.division_id
@@ -461,7 +461,7 @@ def seed_cabinet_demo(user_id: int, team_name: str = "Реал Мадрид", di
                 season_id, division_id, round_number, tournament_type,
                 player1_id, player2_id, player1_team, player2_team,
                 player1_score, player2_score, status, photo_id, played_at
-            ) VALUES (?, ?, 1, 'league', ?, ?, ?, ?, 3, 1, 'confirmed', ?, datetime('now', '-2 days'))
+            ) VALUES (?, ?, 1, 'league', ?, ?, ?, ?, 3, 1, 'confirmed', ?, datetime('now', '+3 hours', '-2 days'))
         """, (season_id, division_id, user_id, opp_bayern["user_id"], team_name, opp_bayern["team"], svg_hist1))
         m_hist1 = cursor.lastrowid
 
@@ -479,7 +479,7 @@ def seed_cabinet_demo(user_id: int, team_name: str = "Реал Мадрид", di
                 season_id, division_id, round_number, tournament_type,
                 player1_id, player2_id, player1_team, player2_team,
                 player1_score, player2_score, status, photo_id, played_at
-            ) VALUES (?, ?, 1, 'league', ?, ?, ?, ?, 2, 2, 'confirmed', ?, datetime('now', '-1 day'))
+            ) VALUES (?, ?, 1, 'league', ?, ?, ?, ?, 2, 2, 'confirmed', ?, datetime('now', '+3 hours', '-1 day'))
         """, (season_id, division_id, opp_liv["user_id"], user_id, opp_liv["team"], team_name, svg_hist2))
         m_hist2 = cursor.lastrowid
 
@@ -495,7 +495,7 @@ def seed_cabinet_demo(user_id: int, team_name: str = "Реал Мадрид", di
                 season_id, division_id, round_number, tournament_type,
                 player1_id, player2_id, player1_team, player2_team,
                 player1_score, player2_score, status, photo_id, played_at
-            ) VALUES (?, ?, 1, 'league', ?, ?, ?, ?, 2, 0, 'confirmed', ?, datetime('now', '-3 hours'))
+            ) VALUES (?, ?, 1, 'league', ?, ?, ?, ?, 2, 0, 'confirmed', ?, datetime('now', '+3 hours', '-3 hours'))
         """, (season_id, division_id, user_id, opp_barca["user_id"], team_name, opp_barca["team"], svg_hist3))
         m_hist3 = cursor.lastrowid
 
@@ -513,7 +513,7 @@ def seed_cabinet_demo(user_id: int, team_name: str = "Реал Мадрид", di
                 season_id, division_id, round_number, tournament_type,
                 player1_id, player2_id, player1_team, player2_team,
                 player1_score, player2_score, status, photo_id, played_at
-            ) VALUES (?, ?, 1, 'league', ?, ?, ?, ?, 2, 1, 'confirmed', ?, datetime('now', '-4 hours'))
+            ) VALUES (?, ?, 1, 'league', ?, ?, ?, ?, 2, 1, 'confirmed', ?, datetime('now', '+3 hours', '-4 hours'))
         """, (season_id, division_id, opp_barca["user_id"], opp_bayern["user_id"], opp_barca["team"], opp_bayern["team"], svg_other))
         m_other = cursor.lastrowid
 
@@ -563,8 +563,8 @@ def seed_cabinet_demo(user_id: int, team_name: str = "Реал Мадрид", di
 
         # 14. Кошелек пользователя
         cursor.execute("""
-            INSERT INTO user_wallets (user_id, balance, bets_count, bets_won)
-            VALUES (?, 1000, 5, 3)
+            INSERT INTO user_wallets (user_id, balance, bets_count, bets_won, updated_at)
+            VALUES (?, 1000, 5, 3, datetime('now', '+3 hours'))
             ON CONFLICT(user_id) DO UPDATE SET balance = MAX(balance, 1000)
         """, (user_id,))
 

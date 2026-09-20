@@ -38,10 +38,10 @@ async def sync_live_provider_job(context: Any) -> None:
         with database.transaction() as conn:
             cursor = conn.cursor()
             cursor.execute("""
-                INSERT INTO provider_sync_state (provider, last_sync_at, status, last_error)
-                VALUES (?, CURRENT_TIMESTAMP, ?, ?)
+                INSERT INTO provider_sync_state (provider, last_sync_at, status, last_error, updated_at)
+                VALUES (?, datetime('now', '+3 hours'), ?, ?, datetime('now', '+3 hours'))
                 ON CONFLICT(provider) DO UPDATE SET
-                    last_sync_at = CURRENT_TIMESTAMP,
+                    last_sync_at = datetime('now', '+3 hours'),
                     status = excluded.status,
                     last_error = excluded.last_error
             """, (provider.provider_name, sync_status.get("status", "unknown"), sync_status.get("last_error")))

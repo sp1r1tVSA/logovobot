@@ -121,7 +121,7 @@ class RiskEngine:
             cursor.execute("""
                 SELECT COUNT(*) as recent_count
                 FROM user_bets
-                WHERE user_id = ? AND created_at >= datetime('now', '-60 seconds')
+                WHERE user_id = ? AND created_at >= datetime('now', '+3 hours', '-60 seconds')
             """, (user_id,))
             recent_count = cursor.fetchone()["recent_count"]
             if recent_count >= 15:
@@ -143,7 +143,7 @@ class RiskEngine:
             cursor.execute("""
                 SELECT COALESCE(SUM(amount), 0) as today_staked
                 FROM user_bets
-                WHERE user_id = ? AND date(created_at) = date('now') AND status != 'refunded'
+                WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status != 'refunded'
             """, (user_id,))
             today_staked = int(cursor.fetchone()["today_staked"])
             if today_staked + amount > limits["max_daily_stake"]:
@@ -171,7 +171,7 @@ class RiskEngine:
                     COALESCE(SUM(CASE WHEN status = 'lost' THEN amount WHEN status = 'cashed_out' AND actual_payout < amount THEN (amount - actual_payout) ELSE 0 END), 0) -
                     COALESCE(SUM(CASE WHEN status = 'won' THEN (actual_payout - amount) WHEN status = 'cashed_out' AND actual_payout >= amount THEN (actual_payout - amount) ELSE 0 END), 0) as today_net_loss
                 FROM user_bets
-                WHERE user_id = ? AND date(created_at) = date('now') AND status IN ('won', 'lost', 'cashed_out')
+                WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status IN ('won', 'lost', 'cashed_out')
             """, (user_id,))
             loss_row = cursor.fetchone()
             today_net_loss = max(0, int(loss_row["today_net_loss"] if loss_row else 0))
@@ -342,7 +342,7 @@ class RiskEngine:
                 # Odds Stale Check (if updated_at exists and match is live)
                 if odds_updated_at and match_row["status"] == "live":
                     cursor.execute("""
-                        SELECT (strftime('%s', 'now') - strftime('%s', ?)) as age_sec
+                        SELECT (strftime('%s', 'now', '+3 hours') - strftime('%s', ?)) as age_sec
                     """, (odds_updated_at,))
                     age_row = cursor.fetchone()
                     age_sec = age_row["age_sec"] if age_row and age_row["age_sec"] is not None else 0

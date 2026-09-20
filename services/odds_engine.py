@@ -45,8 +45,8 @@ def get_or_create_market(
             return dict(row)
 
         cursor.execute("""
-            INSERT INTO markets (match_id, market_key, market_name, category, status, sort_order)
-            VALUES (?, ?, ?, ?, 'open', ?)
+            INSERT INTO markets (match_id, market_key, market_name, category, status, sort_order, created_at)
+            VALUES (?, ?, ?, ?, 'open', ?, datetime('now', '+3 hours'))
         """, (match_id, market_key, market_name, category, sort_order))
         m_id = cursor.lastrowid
         cursor.execute("SELECT * FROM markets WHERE id = ?", (m_id,))
@@ -93,15 +93,15 @@ def get_or_create_selection(
                         odds_value = ?,
                         odds_version = ?,
                         selection_name = ?,
-                        updated_at = CURRENT_TIMESTAMP
+                        updated_at = datetime('now', '+3 hours')
                     WHERE id = ?
                 """, (initial_odds, new_version, selection_name, row["id"]))
 
                 # Audit movement and history if odds value shifted
                 if abs(old_val - initial_odds) > 0.001:
                     cursor.execute("""
-                        INSERT INTO odds_history (selection_id, old_value, new_value, changed_by, reason)
-                        VALUES (?, ?, ?, NULL, 'repricing_sync')
+                        INSERT INTO odds_history (selection_id, old_value, new_value, changed_by, reason, changed_at)
+                        VALUES (?, ?, ?, NULL, 'repricing_sync', datetime('now', '+3 hours'))
                     """, (row["id"], old_val, initial_odds))
                     try:
                         cursor.execute("SELECT match_id FROM markets WHERE id = ?", (market_id,))
@@ -111,8 +111,8 @@ def get_or_create_selection(
                             pct_change = round(((initial_odds - old_val) / max(0.01, old_val)) * 100, 2)
                             direction = "up" if initial_odds > old_val else "down"
                             cursor.execute("""
-                                INSERT INTO odds_movement (selection_id, market_id, match_id, old_odds, new_odds, pct_change, direction, velocity, reason, source)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, 0.0, 'repricing_sync', 'system')
+                                INSERT INTO odds_movement (selection_id, market_id, match_id, old_odds, new_odds, pct_change, direction, velocity, reason, source, created_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, 0.0, 'repricing_sync', 'system', datetime('now', '+3 hours'))
                             """, (row["id"], market_id, match_id, old_val, initial_odds, pct_change, direction))
                     except Exception as e:
                         logger.warning(f"Failed to record odds_movement: {e}")
@@ -122,8 +122,8 @@ def get_or_create_selection(
             return dict(row)
 
         cursor.execute("""
-            INSERT INTO market_selections (market_id, selection_key, selection_name, odds_value, odds_version, status, previous_odds, model_odds)
-            VALUES (?, ?, ?, ?, 1, 'active', NULL, ?)
+            INSERT INTO market_selections (market_id, selection_key, selection_name, odds_value, odds_version, status, previous_odds, model_odds, updated_at)
+            VALUES (?, ?, ?, ?, 1, 'active', NULL, ?, datetime('now', '+3 hours'))
         """, (market_id, selection_key, selection_name, initial_odds, model_odds))
         sel_id = cursor.lastrowid
         cursor.execute("SELECT * FROM market_selections WHERE id = ?", (sel_id,))
@@ -165,13 +165,13 @@ def set_odds(
                 SET previous_odds = odds_value,
                     odds_value = ?,
                     odds_version = ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = datetime('now', '+3 hours')
                 WHERE id = ?
             """, (new_value, new_version, sel_id))
 
             cursor.execute("""
-                INSERT INTO odds_history (selection_id, old_value, new_value, changed_by, reason)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO odds_history (selection_id, old_value, new_value, changed_by, reason, changed_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now', '+3 hours'))
             """, (sel_id, old_value, new_value, admin_id, reason or "odds_update"))
 
             # Phase 6: Odds Movement Tracking & Canonical Sync
@@ -183,8 +183,8 @@ def set_odds(
                     pct_change = round(((new_value - old_value) / max(0.01, old_value)) * 100, 2)
                     direction = "up" if new_value > old_value else "down"
                     cursor.execute("""
-                        INSERT INTO odds_movement (selection_id, market_id, match_id, old_odds, new_odds, pct_change, direction, velocity, reason, source)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?)
+                        INSERT INTO odds_movement (selection_id, market_id, match_id, old_odds, new_odds, pct_change, direction, velocity, reason, source, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, 0.0, ?, ?, datetime('now', '+3 hours'))
                     """, (sel_id, market_id, match_id, old_value, new_value, pct_change, direction, reason or "odds_update", f"admin:{admin_id}" if admin_id else "system"))
 
                     # Synchronize bet_markets for canonical consistency
@@ -264,8 +264,8 @@ def suspend_market(market_id: int, admin_id: Optional[int] = None, reason: Optio
         )
         if admin_id:
             cursor.execute("""
-                INSERT INTO admin_audit_log (admin_id, action, target_type, target_id, new_value, reason)
-                VALUES (?, 'suspend_market', 'market', ?, 'suspended', ?)
+                INSERT INTO admin_audit_log (admin_id, action, target_type, target_id, new_value, reason, created_at)
+                VALUES (?, 'suspend_market', 'market', ?, 'suspended', ?, datetime('now', '+3 hours'))
             """, (admin_id, market_id, reason))
         return cursor.rowcount > 0
 
@@ -280,8 +280,8 @@ def unsuspend_market(market_id: int, admin_id: Optional[int] = None) -> bool:
         )
         if admin_id:
             cursor.execute("""
-                INSERT INTO admin_audit_log (admin_id, action, target_type, target_id, new_value, reason)
-                VALUES (?, 'unsuspend_market', 'market', ?, 'open', 'Manual unsuspend')
+                INSERT INTO admin_audit_log (admin_id, action, target_type, target_id, new_value, reason, created_at)
+                VALUES (?, 'unsuspend_market', 'market', ?, 'open', 'Manual unsuspend', datetime('now', '+3 hours'))
             """, (admin_id, market_id))
         return cursor.rowcount > 0
 

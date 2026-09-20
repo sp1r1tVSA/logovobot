@@ -155,6 +155,41 @@ Anything registered after the AI catch-all will never fire. Add new handlers *be
 
 ---
 
+## One clock: Moscow time
+
+The project runs on a single wall clock — **MSK, a fixed UTC+3** (no DST since 2014, so a
+plain `timezone(timedelta(hours=3))` is exact and needs no `tzdata`, which is absent from
+`python:*-slim` and from Windows `zoneinfo`). `time_utils.py` at the repo root is the only
+source of it: stdlib-only, imports nothing from the project, and sits *below* `database.py`
+so every layer can use it.
+
+Time is stored in MSK and **rendered without conversion** — `web/js/ui.js::formatDate` and
+the bot's formatters print the stored string as-is. Storage sites are enumerable, display
+sites are not, so the conversion happens once, on write.
+
+- In Python: `now_msk()`, `now_msk_str()`, `today_msk()`. Never `datetime.now()`,
+  `datetime.utcnow()` or `date.today()` — those are the server's clock, UTC in Docker.
+- In SQL: `datetime('now', '+3 hours')` (`time_utils.SQL_NOW`). Never `CURRENT_TIMESTAMP`
+  and never a bare `'now'` in `date()` / `julianday()` / `strftime()` — all of them are UTC
+  and would be compared against MSK columns. The `'+3 hours'` literal is interpolated into
+  the query text; it takes no arguments, so there is nothing to parameterize.
+- Every INSERT names its timestamp column explicitly. New tables carry
+  `DEFAULT (datetime('now', '+3 hours'))`, but SQLite cannot change a DEFAULT on an
+  existing table without rebuilding it (forbidden here), so on already-deployed databases
+  the old UTC default is still there — relying on it would silently write UTC.
+- Values with a timezone (ISO from the live-data providers) go through `parse_msk`, which
+  converts them. A *naive* value is assumed to be MSK already.
+- Migration `018_utc_to_msk_timestamps` shifted the machine-written columns on existing
+  databases by +3h, once. Human-entered columns were already MSK and are excluded:
+  `rounds.deadline`, `matches.match_time` / `match_date` / `proposed_time`,
+  plus the date-only `user_progression.last_active_date` and `schema_migrations.applied_at`.
+
+`tests/test_msk_time.py` guards all of this, including static scans of the sources for
+`CURRENT_TIMESTAMP`, bare `'now'`, naive `datetime.now()` and INSERTs that omit a
+default-timestamp column.
+
+---
+
 ## Domain model
 
 **Tournaments** (`tournaments`) have `type IN ('league', 'cup', 'friendly')`. Row id 1 is

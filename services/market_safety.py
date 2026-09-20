@@ -112,8 +112,8 @@ def evaluate_and_apply_suspend_rules(
 
         if updated_count > 0:
             cursor.execute("""
-                INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id)
-                VALUES (?, 'rule_market_suspension', 'match', ?, 'open', ?, ?, ?)
+                INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id, created_at)
+                VALUES (?, 'rule_market_suspension', 'match', ?, 'open', ?, ?, ?, datetime('now', '+3 hours'))
             """, (actor_id or 0, match_id, action, div_id, season_id))
             logger.info(f"Applied {action} on {updated_count} markets for match #{match_id} (Reason: {reason})")
 
@@ -145,8 +145,8 @@ def resume_match_markets(
 
         if count > 0:
             cursor.execute("""
-                INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id)
-                VALUES (?, 'resume_match_markets', 'match', ?, 'suspended', 'open', ?, ?)
+                INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id, created_at)
+                VALUES (?, 'resume_match_markets', 'match', ?, 'suspended', 'open', ?, ?, datetime('now', '+3 hours'))
             """, (actor_id or 0, match_id, div_id, season_id))
             logger.info(f"Resumed {count} suspended markets for match #{match_id}")
 
@@ -175,8 +175,8 @@ def force_close_match_markets(
 
         if count > 0:
             cursor.execute("""
-                INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id)
-                VALUES (?, 'force_close_markets', 'match', ?, 'active', 'closed', ?, ?)
+                INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id, created_at)
+                VALUES (?, 'force_close_markets', 'match', ?, 'active', 'closed', ?, ?, datetime('now', '+3 hours'))
             """, (actor_id or 0, match_id, div_id, season_id))
             logger.info(f"Force closed {count} markets for match #{match_id}")
 

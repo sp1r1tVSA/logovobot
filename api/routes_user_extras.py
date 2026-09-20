@@ -75,8 +75,8 @@ async def handle_save_coupon(request: web.Request) -> web.Response:
     with database.transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO saved_coupons (user_id, name, selections_json, total_odd, status)
-            VALUES (?, ?, ?, ?, 'active')
+            INSERT INTO saved_coupons (user_id, name, selections_json, total_odd, status, created_at)
+            VALUES (?, ?, ?, ?, 'active', datetime('now', '+3 hours'))
         """, (user_id, name, json.dumps(selections), total_odd))
         saved_id = cursor.lastrowid
 
@@ -158,8 +158,8 @@ async def handle_add_favorite(request: web.Request) -> web.Response:
     with database.transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT OR IGNORE INTO favorites (user_id, target_type, target_id)
-            VALUES (?, ?, ?)
+            INSERT OR IGNORE INTO favorites (user_id, target_type, target_id, created_at)
+            VALUES (?, ?, ?, datetime('now', '+3 hours'))
         """, (user_id, target_type, target_id))
 
     return web.json_response({"status": "ok", "message": "⭐ Добавлено в избранное!"})

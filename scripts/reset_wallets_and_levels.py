@@ -229,13 +229,13 @@ def apply_reset(rows: list[dict], args: argparse.Namespace) -> dict:
                         UPDATE user_wallets
                         SET balance = ?, total_wagered = 0, total_won = 0,
                             bets_count = 0, bets_won = 0, last_bonus_at = NULL,
-                            updated_at = CURRENT_TIMESTAMP
+                            updated_at = datetime('now', '+3 hours')
                         WHERE user_id = ?
                     """, (TARGET_BALANCE, uid))
                 else:
                     cursor.execute("""
                         UPDATE user_wallets
-                        SET balance = ?, updated_at = CURRENT_TIMESTAMP
+                        SET balance = ?, updated_at = datetime('now', '+3 hours')
                         WHERE user_id = ?
                     """, (TARGET_BALANCE, uid))
 
@@ -243,8 +243,8 @@ def apply_reset(rows: list[dict], args: argparse.Namespace) -> dict:
                     # Ledger-запись, чтобы правка баланса не выглядела как утечка монет.
                     cursor.execute("""
                         INSERT INTO coin_transactions
-                            (user_id, amount, transaction_type, reference_type, balance_after)
-                        VALUES (?, ?, 'balance_reset', 'admin_script', ?)
+                            (user_id, amount, transaction_type, reference_type, balance_after, created_at)
+                        VALUES (?, ?, 'balance_reset', 'admin_script', ?, datetime('now', '+3 hours'))
                     """, (uid, delta, TARGET_BALANCE))
                     if delta < 0:
                         stats["coins_removed"] += -delta
@@ -260,7 +260,7 @@ def apply_reset(rows: list[dict], args: argparse.Namespace) -> dict:
                             equipped_title = ?, current_streak = ?, best_streak = ?,
                             login_streak = ?, best_login_streak = ?,
                             streak_shields = ?, last_active_date = NULL,
-                            updated_at = CURRENT_TIMESTAMP
+                            updated_at = datetime('now', '+3 hours')
                         WHERE user_id = ?
                     """, (DEFAULT_LEVEL, DEFAULT_XP, DEFAULT_XP, DEFAULT_TITLE,
                           DEFAULT_STREAK, DEFAULT_STREAK,
@@ -269,7 +269,7 @@ def apply_reset(rows: list[dict], args: argparse.Namespace) -> dict:
                     cursor.execute("""
                         UPDATE user_progression
                         SET level = ?, current_xp = ?, total_xp_earned = ?,
-                            equipped_title = ?, updated_at = CURRENT_TIMESTAMP
+                            equipped_title = ?, updated_at = datetime('now', '+3 hours')
                         WHERE user_id = ?
                     """, (DEFAULT_LEVEL, DEFAULT_XP, DEFAULT_XP, DEFAULT_TITLE, uid))
                 stats["progressions"] += 1

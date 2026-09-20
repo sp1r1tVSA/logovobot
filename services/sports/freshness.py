@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import config
+from time_utils import MSK
 
 logger = logging.getLogger(__name__)
 
@@ -54,7 +55,8 @@ def evaluate_match_freshness(
             dt = last_updated_at
 
         if dt.tzinfo is None:
-            dt = dt.replace(tzinfo=timezone.utc)
+            # Наивная строка приходит из базы, а база живёт по Москве (time_utils).
+            dt = dt.replace(tzinfo=MSK)
 
         now = datetime.now(timezone.utc)
         age = max(0.0, (now - dt).total_seconds())

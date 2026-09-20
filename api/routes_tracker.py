@@ -366,8 +366,8 @@ def _ensure_live_state(cursor, match: dict) -> dict:
     cursor.execute(
         """
         INSERT INTO live_match_states
-            (match_id, season_id, division_id, status, period, minute, home_score, away_score, provider)
-        VALUES (?, ?, ?, ?, 'pre_match', 0, 0, 0, ?)
+            (match_id, season_id, division_id, status, period, minute, home_score, away_score, provider, last_updated_at)
+        VALUES (?, ?, ?, ?, 'pre_match', 0, 0, 0, ?, datetime('now', '+3 hours'))
         """,
         (
             match["id"],
@@ -384,8 +384,8 @@ def _audit(cursor, actor_id: int, action: str, match: dict, old_value: str, new_
     cursor.execute(
         """
         INSERT INTO bet_audit_log
-            (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id)
-        VALUES (?, ?, 'match', ?, ?, ?, ?, ?)
+            (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id, created_at)
+        VALUES (?, ?, 'match', ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
         """,
         (actor_id, action, match["id"], old_value, new_value,
          match["division_id"] or 1, match["season_id"] or 1),
@@ -582,7 +582,7 @@ def _start_session(telegram_id: int, match_id: int) -> dict[str, Any]:
             """
             UPDATE live_match_states
             SET status = ?, period = ?, provider = ?, version = version + 1,
-                last_updated_at = CURRENT_TIMESTAMP
+                last_updated_at = datetime('now', '+3 hours')
             WHERE match_id = ?
             """,
             (LIVE, period, TRACKER_PROVIDER, match_id),
@@ -638,7 +638,7 @@ def _apply_tick(
             """
             UPDATE live_match_states
             SET minute = ?, home_score = ?, away_score = ?, period = ?, provider = ?,
-                version = version + 1, last_updated_at = CURRENT_TIMESTAMP
+                version = version + 1, last_updated_at = datetime('now', '+3 hours')
             WHERE match_id = ?
             """,
             (minute, score_home, score_away, new_period, TRACKER_PROVIDER, match_id),
@@ -708,7 +708,7 @@ def _record_event(
             """
             UPDATE live_match_states
             SET status = ?, period = ?, minute = ?, provider = ?,
-                version = version + 1, last_updated_at = CURRENT_TIMESTAMP
+                version = version + 1, last_updated_at = datetime('now', '+3 hours')
             WHERE match_id = ?
             """,
             (new_status, new_period, minute, TRACKER_PROVIDER, match_id),
@@ -727,8 +727,8 @@ def _record_event(
             """
             INSERT INTO live_events (
                 match_id, provider, provider_event_id, event_type, minute,
-                team_name, player_name, payload
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                team_name, player_name, payload, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
             """,
             (
                 match_id, TRACKER_PROVIDER, provider_event_id, event_code, minute,
@@ -783,7 +783,7 @@ def _finish_session(telegram_id: int, match_id: int) -> dict[str, Any]:
             """
             UPDATE live_match_states
             SET status = ?, period = 'ft', provider = ?, version = version + 1,
-                last_updated_at = CURRENT_TIMESTAMP
+                last_updated_at = datetime('now', '+3 hours')
             WHERE match_id = ?
             """,
             (FINISHED, TRACKER_PROVIDER, match_id),

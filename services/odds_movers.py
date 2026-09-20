@@ -10,10 +10,10 @@ Provides analytics for:
 - Suspended Markets
 """
 
-import datetime
 import logging
 from typing import Any, Optional
 import database
+from time_utils import now_msk, parse_msk
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +62,8 @@ def record_odds_movement(
         velocity = 0.0
         if prev_row and prev_row["created_at"]:
             try:
-                prev_time = datetime.datetime.fromisoformat(str(prev_row["created_at"]).replace("Z", "+00:00"))
-                now = datetime.datetime.now(datetime.timezone.utc)
-                delta_sec = max(1.0, (now - prev_time).total_seconds())
+                prev_time = parse_msk(prev_row["created_at"])
+                delta_sec = max(1.0, (now_msk() - prev_time).total_seconds())
                 velocity = round(abs(pct_change) / delta_sec, 4)
             except Exception:
                 velocity = round(abs(pct_change) / 60.0, 4)
@@ -75,7 +74,7 @@ def record_odds_movement(
             INSERT INTO odds_movement (
                 selection_id, market_id, match_id, old_odds, new_odds,
                 pct_change, direction, velocity, reason, source, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
         """, (selection_id, market_id, match_id, old_odds, new_odds, pct_change, direction, velocity, reason, source))
         movement_id = cursor.lastrowid
 

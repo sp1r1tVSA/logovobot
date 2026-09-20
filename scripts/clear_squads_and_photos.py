@@ -27,7 +27,6 @@ scripts/clear_squads_and_photos.py
 """
 
 import argparse
-import datetime
 import os
 import shutil
 import sqlite3
@@ -39,6 +38,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from time_utils import now_msk_str
+
 try:
     import config
     DEFAULT_DB_PATH = getattr(config, "DB_PATH", "league.db")
@@ -48,7 +49,7 @@ except Exception:
 
 def create_backup(db_path: str) -> str:
     """Создает резервную копию базы данных с текущим timestamp."""
-    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    timestamp = now_msk_str("%Y%m%d_%H%M%S")
     backup_path = f"{db_path}.backup_before_squad_clear_{timestamp}"
     shutil.copy2(db_path, backup_path)
     return backup_path

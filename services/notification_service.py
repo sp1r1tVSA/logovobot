@@ -129,7 +129,7 @@ def queue_notification(
         # Cooldown check for low/normal priority events
         if cooldown_seconds > 0 and event_type not in HIGH_PRIORITY_TYPES and priority not in ("high", "critical"):
             cursor.execute("""
-                SELECT strftime('%s', 'now') - strftime('%s', created_at) as diff_sec
+                SELECT strftime('%s', 'now', '+3 hours') - strftime('%s', created_at) as diff_sec
                 FROM notification_events
                 WHERE user_id = ? AND event_type = ?
                 ORDER BY id DESC
@@ -144,8 +144,8 @@ def queue_notification(
         try:
             cursor.execute("""
                 INSERT INTO notification_events (
-                    user_id, event_type, source_event_id, title, body, link, priority, status
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')
+                    user_id, event_type, source_event_id, title, body, link, priority, status, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now', '+3 hours'))
             """, (user_id, event_type, str(source_event_id), title, body, link, priority))
         except sqlite3.IntegrityError:
             logger.debug("Duplicate notification blocked: user=%s, type=%s, source=%s", user_id, event_type, source_event_id)
@@ -154,8 +154,8 @@ def queue_notification(
         # Mirror to in-app notifications
         try:
             cursor.execute("""
-                INSERT INTO notifications (user_id, type, title, body, reference_id, is_read)
-                VALUES (?, ?, ?, ?, ?, 0)
+                INSERT INTO notifications (user_id, type, title, body, reference_id, is_read, created_at)
+                VALUES (?, ?, ?, ?, ?, 0, datetime('now', '+3 hours'))
             """, (user_id, event_type, title, body, None))
         except Exception as e:
             logger.warning("Failed to mirror in-app notification: %s", e)
@@ -247,6 +247,6 @@ def mark_notification_sent(event_id: int) -> None:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE notification_events
-            SET status = 'sent', sent_at = CURRENT_TIMESTAMP
+            SET status = 'sent', sent_at = datetime('now', '+3 hours')
             WHERE id = ?
         """, (event_id,))

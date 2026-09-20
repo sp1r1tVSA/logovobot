@@ -59,27 +59,27 @@ class StreakEngine:
                     UPDATE user_progression
                     SET current_streak = current_streak + 1,
                         best_streak = MAX(best_streak, current_streak + 1),
-                        updated_at = CURRENT_TIMESTAMP
+                        updated_at = datetime('now', '+3 hours')
                     WHERE user_id = ?
                 """, (user_id,))
                 cursor.execute("""
                     UPDATE season_player_stats
                     SET current_streak = current_streak + 1,
                         best_streak = MAX(best_streak, current_streak + 1),
-                        updated_at = CURRENT_TIMESTAMP
+                        updated_at = datetime('now', '+3 hours')
                     WHERE user_id = ? AND season_id = ? AND division_id = ?
                 """, (user_id, s_stats["season_id"], s_stats["division_id"]))
             elif outcome == "lost":
                 cursor.execute("""
                     UPDATE user_progression
                     SET current_streak = 0,
-                        updated_at = CURRENT_TIMESTAMP
+                        updated_at = datetime('now', '+3 hours')
                     WHERE user_id = ?
                 """, (user_id,))
                 cursor.execute("""
                     UPDATE season_player_stats
                     SET current_streak = 0,
-                        updated_at = CURRENT_TIMESTAMP
+                        updated_at = datetime('now', '+3 hours')
                     WHERE user_id = ? AND season_id = ? AND division_id = ?
                 """, (user_id, s_stats["season_id"], s_stats["division_id"]))
             elif outcome in ("refunded", "voided", "cancelled"):

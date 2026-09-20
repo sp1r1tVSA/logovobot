@@ -26,6 +26,8 @@ import math
 import re
 from typing import Any
 
+from time_utils import MSK
+
 # ─── Веса признаков ──────────────────────────────────────────────────────────
 # Правятся разработчиками, а не эксплуатацией, поэтому это константы модуля, а
 # не строки в risk_limits_config (та таблица про денежные лимиты).
@@ -226,8 +228,9 @@ def _parse_ts(value: Any) -> float | None:
         text = text.split("+", 1)[0].strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
+            # Наивные строки приходят из базы, а база московская (time_utils).
             return datetime.datetime.strptime(text, fmt).replace(
-                tzinfo=datetime.timezone.utc
+                tzinfo=MSK
             ).timestamp()
         except ValueError:
             continue

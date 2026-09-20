@@ -33,7 +33,6 @@ scripts/reset_season_data.py
 """
 
 import argparse
-import datetime
 import os
 import shutil
 import sqlite3
@@ -46,6 +45,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 import config
+from time_utils import now_msk_str
 
 DEMO_UIDS = [990101, 990102, 990103, 990104, 990105, 990106]
 
@@ -182,7 +182,7 @@ def execute_reset(
         return
 
     # Создание бэкапа перед модификацией
-    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    ts = now_msk_str("%Y%m%d-%H%M%S")
     backup_path = f"{db_path}.bak-{ts}"
     try:
         shutil.copy2(db_path, backup_path)

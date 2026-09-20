@@ -13,6 +13,7 @@ from telegram.error import BadRequest, TelegramError, Forbidden
 from telegram.ext import ContextTypes, ConversationHandler
 import html
 import database
+from time_utils import now_msk
 from handlers.base import (
     is_admin,
     is_global_admin,
@@ -542,7 +543,7 @@ async def _build_debts_summary(division_id: int | None = None, season_id: int | 
 
     total_debts = len(league_unplayed)
 
-    now_str = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+    now_str = now_msk().strftime("%d.%m.%Y %H:%M")
     header_title = f"🗂 <b>ДОЛГИ УЧАСТНИКОВ — {html.escape(division_name.upper())}</b>\n" if division_name else "🗂 <b>ДОЛГИ УЧАСТНИКОВ</b>\n"
     lines = [
         header_title,
@@ -6121,7 +6122,7 @@ async def job_check_deadlines_and_remind(context: ContextTypes.DEFAULT_TYPE) -> 
     if not open_rounds:
         return
 
-    now = datetime.datetime.now()
+    now = now_msk()
 
     for r in open_rounds:
         r_num = r["round_number"]
@@ -6497,7 +6498,7 @@ async def _run_debt_lifecycle_tracker(context: ContextTypes.DEFAULT_TYPE) -> Non
     if not overdue_matches:
         return
 
-    now = datetime.datetime.now()
+    now = now_msk()
 
     warns_updated = False
 
@@ -6697,11 +6698,11 @@ async def admin_check_debts_command(update: Update, context: ContextTypes.DEFAUL
 
     overdue_matches = await asyncio.to_thread(database.get_detailed_overdue_matches)
 
-    now = datetime.datetime.now()
+    now = now_msk()
 
     lines = [
         f"🔍 <b>Диагностика системы долгов</b>\n",
-        f"📅 Текущее время сервера: <b>{now.strftime('%d.%m.%Y %H:%M:%S')}</b>",
+        f"📅 Текущее время (МСК): <b>{now.strftime('%d.%m.%Y %H:%M:%S')}</b>",
         f"⚙️ Статус авто-варнов: <b>🟢 АКТИВНЫ</b>",
         f"📊 Найдено матчей-долгов: <b>{len(overdue_matches)}</b>\n",
     ]

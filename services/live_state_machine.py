@@ -102,8 +102,8 @@ def transition_live_match(
             curr_status = "SCHEDULED"
 
             cursor.execute("""
-                INSERT INTO live_match_states (match_id, season_id, division_id, status, period, home_score, away_score, provider)
-                VALUES (?, ?, ?, ?, 'pre_match', ?, ?, ?)
+                INSERT INTO live_match_states (match_id, season_id, division_id, status, period, home_score, away_score, provider, last_updated_at)
+                VALUES (?, ?, ?, ?, 'pre_match', ?, ?, ?, datetime('now', '+3 hours'))
             """, (match_id, season_id, div_id, curr_status, m_row["player1_score"] or 0, m_row["player2_score"] or 0, source))
             curr_state = curr_status
             version = 1
@@ -137,7 +137,7 @@ def transition_live_match(
         # 4. Update live_match_states
         cursor.execute("""
             UPDATE live_match_states
-            SET status = ?, period = ?, version = version + 1, last_updated_at = CURRENT_TIMESTAMP
+            SET status = ?, period = ?, version = version + 1, last_updated_at = datetime('now', '+3 hours')
             WHERE match_id = ?
         """, (new_status, new_period, match_id))
 
@@ -167,8 +167,8 @@ def transition_live_match(
         div_id = live_row["division_id"] if live_row and "division_id" in live_row.keys() else 1
         season_id = live_row["season_id"] if live_row and "season_id" in live_row.keys() else 1
         cursor.execute("""
-            INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id)
-            VALUES (?, 'match_status_transition', 'match', ?, ?, ?, ?, ?)
+            INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id, created_at)
+            VALUES (?, 'match_status_transition', 'match', ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
         """, (actor_id or 0, match_id, curr_state, new_status, div_id, season_id))
 
         logger.info(f"Match #{match_id} state changed: {curr_state} -> {new_status} (source: {source})")

@@ -10,12 +10,12 @@ import asyncio
 import html
 import json
 import logging
-from datetime import datetime, timedelta, timezone
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import ContextTypes
 
 import config
 import database
+from time_utils import fmt_msk
 from handlers.base import is_global_admin
 from handlers.cabinet import safe_send_notification
 from services.bet_outcome_text import (
@@ -51,8 +51,6 @@ ITEM_RESULT_TITLES = {
 }
 
 PAGE_SIZE = 5
-
-MSK = timezone(timedelta(hours=3), "МСК")
 
 
 def _ensure_private_chat_and_super_admin(update: Update) -> tuple[bool, int | None]:
@@ -106,19 +104,8 @@ def _build_overview_header(stats: dict, filter_status: str | None = None, filter
 
 
 def _fmt_dt(value) -> str:
-    """UTC из SQLite (CURRENT_TIMESTAMP) → московское время: '2026-09-19 08:42:11' → '19.09 11:42'.
-
-    Москва живёт в UTC+3 без перехода на летнее время, поэтому фиксированный сдвиг
-    точен и не требует tzdata. Непонятный формат отдаём как есть.
-    """
-    raw = str(value or "").strip()
-    try:
-        dt = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return raw or "—"
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(MSK).strftime("%d.%m %H:%M")
+    """Время из базы → '19.09 11:42'. База уже московская (см. time_utils)."""
+    return fmt_msk(value, "%d.%m %H:%M")
 
 
 def _fmt_coins(n: int) -> str:

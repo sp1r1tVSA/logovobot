@@ -9,6 +9,7 @@ import asyncio
 import database
 import logging
 import config
+from time_utils import now_msk
 from config import ADMIN_IDS
 from services.graphics.table_generator import generate_league_table_image
 from services.graphics import top_stats_generator
@@ -736,7 +737,7 @@ async def show_round_matches(update: Update, context: ContextTypes.DEFAULT_TYPE)
         
         if is_open and deadline_text:
             dt = database.parse_flexible_datetime(deadline_text)
-            if dt and datetime.datetime.now() > dt:
+            if dt and now_msk() > dt:
                 text += "Статус: 🔴 Дедлайн истек (результаты принимаются только администратором)\n"
             else:
                 text += f"Статус: 🟢 Открыт\nДедлайн: {deadline_text}\n"

@@ -198,7 +198,7 @@ def settle_match_predictions(
         cursor.execute("""
             UPDATE matches
             SET player1_score = ?, player2_score = ?, ht_score1 = ?, ht_score2 = ?,
-                status = ?, played_at = CURRENT_TIMESTAMP
+                status = ?, played_at = datetime('now', '+3 hours')
             WHERE id = ?
         """, (score1, score2, ht_score1, ht_score2, target_status, match_id))
 
@@ -301,7 +301,7 @@ def settle_match_predictions(
                 # Bet is LOST immediately
                 cursor.execute("""
                     UPDATE user_bets
-                    SET status = 'lost', actual_payout = 0, settled_at = CURRENT_TIMESTAMP
+                    SET status = 'lost', actual_payout = 0, settled_at = datetime('now', '+3 hours')
                     WHERE id = ? AND settled_at IS NULL
                 """, (b_id,))
                 if cursor.rowcount > 0:
@@ -329,7 +329,7 @@ def settle_match_predictions(
                 # Full refund of stake
                 cursor.execute("""
                     UPDATE user_bets
-                    SET status = 'refunded', actual_payout = ?, settled_at = CURRENT_TIMESTAMP
+                    SET status = 'refunded', actual_payout = ?, settled_at = datetime('now', '+3 hours')
                     WHERE id = ? AND settled_at IS NULL
                 """, (stake, b_id))
 
@@ -339,7 +339,7 @@ def settle_match_predictions(
                 database.get_or_create_wallet(u_id)
                 cursor.execute("""
                     UPDATE user_wallets
-                    SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP
+                    SET balance = balance + ?, updated_at = datetime('now', '+3 hours')
                     WHERE user_id = ?
                 """, (stake, u_id))
 
@@ -347,8 +347,8 @@ def settle_match_predictions(
                 bal_after = cursor.fetchone()["balance"]
 
                 cursor.execute("""
-                    INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
-                    VALUES (?, ?, 'refund', ?, 'bet', ?)
+                    INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+                    VALUES (?, ?, 'refund', ?, 'bet', ?, datetime('now', '+3 hours'))
                 """, (u_id, stake, b_id, bal_after))
                 _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after)
 
@@ -386,7 +386,7 @@ def settle_match_predictions(
 
             cursor.execute("""
                 UPDATE user_bets
-                SET status = 'won', actual_payout = ?, settled_at = CURRENT_TIMESTAMP
+                SET status = 'won', actual_payout = ?, settled_at = datetime('now', '+3 hours')
                 WHERE id = ? AND settled_at IS NULL
             """, (payout, b_id))
 
@@ -399,7 +399,7 @@ def settle_match_predictions(
                 SET balance = balance + ?,
                     total_won = total_won + ?,
                     bets_won = bets_won + 1,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = datetime('now', '+3 hours')
                 WHERE user_id = ?
             """, (payout, payout, u_id))
 
@@ -407,8 +407,8 @@ def settle_match_predictions(
             bal_after = cursor.fetchone()["balance"]
 
             cursor.execute("""
-                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
-                VALUES (?, ?, 'bet_won', ?, 'bet', ?)
+                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+                VALUES (?, ?, 'bet_won', ?, 'bet', ?, datetime('now', '+3 hours'))
             """, (u_id, payout, b_id, bal_after))
             _notify_bet_won(cursor, u_id, b_id, bet["bet_type"], effective_odd_rounded, payout, stake, bal_after)
 
@@ -479,7 +479,7 @@ def refund_match_bets(match_id: int) -> list[dict]:
             if bet["bet_type"] == "single" or all_refunded:
                 cursor.execute("""
                     UPDATE user_bets
-                    SET status = 'refunded', actual_payout = ?, settled_at = CURRENT_TIMESTAMP
+                    SET status = 'refunded', actual_payout = ?, settled_at = datetime('now', '+3 hours')
                     WHERE id = ? AND settled_at IS NULL
                 """, (stake, b_id))
 
@@ -487,7 +487,7 @@ def refund_match_bets(match_id: int) -> list[dict]:
                     database.get_or_create_wallet(u_id)
                     cursor.execute("""
                         UPDATE user_wallets
-                        SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP
+                        SET balance = balance + ?, updated_at = datetime('now', '+3 hours')
                         WHERE user_id = ?
                     """, (stake, u_id))
 
@@ -495,8 +495,8 @@ def refund_match_bets(match_id: int) -> list[dict]:
                     bal_after = cursor.fetchone()["balance"]
 
                     cursor.execute("""
-                        INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
-                        VALUES (?, ?, 'bet_refund', ?, 'bet', ?)
+                        INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+                        VALUES (?, ?, 'bet_refund', ?, 'bet', ?, datetime('now', '+3 hours'))
                     """, (u_id, stake, b_id, bal_after))
                     _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after)
 
@@ -545,7 +545,7 @@ def resettle_match_predictions(
         cursor.execute("""
             UPDATE matches
             SET player1_score = ?, player2_score = ?, ht_score1 = ?, ht_score2 = ?,
-                status = ?, played_at = CURRENT_TIMESTAMP
+                status = ?, played_at = datetime('now', '+3 hours')
             WHERE id = ?
         """, (score1, score2, ht_score1, ht_score2, target_status, match_id))
 
@@ -631,15 +631,15 @@ def resettle_match_predictions(
                     SET balance = balance - ?,
                         total_won = CASE WHEN ? = 'won' THEN max(0, total_won - ?) ELSE total_won END,
                         bets_won = CASE WHEN ? = 'won' THEN max(0, bets_won - 1) ELSE bets_won END,
-                        updated_at = CURRENT_TIMESTAMP
+                        updated_at = datetime('now', '+3 hours')
                     WHERE user_id = ?
                 """, (prev_payout, prev_status, prev_payout, prev_status, u_id))
 
                 cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (u_id,))
                 bal_rev = cursor.fetchone()["balance"]
                 cursor.execute("""
-                    INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
-                    VALUES (?, ?, 'resettle_reversal', ?, 'bet', ?)
+                    INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+                    VALUES (?, ?, 'resettle_reversal', ?, 'bet', ?, datetime('now', '+3 hours'))
                 """, (u_id, -prev_payout, b_id, bal_rev))
 
             # 4b. Re-evaluate bet legs
@@ -653,7 +653,7 @@ def resettle_match_predictions(
             if has_lost:
                 cursor.execute("""
                     UPDATE user_bets
-                    SET status = 'lost', actual_payout = 0, settled_at = CURRENT_TIMESTAMP
+                    SET status = 'lost', actual_payout = 0, settled_at = datetime('now', '+3 hours')
                     WHERE id = ?
                 """, (b_id,))
                 if prev_status != "lost":
@@ -694,22 +694,22 @@ def resettle_match_predictions(
             if all_voided:
                 cursor.execute("""
                     UPDATE user_bets
-                    SET status = 'refunded', actual_payout = ?, settled_at = CURRENT_TIMESTAMP
+                    SET status = 'refunded', actual_payout = ?, settled_at = datetime('now', '+3 hours')
                     WHERE id = ?
                 """, (stake, b_id))
 
                 database.get_or_create_wallet(u_id)
                 cursor.execute("""
                     UPDATE user_wallets
-                    SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP
+                    SET balance = balance + ?, updated_at = datetime('now', '+3 hours')
                     WHERE user_id = ?
                 """, (stake, u_id))
 
                 cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (u_id,))
                 bal_after = cursor.fetchone()["balance"]
                 cursor.execute("""
-                    INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
-                    VALUES (?, ?, 'resettle_refund', ?, 'bet', ?)
+                    INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+                    VALUES (?, ?, 'resettle_refund', ?, 'bet', ?, datetime('now', '+3 hours'))
                 """, (u_id, stake, b_id, bal_after))
                 if (prev_status, prev_payout) != ("refunded", stake):
                     _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after, resettle=True)
@@ -733,7 +733,7 @@ def resettle_match_predictions(
 
             cursor.execute("""
                 UPDATE user_bets
-                SET status = 'won', actual_payout = ?, settled_at = CURRENT_TIMESTAMP
+                SET status = 'won', actual_payout = ?, settled_at = datetime('now', '+3 hours')
                 WHERE id = ?
             """, (payout, b_id))
 
@@ -743,15 +743,15 @@ def resettle_match_predictions(
                 SET balance = balance + ?,
                     total_won = total_won + ?,
                     bets_won = bets_won + 1,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = datetime('now', '+3 hours')
                 WHERE user_id = ?
             """, (payout, payout, u_id))
 
             cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (u_id,))
             bal_after = cursor.fetchone()["balance"]
             cursor.execute("""
-                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
-                VALUES (?, ?, 'resettle_payout', ?, 'bet', ?)
+                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+                VALUES (?, ?, 'resettle_payout', ?, 'bet', ?, datetime('now', '+3 hours'))
             """, (u_id, payout, b_id, bal_after))
             if (prev_status, prev_payout) != ("won", payout):
                 _notify_bet_won(cursor, u_id, b_id, bet["bet_type"], effective_odd_rounded, payout, stake, bal_after,

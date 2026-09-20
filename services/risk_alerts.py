@@ -72,7 +72,7 @@ def create_risk_alert(
               AND (division_id IS ? OR division_id = ?)
               AND (match_id IS ? OR match_id = ?)
               AND (market_id IS ? OR market_id = ?)
-              AND created_at >= datetime('now', '-5 minutes')
+              AND created_at >= datetime('now', '+3 hours', '-5 minutes')
             LIMIT 1
         """, (
             alert_type,
@@ -87,8 +87,8 @@ def create_risk_alert(
         cursor.execute("""
             INSERT INTO risk_alerts (
                 alert_type, severity, division_id, match_id, market_id, selection_id,
-                message, details_json, status
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active')
+                message, details_json, status, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', datetime('now', '+3 hours'))
         """, (
             alert_type, severity_lower, division_id, match_id, market_id, selection_id,
             message, details_json
@@ -159,7 +159,7 @@ def resolve_risk_alert(alert_id: int, admin_id: Optional[int] = None) -> bool:
         cursor = conn.cursor()
         cursor.execute("""
             UPDATE risk_alerts
-            SET status = 'resolved', resolved_at = CURRENT_TIMESTAMP
+            SET status = 'resolved', resolved_at = datetime('now', '+3 hours')
             WHERE id = ? AND status IN ('active', 'acknowledged')
         """, (alert_id,))
         return cursor.rowcount > 0

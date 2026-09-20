@@ -64,8 +64,8 @@ def ingest_live_event(event: LiveEvent) -> dict[str, Any]:
             div_id = m_row["division_id"] if "division_id" in m_row.keys() and m_row["division_id"] else 1
             season_id = m_row["season_id"] if "season_id" in m_row.keys() and m_row["season_id"] else 1
             cursor.execute("""
-                INSERT INTO live_match_states (match_id, season_id, division_id, status, period, minute, home_score, away_score, provider)
-                VALUES (?, ?, ?, 'LIVE', '1h', ?, ?, ?, ?)
+                INSERT INTO live_match_states (match_id, season_id, division_id, status, period, minute, home_score, away_score, provider, last_updated_at)
+                VALUES (?, ?, ?, 'LIVE', '1h', ?, ?, ?, ?, datetime('now', '+3 hours'))
             """, (event.match_id, season_id, div_id, event.minute, m_row["player1_score"] or 0, m_row["player2_score"] or 0, event.provider))
             cursor.execute("SELECT * FROM live_match_states WHERE match_id = ?", (event.match_id,))
             state_row = cursor.fetchone()
@@ -137,7 +137,7 @@ def ingest_live_event(event: LiveEvent) -> dict[str, Any]:
             # Update match and state scores monotonically
             cursor.execute("""
                 UPDATE live_match_states
-                SET home_score = ?, away_score = ?, minute = ?, version = version + 1, last_updated_at = CURRENT_TIMESTAMP
+                SET home_score = ?, away_score = ?, minute = ?, version = version + 1, last_updated_at = datetime('now', '+3 hours')
                 WHERE match_id = ?
             """, (curr_home_score, curr_away_score, new_minute, event.match_id))
 
@@ -149,7 +149,7 @@ def ingest_live_event(event: LiveEvent) -> dict[str, Any]:
         else:
             cursor.execute("""
                 UPDATE live_match_states
-                SET minute = ?, last_updated_at = CURRENT_TIMESTAMP
+                SET minute = ?, last_updated_at = datetime('now', '+3 hours')
                 WHERE match_id = ?
             """, (new_minute, event.match_id))
 
@@ -162,8 +162,8 @@ def ingest_live_event(event: LiveEvent) -> dict[str, Any]:
         cursor.execute("""
             INSERT INTO live_events (
                 match_id, provider, provider_event_id, event_type, minute,
-                added_time, team_id, team_name, player_id, player_name, payload
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                added_time, team_id, team_name, player_id, player_name, payload, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
         """, (
             event.match_id, event.provider, event.provider_event_id, event.event_type,
             event.minute, event.added_time, event.team_id, event.team_name,
@@ -186,8 +186,8 @@ def ingest_live_event(event: LiveEvent) -> dict[str, Any]:
                 div_id = m_row["division_id"] if "division_id" in m_row.keys() and m_row["division_id"] else 1
                 season_id = m_row["season_id"] if "season_id" in m_row.keys() and m_row["season_id"] else 1
                 cursor.execute("""
-                    INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id)
-                    VALUES (0, 'auto_suspend_markets', 'match', ?, 'open', 'suspended', ?, ?)
+                    INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id, created_at)
+                    VALUES (0, 'auto_suspend_markets', 'match', ?, 'open', 'suspended', ?, ?, datetime('now', '+3 hours'))
                 """, (event.match_id, div_id, season_id))
 
         logger.info(
@@ -225,7 +225,7 @@ def ingest_live_statistics(stats: LiveStatistics) -> bool:
                 xg_home, xg_away, saves_home, saves_away, substitutions_home, substitutions_away,
                 provider, updated_at
             ) VALUES (
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours')
             )
             ON CONFLICT(match_id) DO UPDATE SET
                 possession_home = excluded.possession_home,
@@ -259,7 +259,7 @@ def ingest_live_statistics(stats: LiveStatistics) -> bool:
                 substitutions_home = excluded.substitutions_home,
                 substitutions_away = excluded.substitutions_away,
                 provider = excluded.provider,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = datetime('now', '+3 hours')
         """, (
             stats.match_id, stats.possession_home, stats.possession_away,
             stats.shots_home, stats.shots_away, stats.shots_on_target_home, stats.shots_on_target_away,

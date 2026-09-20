@@ -10,6 +10,7 @@ import logging
 from aiohttp import web
 import database
 from config import INITIAL_WALLET_BALANCE
+from time_utils import now_msk, parse_msk
 from api.auth import get_authenticated_user, check_user_access
 from handlers.base import is_admin
 
@@ -77,10 +78,9 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
     cooldown_sec = 0
     last_bonus = wallet.get("last_bonus_at")
     if last_bonus:
-        import datetime
         try:
-            last_dt = datetime.datetime.fromisoformat(last_bonus)
-            elapsed = (datetime.datetime.now() - last_dt).total_seconds()
+            last_dt = parse_msk(last_bonus)
+            elapsed = (now_msk() - last_dt).total_seconds()
             if elapsed < 86400:
                 can_claim = False
                 cooldown_sec = int(86400 - elapsed)
@@ -251,10 +251,9 @@ async def handle_get_wallet(request: web.Request) -> web.Response:
     cooldown_sec = 0
     last_bonus = wallet.get("last_bonus_at")
     if last_bonus:
-        import datetime
         try:
-            last_dt = datetime.datetime.fromisoformat(last_bonus)
-            elapsed = (datetime.datetime.now() - last_dt).total_seconds()
+            last_dt = parse_msk(last_bonus)
+            elapsed = (now_msk() - last_dt).total_seconds()
             if elapsed < 86400:
                 can_claim = False
                 cooldown_sec = int(86400 - elapsed)

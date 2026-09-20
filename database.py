@@ -7,6 +7,7 @@ import asyncio
 from typing import Generator
 from contextlib import contextmanager
 from config import DB_PATH, INITIAL_WALLET_BALANCE, MAX_OPEN_ROUNDS_PER_DIVISION
+from time_utils import SQL_NOW, now_msk, now_msk_str, today_msk
 
 logger = logging.getLogger(__name__)
 
@@ -148,6 +149,110 @@ def transaction() -> Generator[sqlite3.Connection, None, None]:
         _tx_local.stack = []
 
 
+# ─── 018: одна стрелка часов ─────────────────────────────────────────────────
+# Эти колонки пишет сам бот. Раньше туда попадал UTC (`CURRENT_TIMESTAMP` и
+# `datetime.now()` на UTC-сервере), теперь — Москва (см. time_utils). Разовый
+# сдвиг старых строк, чтобы в одной колонке не жили два часовых пояса.
+#
+# Сознательно НЕ сдвигаются:
+#   rounds.deadline, matches.match_time / match_date / proposed_time — их руками
+#     вбивает админ, и они и раньше были московскими;
+#   user_progression.last_active_date — только дата, без времени;
+#   schema_migrations.applied_at — служебная отметка о самих миграциях.
+#
+# Имена таблиц и колонок подставляются в SQL текстом. Список захардкожен здесь и
+# никогда не приходит снаружи — тот же случай, что SAFE_COLUMNS.
+_MSK_SHIFT_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("admin_audit_log", "created_at"),
+    ("bet_audit_log", "created_at"),
+    ("bet_markets", "created_at"),
+    ("chat_history", "created_at"),
+    ("coin_transactions", "created_at"),
+    ("debt_reminders", "sent_at"),
+    ("division_admins", "created_at"),
+    ("division_topics", "created_at"),
+    ("divisions", "created_at"),
+    ("elo_applied_matches", "applied_at"),
+    ("favorites", "created_at"),
+    ("integrity_cases", "created_at"),
+    ("integrity_cases", "updated_at"),
+    ("integrity_cases", "reviewed_at"),
+    ("live_events", "created_at"),
+    ("live_match_states", "last_updated_at"),
+    ("live_statistics", "updated_at"),
+    ("market_selections", "updated_at"),
+    ("markets", "created_at"),
+    ("matches", "played_at"),
+    ("matches", "frozen_at"),
+    ("notification_events", "created_at"),
+    ("notification_events", "sent_at"),
+    ("notifications", "created_at"),
+    ("odds_history", "changed_at"),
+    ("odds_movement", "created_at"),
+    ("pending_reports", "created_at"),
+    ("prediction_snapshots", "snapshot_at"),
+    ("predictions", "created_at"),
+    ("predictions", "resolved_at"),
+    ("provider_matches", "last_update_at"),
+    ("provider_sync_log", "created_at"),
+    ("provider_sync_state", "updated_at"),
+    ("provider_sync_state", "last_sync_at"),
+    ("risk_alerts", "created_at"),
+    ("risk_alerts", "resolved_at"),
+    ("risk_limits_config", "updated_at"),
+    ("round_content_posts", "posted_at"),
+    ("round_reminders", "sent_at"),
+    ("rounds", "bets_opened_at"),
+    ("saved_coupons", "created_at"),
+    ("season_player_stats", "updated_at"),
+    ("season_reward_ledger", "created_at"),
+    ("season_reward_ledger", "distributed_at"),
+    ("season_rules_config", "created_at"),
+    ("season_snapshots", "created_at"),
+    ("seasons", "created_at"),
+    ("seasons", "started_at"),
+    ("seasons", "finished_at"),
+    ("sports_providers", "created_at"),
+    ("sports_providers", "updated_at"),
+    ("sports_providers", "last_sync_at"),
+    ("style_samples", "created_at"),
+    ("team_ratings", "last_updated_at"),
+    ("teams", "created_at"),
+    ("telegram_media_cache", "created_at"),
+    ("tournaments", "created_at"),
+    ("user_achievements", "unlocked_at"),
+    ("user_bets", "created_at"),
+    ("user_bets", "settled_at"),
+    ("user_bets", "cashout_at"),
+    ("user_progression", "updated_at"),
+    ("user_wallets", "updated_at"),
+    ("user_wallets", "last_bonus_at"),
+    ("user_warns", "created_at"),
+    ("users", "registered_at"),
+)
+
+
+def _shift_timestamps_to_msk(cursor: sqlite3.Cursor) -> int:
+    """Сдвинуть машинные отметки времени из UTC в МСК. Возвращает число строк."""
+    cursor.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+    tables = {row[0] for row in cursor.fetchall()}
+    shifted = 0
+    for table, column in _MSK_SHIFT_COLUMNS:
+        if table not in tables:
+            continue
+        cursor.execute(f"PRAGMA table_info({table})")
+        if column not in {row[1] for row in cursor.fetchall()}:
+            continue
+        # datetime() отдаёт NULL на неразбираемой строке — такие строки не трогаем,
+        # иначе миграция стёрла бы то, что не смогла прочитать.
+        cursor.execute(
+            f"UPDATE {table} SET {column} = datetime({column}, '+3 hours') "
+            f"WHERE {column} IS NOT NULL AND datetime({column}) IS NOT NULL"
+        )
+        shifted += cursor.rowcount
+    return shifted
+
+
 def init_db() -> None:
     """Initialize the database tables."""
     logger.info("Initializing database tables...")
@@ -156,7 +261,7 @@ def init_db() -> None:
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version TEXT PRIMARY KEY,
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                applied_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 description TEXT
             )
         """)
@@ -165,7 +270,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft', 'active', 'finished', 'archived')),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 started_at TIMESTAMP,
                 finished_at TIMESTAMP,
                 created_by INTEGER
@@ -173,7 +278,7 @@ def init_db() -> None:
         """)
         cursor.execute("""
             INSERT OR IGNORE INTO seasons (id, name, status, created_at, started_at)
-            VALUES (1, 'Сезон 2026', 'active', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+            VALUES (1, 'Сезон 2026', 'active', datetime('now', '+3 hours'), datetime('now', '+3 hours'))
         """)
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS users (
@@ -182,7 +287,7 @@ def init_db() -> None:
                 team_name TEXT,
                 league_name TEXT,
                 role TEXT NOT NULL DEFAULT 'user',
-                registered_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                registered_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         cursor.execute("""
@@ -291,7 +396,7 @@ def init_db() -> None:
                 division_id INTEGER DEFAULT 1,
                 round_number INTEGER,
                 reminder_type TEXT,
-                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sent_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 PRIMARY KEY(division_id, round_number, reminder_type)
             )
         """)
@@ -308,7 +413,7 @@ def init_db() -> None:
                 round_number INTEGER NOT NULL,
                 content_type TEXT NOT NULL,
                 message_id INTEGER,
-                posted_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                posted_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 PRIMARY KEY(division_id, round_number, content_type)
             )
         """)
@@ -317,7 +422,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 match_id INTEGER NOT NULL,
                 stage TEXT NOT NULL,
-                sent_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                sent_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(match_id, stage),
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE
             )
@@ -329,7 +434,7 @@ def init_db() -> None:
                 admin_id INTEGER,
                 reason TEXT,
                 type TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
             )
         """)
@@ -338,7 +443,7 @@ def init_db() -> None:
                 match_id INTEGER PRIMARY KEY,
                 reporter_id INTEGER NOT NULL,
                 payload TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         try:
@@ -520,7 +625,7 @@ def init_db() -> None:
                         idempotency_key TEXT,
                         idempotency_payload_hash TEXT,
                         cashout_at TIMESTAMP,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                         settled_at TIMESTAMP
                     )
                 """)
@@ -575,7 +680,7 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 role TEXT NOT NULL,
                 text TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_chat_history_user ON chat_history(user_id, id)")
@@ -585,7 +690,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS style_samples (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 text TEXT NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
 
@@ -595,7 +700,7 @@ def init_db() -> None:
                 file_hash TEXT PRIMARY KEY,
                 file_id TEXT NOT NULL,
                 media_type TEXT NOT NULL DEFAULT 'animation',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_media_cache_type ON telegram_media_cache(media_type)")
@@ -611,7 +716,7 @@ def init_db() -> None:
                 bets_won INTEGER NOT NULL DEFAULT 0,
                 daily_limit INTEGER,
                 last_bonus_at TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_wallets_balance ON user_wallets(balance DESC)")
@@ -631,7 +736,7 @@ def init_db() -> None:
                 odd_btts_yes REAL NOT NULL DEFAULT 1.70,
                 odd_btts_no REAL NOT NULL DEFAULT 2.05,
                 is_active BOOLEAN DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE
             )
         """)
@@ -652,7 +757,7 @@ def init_db() -> None:
                 idempotency_key TEXT,
                 idempotency_payload_hash TEXT,
                 cashout_at TIMESTAMP,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 settled_at TIMESTAMP
             )
         """)
@@ -688,7 +793,7 @@ def init_db() -> None:
                 reference_id INTEGER,
                 reference_type TEXT,
                 balance_after INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_coin_tx_user ON coin_transactions(user_id, created_at)")
@@ -701,7 +806,7 @@ def init_db() -> None:
                 short_name TEXT,
                 logo_url TEXT,
                 owner_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(owner_id) REFERENCES users(telegram_id)
             )
         """)
@@ -714,12 +819,12 @@ def init_db() -> None:
                 type TEXT NOT NULL DEFAULT 'league' CHECK(type IN ('league', 'cup', 'friendly')),
                 season TEXT,
                 is_active BOOLEAN DEFAULT 1,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         cursor.execute("""
-            INSERT OR IGNORE INTO tournaments (id, name, type, season, is_active)
-            VALUES (1, 'Логово Фифарей (Основная Лига)', 'league', 'Сезон 2026', 1)
+            INSERT OR IGNORE INTO tournaments (id, name, type, season, is_active, created_at)
+            VALUES (1, 'Логово Фифарей (Основная Лига)', 'league', 'Сезон 2026', 1, datetime('now', '+3 hours'))
         """)
 
         # ─── LOGOVO: Divisions & Multi-Topic Routing Tables ───
@@ -734,7 +839,7 @@ def init_db() -> None:
                 group_chat_id INTEGER DEFAULT NULL,
                 is_active BOOLEAN DEFAULT 1,
                 sort_order INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(tournament_id) REFERENCES tournaments(id),
                 FOREIGN KEY(season_id) REFERENCES seasons(id) ON DELETE SET NULL
             )
@@ -756,13 +861,13 @@ def init_db() -> None:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_divisions_group ON divisions(group_chat_id)")
 
         cursor.execute("""
-            INSERT OR IGNORE INTO divisions (id, tournament_id, name, code, season_id, sort_order)
+            INSERT OR IGNORE INTO divisions (id, tournament_id, name, code, season_id, sort_order, created_at)
             VALUES 
-                (1, 1, 'Дивизион 1', 'DIV_1', 1, 1),
-                (2, 1, 'Дивизион 2', 'DIV_2', 1, 2),
-                (3, 1, 'Дивизион 3', 'DIV_3', 1, 3),
-                (4, 1, 'Дивизион 4', 'DIV_4', 1, 4),
-                (5, 1, 'Дивизион 5', 'DIV_5', 1, 5)
+                (1, 1, 'Дивизион 1', 'DIV_1', 1, 1, datetime('now', '+3 hours')),
+                (2, 1, 'Дивизион 2', 'DIV_2', 1, 2, datetime('now', '+3 hours')),
+                (3, 1, 'Дивизион 3', 'DIV_3', 1, 3, datetime('now', '+3 hours')),
+                (4, 1, 'Дивизион 4', 'DIV_4', 1, 4, datetime('now', '+3 hours')),
+                (5, 1, 'Дивизион 5', 'DIV_5', 1, 5, datetime('now', '+3 hours'))
         """)
 
         # INSERT OR IGNORE выше молча пропускает уже существующие строки, поэтому
@@ -788,7 +893,7 @@ def init_db() -> None:
                 topic_type TEXT NOT NULL,
                 message_thread_id INTEGER NOT NULL,
                 group_chat_id INTEGER DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(division_id, topic_type),
                 FOREIGN KEY(division_id) REFERENCES divisions(id) ON DELETE CASCADE
             )
@@ -813,7 +918,7 @@ def init_db() -> None:
                         topic_type TEXT NOT NULL,
                         message_thread_id INTEGER NOT NULL,
                         group_chat_id INTEGER DEFAULT NULL,
-                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                         UNIQUE(division_id, topic_type),
                         FOREIGN KEY(division_id) REFERENCES divisions(id) ON DELETE CASCADE
                     )
@@ -844,7 +949,7 @@ def init_db() -> None:
             CREATE TABLE IF NOT EXISTS division_admins (
                 division_id INTEGER NOT NULL,
                 user_id INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 PRIMARY KEY(division_id, user_id),
                 FOREIGN KEY(division_id) REFERENCES divisions(id) ON DELETE CASCADE,
                 FOREIGN KEY(user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
@@ -861,7 +966,7 @@ def init_db() -> None:
                 category TEXT NOT NULL DEFAULT 'main',
                 status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open','suspended','closed','settled','voided')),
                 sort_order INTEGER DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(match_id, market_key),
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE
             )
@@ -879,7 +984,7 @@ def init_db() -> None:
                 odds_version INTEGER NOT NULL DEFAULT 1,
                 status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','locked','voided')),
                 previous_odds REAL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(market_id, selection_key),
                 FOREIGN KEY(market_id) REFERENCES markets(id) ON DELETE CASCADE
             )
@@ -900,7 +1005,7 @@ def init_db() -> None:
                 new_value REAL NOT NULL,
                 changed_by INTEGER,
                 reason TEXT,
-                changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                changed_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(selection_id) REFERENCES market_selections(id) ON DELETE CASCADE,
                 FOREIGN KEY(changed_by) REFERENCES users(telegram_id)
             )
@@ -913,7 +1018,7 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 target_type TEXT NOT NULL CHECK(target_type IN ('match','team','tournament')),
                 target_id INTEGER NOT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(user_id, target_type, target_id),
                 FOREIGN KEY(user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
             )
@@ -929,7 +1034,7 @@ def init_db() -> None:
                 body TEXT,
                 reference_id INTEGER,
                 is_read BOOLEAN DEFAULT 0,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
             )
         """)
@@ -957,7 +1062,7 @@ def init_db() -> None:
                 division_id INTEGER DEFAULT NULL,
                 season_id INTEGER DEFAULT NULL,
                 reason TEXT DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(admin_id) REFERENCES users(telegram_id)
             )
         """)
@@ -986,7 +1091,7 @@ def init_db() -> None:
                 new_value TEXT,
                 division_id INTEGER,
                 season_id INTEGER,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_bet_audit_actor ON bet_audit_log(actor_id, created_at DESC)")
@@ -1022,7 +1127,7 @@ def init_db() -> None:
                 selections_json TEXT NOT NULL,
                 total_odd REAL NOT NULL,
                 status TEXT DEFAULT 'active' CHECK(status IN ('active','expired','updated')),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
             )
         """)
@@ -1043,7 +1148,7 @@ def init_db() -> None:
                 streak_shields INTEGER NOT NULL DEFAULT 1,
                 equipped_frame TEXT NOT NULL DEFAULT 'default',
                 equipped_title TEXT NOT NULL DEFAULT 'Новичок',
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_progression_level ON user_progression(level DESC, current_xp DESC)")
@@ -1092,7 +1197,7 @@ def init_db() -> None:
                 user_id INTEGER NOT NULL,
                 achievement_id TEXT NOT NULL,
                 is_claimed BOOLEAN NOT NULL DEFAULT 0,
-                unlocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                unlocked_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(user_id, achievement_id),
                 FOREIGN KEY (achievement_id) REFERENCES achievements_catalog(id)
             )
@@ -1148,7 +1253,7 @@ def init_db() -> None:
                 provider TEXT NOT NULL DEFAULT 'none',
                 provider_match_id TEXT,
                 version INTEGER NOT NULL DEFAULT 1,
-                last_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE
             )
         """)
@@ -1170,7 +1275,7 @@ def init_db() -> None:
                 player_id INTEGER,
                 player_name TEXT,
                 payload TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE,
                 UNIQUE(provider, provider_event_id)
             )
@@ -1212,7 +1317,7 @@ def init_db() -> None:
                 substitutions_home INTEGER,
                 substitutions_away INTEGER,
                 provider TEXT NOT NULL DEFAULT 'none',
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE
             )
         """)
@@ -1231,7 +1336,7 @@ def init_db() -> None:
                 velocity REAL NOT NULL DEFAULT 0.0,
                 reason TEXT,
                 source TEXT NOT NULL DEFAULT 'system',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(selection_id) REFERENCES market_selections(id) ON DELETE CASCADE,
                 FOREIGN KEY(market_id) REFERENCES markets(id) ON DELETE CASCADE,
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE
@@ -1253,7 +1358,7 @@ def init_db() -> None:
                 link TEXT,
                 priority TEXT NOT NULL DEFAULT 'normal',
                 status TEXT NOT NULL DEFAULT 'pending',
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 sent_at TIMESTAMP,
                 UNIQUE(user_id, event_type, source_event_id),
                 FOREIGN KEY(user_id) REFERENCES users(telegram_id) ON DELETE CASCADE
@@ -1269,7 +1374,7 @@ def init_db() -> None:
                 status TEXT NOT NULL DEFAULT 'idle',
                 error_count INTEGER NOT NULL DEFAULT 0,
                 last_error TEXT,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
 
@@ -1282,7 +1387,7 @@ def init_db() -> None:
                 season_id INTEGER NOT NULL DEFAULT 1,
                 elo_rating REAL NOT NULL DEFAULT 1500.0,
                 matches_counted INTEGER NOT NULL DEFAULT 0,
-                last_updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(team_name, division_id, season_id),
                 FOREIGN KEY(division_id) REFERENCES divisions(id) ON DELETE CASCADE,
                 FOREIGN KEY(season_id) REFERENCES seasons(id) ON DELETE CASCADE
@@ -1309,7 +1414,7 @@ def init_db() -> None:
                 btts_no_probability REAL,
                 confidence REAL NOT NULL DEFAULT 0.5,
                 key_factors TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 resolved_at TIMESTAMP,
                 actual_result TEXT,
                 is_correct BOOLEAN,
@@ -1335,7 +1440,7 @@ def init_db() -> None:
                 draw_prob REAL NOT NULL,
                 away_prob REAL NOT NULL,
                 confidence REAL NOT NULL,
-                snapshot_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                snapshot_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE
             )
         """)
@@ -1353,8 +1458,8 @@ def init_db() -> None:
                 consecutive_failures INTEGER DEFAULT 0,
                 last_sync_at TIMESTAMP,
                 last_error TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
+                updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
 
@@ -1370,7 +1475,7 @@ def init_db() -> None:
                 home_score INTEGER NOT NULL DEFAULT 0,
                 away_score INTEGER NOT NULL DEFAULT 0,
                 minute INTEGER,
-                last_update_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                last_update_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 payload TEXT,
                 UNIQUE(provider, provider_match_id),
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE
@@ -1389,7 +1494,7 @@ def init_db() -> None:
                 records_count INTEGER DEFAULT 0,
                 latency_ms REAL DEFAULT 0.0,
                 error_message TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_provider_sync_log_provider ON provider_sync_log(provider, created_at DESC)")
@@ -1407,7 +1512,7 @@ def init_db() -> None:
                 message TEXT NOT NULL,
                 details_json TEXT,
                 status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active', 'acknowledged', 'resolved')),
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 resolved_at TIMESTAMP,
                 FOREIGN KEY(division_id) REFERENCES divisions(id) ON DELETE CASCADE,
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE,
@@ -1423,7 +1528,7 @@ def init_db() -> None:
                 scope_id INTEGER NOT NULL DEFAULT 0,
                 limit_key TEXT NOT NULL,
                 limit_value REAL NOT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 PRIMARY KEY(scope_type, scope_id, limit_key)
             )
         """)
@@ -1460,7 +1565,7 @@ def init_db() -> None:
                 value_bets_hit INTEGER NOT NULL DEFAULT 0,
                 status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK(status IN ('ACTIVE', 'QUALIFYING', 'INACTIVE')),
                 rank INTEGER DEFAULT NULL,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 PRIMARY KEY(user_id, season_id, division_id)
             )
         """)
@@ -1487,7 +1592,7 @@ def init_db() -> None:
                 best_streak INTEGER NOT NULL DEFAULT 0,
                 promotion_status TEXT NOT NULL CHECK(promotion_status IN ('PROMOTED', 'RELEGATED', 'STAY', 'INACTIVE')),
                 rewards_json TEXT DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(season_id, division_id, user_id)
             )
         """)
@@ -1503,7 +1608,7 @@ def init_db() -> None:
                 relegation_slots INTEGER NOT NULL DEFAULT 3,
                 min_bets_qualification INTEGER NOT NULL DEFAULT 5,
                 min_matches_qualification INTEGER NOT NULL DEFAULT 3,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(season_id, division_id)
             )
         """)
@@ -1535,7 +1640,7 @@ def init_db() -> None:
                 badge_awarded TEXT DEFAULT NULL,
                 status TEXT NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING', 'DISTRIBUTED')),
                 distributed_at TIMESTAMP DEFAULT NULL,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(user_id, season_id, reward_id)
             )
         """)
@@ -1598,8 +1703,8 @@ def init_db() -> None:
                 reviewed_by INTEGER,
                 reviewed_at TIMESTAMP,
                 note TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
+                updated_at TIMESTAMP DEFAULT (datetime('now', '+3 hours')),
                 UNIQUE(bet_id, bet_item_id),
                 FOREIGN KEY(bet_id) REFERENCES user_bets(id) ON DELETE CASCADE
             )
@@ -1618,7 +1723,7 @@ def init_db() -> None:
                 team2 TEXT,
                 delta1 REAL NOT NULL DEFAULT 0,
                 delta2 REAL NOT NULL DEFAULT 0,
-                applied_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                applied_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
             )
         """)
 
@@ -1636,6 +1741,17 @@ def init_db() -> None:
         if "position" not in squad_cols:
             cursor.execute("ALTER TABLE squad_players ADD COLUMN position TEXT")
             logger.info("Migrated squad_players table: added 'position' column.")
+
+        # ─── 018: старые строки писались по UTC — переводим на московское время ─
+        cursor.execute("SELECT 1 FROM schema_migrations WHERE version = '018_utc_to_msk_timestamps'")
+        if not cursor.fetchone():
+            shifted = _shift_timestamps_to_msk(cursor)
+            cursor.execute("""
+                INSERT OR IGNORE INTO schema_migrations (version, description)
+                VALUES ('018_utc_to_msk_timestamps', 'Machine-written timestamps shifted UTC -> MSK (+3h)')
+            """)
+            if shifted:
+                logger.info("Migration 018: shifted %s timestamp values from UTC to MSK", shifted)
 
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
@@ -1670,8 +1786,8 @@ def save_cached_telegram_media(file_hash: str, file_id: str, media_type: str = "
             cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT INTO telegram_media_cache (file_hash, file_id, media_type)
-                VALUES (?, ?, ?)
+                INSERT INTO telegram_media_cache (file_hash, file_id, media_type, created_at)
+                VALUES (?, ?, ?, datetime('now', '+3 hours'))
                 ON CONFLICT(file_hash) DO UPDATE SET file_id = excluded.file_id, media_type = excluded.media_type
                 """,
                 (file_hash, file_id, media_type)
@@ -1818,7 +1934,7 @@ def register_user(telegram_id: int, username: str | None, role: str = 'player', 
             )
         else:
             cursor.execute(
-                "INSERT INTO users (telegram_id, username, role, team_name, league_name) VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO users (telegram_id, username, role, team_name, league_name, registered_at) VALUES (?, ?, ?, ?, ?, datetime('now', '+3 hours'))",
                 (telegram_id, username, role, team_name, league_name)
             )
 
@@ -1838,7 +1954,7 @@ def upsert_user(telegram_id: int, username: str | None, role: str = 'user') -> N
             )
         else:
             cursor.execute(
-                "INSERT INTO users (telegram_id, username, role) VALUES (?, ?, ?)",
+                "INSERT INTO users (telegram_id, username, role, registered_at) VALUES (?, ?, ?, datetime('now', '+3 hours'))",
                 (telegram_id, username, role)
             )
 
@@ -2018,7 +2134,7 @@ def get_active_matches(telegram_id: int, only_expired_deadlines: bool = False, d
         # Collect round numbers whose deadline has already passed (for debt filtering)
         expired_rounds: set[int] = set()
         if only_expired_deadlines:
-            now = datetime.datetime.now()
+            now = now_msk()
             if user_div_id is not None:
                 cursor.execute("SELECT round_number, deadline FROM rounds WHERE is_open = 1 AND division_id = ?", (user_div_id,))
             else:
@@ -2153,8 +2269,8 @@ def log_admin_action(
             conn.cursor().execute(
                 """
                 INSERT INTO admin_audit_log (
-                    admin_id, action, target_type, target_id, old_value, new_value, division_id, season_id
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    admin_id, action, target_type, target_id, old_value, new_value, division_id, season_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
                 """,
                 (admin_id, action, target_type, target_id, old_value, new_value or reason or metadata, division_id, season_id)
             )
@@ -2167,7 +2283,7 @@ def create_season(name: str, created_by: int | None = None) -> int:
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO seasons (name, status, created_by) VALUES (?, 'draft', ?)",
+            "INSERT INTO seasons (name, status, created_by, created_at) VALUES (?, 'draft', ?, datetime('now', '+3 hours'))",
             (name.strip(), created_by)
         )
         season_id = cursor.lastrowid
@@ -2278,7 +2394,7 @@ def activate_season(season_id: int, actor_user_id: int | None = None) -> tuple[b
     Transition a season to 'active'.
     Marks previous active season as 'finished'.
     """
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_msk_str()
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM seasons WHERE id = ?", (season_id,))
@@ -2311,7 +2427,7 @@ def activate_season(season_id: int, actor_user_id: int | None = None) -> tuple[b
 
 def finish_season(season_id: int, actor_user_id: int | None = None) -> tuple[bool, str]:
     """Transition an active season to 'finished'."""
-    now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now = now_msk_str()
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM seasons WHERE id = ?", (season_id,))
@@ -2636,7 +2752,7 @@ def confirm_and_finalize_match(match_id: int, p1_score: int, p2_score: int, even
             "UPDATE matches SET player1_score = ?, player2_score = ?, reported_by = ?, photo_id = ?, "
             "mvp_player = ?, status = 'confirmed', played_at = ? WHERE id = ?",
             (p1_score, p2_score, reporter_id, photo_id, mvp_clean,
-             datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), match_id)
+             now_msk_str(), match_id)
         )
         if cursor.rowcount != 1:
             # Матч исчез между проверкой и записью — откатываем, чтобы не остаться
@@ -2687,7 +2803,7 @@ def set_technical_result(
         cursor.execute(
             "UPDATE matches SET player1_score = ?, player2_score = ?, status = 'confirmed', played_at = ?, "
             "is_technical = 1, technical_type = ?, mvp_player = NULL WHERE id = ?",
-            (p1_score, p2_score, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), tech_type, match_id)
+            (p1_score, p2_score, now_msk_str(), tech_type, match_id)
         )
         # Тот же silent no-op, что и в confirm_and_finalize_match.
         if cursor.rowcount != 1:
@@ -2705,7 +2821,7 @@ def save_pending_report(match_id: int, reporter_id: int, payload: dict) -> None:
     import json
     with transaction() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO pending_reports (match_id, reporter_id, payload) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO pending_reports (match_id, reporter_id, payload, created_at) VALUES (?, ?, ?, datetime('now', '+3 hours'))",
             (match_id, reporter_id, json.dumps(payload, ensure_ascii=False))
         )
 
@@ -2852,7 +2968,7 @@ def get_active_match_by_teams(team1: str, team2: str, caption: str | None = None
         round_match = re.search(r'(\d+)\s*[:\.\-—#]?\s*(?:тур|round|раунд)', caption_clean)
     target_round = int(round_match.group(1)) if round_match else None
     
-    now = datetime.datetime.now()
+    now = now_msk()
 
     active_season = get_active_season()
     active_season_id = active_season["id"] if active_season else 1
@@ -3300,7 +3416,7 @@ def record_reminder_sent(round_number: int, reminder_type: str, division_id: int
         cursor = conn.cursor()
         div_id = division_id if division_id is not None else 1
         cursor.execute(
-            "INSERT OR REPLACE INTO round_reminders (division_id, round_number, reminder_type) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO round_reminders (division_id, round_number, reminder_type, sent_at) VALUES (?, ?, ?, datetime('now', '+3 hours'))",
             (div_id, round_number, reminder_type)
         )
 
@@ -3321,7 +3437,7 @@ def record_round_content_post(division_id: int, round_number: int, content_type:
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT OR REPLACE INTO round_content_posts (division_id, round_number, content_type, message_id) VALUES (?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO round_content_posts (division_id, round_number, content_type, message_id, posted_at) VALUES (?, ?, ?, ?, datetime('now', '+3 hours'))",
             (division_id, round_number, content_type, message_id)
         )
 
@@ -3354,7 +3470,7 @@ def admin_set_match_score(match_id: int, player1_score: int, player2_score: int,
         cursor.execute(
             "UPDATE matches SET player1_score = ?, player2_score = ?, status = 'confirmed', "
             "played_at = ?, mvp_player = NULL WHERE id = ?",
-            (player1_score, player2_score, datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"), match_id)
+            (player1_score, player2_score, now_msk_str(), match_id)
         )
 
         if is_correction and admin_id:
@@ -3465,7 +3581,7 @@ def append_chat_history(user_id: int, role: str, text: str) -> None:
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO chat_history (user_id, role, text) VALUES (?, ?, ?)",
+            "INSERT INTO chat_history (user_id, role, text, created_at) VALUES (?, ?, ?, datetime('now', '+3 hours'))",
             (user_id, role, text)
         )
 
@@ -3490,7 +3606,7 @@ def append_style_sample(text: str) -> None:
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO style_samples (text) VALUES (?)",
+            "INSERT INTO style_samples (text, created_at) VALUES (?, datetime('now', '+3 hours'))",
             (text_clean,)
         )
 
@@ -3580,7 +3696,7 @@ def _active_open_rounds(cursor, division_id: int, season_id: int) -> list[dict]:
         "ORDER BY round_number",
         (division_id, season_id)
     )
-    now = datetime.datetime.now()
+    now = now_msk()
     active: list[dict] = []
     for row in cursor.fetchall():
         dt = parse_flexible_datetime(row["deadline"])
@@ -3793,7 +3909,7 @@ def set_match_extended(match_id: int, value: int) -> None:
 def _apply_freeze_state(cursor: sqlite3.Cursor, match_id: int, new_val: int) -> None:
     """Shared freeze bookkeeping: stamp frozen_at on freeze, accumulate elapsed
     seconds into frozen_seconds on unfreeze."""
-    now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    now_str = now_msk_str()
     if new_val == 1:
         # Start freezing: remember when (idempotent if already frozen)
         cursor.execute(
@@ -3809,7 +3925,7 @@ def _apply_freeze_state(cursor: sqlite3.Cursor, match_id: int, new_val: int) -> 
         if row and row["frozen_at"]:
             f_at = parse_flexible_datetime(row["frozen_at"])
             if f_at:
-                extra = max(0, int((datetime.datetime.now() - f_at).total_seconds()))
+                extra = max(0, int((now_msk() - f_at).total_seconds()))
         cursor.execute(
             "UPDATE matches SET is_extended = 0, frozen_at = NULL, "
             "frozen_seconds = COALESCE(frozen_seconds, 0) + ? WHERE id = ?",
@@ -3838,7 +3954,7 @@ def extend_match_deadline_by_hours(match_id: int, hours: int) -> str | None:
             return None
 
         _apply_freeze_state(cursor, match_id, 1)
-        until = datetime.datetime.now() + datetime.timedelta(hours=hours)
+        until = now_msk() + datetime.timedelta(hours=hours)
         until_str = until.strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("UPDATE matches SET extended_until = ? WHERE id = ?", (until_str, match_id))
         cursor.execute(
@@ -3887,7 +4003,7 @@ def get_match_frozen_seconds(match_id: int) -> float:
         if row["is_extended"] and row["frozen_at"]:
             f_at = parse_flexible_datetime(row["frozen_at"])
             if f_at:
-                total += max(0.0, (datetime.datetime.now() - f_at).total_seconds())
+                total += max(0.0, (now_msk() - f_at).total_seconds())
         return total
 
 def get_matches_by_round(round_number: int, division_id: int | None = None, season_id: int | None = None) -> list[dict]:
@@ -4011,7 +4127,7 @@ def pre_register_player(username: str, team_name: str) -> int:
         temp_id = min(min_id - 1, -1)
         
         cursor.execute(
-            "INSERT INTO users (telegram_id, username, team_name, league_name, role, warn_count) VALUES (?, ?, ?, ?, ?, 0)",
+            "INSERT INTO users (telegram_id, username, team_name, league_name, role, warn_count, registered_at) VALUES (?, ?, ?, ?, ?, 0, datetime('now', '+3 hours'))",
             (temp_id, username_clean, team_name_clean, "Основная", "player")
         )
         return temp_id
@@ -4037,8 +4153,8 @@ def pre_register_player_to_division(username: str, division_id: int) -> int:
         temp_id = min(min_id - 1, -1)
         
         cursor.execute(
-            "INSERT INTO users (telegram_id, username, team_name, league_name, role, division_id, warn_count) "
-            "VALUES (?, ?, NULL, 'Основная', 'player', ?, 0)",
+            "INSERT INTO users (telegram_id, username, team_name, league_name, role, division_id, warn_count, registered_at) "
+            "VALUES (?, ?, NULL, 'Основная', 'player', ?, 0, datetime('now', '+3 hours'))",
             (temp_id, username_clean, division_id)
         )
         return temp_id
@@ -4081,7 +4197,7 @@ def _repoint_user_owned_rows(cursor, old_id: int, new_id: int) -> None:
                     total_won = total_won + ?,
                     bets_count = bets_count + ?,
                     bets_won = bets_won + ?,
-                    updated_at = CURRENT_TIMESTAMP
+                    updated_at = datetime('now', '+3 hours')
                 WHERE user_id = ?
                 """,
                 (
@@ -4113,7 +4229,7 @@ def _repoint_user_owned_rows(cursor, old_id: int, new_id: int) -> None:
                         level = ?, current_xp = ?, total_xp_earned = ?,
                         current_streak = ?, best_streak = ?, last_active_date = ?,
                         streak_shields = ?, equipped_frame = ?, equipped_title = ?,
-                        updated_at = CURRENT_TIMESTAMP
+                        updated_at = datetime('now', '+3 hours')
                     WHERE user_id = ?
                     """,
                     (
@@ -4240,7 +4356,7 @@ def handle_user_startup(telegram_id: int, username: str | None, default_role: st
 
         # 3. Fallback: regular insert
         cursor.execute(
-            "INSERT INTO users (telegram_id, username, role) VALUES (?, ?, ?)",
+            "INSERT INTO users (telegram_id, username, role, registered_at) VALUES (?, ?, ?, datetime('now', '+3 hours'))",
             (telegram_id, username, default_role)
         )
 
@@ -4498,7 +4614,7 @@ def assign_player_to_club(username: str, club: str, division_id: int = 1) -> tup
             min_id = min_row[0] if min_row and min_row[0] else 0
             new_id = min(min_id - 1, -1)
             cursor.execute(
-                "INSERT INTO users (telegram_id, username, team_name, league_name, role, division_id) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO users (telegram_id, username, team_name, league_name, role, division_id, registered_at) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))",
                 (new_id, username_clean, club_clean, "Основная", "player", division_id)
             )
             
@@ -4545,7 +4661,7 @@ def add_warn(user_id: int, admin_id: int | None, reason: str) -> tuple[int, bool
     from config import MAX_WARNS_LIMIT
     with transaction() as conn:
         cursor = conn.cursor()
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now_msk_str()
 
         # Atomic increment inside the write transaction: two concurrent callers
         # can no longer read the same warn_count and lose an increment.
@@ -4574,7 +4690,7 @@ def remove_warn(user_id: int, admin_id: int | None, reason: str) -> tuple[int, b
             return 0, False
             
         new_count = max(0, current_count - 1)
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now_msk_str()
         cursor.execute("UPDATE users SET warn_count = ? WHERE telegram_id = ?", (new_count, user_id))
         cursor.execute(
             "INSERT INTO user_warns (user_id, admin_id, reason, type, created_at) VALUES (?, ?, ?, 'WARN_REMOVE', ?)",
@@ -4604,7 +4720,7 @@ def ban_and_remove_from_league(user_id: int) -> str | None:
         team_name = row["team_name"] if row else None
 
         cursor.execute("UPDATE users SET team_name = NULL, warn_count = 0 WHERE telegram_id = ?", (user_id,))
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now_msk_str()
         cursor.execute(
             "INSERT INTO user_warns (user_id, admin_id, reason, type, created_at) VALUES (?, NULL, ?, 'AUTO_KICK', ?)",
             (user_id, f"Превышен лимит варнов ({MAX_WARNS_LIMIT}/{MAX_WARNS_LIMIT}). Авто-удаление из клуба.", now_str)
@@ -4622,7 +4738,7 @@ def reset_season_warns() -> None:
 def amnesty_player(user_id: int, admin_id: int | None = None) -> None:
     with transaction() as conn:
         cursor = conn.cursor()
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now_msk_str()
         cursor.execute("UPDATE users SET warn_count = 0 WHERE telegram_id = ?", (user_id,))
         cursor.execute(
             "INSERT INTO user_warns (user_id, admin_id, reason, type, created_at) VALUES (?, ?, 'Амнистия (сброс варнов)', 'WARN_REMOVE', ?)",
@@ -5305,8 +5421,8 @@ def enqueue_bet_settled_notice(
         cursor.execute(
             """
             INSERT OR IGNORE INTO notification_events
-                (user_id, event_type, source_event_id, title, body, priority, status)
-            SELECT ?, ?, ?, ?, ?, 'high', 'pending'
+                (user_id, event_type, source_event_id, title, body, priority, status, created_at)
+            SELECT ?, ?, ?, ?, ?, 'high', 'pending', datetime('now', '+3 hours')
             WHERE EXISTS (SELECT 1 FROM users WHERE telegram_id = ?)
               AND NOT EXISTS (
                   SELECT 1 FROM user_notification_settings
@@ -5463,7 +5579,7 @@ def evaluate_round_betting_gate(
 
     if r_row["deadline"]:
         dl_dt = _parse_round_deadline(r_row["deadline"])
-        if dl_dt and datetime.datetime.now() > dl_dt:
+        if dl_dt and now_msk() > dl_dt:
             return False, "DEADLINE_PASSED", f"Дедлайн для прогнозов на Тур {round_number} истек."
 
     # Принцип pre-match: на сыгранный матч ставку не принять даже при открытой
@@ -5707,7 +5823,7 @@ def set_round_bets_open(
                 (s_id, division_id if division_id is not None else 1, round_number)
             )
 
-        opened_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S") if bets_open else None
+        opened_at = now_msk_str() if bets_open else None
         if division_id is not None:
             cursor.execute(
                 "UPDATE rounds SET bets_open = ?, bets_opened_at = ? WHERE (season_id = ? OR season_id IS NULL) AND division_id = ? AND round_number = ?",
@@ -6458,7 +6574,7 @@ def get_club_card_data(team_name: str) -> dict:
         """)
         pending_matches = []
         debts_count = 0
-        now_dt = datetime.datetime.now()
+        now_dt = now_msk()
 
         for pm in cursor.fetchall():
             p1_t = pm["player1_team"] or ""
@@ -7166,12 +7282,12 @@ def parse_flexible_datetime(dt_str: str | None) -> datetime.datetime | None:
 
     # Try format without year (e.g. "20.08 12:00" or "20.08") -> use current year
     try:
-        now_year = datetime.datetime.now().year
+        now_year = now_msk().year
         return datetime.datetime.strptime(f"{s}.{now_year}", "%d.%m %H:%M.%Y")
     except ValueError:
         pass
     try:
-        now_year = datetime.datetime.now().year
+        now_year = now_msk().year
         return datetime.datetime.strptime(f"{s}.{now_year}", "%d.%m.%Y")
     except ValueError:
         pass
@@ -7182,7 +7298,7 @@ def get_all_unplayed_league_matches(division_id: int | None = None, season_id: i
     """Retrieve pending league matches that are overdue: expired deadlines or past rounds, optionally filtered by division and season."""
     with transaction() as conn:
         cursor = conn.cursor()
-        now = datetime.datetime.now()
+        now = now_msk()
 
         target_season_id = season_id
         if target_season_id is None:
@@ -7288,7 +7404,7 @@ def record_debt_stage(match_id: int, stage: str) -> None:
     """Record a debt lifecycle stage for a match (e.g. 'deadline_passed', 'warn_24h', 'warn_48h', etc.)."""
     with transaction() as conn:
         cursor = conn.cursor()
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now_msk_str()
         cursor.execute(
             "INSERT OR REPLACE INTO debt_reminders (match_id, stage, sent_at) VALUES (?, ?, ?)",
             (match_id, stage, now_str)
@@ -7313,7 +7429,7 @@ def record_debt_12h_reminder(match_id: int) -> None:
     """Record timestamp of 12h cycle debt reminder."""
     with transaction() as conn:
         cursor = conn.cursor()
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now_msk_str()
         cursor.execute("""
             INSERT INTO debt_reminders (match_id, stage, sent_at)
             VALUES (?, 'cycle_reminder_last', ?)
@@ -7392,7 +7508,7 @@ def get_detailed_overdue_matches(division_id: int | None = None, season_id: int 
     """
     with transaction() as conn:
         cursor = conn.cursor()
-        now = datetime.datetime.now()
+        now = now_msk()
 
         target_season_id = season_id
         if target_season_id is None:
@@ -7549,7 +7665,7 @@ def is_match_overdue(match_id: int) -> bool:
 
         dl_dt = parse_flexible_datetime(r_row["deadline"])
         is_open = bool(r_row["is_open"])
-        now = datetime.datetime.now()
+        now = now_msk()
 
         if m_div_id is not None:
             cursor.execute("SELECT MAX(round_number) FROM rounds WHERE is_open = 1 AND division_id = ?", (m_div_id,))
@@ -7635,7 +7751,7 @@ def has_user_been_warned_recently(user_id: int, hours: float = 20.0) -> bool:
         warn_dt = parse_flexible_datetime(row["created_at"])
         if not warn_dt:
             return False
-        diff_sec = (datetime.datetime.now() - warn_dt).total_seconds()
+        diff_sec = (now_msk() - warn_dt).total_seconds()
         # Negative diff (clock stepped backwards) also counts as "recently warned"
         # so a rollback of the system clock cannot defeat the rate limiter.
         return diff_sec < (hours * 3600.0)
@@ -7665,7 +7781,7 @@ def restore_user_team(telegram_id: int, team_name: str) -> None:
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("UPDATE users SET team_name = ?, warn_count = 0 WHERE telegram_id = ?", (team_name, telegram_id))
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now_msk_str()
         cursor.execute(
             "INSERT INTO user_warns (user_id, admin_id, reason, type, created_at) VALUES (?, NULL, 'Восстановление клуба и сброс варнов', 'RESTORE', ?)",
             (telegram_id, now_str)
@@ -7691,7 +7807,7 @@ def apply_debt_played_reward(user_id: int, round_number: int) -> tuple[int, bool
         
         new_warns = max(0, current_warns - 1)
         cursor.execute("UPDATE users SET warn_count = ? WHERE telegram_id = ?", (new_warns, user_id))
-        now_str = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        now_str = now_msk_str()
         cursor.execute(
             "INSERT INTO user_warns (user_id, admin_id, reason, type, created_at) VALUES (?, NULL, ?, 'DEBT_UNWARN', ?)",
             (user_id, f"Снятие варна за закрытие долга ({round_number} тур)", now_str)
@@ -7757,14 +7873,14 @@ def get_or_create_wallet(user_id: int) -> dict:
 
         cursor.execute(
             """
-            INSERT INTO user_wallets (user_id, balance, total_wagered, total_won, bets_count, bets_won)
-            VALUES (?, ?, 0, 0, 0, 0)
+            INSERT INTO user_wallets (user_id, balance, total_wagered, total_won, bets_count, bets_won, updated_at)
+            VALUES (?, ?, 0, 0, 0, 0, datetime('now', '+3 hours'))
             """,
             (user_id, INITIAL_WALLET_BALANCE)
         )
         cursor.execute(
-            "INSERT INTO coin_transactions (user_id, amount, transaction_type, balance_after)"
-            " VALUES (?, ?, 'welcome_bonus', ?)",
+            "INSERT INTO coin_transactions (user_id, amount, transaction_type, balance_after, created_at)"
+            " VALUES (?, ?, 'welcome_bonus', ?, datetime('now', '+3 hours'))",
             (user_id, INITIAL_WALLET_BALANCE, INITIAL_WALLET_BALANCE)
         )
         cursor.execute("SELECT * FROM user_wallets WHERE user_id = ?", (user_id,))
@@ -7787,12 +7903,12 @@ def add_coins(user_id: int, amount: int, tx_type: str = "deposit", ref_id: int |
         cursor = conn.cursor()
         get_or_create_wallet(user_id)
         cursor.execute(
-            "UPDATE user_wallets SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+            "UPDATE user_wallets SET balance = balance + ?, updated_at = datetime('now', '+3 hours') WHERE user_id = ?",
             (amount, user_id)
         )
         cursor.execute(
-            "INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, balance_after)"
-            " VALUES (?, ?, ?, ?, (SELECT balance FROM user_wallets WHERE user_id = ?))",
+            "INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, balance_after, created_at)"
+            " VALUES (?, ?, ?, ?, (SELECT balance FROM user_wallets WHERE user_id = ?), datetime('now', '+3 hours'))",
             (user_id, amount, tx_type, ref_id, user_id)
         )
         cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
@@ -7816,14 +7932,14 @@ def deduct_coins(user_id: int, amount: int, tx_type: str = "bet_placed", ref_id:
         cursor.execute(
             """
             UPDATE user_wallets 
-            SET balance = balance - ?, total_wagered = total_wagered + ?, updated_at = CURRENT_TIMESTAMP 
+            SET balance = balance - ?, total_wagered = total_wagered + ?, updated_at = datetime('now', '+3 hours') 
             WHERE user_id = ?
             """,
             (amount, amount, user_id)
         )
         cursor.execute(
-            "INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, balance_after)"
-            " VALUES (?, ?, ?, ?, (SELECT balance FROM user_wallets WHERE user_id = ?))",
+            "INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, balance_after, created_at)"
+            " VALUES (?, ?, ?, ?, (SELECT balance FROM user_wallets WHERE user_id = ?), datetime('now', '+3 hours'))",
             (user_id, -amount, tx_type, ref_id, user_id)
         )
         return True
@@ -7844,7 +7960,7 @@ def claim_daily_bonus(user_id: int, bonus_amount: int = 250) -> tuple[bool, int,
         cursor = conn.cursor()
         wallet = get_or_create_wallet(user_id)
         last_bonus = wallet.get("last_bonus_at")
-        now = datetime.datetime.now()
+        now = now_msk()
 
         if last_bonus:
             try:
@@ -7862,14 +7978,14 @@ def claim_daily_bonus(user_id: int, bonus_amount: int = 250) -> tuple[bool, int,
         cursor.execute(
             """
             UPDATE user_wallets 
-            SET balance = balance + ?, last_bonus_at = ?, updated_at = CURRENT_TIMESTAMP 
+            SET balance = balance + ?, last_bonus_at = ?, updated_at = datetime('now', '+3 hours') 
             WHERE user_id = ?
             """,
             (bonus_amount, now_str, user_id)
         )
         cursor.execute(
-            "INSERT INTO coin_transactions (user_id, amount, transaction_type, balance_after)"
-            " VALUES (?, ?, 'daily_bonus', (SELECT balance FROM user_wallets WHERE user_id = ?))",
+            "INSERT INTO coin_transactions (user_id, amount, transaction_type, balance_after, created_at)"
+            " VALUES (?, ?, 'daily_bonus', (SELECT balance FROM user_wallets WHERE user_id = ?), datetime('now', '+3 hours'))",
             (user_id, bonus_amount, user_id)
         )
         cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
@@ -7915,8 +8031,8 @@ def save_bet_market(
             """
             INSERT INTO bet_markets (
                 match_id, tour, team1_name, team2_name,
-                odd_p1, odd_x, odd_p2, odd_tb25, odd_tm25, odd_btts_yes, odd_btts_no, is_active
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
+                odd_p1, odd_x, odd_p2, odd_tb25, odd_tm25, odd_btts_yes, odd_btts_no, is_active, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, datetime('now', '+3 hours'))
             ON CONFLICT(match_id) DO UPDATE SET
                 tour = excluded.tour,
                 team1_name = excluded.team1_name,
@@ -8008,7 +8124,7 @@ def get_open_betting_tours(division_id: int | None = None, season_id: int | None
         """
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        now = datetime.datetime.now()
+        now = now_msk()
         open_tours = []
         for row in rows:
             r_num = row["round_number"]
@@ -8084,7 +8200,7 @@ def get_active_bet_markets(
         query += " ORDER BY bm.tour ASC, bm.id ASC"
         cursor.execute(query, params)
         rows = cursor.fetchall()
-        now = datetime.datetime.now()
+        now = now_msk()
         valid_markets = []
         for r in rows:
             dl_dt = _parse_round_deadline(r["deadline"])
@@ -8457,7 +8573,6 @@ def place_user_bet(
         total_odd = 1.0
         validated_items = []
         seen_matches = set()
-        now = datetime.datetime.now(datetime.timezone.utc)
 
         for s in selections:
             m_id = s.get("match_id")
@@ -8583,8 +8698,8 @@ def place_user_bet(
         # 1. Insert user_bet with idempotency check (Phase 5: includes idempotency_payload_hash)
         try:
             cursor.execute("""
-                INSERT INTO user_bets (user_id, bet_type, amount, total_odd, potential_win, status, idempotency_key, idempotency_payload_hash)
-                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)
+                INSERT INTO user_bets (user_id, bet_type, amount, total_odd, potential_win, status, idempotency_key, idempotency_payload_hash, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, datetime('now', '+3 hours'))
             """, (user_id, bet_type, amount, total_odd, potential_win, idempotency_key, _payload_hash))
             bet_id = cursor.lastrowid
         except sqlite3.IntegrityError:
@@ -8605,7 +8720,7 @@ def place_user_bet(
         # 2. Deduct coins with strict balance check
         cursor.execute("""
             UPDATE user_wallets 
-            SET balance = balance - ?, total_wagered = total_wagered + ?, bets_count = bets_count + 1, updated_at = CURRENT_TIMESTAMP
+            SET balance = balance - ?, total_wagered = total_wagered + ?, bets_count = bets_count + 1, updated_at = datetime('now', '+3 hours')
             WHERE user_id = ? AND balance >= ?
         """, (amount, amount, user_id, amount))
 
@@ -8633,8 +8748,8 @@ def place_user_bet(
 
         # 4. Record transaction with balance_after
         cursor.execute("""
-            INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
-            VALUES (?, ?, 'bet_placed', ?, 'bet', ?)
+            INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+            VALUES (?, ?, 'bet_placed', ?, 'bet', ?, datetime('now', '+3 hours'))
         """, (user_id, -amount, bet_id, new_balance))
 
         return True, bet_id
@@ -8650,7 +8765,7 @@ def execute_cashout(
     1. Check if bet is pending and not yet settled (settled_at IS NULL).
     2. Verify matches/markets are still active.
     3. Calculate cashout offer.
-    4. Atomically update user_bets (actual_payout = offer, cashout_at = CURRENT_TIMESTAMP, settled_at = CURRENT_TIMESTAMP, status = 'won').
+    4. Atomically update user_bets (actual_payout = offer, cashout_at = datetime('now', '+3 hours'), settled_at = datetime('now', '+3 hours'), status = 'won').
     5. Credit user_wallets and record coin_transactions with transaction_type = 'cashout'.
     """
     from config import is_global_lockdown_enabled
@@ -8738,8 +8853,8 @@ def execute_cashout(
             UPDATE user_bets
             SET status = 'cashed_out',
                 actual_payout = ?,
-                cashout_at = CURRENT_TIMESTAMP,
-                settled_at = CURRENT_TIMESTAMP
+                cashout_at = datetime('now', '+3 hours'),
+                settled_at = datetime('now', '+3 hours')
             WHERE id = ? AND settled_at IS NULL AND status = 'pending'
         """, (offer, bet_id))
 
@@ -8752,7 +8867,7 @@ def execute_cashout(
             UPDATE user_wallets
             SET balance = balance + ?,
                 total_won = total_won + ?,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = datetime('now', '+3 hours')
             WHERE user_id = ?
         """, (offer, offer, user_id))
 
@@ -8761,8 +8876,8 @@ def execute_cashout(
 
         # 6. Record transaction
         cursor.execute("""
-            INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
-            VALUES (?, ?, 'cashout', ?, 'bet', ?)
+            INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+            VALUES (?, ?, 'cashout', ?, 'bet', ?, datetime('now', '+3 hours'))
         """, (user_id, offer, bet_id, new_balance))
 
         try:
@@ -9182,8 +9297,8 @@ def log_betting_audit(
         cursor = conn.cursor()
         cursor.execute(
             """
-            INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO bet_audit_log (actor_id, action, entity_type, entity_id, old_value, new_value, division_id, season_id, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
             """,
             (actor_id, action, entity_type, entity_id, old_v, new_v, division_id, season_id),
         )
@@ -9285,7 +9400,7 @@ def update_selection_odds(selection_id: int, new_odd: float, actor_id: int) -> d
             SET previous_odds = odds_value,
                 odds_value = ?,
                 odds_version = odds_version + 1,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = datetime('now', '+3 hours')
             WHERE id = ?
             """,
             (new_odd, selection_id),
@@ -9295,8 +9410,8 @@ def update_selection_odds(selection_id: int, new_odd: float, actor_id: int) -> d
         try:
             cursor.execute(
                 """
-                INSERT INTO odds_history (selection_id, old_value, new_value, changed_by)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO odds_history (selection_id, old_value, new_value, changed_by, changed_at)
+                VALUES (?, ?, ?, ?, datetime('now', '+3 hours'))
                 """,
                 (selection_id, old_odd, new_odd, actor_id),
             )
@@ -9336,7 +9451,7 @@ def void_user_bet(bet_id: int, actor_id: int) -> dict:
 
         # Void the bet and all its items
         cursor.execute(
-            "UPDATE user_bets SET status = 'refunded', actual_payout = ?, settled_at = CURRENT_TIMESTAMP WHERE id = ? AND status = 'pending' AND settled_at IS NULL",
+            "UPDATE user_bets SET status = 'refunded', actual_payout = ?, settled_at = datetime('now', '+3 hours') WHERE id = ? AND status = 'pending' AND settled_at IS NULL",
             (stake, bet_id),
         )
         if cursor.rowcount == 0:
@@ -9350,7 +9465,7 @@ def void_user_bet(bet_id: int, actor_id: int) -> dict:
         # Refund stake
         get_or_create_wallet(user_id)
         cursor.execute(
-            "UPDATE user_wallets SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP WHERE user_id = ?",
+            "UPDATE user_wallets SET balance = balance + ?, updated_at = datetime('now', '+3 hours') WHERE user_id = ?",
             (stake, user_id),
         )
         cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
@@ -9358,8 +9473,8 @@ def void_user_bet(bet_id: int, actor_id: int) -> dict:
 
         cursor.execute(
             """
-            INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
-            VALUES (?, ?, 'admin_refund', ?, 'bet', ?)
+            INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+            VALUES (?, ?, 'admin_refund', ?, 'bet', ?, datetime('now', '+3 hours'))
             """,
             (user_id, stake, bet_id, bal_after),
         )
@@ -9567,8 +9682,8 @@ def seed_gamification_catalog(cursor) -> None:
     # Phase 10: Seed default division rules
     for div_id in range(1, 6):
         cursor.execute("""
-            INSERT OR IGNORE INTO season_rules_config (season_id, division_id, promotion_slots, relegation_slots, min_bets_qualification, min_matches_qualification)
-            VALUES (1, ?, 3, 3, 5, 3)
+            INSERT OR IGNORE INTO season_rules_config (season_id, division_id, promotion_slots, relegation_slots, min_bets_qualification, min_matches_qualification, created_at)
+            VALUES (1, ?, 3, 3, 5, 3, datetime('now', '+3 hours'))
         """, (div_id,))
 
 
@@ -9582,8 +9697,8 @@ def get_or_create_progression(user_id: int) -> dict:
             return dict(row)
 
         cursor.execute("""
-            INSERT INTO user_progression (user_id, level, current_xp, total_xp_earned, current_streak, best_streak, login_streak, best_login_streak, streak_shields, equipped_frame, equipped_title)
-            VALUES (?, 1, 0, 0, 0, 0, 0, 0, 1, 'default', 'Новичок')
+            INSERT INTO user_progression (user_id, level, current_xp, total_xp_earned, current_streak, best_streak, login_streak, best_login_streak, streak_shields, equipped_frame, equipped_title, updated_at)
+            VALUES (?, 1, 0, 0, 0, 0, 0, 0, 1, 'default', 'Новичок', datetime('now', '+3 hours'))
         """, (user_id,))
         cursor.execute("SELECT * FROM user_progression WHERE user_id = ?", (user_id,))
         return dict(cursor.fetchone())
@@ -9628,12 +9743,12 @@ def add_user_xp(user_id: int, xp_amount: int) -> dict:
             reward_coins = (calculated_level - cur_level) * 500
             cursor.execute("""
                 UPDATE user_wallets 
-                SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP
+                SET balance = balance + ?, updated_at = datetime('now', '+3 hours')
                 WHERE user_id = ?
             """, (reward_coins, user_id))
             cursor.execute("""
-                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, balance_after)
-                VALUES (?, ?, 'level_up_reward', ?, (SELECT balance FROM user_wallets WHERE user_id = ?))
+                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, balance_after, created_at)
+                VALUES (?, ?, 'level_up_reward', ?, (SELECT balance FROM user_wallets WHERE user_id = ?), datetime('now', '+3 hours'))
             """, (user_id, reward_coins, calculated_level, user_id))
 
         # XP required for next level
@@ -9643,7 +9758,7 @@ def add_user_xp(user_id: int, xp_amount: int) -> dict:
 
         cursor.execute("""
             UPDATE user_progression
-            SET level = ?, current_xp = ?, total_xp_earned = ?, equipped_title = ?, updated_at = CURRENT_TIMESTAMP
+            SET level = ?, current_xp = ?, total_xp_earned = ?, equipped_title = ?, updated_at = datetime('now', '+3 hours')
             WHERE user_id = ?
         """, (calculated_level, lvl_progress_xp, new_total_xp, title, user_id))
 
@@ -9670,7 +9785,7 @@ def check_and_update_login_streak(user_id: int) -> dict:
     with transaction() as conn:
         cursor = conn.cursor()
         p = get_or_create_progression(user_id)
-        today_str = datetime.date.today().isoformat()
+        today_str = today_msk().isoformat()
         last_active = p.get("last_active_date")
 
         if last_active == today_str:
@@ -9688,7 +9803,7 @@ def check_and_update_login_streak(user_id: int) -> dict:
         if last_active:
             try:
                 last_dt = datetime.date.fromisoformat(last_active)
-                delta_days = (datetime.date.today() - last_dt).days
+                delta_days = (today_msk() - last_dt).days
                 if delta_days == 1:
                     cur_streak += 1
                 elif delta_days == 2 and shields > 0:
@@ -9706,7 +9821,7 @@ def check_and_update_login_streak(user_id: int) -> dict:
         best = max(cur_streak, p["best_login_streak"])
         cursor.execute("""
             UPDATE user_progression
-            SET login_streak = ?, best_login_streak = ?, last_active_date = ?, streak_shields = ?, updated_at = CURRENT_TIMESTAMP
+            SET login_streak = ?, best_login_streak = ?, last_active_date = ?, streak_shields = ?, updated_at = datetime('now', '+3 hours')
             WHERE user_id = ?
         """, (cur_streak, best, today_str, shields, user_id))
 
@@ -9739,7 +9854,7 @@ def unlock_achievement(user_id: int, achievement_id: str) -> bool:
 
         cursor.execute("""
             INSERT OR IGNORE INTO user_achievements (user_id, achievement_id, is_claimed, unlocked_at)
-            VALUES (?, ?, 0, CURRENT_TIMESTAMP)
+            VALUES (?, ?, 0, datetime('now', '+3 hours'))
         """, (user_id, achievement_id))
         return True
 
@@ -9978,8 +10093,8 @@ def get_or_create_season_stats(user_id: int, season_id: int | None = None, divis
             return dict(row)
 
         cursor.execute("""
-            INSERT OR IGNORE INTO season_player_stats (user_id, season_id, division_id, rating, confidence, season_points, status)
-            VALUES (?, ?, ?, 1200.0, 350.0, 0.0, 'QUALIFYING')
+            INSERT OR IGNORE INTO season_player_stats (user_id, season_id, division_id, rating, confidence, season_points, status, updated_at)
+            VALUES (?, ?, ?, 1200.0, 350.0, 0.0, 'QUALIFYING', datetime('now', '+3 hours'))
         """, (user_id, target_s_id, target_d_id))
 
         cursor.execute("""
@@ -10003,7 +10118,7 @@ def update_season_player_stats(user_id: int, season_id: int, division_id: int, *
         for k, v in kwargs.items():
             set_clauses.append(f"{k} = ?")
             params.append(v)
-        set_clauses.append("updated_at = CURRENT_TIMESTAMP")
+        set_clauses.append("updated_at = datetime('now', '+3 hours')")
 
         params.extend([user_id, season_id, division_id])
         sql = f"UPDATE season_player_stats SET {', '.join(set_clauses)} WHERE user_id = ? AND season_id = ? AND division_id = ?"
@@ -10188,8 +10303,8 @@ def create_season_snapshot(
             INSERT INTO season_snapshots (
                 season_id, division_id, user_id, final_rank, final_rating, season_points,
                 wins, losses, voids, settled_bets, win_rate, roi, total_stake, total_payout,
-                best_streak, promotion_status, rewards_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                best_streak, promotion_status, rewards_json, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
             ON CONFLICT(season_id, division_id, user_id) DO NOTHING
         """, (
             season_id, division_id, user_id, final_rank, final_rating, season_points,
@@ -10258,8 +10373,8 @@ def set_season_rules(
         cursor.execute("""
             INSERT INTO season_rules_config (
                 season_id, division_id, promotion_slots, relegation_slots,
-                min_bets_qualification, min_matches_qualification
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                min_bets_qualification, min_matches_qualification, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
             ON CONFLICT(season_id, division_id) DO UPDATE SET
                 promotion_slots = excluded.promotion_slots,
                 relegation_slots = excluded.relegation_slots,
@@ -10287,8 +10402,8 @@ def record_season_reward_in_ledger(
         cursor.execute("""
             INSERT INTO season_reward_ledger (
                 season_id, division_id, user_id, reward_id, reward_type,
-                coins_awarded, xp_awarded, badge_awarded, status, distributed_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DISTRIBUTED', CURRENT_TIMESTAMP)
+                coins_awarded, xp_awarded, badge_awarded, status, distributed_at, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DISTRIBUTED', datetime('now', '+3 hours'), datetime('now', '+3 hours'))
             ON CONFLICT(user_id, season_id, reward_id) DO NOTHING
         """, (season_id, division_id, user_id, reward_id, reward_type, coins_awarded, xp_awarded, badge_awarded))
         return cursor.rowcount > 0
@@ -10326,8 +10441,8 @@ def create_division(
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO divisions (name, code, tournament_id, topic_id, sort_order)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO divisions (name, code, tournament_id, topic_id, sort_order, created_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now', '+3 hours'))
         """, (name.strip(), code.strip().upper(), tournament_id, topic_id, sort_order))
         return cursor.lastrowid
 
@@ -10336,13 +10451,13 @@ def ensure_canonical_divisions() -> None:
     """Ensure the 5 canonical divisions exist in the database."""
     with transaction() as conn:
         conn.cursor().execute("""
-            INSERT OR IGNORE INTO divisions (id, tournament_id, name, code, season_id, sort_order)
+            INSERT OR IGNORE INTO divisions (id, tournament_id, name, code, season_id, sort_order, created_at)
             VALUES
-                (1, 1, 'Дивизион 1', 'DIV_1', 1, 1),
-                (2, 1, 'Дивизион 2', 'DIV_2', 1, 2),
-                (3, 1, 'Дивизион 3', 'DIV_3', 1, 3),
-                (4, 1, 'Дивизион 4', 'DIV_4', 1, 4),
-                (5, 1, 'Дивизион 5', 'DIV_5', 1, 5)
+                (1, 1, 'Дивизион 1', 'DIV_1', 1, 1, datetime('now', '+3 hours')),
+                (2, 1, 'Дивизион 2', 'DIV_2', 1, 2, datetime('now', '+3 hours')),
+                (3, 1, 'Дивизион 3', 'DIV_3', 1, 3, datetime('now', '+3 hours')),
+                (4, 1, 'Дивизион 4', 'DIV_4', 1, 4, datetime('now', '+3 hours')),
+                (5, 1, 'Дивизион 5', 'DIV_5', 1, 5, datetime('now', '+3 hours'))
         """)
 
 
@@ -10642,8 +10757,8 @@ def add_division_admin(division_id: int, user_id: int) -> None:
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            INSERT INTO division_admins (division_id, user_id)
-            VALUES (?, ?)
+            INSERT INTO division_admins (division_id, user_id, created_at)
+            VALUES (?, ?, datetime('now', '+3 hours'))
             ON CONFLICT(division_id, user_id) DO NOTHING
         """, (division_id, user_id))
 
@@ -10811,8 +10926,8 @@ def bind_division_topic(
 
         # 5. Insert or update new binding
         cursor.execute("""
-            INSERT INTO division_topics (division_id, topic_type, message_thread_id, group_chat_id)
-            VALUES (?, ?, ?, ?)
+            INSERT INTO division_topics (division_id, topic_type, message_thread_id, group_chat_id, created_at)
+            VALUES (?, ?, ?, ?, datetime('now', '+3 hours'))
             ON CONFLICT(division_id, topic_type) DO UPDATE SET
                 message_thread_id = excluded.message_thread_id,
                 group_chat_id = excluded.group_chat_id
@@ -10928,8 +11043,8 @@ def set_division_topic(
                     WHERE group_chat_id = ? AND message_thread_id = ?
                 """, (group_chat_id, message_thread_id))
             cursor.execute("""
-                INSERT INTO division_topics (division_id, topic_type, message_thread_id, group_chat_id)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO division_topics (division_id, topic_type, message_thread_id, group_chat_id, created_at)
+                VALUES (?, ?, ?, ?, datetime('now', '+3 hours'))
                 ON CONFLICT(division_id, topic_type) DO UPDATE SET 
                     message_thread_id = excluded.message_thread_id,
                     group_chat_id = COALESCE(excluded.group_chat_id, division_topics.group_chat_id)
@@ -11027,14 +11142,14 @@ def update_team_elo(
             cnt = matches_counted if matches_counted is not None else (existing["matches_counted"] + 1)
             cursor.execute("""
                 UPDATE team_ratings
-                SET elo_rating = ?, matches_counted = ?, last_updated_at = CURRENT_TIMESTAMP
+                SET elo_rating = ?, matches_counted = ?, last_updated_at = datetime('now', '+3 hours')
                 WHERE id = ?
             """, (round(float(new_elo), 2), cnt, existing["id"]))
         else:
             cnt = matches_counted if matches_counted is not None else 1
             cursor.execute("""
-                INSERT INTO team_ratings (team_name, division_id, season_id, elo_rating, matches_counted)
-                VALUES (?, ?, ?, ?, ?)
+                INSERT INTO team_ratings (team_name, division_id, season_id, elo_rating, matches_counted, last_updated_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now', '+3 hours'))
             """, (team_name, division_id, season_id, round(float(new_elo), 2), cnt))
 
 
@@ -11079,13 +11194,13 @@ def _elo_set_rating(cursor: sqlite3.Cursor, team_name: str, division_id: int,
         cnt = existing["matches_counted"] + (1 if bump_counter else 0)
         cursor.execute(
             "UPDATE team_ratings SET elo_rating = ?, matches_counted = ?, "
-            "last_updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+            "last_updated_at = datetime('now', '+3 hours') WHERE id = ?",
             (value, cnt, existing["id"])
         )
     else:
         cursor.execute(
-            "INSERT INTO team_ratings (team_name, division_id, season_id, elo_rating, matches_counted) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO team_ratings (team_name, division_id, season_id, elo_rating, matches_counted, last_updated_at) "
+            "VALUES (?, ?, ?, ?, ?, datetime('now', '+3 hours'))",
             (team_name, division_id, season_id, value, 1 if bump_counter else 0)
         )
 
@@ -11137,13 +11252,13 @@ def _apply_elo_after_match(match_id: int, p1_score: int, p2_score: int) -> bool:
 
         cursor.execute("""
             INSERT INTO elo_applied_matches (match_id, team1, team2, delta1, delta2, applied_at)
-            VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            VALUES (?, ?, ?, ?, ?, datetime('now', '+3 hours'))
             ON CONFLICT(match_id) DO UPDATE SET
                 team1 = excluded.team1,
                 team2 = excluded.team2,
                 delta1 = excluded.delta1,
                 delta2 = excluded.delta2,
-                applied_at = CURRENT_TIMESTAMP
+                applied_at = datetime('now', '+3 hours')
         """, (match_id, team1, team2, delta1, delta2))
 
     logger.info(
@@ -11181,8 +11296,8 @@ def save_ai_prediction(
                 home_probability, draw_probability, away_probability,
                 over_1_5_probability, over_2_5_probability, over_3_5_probability,
                 btts_yes_probability, btts_no_probability,
-                confidence, key_factors
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                confidence, key_factors, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
         """, (
             match_id, division_id, season_id, model_version, feature_version,
             round(home_prob, 4), round(draw_prob, 4), round(away_prob, 4),
@@ -11235,8 +11350,8 @@ def save_prediction_snapshot(
         cursor.execute("""
             INSERT INTO prediction_snapshots (
                 match_id, stage, minute, home_score, away_score,
-                home_prob, draw_prob, away_prob, confidence
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                home_prob, draw_prob, away_prob, confidence, snapshot_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
         """, (
             match_id, stage, minute, home_score, away_score,
             round(home_prob, 4), round(draw_prob, 4), round(away_prob, 4),
@@ -11306,7 +11421,7 @@ def resolve_ai_predictions(match_id: int, home_score: int, away_score: int) -> i
 
             cursor.execute("""
                 UPDATE predictions
-                SET resolved_at = CURRENT_TIMESTAMP, actual_result = ?, is_correct = ?, brier_score = ?
+                SET resolved_at = datetime('now', '+3 hours'), actual_result = ?, is_correct = ?, brier_score = ?
                 WHERE id = ?
             """, (actual_result, 1 if is_correct else 0, brier, p["id"]))
             resolved_count += 1
@@ -11361,7 +11476,7 @@ def correct_ai_predictions(match_id: int, new_home_score: int, new_away_score: i
 
             cursor.execute("""
                 UPDATE predictions
-                SET resolved_at = CURRENT_TIMESTAMP, actual_result = ?, is_correct = ?, brier_score = ?
+                SET resolved_at = datetime('now', '+3 hours'), actual_result = ?, is_correct = ?, brier_score = ?
                 WHERE id = ?
             """, (actual_result, 1 if is_correct else 0, brier, p["id"]))
             updated_count += 1
@@ -11609,8 +11724,11 @@ def upsert_integrity_case(
             INSERT INTO integrity_cases (
                 bet_id, bet_item_id, user_id, match_id, division_id, season_id,
                 online_score, post_score, total_score, severity, stage,
-                low_confidence, features
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                low_confidence, features, created_at, updated_at
+            ) VALUES (
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                datetime('now', '+3 hours'), datetime('now', '+3 hours')
+            )
             ON CONFLICT(bet_id, bet_item_id) DO UPDATE SET
                 online_score = excluded.online_score,
                 post_score = excluded.post_score,
@@ -11619,7 +11737,7 @@ def upsert_integrity_case(
                 stage = excluded.stage,
                 low_confidence = excluded.low_confidence,
                 features = excluded.features,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = datetime('now', '+3 hours')
         """, (
             bet_id, bet_item_id, user_id, match_id, division_id, season_id,
             float(online_score), float(post_score), float(total_score),
@@ -11743,9 +11861,9 @@ def set_integrity_case_status(
             UPDATE integrity_cases
             SET status = ?,
                 reviewed_by = ?,
-                reviewed_at = CURRENT_TIMESTAMP,
+                reviewed_at = datetime('now', '+3 hours'),
                 note = COALESCE(?, note),
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = datetime('now', '+3 hours')
             WHERE id = ?
         """, (status, admin_id, note, int(case_id)))
         return cursor.rowcount > 0
@@ -11766,8 +11884,8 @@ def record_provider_sync_log(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO provider_sync_log (
-                provider, endpoint, status_code, records_count, latency_ms, error_message
-            ) VALUES (?, ?, ?, ?, ?, ?)
+                provider, endpoint, status_code, records_count, latency_ms, error_message, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
         """, (provider, endpoint, status_code, records_count, round(latency_ms, 2), error_message))
         return cursor.lastrowid
 
@@ -11793,14 +11911,14 @@ def link_provider_match(
             INSERT INTO provider_matches (
                 provider, provider_match_id, match_id, division_id, season_id,
                 status, home_score, away_score, minute, payload, last_update_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
             ON CONFLICT(provider, provider_match_id) DO UPDATE SET
                 status = excluded.status,
                 home_score = excluded.home_score,
                 away_score = excluded.away_score,
                 minute = excluded.minute,
                 payload = excluded.payload,
-                last_update_at = CURRENT_TIMESTAMP
+                last_update_at = datetime('now', '+3 hours')
         """, (provider, str(provider_match_id), match_id, division_id, season_id, status, home_score, away_score, minute, payload_str))
         return cursor.lastrowid
 
@@ -11851,14 +11969,19 @@ def update_provider_health_state(
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO sports_providers (
-                provider_name, display_name, circuit_breaker_status, consecutive_failures, last_sync_at, last_error
-            ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, ?)
+                provider_name, display_name, circuit_breaker_status, consecutive_failures,
+                last_sync_at, last_error, created_at, updated_at
+            ) VALUES (
+                ?, ?, ?, ?,
+                datetime('now', '+3 hours'), ?,
+                datetime('now', '+3 hours'), datetime('now', '+3 hours')
+            )
             ON CONFLICT(provider_name) DO UPDATE SET
                 circuit_breaker_status = excluded.circuit_breaker_status,
                 consecutive_failures = excluded.consecutive_failures,
-                last_sync_at = CURRENT_TIMESTAMP,
+                last_sync_at = datetime('now', '+3 hours'),
                 last_error = excluded.last_error,
-                updated_at = CURRENT_TIMESTAMP
+                updated_at = datetime('now', '+3 hours')
         """, (provider_name, provider_name.upper(), status, consecutive_failures, last_error))
 
 
@@ -11883,7 +12006,7 @@ def get_stale_provider_matches_count(stale_threshold_seconds: int = 120) -> int:
             SELECT COUNT(*) as cnt
             FROM live_match_states
             WHERE status IN ('LIVE', 'HALFTIME')
-              AND (julianday('now') - julianday(last_updated_at)) * 86400 > ?
+              AND (julianday('now', '+3 hours') - julianday(last_updated_at)) * 86400 > ?
         """, (stale_threshold_seconds,))
         row = cursor.fetchone()
         return row["cnt"] if row else 0

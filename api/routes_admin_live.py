@@ -117,7 +117,7 @@ async def handle_admin_live_overview(request: web.Request) -> web.Response:
                    m.player1_team, m.player2_team, m.status as match_status,
                    lms.period, lms.minute, lms.home_score, lms.away_score,
                    lms.last_updated_at, lms.provider,
-                   strftime('%s', 'now') - strftime('%s', lms.last_updated_at) as freshness_age_sec,
+                   strftime('%s', 'now', '+3 hours') - strftime('%s', lms.last_updated_at) as freshness_age_sec,
                    (SELECT COUNT(*) FROM markets WHERE match_id = m.id AND status = 'open') as open_markets,
                    (SELECT COUNT(*) FROM markets WHERE match_id = m.id AND status = 'suspended') as suspended_markets
             FROM matches m
@@ -344,7 +344,7 @@ async def handle_admin_void_market(request: web.Request) -> web.Response:
         for b in refunded_bets:
             cursor.execute("""
                 UPDATE user_bets
-                SET status = 'refunded', actual_payout = amount, settled_at = CURRENT_TIMESTAMP
+                SET status = 'refunded', actual_payout = amount, settled_at = datetime('now', '+3 hours')
                 WHERE id = ? AND status = 'pending'
             """, (b["id"],))
 
@@ -359,7 +359,7 @@ async def handle_admin_void_market(request: web.Request) -> web.Response:
             database.get_or_create_wallet(b["user_id"])
             cursor.execute("""
                 UPDATE user_wallets
-                SET balance = balance + ?, updated_at = CURRENT_TIMESTAMP
+                SET balance = balance + ?, updated_at = datetime('now', '+3 hours')
                 WHERE user_id = ?
             """, (b["amount"], b["user_id"]))
 
@@ -367,8 +367,8 @@ async def handle_admin_void_market(request: web.Request) -> web.Response:
             new_bal = cursor.fetchone()["balance"]
 
             cursor.execute("""
-                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after)
-                VALUES (?, ?, 'refund', ?, 'user_bets', ?)
+                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+                VALUES (?, ?, 'refund', ?, 'user_bets', ?, datetime('now', '+3 hours'))
             """, (b["user_id"], b["amount"], b["id"], new_bal))
 
             database.write_bet_audit_log(
@@ -485,15 +485,15 @@ async def handle_admin_match_correction(request: web.Request) -> web.Response:
             cursor.execute("""
                 UPDATE live_match_states
                 SET home_score = ?, away_score = ?, status = COALESCE(?, status),
-                    version = version + 1, last_updated_at = CURRENT_TIMESTAMP
+                    version = version + 1, last_updated_at = datetime('now', '+3 hours')
                 WHERE match_id = ?
             """, (new_home, new_away, new_status, match_id))
         else:
             cursor.execute("""
                 INSERT INTO live_match_states (
                     match_id, season_id, division_id, status, period, minute,
-                    home_score, away_score, provider, provider_match_id, version
-                ) VALUES (?, ?, ?, ?, 'regular', 90, ?, ?, 'manual_admin', ?, 1)
+                    home_score, away_score, provider, provider_match_id, version, last_updated_at
+                ) VALUES (?, ?, ?, ?, 'regular', 90, ?, ?, 'manual_admin', ?, 1, datetime('now', '+3 hours'))
             """, (match_id, match_row["season_id"], match_row["division_id"],
                   new_status or "live", new_home, new_away, str(match_id)))
 

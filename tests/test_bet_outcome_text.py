@@ -86,7 +86,7 @@ def test_snippet_shows_readable_pick_score_net_and_settle_time():
     assert "Кельн 1:3 Айнтрахт" in text
     assert "Победит Айнтрахт (П2)" in text
     assert "+278 🪙" in text
-    assert "Поставлена 19.09 11:30 · рассчитана 19.09 13:05 (МСК)" in text
+    assert "Поставлена 19.09 08:30 · рассчитана 19.09 10:05 (МСК)" in text
     assert "p2" not in text
 
 
@@ -120,18 +120,20 @@ def test_card_contains_breakdown_player_stats_and_cashout():
     assert "+200 🪙" in card
     assert "Забрал: <b>150 🪙</b> из 378 🪙" in card
     assert "недополучил 228 🪙" in card
-    assert "Поставлена:</b> 19.09 11:30 МСК" in card
-    assert "Кэшаут сделан:</b> 19.09 12:00 МСК" in card
+    assert "Поставлена:</b> 19.09 08:30 МСК" in card
+    assert "Кэшаут сделан:</b> 19.09 09:00 МСК" in card
 
 
 @pytest.mark.parametrize("raw, expected", [
-    ("2026-09-19 08:42:11", "19.09 11:42"),
-    ("2026-09-19 22:15:00", "20.09 01:15"),   # переход через полночь
-    ("2026-12-31 23:30", "01.01 02:30"),      # и через Новый год
+    # В базе лежит московское время (time_utils) — показываем как есть.
+    ("2026-09-19 08:42:11", "19.09 08:42"),
+    ("2026-09-19 22:15:00", "19.09 22:15"),
+    ("2026-12-31 23:30", "31.12 23:30"),
+    # А вот строка с зоной приходит из внешнего источника — её переводим в МСК.
     ("2026-09-19T08:42:11Z", "19.09 11:42"),
     ("", "—"),
     (None, "—"),
     ("вчера", "вчера"),
 ])
-def test_fmt_dt_converts_utc_to_moscow(raw, expected):
+def test_fmt_dt_shows_stored_moscow_time(raw, expected):
     assert _fmt_dt(raw) == expected

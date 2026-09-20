@@ -151,8 +151,8 @@ class BettingLimitsService:
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO risk_limits_config (scope_type, scope_id, limit_key, limit_value, updated_at)
-                VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                VALUES (?, ?, ?, ?, datetime('now', '+3 hours'))
                 ON CONFLICT(scope_type, scope_id, limit_key)
-                DO UPDATE SET limit_value = excluded.limit_value, updated_at = CURRENT_TIMESTAMP
+                DO UPDATE SET limit_value = excluded.limit_value, updated_at = datetime('now', '+3 hours')
             """, (scope_type, scope_id, limit_key, limit_value))
             return True

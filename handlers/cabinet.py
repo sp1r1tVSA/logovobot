@@ -5,6 +5,7 @@ from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton, Callbac
 from telegram.ext import ContextTypes, ConversationHandler
 import html
 import database
+from time_utils import now_msk
 from handlers.base import is_admin, resolve_division_target
 
 import logging
@@ -1272,7 +1273,7 @@ async def cabinet_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE)
     is_overdue = False
     if deadline_text:
         dt = database.parse_flexible_datetime(deadline_text)
-        if dt and datetime.datetime.now() > dt:
+        if dt and now_msk() > dt:
             is_overdue = True
             
     if m['player1_id'] == user_id:
