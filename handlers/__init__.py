@@ -404,6 +404,11 @@ def _register_user_handlers(app: Application) -> None:
     from handlers.tracker import tracker_command
     app.add_handler(CommandHandler(["tracker", "app"], tracker_command))
 
+    # Вызов тренера и управление плашками клубов
+    from handlers.text_commands import cmd_summon_club, cmd_sync_club_titles
+    app.add_handler(CommandHandler(["summon", "call", "pozvat"], cmd_summon_club))
+    app.add_handler(CommandHandler(["set_club_titles", "sync_titles"], cmd_sync_club_titles))
+
     app.add_handler(CallbackQueryHandler(show_my_club_card, pattern="^cb_my_club_card$"))
     app.add_handler(CallbackQueryHandler(show_clubs_catalog, pattern="^cb_clubs_catalog$"))
     app.add_handler(CallbackQueryHandler(show_clubs_catalog_for_division, pattern=r"^clubs_catalog_div:(\d+)$"))

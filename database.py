@@ -1959,6 +1959,56 @@ def get_team_owner(team_name: str) -> int | None:
                 return r['telegram_id']
         return None
 
+
+def find_coach_by_club(club_query: str, division_id: int | None = None) -> dict | None:
+    """
+    Find a coach by club name or alias.
+    If division_id is specified, searches that division first; otherwise searches all coaches.
+    Returns dict with telegram_id, username, team_name, division_id, or None.
+    """
+    if not club_query:
+        return None
+    target = club_query.strip()
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT telegram_id, username, team_name, division_id FROM users WHERE team_name IS NOT NULL"
+        )
+        rows = cursor.fetchall()
+        matches = []
+        for r in rows:
+            if teams_match(r["team_name"], target):
+                matches.append(dict(r))
+
+        if not matches:
+            return None
+
+        # Prioritize division if provided
+        if division_id is not None:
+            div_matches = [m for m in matches if m.get("division_id") == division_id]
+            if div_matches:
+                return div_matches[0]
+
+        return matches[0]
+
+
+def get_coaches_for_division(division_id: int | None = None) -> list[dict]:
+    """
+    Retrieve all users who have an assigned team_name, optionally filtered by division_id.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        if division_id is not None:
+            cursor.execute(
+                "SELECT telegram_id, username, team_name, division_id FROM users WHERE team_name IS NOT NULL AND division_id = ? ORDER BY team_name ASC",
+                (division_id,)
+            )
+        else:
+            cursor.execute(
+                "SELECT telegram_id, username, team_name, division_id FROM users WHERE team_name IS NOT NULL ORDER BY team_name ASC"
+            )
+        return [dict(r) for r in cursor.fetchall()]
+
 def get_user(telegram_id: int) -> sqlite3.Row | None:
     """Retrieve a user record by Telegram ID."""
     with transaction() as conn:

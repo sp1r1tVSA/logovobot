@@ -181,6 +181,7 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
             "• <code>Темшик долги [дивизион]</code> — несыгранные матчи дивизиона с тегами участников\n"
             "• <code>Темшик состав [клуб]</code> — фото и состав заявленного клуба\n"
             "• <code>Темшик карточка [клуб]</code> — инфокарточка клуба\n"
+            "• <code>Темшик позвать [клуб]</code> — позвать тренера клуба на матч (тегнет тренера)\n"
             "• <code>Темшик дивизионы</code> — список активных дивизионов лиги\n"
         )
         if is_adm:
@@ -194,7 +195,9 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
                 "• <code>Темшик -игрок [клуб] [имя]</code> — удалить из состава\n"
                 "• <code>Темшик позиция [клуб] [POS] [имя]</code> — сменить позицию (GK, CB, CM, ST…)\n"
                 "• <code>Темшик переименовать игрока [клуб] [старое] -> [новое]</code>\n"
-                "• <code>Темшик привязать клуб @username [клуб]</code>\n\n"
+                "• <code>Темшик привязать клуб @username [клуб]</code>\n"
+                "• <code>Темшик тег @username [клуб]</code> — выдать плашку клуба в чате\n"
+                "• <code>Темшик обновить теги [дивизион]</code> — выдать плашки всем тренерам\n\n"
                 "<i>Дисциплина:</i>\n"
                 "• <code>Темшик варн @username [причина]</code> — выдать варн\n"
                 "• <code>Темшик снять варн @username</code> — снять варн\n"
@@ -802,5 +805,222 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
         await msg.reply_text(f"{'✅' if ok else '❌'} {html.escape(res_text)}", parse_mode="HTML")
         return True
 
+    # =========================================================================
+    # 📣 ВЫЗОВ ТРЕНЕРА КЛУБА НА МАТЧ («Темшик позвать Кельн»)
+    # =========================================================================
+    if (
+        action in ("позвать", "позови", "вызвать", "вызови", "где", "summon", "call") or
+        full_cmd.startswith(("позвать", "позови", "вызвать", "вызови", "где "))
+    ):
+        clean_target = re.sub(r"^(?:позвать|позови|вызвать|вызови|где|summon|call)\s*(?:тренера|клуб)?\s*", "", cmd_text, flags=re.IGNORECASE).strip()
+        division_id, club_query, divisions = await resolve_command_division(update, clean_target)
+        club_query = club_query.strip()
+        if not club_query:
+            await msg.reply_text(
+                "ℹ️ Формат: <code>Темшик позвать [Название клуба] [дивизион]</code>\n"
+                "Пример: <code>Темшик позвать Кельн</code> или <code>Темшик позвать Реал Дивизион 1</code>",
+                parse_mode="HTML"
+            )
+            return True
+
+        clean_club = re.sub(r"^(?:тренера|клуб|на\s+матч)\s*", "", club_query, flags=re.IGNORECASE).strip()
+        target_club = clean_club or club_query
+        coach = await asyncio.to_thread(database.find_coach_by_club, target_club, division_id)
+        if not coach and clean_club != club_query:
+            coach = await asyncio.to_thread(database.find_coach_by_club, club_query, division_id)
+
+        if not coach:
+            await msg.reply_text(
+                f"❌ Тренер клуба «<b>{html.escape(target_club)}</b>» не найден среди участников турнира.",
+                parse_mode="HTML"
+            )
+            return True
+
+        u_name = coach.get("username")
+        p_id = coach.get("telegram_id")
+        t_name = coach.get("team_name") or target_club
+        caller_name = (
+            f"@{msg.from_user.username}"
+            if (msg.from_user and msg.from_user.username)
+            else (msg.from_user.first_name if msg.from_user else "Участник")
+        )
+
+        if u_name:
+            clean_u = u_name.lstrip('@')
+            mention = f"@{html.escape(clean_u)}"
+        else:
+            mention = f'<a href="tg://user?id={p_id}">Тренер {html.escape(t_name)}</a>'
+
+        reply_text = (
+            f"📣 <b>{html.escape(caller_name)}</b> вызывает тренера <b>{html.escape(t_name)}</b>!\n"
+            f"👉 {mention}, вас ждут на матч! ⚽"
+        )
+        await msg.reply_text(reply_text, parse_mode="HTML")
+        return True
+
+    # =========================================================================
+    # 🏷 УПРАВЛЕНИЕ ПЛАШКАМИ КЛУБОВ (Custom Titles)
+    # =========================================================================
+    if (
+        action in ("тег", "теги", "звание", "плашка", "плашки", "set_title", "titles") or
+        full_cmd.startswith(("обновить теги", "назначить теги", "теги обновить", "теги назначить"))
+    ):
+        if not is_adm:
+            await msg.reply_text("⚠️ Эта команда доступна только администраторам турнира.")
+            return True
+
+        if not update.effective_chat or update.effective_chat.type not in ("group", "supergroup"):
+            await msg.reply_text("⚠️ Установка плашек возможна только в супергруппе турнира.")
+            return True
+
+        from services.chat_titles import assign_club_title, sync_division_club_titles
+
+        clean_args = re.sub(
+            r"^(?:обновить|назначить|поставить)?\s*(?:теги|тег|звание|плашки|плашка)\s*",
+            "", cmd_text, flags=re.IGNORECASE
+        ).strip()
+
+        # Массовое обновление тегов для дивизиона/группы
+        is_bulk = (
+            action in ("теги", "titles") or
+            full_cmd.startswith(("обновить теги", "назначить теги", "теги обновить", "теги назначить"))
+        )
+        is_single_user = clean_args.startswith("@") or (bool(clean_args.split() and clean_args.split()[0].isdigit()))
+
+        if is_bulk and not is_single_user:
+            division_id, _, divisions = await resolve_command_division(update, clean_args)
+            status_m = await msg.reply_text("⏳ <i>Обновляю плашки клубов для участников...</i>", parse_mode="HTML")
+            stats = await sync_division_club_titles(context.bot, update.effective_chat.id, division_id)
+            report_lines = [
+                "🏷 <b>ОБНОВЛЕНИЕ ПЛАШЕК КЛУБОВ ЗАВЕРШЕНО:</b>\n",
+                f"• Всего тренеров в базе: <b>{stats['total']}</b>",
+                f"• ✅ Успешно установлено: <b>{stats['success']}</b>",
+                f"• ⚠️ Пропущено (не в чате / владелец): <b>{stats['skipped']}</b>",
+                f"• ❌ Ошибок (лимит 50 / нет прав): <b>{stats['failed']}</b>",
+            ]
+            if stats["details"] and stats["failed"] > 0:
+                report_lines.append("\n<b>Ошибки:</b>")
+                report_lines.extend(stats["details"][-5:])
+            await status_m.edit_text("\n".join(report_lines), parse_mode="HTML")
+            return True
+
+        # Точечное назначение: «Темшик тег @username [клуб]»
+        parts_p = clean_args.split(None, 1)
+        if not parts_p:
+            await msg.reply_text(
+                "ℹ️ <b>Форматы управления плашками:</b>\n"
+                "• <code>Темшик тег @username [Клуб]</code> — выдать плашку участнику\n"
+                "• <code>Темшик обновить теги [дивизион]</code> — выдать плашки всем тренерам в чате",
+                parse_mode="HTML"
+            )
+            return True
+
+        target_ref = parts_p[0].strip().lstrip("@")
+        override_club = parts_p[1].strip() if len(parts_p) > 1 else None
+
+        user_row = await asyncio.to_thread(database.find_user_by_ref, target_ref)
+        target_user_id = user_row["telegram_id"] if user_row else (int(target_ref) if target_ref.isdigit() else None)
+        club_to_assign = override_club or (user_row["team_name"] if user_row else None)
+
+        if not target_user_id:
+            await msg.reply_text(f"❌ Пользователь <code>@{html.escape(target_ref)}</code> не найден в базе данных.", parse_mode="HTML")
+            return True
+
+        if not club_to_assign:
+            await msg.reply_text("❌ У пользователя не указан клуб в базе данных, и клуб не передан в команде.", parse_mode="HTML")
+            return True
+
+        ok, res_msg = await assign_club_title(context.bot, update.effective_chat.id, target_user_id, club_to_assign)
+        await msg.reply_text(
+            f"{'✅' if ok else '❌'} <b>@{html.escape(target_ref)}</b>: {html.escape(res_msg)}",
+            parse_mode="HTML"
+        )
+        return True
+
     # Not a specific tournament command -> return False to allow conversational AI chat to handle it
     return False
+
+
+async def cmd_summon_club(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Slash command /summon [club] [division]."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    args_str = " ".join(context.args) if context.args else ""
+    if not args_str.strip():
+        await msg.reply_text(
+            "ℹ️ Формат: <code>/summon [Название клуба] [дивизион]</code>\n"
+            "Пример: <code>/summon Кельн</code> или <code>/summon Реал Дивизион 1</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    division_id, club_query, _ = await resolve_command_division(update, args_str)
+    target_club = club_query.strip()
+    coach = await asyncio.to_thread(database.find_coach_by_club, target_club, division_id)
+
+    if not coach:
+        await msg.reply_text(
+            f"❌ Тренер клуба «<b>{html.escape(target_club)}</b>» не найден среди участников турнира.",
+            parse_mode="HTML"
+        )
+        return
+
+    u_name = coach.get("username")
+    p_id = coach.get("telegram_id")
+    t_name = coach.get("team_name") or target_club
+    caller_name = (
+        f"@{msg.from_user.username}"
+        if (msg.from_user and msg.from_user.username)
+        else (msg.from_user.first_name if msg.from_user else "Участник")
+    )
+
+    if u_name:
+        clean_u = u_name.lstrip('@')
+        mention = f"@{html.escape(clean_u)}"
+    else:
+        mention = f'<a href="tg://user?id={p_id}">Тренер {html.escape(t_name)}</a>'
+
+    reply_text = (
+        f"📣 <b>{html.escape(caller_name)}</b> вызывает тренера <b>{html.escape(t_name)}</b>!\n"
+        f"👉 {mention}, вас ждут на матч! ⚽"
+    )
+    await msg.reply_text(reply_text, parse_mode="HTML")
+
+
+async def cmd_sync_club_titles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Slash command /set_club_titles [division] (Admin only)."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    user_id = update.effective_user.id if update.effective_user else 0
+    if not is_admin(user_id):
+        await msg.reply_text("⚠️ Эта команда доступна только администраторам турнира.")
+        return
+
+    if not update.effective_chat or update.effective_chat.type not in ("group", "supergroup"):
+        await msg.reply_text("⚠️ Установка плашек возможна только в супергруппе турнира.")
+        return
+
+    from services.chat_titles import sync_division_club_titles
+
+    args_str = " ".join(context.args) if context.args else ""
+    division_id, _, _ = await resolve_command_division(update, args_str)
+
+    status_m = await msg.reply_text("⏳ <i>Обновляю плашки клубов для участников...</i>", parse_mode="HTML")
+    stats = await sync_division_club_titles(context.bot, update.effective_chat.id, division_id)
+
+    report_lines = [
+        "🏷 <b>ОБНОВЛЕНИЕ ПЛАШЕК КЛУБОВ ЗАВЕРШЕНО:</b>\n",
+        f"• Всего тренеров в базе: <b>{stats['total']}</b>",
+        f"• ✅ Успешно установлено: <b>{stats['success']}</b>",
+        f"• ⚠️ Пропущено (не в чате / владелец): <b>{stats['skipped']}</b>",
+        f"• ❌ Ошибок (лимит 50 / нет прав): <b>{stats['failed']}</b>",
+    ]
+    if stats["details"] and stats["failed"] > 0:
+        report_lines.append("\n<b>Ошибки:</b>")
+        report_lines.extend(stats["details"][-5:])
+    await status_m.edit_text("\n".join(report_lines), parse_mode="HTML")
+
