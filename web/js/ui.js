@@ -1740,7 +1740,9 @@ export class UIRenderer {
 
     // Счётчик слотов показываем всегда, а не только при отказе: уже открытые
     // купоны занимают слоты, и без счётчика непонятно, куда они делись.
-    const freeSlots = store.getRemainingBetSlots();
+    const freeSlots = typeof store.getRemainingBetSlots === 'function'
+      ? store.getRemainingBetSlots()
+      : Math.max(0, (max_open_bets || 5) - (open_bets || 0));
     setText('coupon-summary-slots', `${open_bets} из ${max_open_bets}`);
     document.getElementById('coupon-slots-row')?.classList.toggle('is-full', freeSlots === 0);
 

@@ -3,11 +3,11 @@
  * Comprehensive App Controller and Event Orchestrator for Logovo.bet (v2.0).
  */
 
-import { api } from './api.js';
-import { store } from './store.js';
-import { tgBridge } from './tg.js';
-import { UIRenderer, escapeHtml } from './ui.js';
-import { ParticleEffects } from './effects.js';
+import { api } from './api.js?v=3.3.0';
+import { store } from './store.js?v=3.3.0';
+import { tgBridge } from './tg.js?v=3.3.0';
+import { UIRenderer, escapeHtml } from './ui.js?v=3.3.0';
+import { ParticleEffects } from './effects.js?v=3.3.0';
 
 class AppController {
   constructor() {
@@ -910,8 +910,14 @@ class AppController {
           submitBtn.classList.remove('loading');
           submitBtn.disabled = false;
           // Force the CTA text back from the loader: the render only writes changed text.
-          if (ctaMain) ctaMain.textContent = '';
+          if (ctaMain && ctaMain.innerHTML.includes('coupon-spinner')) {
+            ctaMain.textContent = '';
+          }
           store.notify();
+          // Safety guard: ensure the button NEVER stays completely blank
+          if (ctaMain && !ctaMain.textContent.trim()) {
+            ctaMain.textContent = 'Поставить';
+          }
         }
       });
     }
