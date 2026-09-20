@@ -3,6 +3,7 @@ import logging
 import html
 import re
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+import telegram.error
 from telegram.ext import ContextTypes
 
 import database
@@ -17,6 +18,25 @@ logger = logging.getLogger(__name__)
 
 # Trigger pattern: matches messages starting with "темшик", "темщик", "temshik", or @bot_username
 TRIGGER_REGEX = re.compile(r"^(?:темшик|темщик|temshik|@[\w_]+bot)\b[\s,:]*", re.IGNORECASE)
+
+
+async def _safe_edit_status(msg, text: str) -> None:
+    """Safely edit a message, awaiting RetryAfter if Telegram flood control is exceeded."""
+    if not msg:
+        return
+    try:
+        await msg.edit_text(text, parse_mode="HTML")
+    except telegram.error.RetryAfter as ra:
+        wait_s = max(1, int(ra.retry_after)) + 1
+        logger.warning(f"Flood control exceeded on edit_text: waiting {wait_s}s...")
+        await asyncio.sleep(wait_s)
+        try:
+            await msg.edit_text(text, parse_mode="HTML")
+        except Exception as e:
+            logger.error(f"Failed to edit status message after RetryAfter: {e}")
+    except Exception as e:
+        logger.error(f"Failed to edit status message: {e}")
+
 
 # «див 2», «дивизион: 3», «division 4», «div #1» — явное указание дивизиона.
 # Голое число дивизионом НЕ считается: в «бомбардиры 10» и «открыть тур 5» число
@@ -910,7 +930,8 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
 
             if stats.get("error") == "no_promote_rights" or (stats["failed"] > 0 and stats["success"] == 0 and any("can_promote_members" in d for d in stats["details"])):
                 retry_arg = f" {division_id}" if division_id else ""
-                await status_m.edit_text(
+                await _safe_edit_status(
+                    status_m,
                     "⚠️ <b>Недостаточно прав у бота в группе!</b>\n\n"
                     "В Telegram плашки клубов (должности) технически привязаны к статусу администратора. "
                     "Бот делает тренеров администраторами с <i>минимальными правами</i> (только инвайт-ссылки, без права удалять сообщения или банить).\n\n"
@@ -920,8 +941,7 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
                     "2. Откройте профиль бота <b>ТЕМШИК</b>.\n"
                     "3. Включите пункт <b>«Добавление администраторов»</b> (или «Назначение администраторов»).\n"
                     "4. Сохраните и повторите команду:\n"
-                    f"<code>Темшик обновить теги{retry_arg}</code>",
-                    parse_mode="HTML"
+                    f"<code>Темшик обновить теги{retry_arg}</code>"
                 )
                 return True
 
@@ -936,7 +956,7 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
             if stats["details"] and stats["failed"] > 0:
                 report_lines.append("\n<b>Ошибки:</b>")
                 report_lines.extend(stats["details"][-5:])
-            await status_m.edit_text("\n".join(report_lines), parse_mode="HTML")
+            await _safe_edit_status(status_m, "\n".join(report_lines))
             return True
 
         # Точечное назначение: «Темшик тег @username [клуб]»
@@ -1065,7 +1085,8 @@ async def cmd_sync_club_titles(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if stats.get("error") == "no_promote_rights" or (stats["failed"] > 0 and stats["success"] == 0 and any("can_promote_members" in d for d in stats["details"])):
         retry_arg = f" {division_id}" if division_id else ""
-        await status_m.edit_text(
+        await _safe_edit_status(
+            status_m,
             "⚠️ <b>Недостаточно прав у бота в группе!</b>\n\n"
             "В Telegram плашки клубов (должности) технически привязаны к статусу администратора. "
             "Чтобы бот мог автоматически выдавать плашки, ему требуется право <b>«Добавление администраторов»</b>.\n\n"
@@ -1073,8 +1094,7 @@ async def cmd_sync_club_titles(update: Update, context: ContextTypes.DEFAULT_TYP
             "1. Зайдите в <b>Настройки группы</b> → <b>Администраторы</b>.\n"
             "2. Откройте профиль бота <b>ТЕМШИК</b>.\n"
             "3. Включите право <b>«Добавление администраторов»</b>.\n"
-            f"4. Сохраните и повторите: <code>/set_club_titles{retry_arg}</code>",
-            parse_mode="HTML"
+            f"4. Сохраните и повторите: <code>/set_club_titles{retry_arg}</code>"
         )
         return
 
@@ -1090,5 +1110,5 @@ async def cmd_sync_club_titles(update: Update, context: ContextTypes.DEFAULT_TYP
     if stats["details"] and stats["failed"] > 0:
         report_lines.append("\n<b>Ошибки:</b>")
         report_lines.extend(stats["details"][-5:])
-    await status_m.edit_text("\n".join(report_lines), parse_mode="HTML")
+    await _safe_edit_status(status_m, "\n".join(report_lines))
 

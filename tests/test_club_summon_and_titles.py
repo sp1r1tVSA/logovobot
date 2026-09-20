@@ -213,6 +213,19 @@ class TestClubSummonAndTitles(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Недостаточно прав у бота", report)
             self.assertIn("Добавление администраторов", report)
 
+    async def test_safe_edit_status_handles_retry_after(self):
+        from handlers.text_commands import _safe_edit_status
+        import telegram.error
+
+        msg = MagicMock()
+        # First call raises RetryAfter, second call succeeds
+        msg.edit_text = AsyncMock(side_effect=[telegram.error.RetryAfter(0), None])
+
+        with patch("asyncio.sleep", new=AsyncMock()) as mock_sleep:
+            await _safe_edit_status(msg, "Updated text")
+            self.assertEqual(msg.edit_text.await_count, 2)
+            mock_sleep.assert_awaited_once_with(2)
+
 
 if __name__ == "__main__":
     unittest.main()

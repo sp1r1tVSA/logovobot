@@ -7,13 +7,21 @@ if TYPE_CHECKING:
 
 import database
 
+from telegram.error import RetryAfter
+
 logger = logging.getLogger(__name__)
 
 # Telegram limits custom titles to 16 UTF-8 characters
 MAX_CUSTOM_TITLE_LEN = 16
 
 
-async def assign_club_title(bot: "Bot", chat_id: int, user_id: int, club_name: str) -> tuple[bool, str]:
+async def assign_club_title(
+    bot: "Bot",
+    chat_id: int,
+    user_id: int,
+    club_name: str,
+    max_retries: int = 1,
+) -> tuple[bool, str]:
     """
     Safely assign a custom title (club badge) to a user in a Telegram supergroup.
     Promotes the user to administrator with minimal benign privileges if they are not one,
@@ -28,6 +36,13 @@ async def assign_club_title(bot: "Bot", chat_id: int, user_id: int, club_name: s
 
     try:
         member = await bot.get_chat_member(chat_id=chat_id, user_id=user_id)
+    except RetryAfter as ra:
+        if max_retries > 0:
+            wait_s = max(1, int(ra.retry_after)) + 1
+            logger.warning(f"RetryAfter during get_chat_member for {user_id}: sleeping {wait_s}s...")
+            await asyncio.sleep(wait_s)
+            return await assign_club_title(bot, chat_id, user_id, club_name, max_retries=max_retries - 1)
+        return False, f"Flood control Telegram (повторите через {ra.retry_after}с)"
     except Exception as e:
         err_str = str(e).lower()
         if "participant" in err_str or "not found" in err_str:
@@ -58,6 +73,13 @@ async def assign_club_title(bot: "Bot", chat_id: int, user_id: int, club_name: s
                 can_pin_messages=False,
                 can_manage_topics=False,
             )
+        except RetryAfter as ra:
+            if max_retries > 0:
+                wait_s = max(1, int(ra.retry_after)) + 1
+                logger.warning(f"RetryAfter during promote_chat_member for {user_id}: sleeping {wait_s}s...")
+                await asyncio.sleep(wait_s)
+                return await assign_club_title(bot, chat_id, user_id, club_name, max_retries=max_retries - 1)
+            return False, f"Flood control Telegram (повторите через {ra.retry_after}с)"
         except Exception as e:
             err_str = str(e)
             if "CHAT_ADMIN_LIMIT_EXCEEDED" in err_str or "admin limit" in err_str.lower():
@@ -75,6 +97,13 @@ async def assign_club_title(bot: "Bot", chat_id: int, user_id: int, club_name: s
             custom_title=title,
         )
         return True, f"Установлена плашка «{title}»"
+    except RetryAfter as ra:
+        if max_retries > 0:
+            wait_s = max(1, int(ra.retry_after)) + 1
+            logger.warning(f"RetryAfter during set_custom_title for {user_id}: sleeping {wait_s}s...")
+            await asyncio.sleep(wait_s)
+            return await assign_club_title(bot, chat_id, user_id, club_name, max_retries=max_retries - 1)
+        return False, f"Flood control Telegram (повторите через {ra.retry_after}с)"
     except Exception as e:
         err_str = str(e)
         if "rights_not_modified" in err_str.lower():
@@ -117,6 +146,10 @@ async def sync_division_club_titles(bot: "Bot", chat_id: int, division_id: int |
             stats["error"] = "no_promote_rights"
             stats["details"].append("❌ У бота нет права «Добавление администраторов» (can_promote_members). Включите это право боту в настройках группы.")
             return stats
+    except RetryAfter as ra:
+        wait_s = max(1, int(ra.retry_after)) + 1
+        logger.warning(f"RetryAfter during check bot permissions: sleeping {wait_s}s...")
+        await asyncio.sleep(wait_s)
     except Exception as e:
         logger.warning(f"Could not verify bot permissions upfront: {e}")
 
@@ -143,6 +176,6 @@ async def sync_division_club_titles(bot: "Bot", chat_id: int, division_id: int |
                 stats["details"].append(f"❌ {display} ({team_name}): {msg}")
 
         # Rate-limiting pacing: Telegram allows ~20-30 admin API mutations per minute
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(1.0)
 
     return stats
