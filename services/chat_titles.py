@@ -110,6 +110,16 @@ async def sync_division_club_titles(bot: "Bot", chat_id: int, division_id: int |
     if not coaches:
         return stats
 
+    # Проверяем права самого бота в группе заранее, чтобы не крутить цикл впустую
+    try:
+        bot_member = await bot.get_chat_member(chat_id=chat_id, user_id=bot.id)
+        if getattr(bot_member, "status", None) == "administrator" and getattr(bot_member, "can_promote_members", True) is False:
+            stats["error"] = "no_promote_rights"
+            stats["details"].append("❌ У бота нет права «Добавление администраторов» (can_promote_members). Включите это право боту в настройках группы.")
+            return stats
+    except Exception as e:
+        logger.warning(f"Could not verify bot permissions upfront: {e}")
+
     for coach in coaches:
         user_id = coach.get("telegram_id")
         team_name = coach.get("team_name")

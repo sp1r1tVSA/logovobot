@@ -907,6 +907,24 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
 
             status_m = await msg.reply_text("⏳ <i>Обновляю плашки клубов для участников...</i>", parse_mode="HTML")
             stats = await sync_division_club_titles(context.bot, update.effective_chat.id, division_id)
+
+            if stats.get("error") == "no_promote_rights" or (stats["failed"] > 0 and stats["success"] == 0 and any("can_promote_members" in d for d in stats["details"])):
+                retry_arg = f" {division_id}" if division_id else ""
+                await status_m.edit_text(
+                    "⚠️ <b>Недостаточно прав у бота в группе!</b>\n\n"
+                    "В Telegram плашки клубов (должности) технически привязаны к статусу администратора. "
+                    "Бот делает тренеров администраторами с <i>минимальными правами</i> (только инвайт-ссылки, без права удалять сообщения или банить).\n\n"
+                    "Чтобы бот мог автоматически выдавать плашки, ему требуется право <b>«Добавление администраторов»</b>.\n\n"
+                    "👉 <b>Как настроить владельцу группы:</b>\n"
+                    "1. Зайдите в <b>Настройки группы</b> → <b>Администраторы</b>.\n"
+                    "2. Откройте профиль бота <b>ТЕМШИК</b>.\n"
+                    "3. Включите пункт <b>«Добавление администраторов»</b> (или «Назначение администраторов»).\n"
+                    "4. Сохраните и повторите команду:\n"
+                    f"<code>Темшик обновить теги{retry_arg}</code>",
+                    parse_mode="HTML"
+                )
+                return True
+
             div_label = f" (Дивизион {division_id})" if division_id else ""
             report_lines = [
                 f"🏷 <b>ОБНОВЛЕНИЕ ПЛАШЕК КЛУБОВ ЗАВЕРШЕНО{html.escape(div_label)}:</b>\n",
@@ -1044,6 +1062,22 @@ async def cmd_sync_club_titles(update: Update, context: ContextTypes.DEFAULT_TYP
 
     status_m = await msg.reply_text("⏳ <i>Обновляю плашки клубов для участников...</i>", parse_mode="HTML")
     stats = await sync_division_club_titles(context.bot, update.effective_chat.id, division_id)
+
+    if stats.get("error") == "no_promote_rights" or (stats["failed"] > 0 and stats["success"] == 0 and any("can_promote_members" in d for d in stats["details"])):
+        retry_arg = f" {division_id}" if division_id else ""
+        await status_m.edit_text(
+            "⚠️ <b>Недостаточно прав у бота в группе!</b>\n\n"
+            "В Telegram плашки клубов (должности) технически привязаны к статусу администратора. "
+            "Чтобы бот мог автоматически выдавать плашки, ему требуется право <b>«Добавление администраторов»</b>.\n\n"
+            "👉 <b>Как настроить:</b>\n"
+            "1. Зайдите в <b>Настройки группы</b> → <b>Администраторы</b>.\n"
+            "2. Откройте профиль бота <b>ТЕМШИК</b>.\n"
+            "3. Включите право <b>«Добавление администраторов»</b>.\n"
+            f"4. Сохраните и повторите: <code>/set_club_titles{retry_arg}</code>",
+            parse_mode="HTML"
+        )
+        return
+
     div_label = f" (Дивизион {division_id})" if division_id else ""
 
     report_lines = [

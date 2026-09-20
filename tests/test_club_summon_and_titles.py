@@ -189,6 +189,30 @@ class TestClubSummonAndTitles(unittest.IsolatedAsyncioTestCase):
             mock_sync.assert_awaited_once_with(context.bot, msg.chat.id, self.div_id)
             status_msg.edit_text.assert_awaited_once()
 
+    async def test_bulk_update_tags_no_promote_rights_guidance(self):
+        update, msg = _make_msg_update(self.admin_id, f"Темшик обновить теги {self.div_id}")
+        status_msg = MagicMock()
+        status_msg.edit_text = AsyncMock()
+        msg.reply_text = AsyncMock(return_value=status_msg)
+
+        context = MagicMock()
+        context.bot = MagicMock()
+
+        with patch("services.chat_titles.sync_division_club_titles", new=AsyncMock(return_value={
+            "total": 16,
+            "success": 0,
+            "skipped": 0,
+            "failed": 16,
+            "details": ["❌ @coach (Club): У бота нет права назначать администраторов (требуется can_promote_members)"],
+            "error": "no_promote_rights"
+        })):
+            handled = await handle_temshik_command(update, context)
+            self.assertTrue(handled)
+            status_msg.edit_text.assert_awaited_once()
+            report = status_msg.edit_text.await_args[0][0]
+            self.assertIn("Недостаточно прав у бота", report)
+            self.assertIn("Добавление администраторов", report)
+
 
 if __name__ == "__main__":
     unittest.main()
