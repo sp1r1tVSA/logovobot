@@ -104,38 +104,29 @@ class TestClubSummonAndTitles(unittest.IsolatedAsyncioTestCase):
         reply_content = msg.reply_text.await_args[0][0]
         self.assertIn(f"@{self.player_username}", reply_content)
 
-    async def test_assign_club_title_promotion_and_set_title(self):
+    async def test_assign_club_title_sets_member_tag(self):
         bot = MagicMock()
-        # User is regular member
-        member = MagicMock(status="member")
-        bot.get_chat_member = AsyncMock(return_value=member)
-        bot.promote_chat_member = AsyncMock()
-        bot.set_chat_administrator_custom_title = AsyncMock()
+        bot._post = AsyncMock(return_value=True)
 
         chat_id = -100123456789
         long_club_name = "Боруссия Мёнхенгладбах"
         ok, msg = await assign_club_title(bot, chat_id, self.player_id, long_club_name)
 
         self.assertTrue(ok)
-        self.assertIn("Установлена плашка", msg)
+        self.assertIn("Установлен тег", msg)
 
-        # Verified promotion was called with zero permissions (pure tag only)
-        bot.promote_chat_member.assert_awaited_once()
-        promote_kwargs = bot.promote_chat_member.await_args.kwargs
-        self.assertFalse(promote_kwargs["can_invite_users"])
-        self.assertFalse(promote_kwargs["can_delete_messages"])
-        self.assertFalse(promote_kwargs["can_restrict_members"])
-
-        # Verified title was truncated to 16 characters
-        bot.set_chat_administrator_custom_title.assert_awaited_once()
-        title_arg = bot.set_chat_administrator_custom_title.await_args.kwargs["custom_title"]
-        self.assertLessEqual(len(title_arg), MAX_CUSTOM_TITLE_LEN)
-        self.assertEqual(title_arg, long_club_name[:16])
+        # Verified setChatMemberTag was called directly without admin promotion
+        bot._post.assert_awaited_once()
+        call_endpoint = bot._post.await_args[0][0]
+        call_kwargs = bot._post.await_args.kwargs["data"]
+        self.assertEqual(call_endpoint, "setChatMemberTag")
+        self.assertEqual(call_kwargs["chat_id"], chat_id)
+        self.assertEqual(call_kwargs["user_id"], self.player_id)
+        self.assertEqual(call_kwargs["tag"], long_club_name[:16])
 
     async def test_assign_club_title_creator_skipped(self):
         bot = MagicMock()
-        member = MagicMock(status="creator")
-        bot.get_chat_member = AsyncMock(return_value=member)
+        bot._post = AsyncMock(side_effect=Exception("Bad Request: creator tag cannot be changed"))
 
         ok, msg = await assign_club_title(bot, -1001234, self.admin_id, "Кёльн")
         self.assertFalse(ok)
@@ -143,10 +134,9 @@ class TestClubSummonAndTitles(unittest.IsolatedAsyncioTestCase):
 
     async def test_sync_division_club_titles(self):
         bot = MagicMock()
-        member = MagicMock(status="member")
-        bot.get_chat_member = AsyncMock(return_value=member)
-        bot.promote_chat_member = AsyncMock()
-        bot.set_chat_administrator_custom_title = AsyncMock()
+        bot._post = AsyncMock(return_value=True)
+        bot_admin = MagicMock(status="administrator", can_manage_tags=True)
+        bot.get_chat_member = AsyncMock(return_value=bot_admin)
 
         stats = await sync_division_club_titles(bot, -1001234, self.div_id)
         self.assertGreaterEqual(stats["total"], 1)
@@ -203,15 +193,15 @@ class TestClubSummonAndTitles(unittest.IsolatedAsyncioTestCase):
             "success": 0,
             "skipped": 0,
             "failed": 16,
-            "details": ["❌ @coach (Club): У бота нет права назначать администраторов (требуется can_promote_members)"],
-            "error": "no_promote_rights"
+            "details": ["❌ @coach (Club): У бота нет права «Изменение тегов участников» (can_manage_tags)"],
+            "error": "no_tags_rights"
         })):
             handled = await handle_temshik_command(update, context)
             self.assertTrue(handled)
             status_msg.edit_text.assert_awaited_once()
             report = status_msg.edit_text.await_args[0][0]
             self.assertIn("Недостаточно прав у бота", report)
-            self.assertIn("Добавление администраторов", report)
+            self.assertIn("Изменение тегов участников", report)
 
     async def test_safe_edit_status_handles_retry_after(self):
         from handlers.text_commands import _safe_edit_status
