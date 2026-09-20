@@ -222,10 +222,10 @@ async def handle_get_predictions(request: web.Request) -> web.Response:
         status_filter = None  # ignore unknown filter
 
     try:
-        raw_limit = int(request.query.get("limit", 30))
-        limit = max(1, min(50, raw_limit))
+        raw_limit = int(request.query.get("limit", 50))
+        limit = max(1, min(100, raw_limit))
     except (ValueError, TypeError):
-        limit = 30
+        limit = 50
 
     bets = await asyncio.to_thread(database.get_user_bets, user_id, status=status_filter, limit=limit)
 

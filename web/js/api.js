@@ -167,7 +167,7 @@ class ApiClient {
     });
   }
 
-  getPredictions(status = null, limit = 30) {
+  getPredictions(status = null, limit = 50) {
     const params = new URLSearchParams();
     if (status && status !== 'all') params.append('status', status);
     if (limit) params.append('limit', limit);

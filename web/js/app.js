@@ -614,13 +614,23 @@ class AppController {
     // 10. History Filter Chips
     const historyFilters = document.getElementById('history-filter-pills');
     if (historyFilters) {
-      historyFilters.addEventListener('click', (e) => {
+      historyFilters.addEventListener('click', async (e) => {
         const btn = e.target.closest('.category-pill');
         if (btn && btn.dataset.filter) {
+          const filter = btn.dataset.filter;
           historyFilters.querySelectorAll('.category-pill').forEach(p => p.classList.remove('active'));
           btn.classList.add('active');
-          store.setMyBets(store.state.myBets, btn.dataset.filter);
+          store.setMyBets(store.state.myBets, filter);
           tgBridge.hapticImpact('light');
+
+          try {
+            const res = await api.getPredictions(filter === 'all' ? null : filter, 50);
+            if (res && res.status === 'ok') {
+              store.setMyBets(res.predictions || res.bets || [], filter);
+            }
+          } catch (err) {
+            console.warn("Could not load filtered predictions:", err);
+          }
         }
       });
     }
@@ -1260,8 +1270,9 @@ class AppController {
 
     // On-demand view refresh
     if (viewName === 'history') {
-      api.getPredictions().then(res => {
-        if (res.status === 'ok') store.setMyBets(res.predictions || res.bets || []);
+      const activeFilter = document.querySelector('#history-filter-pills .category-pill.active')?.dataset.filter || 'all';
+      api.getPredictions(activeFilter === 'all' ? null : activeFilter, 50).then(res => {
+        if (res.status === 'ok') store.setMyBets(res.predictions || res.bets || [], activeFilter);
       }).catch(() => {});
     } else if (viewName === 'profile') {
       this.fetchUserExtras();
