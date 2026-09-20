@@ -3,11 +3,11 @@
  * Comprehensive App Controller and Event Orchestrator for Logovo.bet (v2.0).
  */
 
-import { api } from './api.js?v=3.3.0';
-import { store } from './store.js?v=3.3.0';
-import { tgBridge } from './tg.js?v=3.3.0';
-import { UIRenderer, escapeHtml } from './ui.js?v=3.3.0';
-import { ParticleEffects } from './effects.js?v=3.3.0';
+import { api } from './api.js';
+import { store } from './store.js';
+import { tgBridge } from './tg.js';
+import { UIRenderer, escapeHtml } from './ui.js';
+import { ParticleEffects } from './effects.js';
 
 class AppController {
   constructor() {

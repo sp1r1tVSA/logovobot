@@ -164,6 +164,11 @@ async def cors_middleware(request: web.Request, handler):
     response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Telegram-Init-Data, Authorization"
     response.headers["Access-Control-Max-Age"] = "86400"
+
+    # Static assets (JS/CSS) in Telegram WebView: must revalidate so updates land immediately
+    if request.path.startswith(("/js/", "/css/", "/static/")):
+        response.headers["Cache-Control"] = "no-cache, must-revalidate"
+
     return response
 
 
