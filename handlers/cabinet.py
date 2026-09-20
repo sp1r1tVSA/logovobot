@@ -1966,11 +1966,47 @@ async def cb_report_choice_manual(update: Update, context: ContextTypes.DEFAULT_
     # Используем safe_edit_or_reply, чтобы корректно удалить карточку с картинкой!
     await safe_edit_or_reply(query, context, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
+async def send_report_session_expired(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Сообщить, что ручной ввод больше не привязан ни к какому матчу."""
+    query = update.callback_query
+    expired_text = (
+        "⚠️ <b>Сессия ввода результата устарела</b> (бот перезапускался).\n\n"
+        "Откройте матч в кабинете и начните ввод результата заново."
+    )
+    if query:
+        await safe_query_answer(query, "⚠️ Сессия устарела. Откройте матч заново.", show_alert=True)
+        try:
+            await query.edit_message_text(expired_text, parse_mode="HTML")
+        except Exception:
+            pass
+    else:
+        await update.effective_message.reply_text(expired_text, parse_mode="HTML")
+
+async def manual_report_session_lost(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """True, если ручной ввод потерял привязку к матчу — тогда шаг выполнять нельзя.
+
+    The whole manual flow — match id, team names, squads behind the buttons —
+    lives in in-memory user_data, so a restart leaves the inline keyboard alive
+    while the state behind it is gone. Walking on with None teams crashed in
+    html.escape(); ask the user to start over instead.
+    """
+    if (
+        context.user_data.get("reporting_match_id")
+        and context.user_data.get("report_home_team")
+        and context.user_data.get("report_away_team")
+    ):
+        return False
+    await send_report_session_expired(update, context)
+    return True
+
 async def cb_report_home_goals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
         return
     await query.answer()
+
+    if await manual_report_session_lost(update, context):
+        return
 
     hg = int(query.data.replace("cb_report_hg_", ""))
     context.user_data["report_home_goals"] = hg
@@ -2006,6 +2042,9 @@ async def cb_report_away_goals(update: Update, context: ContextTypes.DEFAULT_TYP
     if not query:
         return
     await query.answer()
+
+    if await manual_report_session_lost(update, context):
+        return
 
     ag = int(query.data.replace("cb_report_ag_", ""))
     context.user_data["report_away_goals"] = ag
@@ -2071,7 +2110,7 @@ async def render_squad_goals_picker(update: Update, context: ContextTypes.DEFAUL
         summary_str = "\n\n⚽ **Уже выбрано:**\n" + "\n".join([f"• {p}: {c}" for p, c in picked_dict.items()])
 
     text = (
-        f"⚽ <b>Авторы голов команды ({html.escape(team_name)})</b>\n"
+        f"⚽ <b>Авторы голов команды ({safe_escape(team_name)})</b>\n"
         f"Осталось распределить голов: <b>{left}</b>{summary_str}\n\n"
         f"Нажимайте на кнопки с игроками состава:"
     )
@@ -2107,6 +2146,9 @@ async def cb_pick_goal(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     await query.answer()
 
+    if await manual_report_session_lost(update, context):
+        return
+
     idx = int(query.data.replace("cb_pick_goal_idx_", ""))
     squad = context.user_data.get("temp_active_squad_goals", [])
     player = squad[idx] if idx < len(squad) else "Unknown"
@@ -2136,6 +2178,9 @@ async def cb_skip_goals(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         return
     await query.answer()
 
+    if await manual_report_session_lost(update, context):
+        return
+
     phase = context.user_data.get("current_picking_phase", "home_goals")
     if phase == "home_goals":
         await start_home_assists_picker(update, context)
@@ -2160,7 +2205,7 @@ async def render_squad_assists_picker(update: Update, context: ContextTypes.DEFA
         summary_str = "\n\n🎯 **Уже выбрано:**\n" + "\n".join([f"• {p}: {c}" for p, c in picked_dict.items()])
 
     text = (
-        f"🎯 <b>Авторы ассистов команды ({html.escape(team_name)})</b>\n"
+        f"🎯 <b>Авторы ассистов команды ({safe_escape(team_name)})</b>\n"
         f"Осталось ассистов (макс {max_assists}): <b>{left}</b>{summary_str}\n\n"
         f"Нажимайте на кнопки с игроками состава или пропустите:"
     )
@@ -2193,6 +2238,9 @@ async def cb_pick_assist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     await query.answer()
 
+    if await manual_report_session_lost(update, context):
+        return
+
     idx = int(query.data.replace("cb_pick_assist_idx_", ""))
     squad = context.user_data.get("temp_active_squad_assists", [])
     player = squad[idx] if idx < len(squad) else "Unknown"
@@ -2222,6 +2270,9 @@ async def cb_skip_assists(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return
     await query.answer()
 
+    if await manual_report_session_lost(update, context):
+        return
+
     phase = context.user_data.get("current_picking_phase", "home_assists")
     if phase == "home_assists":
         await start_away_goals_picker(update, context)
@@ -2237,18 +2288,7 @@ async def prompt_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     # user_data is in-memory and is lost on bot restart — stale buttons from a
     # previous session must not produce broken callbacks (e.g. "_None").
     if not match_id:
-        expired_text = (
-            "⚠️ <b>Сессия ввода результата устарела</b> (бот перезапускался).\n\n"
-            "Откройте матч в кабинете и начните ввод результата заново."
-        )
-        if query:
-            await query.answer("⚠️ Сессия устарела. Откройте матч заново.", show_alert=True)
-            try:
-                await query.edit_message_text(expired_text, parse_mode="HTML")
-            except Exception:
-                pass
-        else:
-            await update.effective_message.reply_text(expired_text, parse_mode="HTML")
+        await send_report_session_expired(update, context)
         return ConversationHandler.END
 
     cancel_cb = get_match_cancel_cb(context, user_id, match_id)
