@@ -410,6 +410,10 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
     if "drafts" not in context.bot_data:
         context.bot_data["drafts"] = {}
     context.bot_data["drafts"][draft_uuid] = draft_data
+    try:
+        await asyncio.to_thread(database.save_draft, draft_uuid, draft_data)
+    except Exception as e:
+        logger.warning(f"Failed to persist draft {draft_uuid} to SQLite: {e}")
 
     btn_label = "✅ Подтвердить все игры" if is_multi else "✅ Подтвердить"
     keyboard = [
@@ -481,14 +485,22 @@ async def cb_draft_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     draft_uuid = query.data.replace("draft_conf_", "")
     drafts = context.bot_data.get("drafts", {})
-    if draft_uuid not in drafts:
+    draft = drafts.get(draft_uuid)
+    if not draft:
+        draft = await asyncio.to_thread(database.get_draft, draft_uuid)
+        if draft:
+            if "drafts" not in context.bot_data:
+                context.bot_data["drafts"] = {}
+            context.bot_data["drafts"][draft_uuid] = draft
+            drafts = context.bot_data["drafts"]
+
+    if not draft:
         if query.message.photo: await query.edit_message_caption(caption="❌ Данные черновика устарели или не найдены.")
         else: await query.edit_message_text(text="❌ Данные черновика устарели или не найдены.")
         return
         
     # Черновик забираем только после успешного сохранения: иначе неудачное
     # подтверждение оставляло бы админа без данных и без возможности повторить.
-    draft = drafts[draft_uuid]
     if not await _can_manage_draft(query.from_user.id, draft):
         await query.answer("⛔ У вас нет прав на дивизион этого черновика!", show_alert=True)
         return
@@ -602,6 +614,10 @@ async def cb_draft_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         # доподтвердит их и не продублирует уже опубликованные.
         draft["games"] = [g for _, g, _ in failed_games]
         draft["is_multi"] = len(failed_games) > 1
+        try:
+            await asyncio.to_thread(database.save_draft, draft_uuid, draft)
+        except Exception as e:
+            logger.warning(f"Failed to update draft {draft_uuid} in SQLite: {e}")
         saved_count = len(games) - len(failed_games)
         fail_lines = "\n".join(
             f"• Игра {g.get('game_num', i + 1)} "
@@ -618,6 +634,10 @@ async def cb_draft_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         keep_markup = True
     else:
         drafts.pop(draft_uuid, None)
+        try:
+            await asyncio.to_thread(database.delete_draft, draft_uuid)
+        except Exception as e:
+            logger.warning(f"Failed to delete draft {draft_uuid} from SQLite: {e}")
         new_caption = f"{cleaned_text}\n\n✅ <b>Одобрено администратором {html.escape(admin_name)}.</b>"
         keep_markup = False
 
@@ -652,10 +672,21 @@ async def cb_draft_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     draft_uuid = query.data.replace("draft_rej_", "")
     drafts = context.bot_data.get("drafts", {})
     draft = drafts.get(draft_uuid)
+    if not draft:
+        draft = await asyncio.to_thread(database.get_draft, draft_uuid)
+        if draft:
+            if "drafts" not in context.bot_data:
+                context.bot_data["drafts"] = {}
+            context.bot_data["drafts"][draft_uuid] = draft
+
     if draft is not None and not await _can_manage_draft(query.from_user.id, draft):
         await query.answer("⛔ У вас нет прав на дивизион этого черновика!", show_alert=True)
         return
     drafts.pop(draft_uuid, None)
+    try:
+        await asyncio.to_thread(database.delete_draft, draft_uuid)
+    except Exception as e:
+        logger.warning(f"Failed to delete rejected draft {draft_uuid} from SQLite: {e}")
 
     admin_name = f"@{query.from_user.username}" if query.from_user.username else (query.from_user.first_name or "Администратор")
     original_text = query.message.caption if query.message.photo else query.message.text

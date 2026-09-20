@@ -57,16 +57,17 @@ class TestRoundRemindersDivisionIsolation(unittest.IsolatedAsyncioTestCase):
         target_time = database.now_msk() + datetime.timedelta(hours=24)
         dl_str = target_time.strftime("%d.%m.%Y %H:%M")
 
+        season_id = int(database.get_active_season() or 1)
         with database.transaction() as conn:
             c = conn.cursor()
             # Open round 1 in div A and div B with 24h deadline
             c.execute(
-                "INSERT INTO rounds (season_id, division_id, round_number, is_open, deadline) VALUES (1, ?, ?, 1, ?)",
-                (self.div_a_id, self.round_num, dl_str),
+                "INSERT INTO rounds (season_id, division_id, round_number, is_open, deadline) VALUES (?, ?, ?, 1, ?)",
+                (season_id, self.div_a_id, self.round_num, dl_str),
             )
             c.execute(
-                "INSERT INTO rounds (season_id, division_id, round_number, is_open, deadline) VALUES (1, ?, ?, 1, ?)",
-                (self.div_b_id, self.round_num, dl_str),
+                "INSERT INTO rounds (season_id, division_id, round_number, is_open, deadline) VALUES (?, ?, ?, 1, ?)",
+                (season_id, self.div_b_id, self.round_num, dl_str),
             )
 
         context = MagicMock()
@@ -93,11 +94,12 @@ class TestRoundRemindersDivisionIsolation(unittest.IsolatedAsyncioTestCase):
         target_time = database.now_msk() + datetime.timedelta(hours=18)
         dl_str = target_time.strftime("%d.%m.%Y %H:%M")
 
+        season_id = int(database.get_active_season() or 1)
         with database.transaction() as conn:
             c = conn.cursor()
             c.execute(
-                "INSERT INTO rounds (season_id, division_id, round_number, is_open, deadline) VALUES (1, ?, ?, 1, ?)",
-                (self.div_a_id, self.round_num, dl_str),
+                "INSERT INTO rounds (season_id, division_id, round_number, is_open, deadline) VALUES (?, ?, ?, 1, ?)",
+                (season_id, self.div_a_id, self.round_num, dl_str),
             )
 
         context = MagicMock()

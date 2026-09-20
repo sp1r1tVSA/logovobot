@@ -4,6 +4,7 @@ import datetime
 import re
 import threading
 import asyncio
+import json
 from typing import Generator
 from contextlib import contextmanager
 from config import DB_PATH, INITIAL_WALLET_BALANCE, MAX_OPEN_ROUNDS_PER_DIVISION
@@ -448,6 +449,20 @@ def init_db() -> None:
                 PRIMARY KEY(division_id, round_number, content_type)
             )
         """)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS pending_drafts (
+                draft_uuid TEXT PRIMARY KEY,
+                draft_data TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT (datetime('now', '+3 hours'))
+            )
+        """)
+        try:
+            cursor.execute("""
+                DELETE FROM pending_drafts
+                WHERE created_at < datetime('now', '+3 hours', '-14 days')
+            """)
+        except Exception as e:
+            logger.warning(f"Failed to prune old pending_drafts: {e}")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS debt_reminders (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -12501,4 +12516,37 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
         "top_assistant": top_assistant,
         "top_mvp": top_mvp,
     }
+
+
+def save_draft(draft_uuid: str, draft_data: dict) -> None:
+    """Save or update a pending match draft in SQLite."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        data_json = json.dumps(draft_data, ensure_ascii=False)
+        cursor.execute(
+            "REPLACE INTO pending_drafts (draft_uuid, draft_data, created_at) VALUES (?, ?, datetime('now', '+3 hours'))",
+            (draft_uuid, data_json)
+        )
+
+
+def get_draft(draft_uuid: str) -> dict | None:
+    """Retrieve a pending match draft by uuid, or None if not found."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT draft_data FROM pending_drafts WHERE draft_uuid = ?", (draft_uuid,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        try:
+            return json.loads(row["draft_data"])
+        except Exception:
+            logger.exception(f"Corrupt draft JSON for uuid {draft_uuid}")
+            return None
+
+
+def delete_draft(draft_uuid: str) -> None:
+    """Delete a pending draft by uuid."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM pending_drafts WHERE draft_uuid = ?", (draft_uuid,))
 

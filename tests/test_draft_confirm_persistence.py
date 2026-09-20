@@ -142,14 +142,15 @@ class TestMatchResolutionExcludesUsedIds(unittest.TestCase):
         self.uid = uuid.uuid4().hex[:6].upper()
         self.team1 = f"Резолв A{self.uid}"
         self.team2 = f"Резолв B{self.uid}"
+        season_id = int(database.get_active_season() or 1)
         self.ids = []
         with database.transaction() as conn:
             cur = conn.cursor()
             for rnd in (1, 2):
                 cur.execute(
-                    "INSERT INTO matches (player1_team, player2_team, round_number, status, tournament_type) "
-                    "VALUES (?, ?, ?, 'pending', 'league')",
-                    (self.team1, self.team2, rnd)
+                    "INSERT INTO matches (player1_team, player2_team, round_number, status, tournament_type, season_id) "
+                    "VALUES (?, ?, ?, 'pending', 'league', ?)",
+                    (self.team1, self.team2, rnd, season_id)
                 )
                 self.ids.append(cur.lastrowid)
 
