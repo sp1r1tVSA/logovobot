@@ -269,7 +269,12 @@ class ApiClient {
     return this.request('/api/achievements');
   }
 
-  // Награды за достижения отключены — claimAchievement() удалён.
+  claimAchievement(achievementId) {
+    return this.request('/api/achievements/claim', {
+      method: 'POST',
+      body: JSON.stringify({ achievement_id: achievementId })
+    });
+  }
 
   getTournamentStats() {
     return this.request('/api/profile/tournament-stats');

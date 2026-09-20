@@ -352,11 +352,17 @@ def execute_purge(conn: sqlite3.Connection, verbose: bool = False) -> Tuple[bool
                 logger.info("Reset user_wallets betting counters (balances preserved)")
                 
         # 8. Сброс серий пари в user_progression (уровень и XP СОХРАНЯЮТСЯ!)
+        # Серия входов сбрасывается вместе с last_active_date: иначе после
+        # обнуления счётчика в базе остаётся «вчерашний» вход, и первый же заход
+        # в новом сезоне продолжает прошлую серию вместо того, чтобы начать новую.
         if table_exists(cursor, "user_progression"):
             cursor.execute("""
                 UPDATE user_progression 
                 SET current_streak = 0, 
-                    best_streak = 0
+                    best_streak = 0,
+                    login_streak = 0,
+                    best_login_streak = 0,
+                    last_active_date = NULL
             """)
             if verbose:
                 logger.info("Reset user_progression streaks (level and XP preserved)")

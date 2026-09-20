@@ -22,7 +22,7 @@ class AppController {
   async init() {
     // 1. Subscribe UI renderer to reactive store changes
     store.subscribe((state) => {
-      UIRenderer.renderHeader(state.user, state.progression);
+      UIRenderer.renderHeader(state.user, state.progression, state.unclaimedAchievementsCount);
       UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'lobby-division-tabs-container');
       UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'tournament-division-tabs-container');
       UIRenderer.renderHotMatches(state.hotMatches);
@@ -949,8 +949,35 @@ class AppController {
       });
     }
 
-    // 17. Achievement rewards removed — достижения теперь чисто статусные,
-    // монеты и XP за них не выдаются, поэтому обработчика получения награды нет.
+    // 17. Achievement Reward Claim
+    // Ответ /api/achievements/claim не содержит нового баланса, поэтому
+    // кошелёк перечитывается отдельно — иначе шапка показывает старые монеты.
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('.btn-claim-achievement');
+      if (!btn || !btn.dataset.claimAchId) return;
+      btn.disabled = true;
+      try {
+        const res = await api.claimAchievement(btn.dataset.claimAchId);
+        if (res.status !== 'ok') {
+          tgBridge.showAlert(res.message || 'Не удалось получить награду.');
+          return;
+        }
+        tgBridge.showAlert(res.message || 'Награда получена!');
+        try {
+          const walletRes = await api.getWallet();
+          if (walletRes.status === 'ok' && walletRes.wallet) {
+            store.setUser({ ...store.state.user, balance: walletRes.wallet.balance });
+          }
+        } catch (err2) {
+          console.warn("Could not refresh wallet after claim:", err2);
+        }
+        await this.fetchProgressionData();
+      } catch (err) {
+        tgBridge.showAlert(err.message || 'Не удалось получить награду.');
+      } finally {
+        btn.disabled = false;
+      }
+    });
 
     // 18. Early Cashout Settlement
     document.addEventListener('click', async (e) => {

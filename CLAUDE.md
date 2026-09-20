@@ -308,6 +308,26 @@ Automatic repricing (`odds_engine.generate_match_markets`) is smoothed by
 keep stepping toward it. Line tiles (`bet_markets`) take their odds from the smoothed
 selections, which placement validates against — never save raw model odds into a tile.
 
+**Gamification** pays out of the same closed economy, so rewards are calibrated against it
+rather than against round numbers: the starting wallet is `INITIAL_WALLET_BALANCE` (677 🪙),
+the daily bonus 250 🪙, the payout ceiling 10 000 🪙. `seed_gamification_catalog` therefore
+bands `reward_coins` by rarity — common ≈150–300, rare ≈500–1 000, epic ≈1 000–1 500,
+legendary ≈2 500–5 000, with `reward_xp` at roughly half, because each level gained already
+pays 500 🪙 via `add_user_xp`. `tests/test_gamification.py::TestAchievementsCatalog` enforces
+the bands and the ≈37 000 🪙 total for 100% completion. The seed is an **upsert and never
+deletes**, so retiring an achievement means dropping it from the seed list and setting
+`achievements_catalog.is_active = 0` (migration `016`); `get_user_achievements` then hides it
+unless the caller already owns it, keeping the `user_achievements` FK alive and the
+"N из M" denominator honest.
+
+`user_progression` carries **two** unrelated streaks. `current_streak` / `best_streak` belong
+to `StreakEngine.process_bet_outcome` and count consecutive winning bets; `login_streak` /
+`best_login_streak` belong to `check_and_update_login_streak` and count consecutive days.
+They shared one column until migration `015` and a win streak was read as login days, handing
+out `ACH_LOGIN_3` on day one — keep the two engines off each other's columns. A season reset
+must clear `last_active_date` along with the login counters, or the first login of the new
+season continues the old streak.
+
 ---
 
 ## Roles and access

@@ -104,4 +104,5 @@ def test_05_streak_milestone_achievements_unlock():
     # 5th win
     r5 = StreakEngine.process_bet_outcome(8001, "won")
     assert "ACH_STREAK_5" in r5["unlocked_achievements"]
-    assert "ACH_HOT_STREAK" in r5["unlocked_achievements"]
+    # ACH_HOT_STREAK — снятый дубль ACH_STREAK_5, он больше не выдаётся
+    assert "ACH_HOT_STREAK" not in r5["unlocked_achievements"]

@@ -407,7 +407,7 @@ export class UIRenderer {
     return (n || 0).toLocaleString('ru-RU');
   }
 
-  static renderHeader(user, progression) {
+  static renderHeader(user, progression, unclaimedAchievements = 0) {
     const balEl = document.getElementById('user-balance-val');
     if (balEl && user) {
       // Монета уже нарисована в .balance-icon — второй эмодзи здесь не нужен.
@@ -418,9 +418,10 @@ export class UIRenderer {
       lvlEl.textContent = `Lvl ${progression.level || 1}`;
     }
 
-    // Награды за достижения отключены — счётчик «неполученных» больше не нужен.
+    // Точка на вкладке профиля: есть открытые достижения, награда за которые
+    // ещё не забрана.
     const aBadge = document.getElementById('achievements-badge');
-    if (aBadge) aBadge.style.display = 'none';
+    if (aBadge) aBadge.style.display = unclaimedAchievements > 0 ? '' : 'none';
   }
 
   static updateNavClubIcon(overview) {
@@ -1535,20 +1536,30 @@ export class UIRenderer {
       if (achCountEl) achCountEl.textContent = `${unlocked}/${achievements.length}`;
 
       // The catalog columns are `name` / `badge_icon` — не `title` / `icon`.
-      // Награды за достижения отключены: карточка показывает только название,
-      // описание и статус.
-      achEl.innerHTML = achievements.map(a => `
+      // Награда показывается на каждой карточке, в том числе на закрытой:
+      // это и есть ответ на вопрос «сколько дадут за квест».
+      achEl.innerHTML = achievements.map(a => {
+        const coins = Number(a.reward_coins) || 0;
+        const xp = Number(a.reward_xp) || 0;
+        const canClaim = a.is_unlocked && !a.is_claimed;
+        return `
         <div class="achievement-card ${a.is_unlocked ? 'unlocked' : 'locked'}" data-ach-id="${a.id}">
           <div class="ach-icon" style="font-size: 1.8rem;">${a.badge_icon || '🏆'}</div>
           <div style="margin-top: 6px;">
             <div class="ach-title" style="font-weight: 800; color: #fff; font-size: 0.85rem;">${a.name || 'Достижение'}</div>
             <div class="ach-desc" style="font-size: 0.72rem; color: var(--text-secondary); margin-top: 2px;">${a.description || ''}</div>
           </div>
-          ${a.is_unlocked ? `
+          <div class="ach-reward" style="margin-top: 8px; font-size: 0.72rem; font-weight: 800; color: var(--accent-gold);">
+            +${this.formatNumber(coins)} 🪙${xp ? ` <span style="color: var(--text-secondary); font-weight: 700;">· +${xp} XP</span>` : ''}
+          </div>
+          ${canClaim ? `
+            <button class="btn-claim-achievement" data-claim-ach-id="${a.id}" style="width: 100%;">Забрать</button>
+          ` : a.is_unlocked ? `
             <div class="ach-status" style="margin-top: 8px; font-size: 0.7rem; font-weight: 800; color: var(--accent-gold); text-transform: uppercase; letter-spacing: 0.03em;">Получено</div>
           ` : ''}
         </div>
-      `).join('');
+      `;
+      }).join('');
     }
   }
 

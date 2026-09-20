@@ -1037,6 +1037,8 @@ def init_db() -> None:
                 total_xp_earned INTEGER NOT NULL DEFAULT 0,
                 current_streak INTEGER NOT NULL DEFAULT 0,
                 best_streak INTEGER NOT NULL DEFAULT 0,
+                login_streak INTEGER NOT NULL DEFAULT 0,
+                best_login_streak INTEGER NOT NULL DEFAULT 0,
                 last_active_date TEXT,
                 streak_shields INTEGER NOT NULL DEFAULT 1,
                 equipped_frame TEXT NOT NULL DEFAULT 'default',
@@ -1055,9 +1057,34 @@ def init_db() -> None:
                 rarity TEXT NOT NULL,
                 reward_xp INTEGER NOT NULL DEFAULT 100,
                 reward_coins INTEGER NOT NULL DEFAULT 250,
-                badge_icon TEXT NOT NULL
+                badge_icon TEXT NOT NULL,
+                is_active INTEGER NOT NULL DEFAULT 1
             )
         """)
+
+        # ── 016: каталог не умеет удалять строки ────────────────────────────
+        # seed_gamification_catalog() делает upsert и ничего не чистит, поэтому
+        # достижения снятых механик (дуэли PvP убраны в v2.0) навсегда остаются
+        # в знаменателе «получено N из M» и никогда не могут быть получены.
+        # ACH_HOT_STREAK — дубль ACH_STREAK_5 (то же условие, серия из 5 побед),
+        # который платил награду дважды за одно и то же. Строки не удаляются:
+        # у кого-то они уже открыты, и FK из user_achievements должен остаться
+        # живым — достижение просто уходит из активного каталога.
+        try:
+            cursor.execute("ALTER TABLE achievements_catalog ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        cursor.execute("SELECT 1 FROM schema_migrations WHERE version = '016_retire_dead_achievements'")
+        if not cursor.fetchone():
+            cursor.execute("""
+                UPDATE achievements_catalog
+                SET is_active = 0
+                WHERE id IN ('ACH_DUEL_FIRST', 'ACH_DUEL_5_WINS', 'ACH_HOT_STREAK')
+            """)
+            cursor.execute("""
+                INSERT OR IGNORE INTO schema_migrations (version, description)
+                VALUES ('016_retire_dead_achievements', 'Retire PvP duel achievements and the ACH_STREAK_5 duplicate')
+            """)
 
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_achievements (
@@ -1071,6 +1098,39 @@ def init_db() -> None:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_achievements_uid ON user_achievements(user_id)")
+
+        # ── 015: серия входов и серия побед — это два разных счётчика ────────
+        # `current_streak` принадлежит StreakEngine и считает подряд выигранные
+        # ставки; `login_streak` принадлежит check_and_update_login_streak и
+        # считает дни подряд. Раньше колонка была одна на двоих, поэтому серия
+        # побед читалась как дни и выдавала ACH_LOGIN_3 тому, кто не заходил три
+        # дня подряд. Бэкфилл честно не восстановить — прошлых дат входа нет,
+        # поэтому активным ставится 1 день, а невыданные (is_claimed = 0) награды
+        # за вход отзываются, чтобы их заработали заново.
+        try:
+            cursor.execute("ALTER TABLE user_progression ADD COLUMN login_streak INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        try:
+            cursor.execute("ALTER TABLE user_progression ADD COLUMN best_login_streak INTEGER NOT NULL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+        cursor.execute("SELECT 1 FROM schema_migrations WHERE version = '015_split_login_and_win_streaks'")
+        if not cursor.fetchone():
+            cursor.execute("""
+                UPDATE user_progression
+                SET login_streak = CASE WHEN last_active_date IS NULL THEN 0 ELSE 1 END,
+                    best_login_streak = CASE WHEN last_active_date IS NULL THEN 0 ELSE 1 END
+            """)
+            cursor.execute("""
+                DELETE FROM user_achievements
+                WHERE achievement_id IN ('ACH_LOGIN_3', 'ACH_LOGIN_7', 'ACH_LOGIN_30')
+                  AND is_claimed = 0
+            """)
+            cursor.execute("""
+                INSERT OR IGNORE INTO schema_migrations (version, description)
+                VALUES ('015_split_login_and_win_streaks', 'login_streak split off current_streak; unclaimed ACH_LOGIN_* revoked')
+            """)
 
         # (quests_catalog, user_quests, pvp_duels tables removed in v2.0 cleanup)
 
@@ -9306,44 +9366,56 @@ def settle_all_pending_finished_matches() -> list[dict]:
 # ═════════════════════════════════════════════════════════════════════════════
 
 def seed_gamification_catalog(cursor) -> None:
-    """Seed standard 20+ achievements catalog (quests removed in v2.0)."""
+    """
+    Seed the achievements catalog (quests removed in v2.0).
+
+    Награды откалиброваны под реальную экономику Logovo.bet, а не под круглые
+    числа: стартовый кошелёк — `config.INITIAL_WALLET_BALANCE` (677 🪙), дейлик
+    даёт 250 🪙, минимальная ставка — 10 🪙, потолок выплаты по купону — 10 000 🪙.
+    Отсюда шкала по редкости: common ≈ один дейлик (150–300), rare ≈ 500–1 000,
+    epic ≈ 1 000–1 500, legendary ≈ 2 500–5 000. XP держится примерно на половине
+    монет, потому что уровень сам по себе доплачивает 500 🪙 за каждый левел
+    (`add_user_xp`) — если считать XP щедро, монеты приходят дважды.
+
+    `is_active = 1` проставляется здесь: снятые с вооружения достижения в этом
+    списке просто отсутствуют, и миграция 016 гасит их флагом, не удаляя строку.
+    """
     achievements = [
-        ("ACH_FIRST_BET", "🐺 Первый шаг", "Сделать свой первый прогноз", "general", "common", 100, 250, "🎯"),
-        ("ACH_FIRST_WIN", "🏆 Первая кровь", "Выиграть свой первый прогноз", "general", "common", 150, 300, "⚔️"),
-        ("ACH_STREAK_3", "🔥 В ударе", "Оформить серию из 3 побед подряд", "streaks", "common", 250, 500, "🔥"),
-        ("ACH_STREAK_5", "🎯 Снайпер", "Оформить серию из 5 побед подряд", "streaks", "rare", 600, 1200, "🎯"),
-        ("ACH_STREAK_10", "👑 Непобедимый", "Оформить серию из 10 побед подряд", "streaks", "legendary", 2500, 5000, "👑"),
-        ("ACH_EXPRESS_3", "🚂 Экспресс-старт", "Собрать экспресс из 3+ событий", "parlays", "common", 200, 400, "🚂"),
-        ("ACH_EXPRESS_ODD_5", "💥 Множитель x5", "Выиграть экспресс с коэффициентом 5.0+", "parlays", "rare", 500, 1000, "💥"),
-        ("ACH_EXPRESS_ODD_15", "🚀 Ракета x15", "Выиграть экспресс с коэффициентом 15.0+", "parlays", "epic", 1500, 3000, "🚀"),
-        ("ACH_EXPRESS_ODD_50", "🌌 Космос x50", "Выиграть экспресс с коэффициентом 50.0+", "parlays", "legendary", 5000, 10000, "🌌"),
-        ("ACH_UNDERDOG", "🐺 Гроза Фаворитов", "Выиграть ординар с коэффициентом 3.5+", "odds", "rare", 400, 800, "⚡"),
-        ("ACH_TOTAL_10_BETS", "📊 Любитель", "Сделать 10 любых прогнозов", "volume", "common", 300, 500, "📊"),
-        ("ACH_TOTAL_50_BETS", "🏅 Регуляр", "Сделать 50 любых прогнозов", "volume", "rare", 1000, 2000, "🏅"),
-        ("ACH_TOTAL_100_BETS", "💯 Центурион", "Сделать 100 любых прогнозов", "volume", "epic", 2500, 5000, "💯"),
-        ("ACH_COIN_MILLIONAIRE", "💰 Мешок Монет", "Накопить 25 000 🪙 на балансе", "wealth", "epic", 2000, 2500, "💰"),
-        ("ACH_COIN_TYCOON", "🏦 Олигарх Логова", "Накопить 100 000 🪙 на балансе", "wealth", "legendary", 5000, 10000, "🏦"),
-        ("ACH_LOGIN_3", "📅 Разминка", "Заходить в игру 3 дня подряд", "loyalty", "common", 200, 400, "📅"),
-        ("ACH_LOGIN_7", "🔥 Неделя в строю", "Заходить в игру 7 дней подряд", "loyalty", "rare", 800, 1500, "🔥"),
-        ("ACH_LOGIN_30", "🐺 Вожак Стаи", "Заходить в игру 30 дней подряд", "loyalty", "legendary", 4000, 10000, "🐺"),
-        ("ACH_TB_SPECIALIST", "⚽ Голевой Маньяк", "Выиграть 5 прогнозов на Тотал Больше 2.5", "markets", "rare", 500, 1000, "⚽"),
-        ("ACH_BTTS_MASTER", "🤝 Обе Забьют", "Выиграть 5 прогнозов на Обе Забьют", "markets", "rare", 500, 1000, "🤝"),
+        ("ACH_FIRST_BET", "🐺 Первый шаг", "Сделать свой первый прогноз", "general", "common", 75, 150, "🎯"),
+        ("ACH_FIRST_WIN", "🏆 Первая кровь", "Выиграть свой первый прогноз", "general", "common", 125, 250, "⚔️"),
+        ("ACH_STREAK_3", "🔥 В ударе", "Оформить серию из 3 побед подряд", "streaks", "common", 150, 300, "🔥"),
+        ("ACH_STREAK_5", "🎯 Снайпер", "Оформить серию из 5 побед подряд", "streaks", "rare", 300, 700, "🎯"),
+        ("ACH_STREAK_10", "👑 Непобедимый", "Оформить серию из 10 побед подряд", "streaks", "legendary", 1200, 3000, "👑"),
+        ("ACH_EXPRESS_3", "🚂 Экспресс-старт", "Собрать экспресс из 3+ событий", "parlays", "common", 100, 200, "🚂"),
+        ("ACH_EXPRESS_ODD_5", "💥 Множитель x5", "Выиграть экспресс с коэффициентом 5.0+", "parlays", "rare", 250, 600, "💥"),
+        ("ACH_EXPRESS_ODD_15", "🚀 Ракета x15", "Выиграть экспресс с коэффициентом 15.0+", "parlays", "epic", 600, 1500, "🚀"),
+        ("ACH_EXPRESS_ODD_50", "🌌 Космос x50", "Выиграть экспресс с коэффициентом 50.0+", "parlays", "legendary", 1500, 4000, "🌌"),
+        ("ACH_UNDERDOG", "🐺 Гроза Фаворитов", "Выиграть ординар с коэффициентом 3.5+", "odds", "rare", 200, 500, "⚡"),
+        ("ACH_TOTAL_10_BETS", "📊 Любитель", "Сделать 10 любых прогнозов", "volume", "common", 100, 250, "📊"),
+        ("ACH_TOTAL_50_BETS", "🏅 Регуляр", "Сделать 50 любых прогнозов", "volume", "rare", 300, 750, "🏅"),
+        ("ACH_TOTAL_100_BETS", "💯 Центурион", "Сделать 100 любых прогнозов", "volume", "epic", 600, 1500, "💯"),
+        ("ACH_COIN_MILLIONAIRE", "💰 Мешок Монет", "Накопить 25 000 🪙 на балансе", "wealth", "epic", 500, 1000, "💰"),
+        ("ACH_COIN_TYCOON", "🏦 Олигарх Логова", "Накопить 100 000 🪙 на балансе", "wealth", "legendary", 1000, 2500, "🏦"),
+        ("ACH_LOGIN_3", "📅 Разминка", "Заходить в игру 3 дня подряд", "loyalty", "common", 100, 250, "📅"),
+        ("ACH_LOGIN_7", "🔥 Неделя в строю", "Заходить в игру 7 дней подряд", "loyalty", "rare", 250, 600, "🔥"),
+        ("ACH_LOGIN_30", "🐺 Вожак Стаи", "Заходить в игру 30 дней подряд", "loyalty", "legendary", 1200, 3000, "🐺"),
+        ("ACH_TB_SPECIALIST", "⚽ Голевой Маньяк", "Выиграть 5 прогнозов на Тотал Больше 2.5", "markets", "rare", 200, 500, "⚽"),
+        ("ACH_BTTS_MASTER", "🤝 Обе Забьют", "Выиграть 5 прогнозов на Обе Забьют", "markets", "rare", 200, 500, "🤝"),
         # Phase 10 Competitive & Seasonal Achievements
-        ("ACH_10_WINS", "🎯 10 Побед", "Выиграть 10 любых прогнозов", "volume", "common", 400, 800, "🎯"),
-        ("ACH_50_WINS", "🏆 50 Побед", "Выиграть 50 любых прогнозов", "volume", "rare", 1500, 3000, "🏆"),
-        ("ACH_100_WINS", "👑 100 Побед", "Выиграть 100 любых прогнозов", "volume", "legendary", 3500, 7000, "👑"),
-        ("ACH_POSITIVE_ROI", "📈 В Плюсе", "Достичь положительного ROI при 10+ прогнозах", "skill", "rare", 800, 1500, "📈"),
-        ("ACH_VALUE_HUNTER", "💎 Охотник за Валуем", "Выиграть 5 валуйных прогнозов с перевесом", "skill", "epic", 1200, 2500, "💎"),
-        ("ACH_HOT_STREAK", "🔥 Горячая Серия", "Оформить серию из 5 побед подряд", "streaks", "rare", 750, 1500, "🔥"),
-        ("ACH_NO_LOSS_STREAK", "🛡 Без Поражений", "Оформить серию из 7 побед подряд без поражений", "streaks", "epic", 1800, 3500, "🛡"),
-        ("ACH_SEASON_TOP_10", "🌟 Топ-10 Сезона", "Завершить сезон в топ-10 своего дивизиона", "seasonal", "epic", 2000, 4000, "🌟"),
-        ("ACH_SEASON_CHAMPION", "🥇 Чемпион Сезона", "Занять 1-е место в дивизионе по итогам сезона", "seasonal", "legendary", 5000, 10000, "🥇"),
-        ("ACH_PROMOTED", "🚀 Повышение в Классе", "Заработать повышение в высший дивизион", "seasonal", "rare", 1000, 2000, "🚀")
+        ("ACH_10_WINS", "🎯 10 Побед", "Выиграть 10 любых прогнозов", "volume", "common", 150, 300, "🎯"),
+        ("ACH_50_WINS", "🏆 50 Побед", "Выиграть 50 любых прогнозов", "volume", "rare", 400, 1000, "🏆"),
+        ("ACH_100_WINS", "👑 100 Побед", "Выиграть 100 любых прогнозов", "volume", "legendary", 1200, 3000, "👑"),
+        ("ACH_POSITIVE_ROI", "📈 В Плюсе", "Достичь положительного ROI при 10+ прогнозах", "skill", "rare", 300, 700, "📈"),
+        ("ACH_VALUE_HUNTER", "💎 Охотник за Валуем", "Выиграть 5 валуйных прогнозов с перевесом", "skill", "epic", 500, 1200, "💎"),
+        ("ACH_NO_LOSS_STREAK", "🛡 Без Поражений", "Оформить серию из 7 побед подряд без поражений", "streaks", "epic", 600, 1500, "🛡"),
+        ("ACH_SEASON_TOP_10", "🌟 Топ-10 Сезона", "Завершить сезон в топ-10 своего дивизиона", "seasonal", "epic", 600, 1500, "🌟"),
+        ("ACH_SEASON_CHAMPION", "🥇 Чемпион Сезона", "Занять 1-е место в дивизионе по итогам сезона", "seasonal", "legendary", 2000, 5000, "🥇"),
+        ("ACH_PROMOTED", "🚀 Повышение в Классе", "Заработать повышение в высший дивизион", "seasonal", "rare", 400, 1000, "🚀")
     ]
     for ach in achievements:
         cursor.execute("""
-            INSERT INTO achievements_catalog (id, name, description, category, rarity, reward_xp, reward_coins, badge_icon)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO achievements_catalog (id, name, description, category, rarity, reward_xp, reward_coins, badge_icon, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -9351,7 +9423,8 @@ def seed_gamification_catalog(cursor) -> None:
                 rarity = excluded.rarity,
                 reward_xp = excluded.reward_xp,
                 reward_coins = excluded.reward_coins,
-                badge_icon = excluded.badge_icon
+                badge_icon = excluded.badge_icon,
+                is_active = 1
         """, ach)
 
     # Phase 10: Seed default season rewards
@@ -9393,8 +9466,8 @@ def get_or_create_progression(user_id: int) -> dict:
             return dict(row)
 
         cursor.execute("""
-            INSERT INTO user_progression (user_id, level, current_xp, total_xp_earned, current_streak, best_streak, streak_shields, equipped_frame, equipped_title)
-            VALUES (?, 1, 0, 0, 1, 1, 1, 'default', 'Новичок')
+            INSERT INTO user_progression (user_id, level, current_xp, total_xp_earned, current_streak, best_streak, login_streak, best_login_streak, streak_shields, equipped_frame, equipped_title)
+            VALUES (?, 1, 0, 0, 0, 0, 0, 0, 1, 'default', 'Новичок')
         """, (user_id,))
         cursor.execute("SELECT * FROM user_progression WHERE user_id = ?", (user_id,))
         return dict(cursor.fetchone())
@@ -9471,8 +9544,12 @@ def add_user_xp(user_id: int, xp_amount: int) -> dict:
 
 def check_and_update_login_streak(user_id: int) -> dict:
     """
-    Evaluate 7-day login streak for user.
+    Evaluate the consecutive-login-days streak for user.
     Handles streak increment, resets, and streak shield protection.
+
+    Владеет колонками `login_streak` / `best_login_streak`. Серия побед по
+    ставкам живёт в `current_streak` и принадлежит StreakEngine — счётчики
+    разные и пересекаться не должны.
     """
     with transaction() as conn:
         cursor = conn.cursor()
@@ -9482,13 +9559,13 @@ def check_and_update_login_streak(user_id: int) -> dict:
 
         if last_active == today_str:
             return {
-                "streak": p["current_streak"],
-                "best_streak": p["best_streak"],
+                "streak": p["login_streak"],
+                "best_streak": p["best_login_streak"],
                 "shield_used": False,
                 "streak_shield_count": p["streak_shields"]
             }
 
-        cur_streak = p["current_streak"]
+        cur_streak = p["login_streak"]
         shield_used = False
         shields = p["streak_shields"]
 
@@ -9510,14 +9587,15 @@ def check_and_update_login_streak(user_id: int) -> dict:
         else:
             cur_streak = 1
 
-        best = max(cur_streak, p["best_streak"])
+        best = max(cur_streak, p["best_login_streak"])
         cursor.execute("""
             UPDATE user_progression
-            SET current_streak = ?, best_streak = ?, last_active_date = ?, streak_shields = ?, updated_at = CURRENT_TIMESTAMP
+            SET login_streak = ?, best_login_streak = ?, last_active_date = ?, streak_shields = ?, updated_at = CURRENT_TIMESTAMP
             WHERE user_id = ?
         """, (cur_streak, best, today_str, shields, user_id))
 
-        # Trigger login achievements
+        # Trigger login achievements. Порог читается из login_streak, а не из
+        # current_streak: последний принадлежит StreakEngine и считает победы.
         if cur_streak >= 3:
             unlock_achievement(user_id, "ACH_LOGIN_3")
         if cur_streak >= 7:
@@ -9551,7 +9629,14 @@ def unlock_achievement(user_id: int, achievement_id: str) -> bool:
 
 
 def get_user_achievements(user_id: int) -> list[dict]:
-    """Return list of all catalog achievements with user unlocked status."""
+    """
+    Return list of all catalog achievements with user unlocked status.
+
+    Снятые с каталога достижения (`is_active = 0`) уходят из выдачи, чтобы не
+    висеть в знаменателе «получено N из M» недостижимым балластом, но остаются
+    видны тому, кто успел их открыть — иначе из профиля пропала бы уже
+    полученная награда.
+    """
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
@@ -9561,6 +9646,7 @@ def get_user_achievements(user_id: int) -> list[dict]:
                    ua.unlocked_at
             FROM achievements_catalog ac
             LEFT JOIN user_achievements ua ON ac.id = ua.achievement_id AND ua.user_id = ?
+            WHERE ac.is_active = 1 OR ua.id IS NOT NULL
             ORDER BY is_unlocked DESC, ac.reward_xp DESC
         """, (user_id,))
         return [dict(r) for r in cursor.fetchall()]

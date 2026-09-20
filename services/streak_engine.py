@@ -96,10 +96,11 @@ class StreakEngine:
                     if database.unlock_achievement(user_id, "ACH_STREAK_3"):
                         unlocked_achievements.append("ACH_STREAK_3")
                 if cur_streak >= 5:
+                    # ACH_HOT_STREAK выдавался здесь же и с тем же условием, то
+                    # есть платил за одну серию из 5 побед дважды. Он снят с
+                    # каталога миграцией 016 и больше не выдаётся.
                     if database.unlock_achievement(user_id, "ACH_STREAK_5"):
                         unlocked_achievements.append("ACH_STREAK_5")
-                    if database.unlock_achievement(user_id, "ACH_HOT_STREAK"):
-                        unlocked_achievements.append("ACH_HOT_STREAK")
                 if cur_streak >= 7:
                     if database.unlock_achievement(user_id, "ACH_NO_LOSS_STREAK"):
                         unlocked_achievements.append("ACH_NO_LOSS_STREAK")

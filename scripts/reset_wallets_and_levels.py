@@ -59,7 +59,9 @@ TARGET_BALANCE = config.INITIAL_WALLET_BALANCE
 DEFAULT_LEVEL = 1
 DEFAULT_XP = 0
 DEFAULT_TITLE = "Новичок"
-DEFAULT_STREAK = 1
+# Серия = 0, а не 1: last_active_date тут сбрасывается в NULL, то есть входов
+# ещё не было, и «день подряд» считать не с чего.
+DEFAULT_STREAK = 0
 DEFAULT_SHIELDS = 1
 
 
@@ -256,10 +258,12 @@ def apply_reset(rows: list[dict], args: argparse.Namespace) -> dict:
                         UPDATE user_progression
                         SET level = ?, current_xp = ?, total_xp_earned = ?,
                             equipped_title = ?, current_streak = ?, best_streak = ?,
+                            login_streak = ?, best_login_streak = ?,
                             streak_shields = ?, last_active_date = NULL,
                             updated_at = CURRENT_TIMESTAMP
                         WHERE user_id = ?
                     """, (DEFAULT_LEVEL, DEFAULT_XP, DEFAULT_XP, DEFAULT_TITLE,
+                          DEFAULT_STREAK, DEFAULT_STREAK,
                           DEFAULT_STREAK, DEFAULT_STREAK, DEFAULT_SHIELDS, uid))
                 else:
                     cursor.execute("""
