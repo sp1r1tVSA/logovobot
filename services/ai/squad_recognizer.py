@@ -79,60 +79,12 @@ PROMPT_TEXT = PROMPT_MAIN_TEXT
 
 MAX_PLAYER_NAME_LEN = 50
 
-ALIAS_TOKEN_MAP = {
-    "vini": "vinicius",
-    "jr": "junior",
-    "младший": "junior",
-    "жуниор": "junior",
-    "leo": "lionel",
-}
-
-
-def normalize_footballer_name(name: str) -> str:
-    """Strip accents, lowercase, strip punctuation and extra whitespace."""
-    if not name:
-        return ""
-    n = unicodedata.normalize("NFKD", str(name)).encode("ASCII", "ignore").decode("utf-8").lower()
-    n = re.sub(r"[.\-_'/]+", " ", n)
-    n = re.sub(r"[^\w\s]", " ", n)
-    return re.sub(r"\s+", " ", n).strip()
-
-
-def is_same_footballer(name1: str, name2: str) -> bool:
-    """Check if two names refer to the same footballer in the context of squad rosters."""
-    norm1 = normalize_footballer_name(name1)
-    norm2 = normalize_footballer_name(name2)
-    if not norm1 or not norm2:
-        return False
-    if norm1 == norm2:
-        return True
-
-    toks1 = [ALIAS_TOKEN_MAP.get(t, t) for t in norm1.split()]
-    toks2 = [ALIAS_TOKEN_MAP.get(t, t) for t in norm2.split()]
-    if toks1 == toks2:
-        return True
-
-    # Check if single-token surname matches surname of multi-token name
-    if len(toks1) == 1 and len(toks2) > 1:
-        if len(toks1[0]) >= 4 and toks1[0] == toks2[-1]:
-            return True
-        if len(toks1[0]) >= 6 and toks1[0] == toks2[0]:
-            return True
-    elif len(toks2) == 1 and len(toks1) > 1:
-        if len(toks2[0]) >= 4 and toks2[0] == toks1[-1]:
-            return True
-        if len(toks2[0]) >= 6 and toks2[0] == toks1[0]:
-            return True
-
-    # Suffix matching (e.g. "Alexander-Arnold" vs "Trent Alexander-Arnold")
-    if len(toks1) >= 2 and len(toks2) > len(toks1):
-        if toks2[-len(toks1):] == toks1:
-            return True
-    elif len(toks2) >= 2 and len(toks1) > len(toks2):
-        if toks1[-len(toks2):] == toks2:
-            return True
-
-    return False
+from services.player_names import (
+    ALIAS_TOKEN_MAP,
+    is_same_footballer,
+    normalize_footballer_name,
+    normalize_player_name_key,
+)
 
 
 def _parse_players(payload: dict) -> list[dict]:

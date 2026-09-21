@@ -9,6 +9,12 @@ from typing import Generator
 from contextlib import contextmanager
 from config import DB_PATH, INITIAL_WALLET_BALANCE, MAX_OPEN_ROUNDS_PER_DIVISION
 from time_utils import SQL_NOW, now_msk, now_msk_str, today_msk
+from club_registry import normalize_team_name, resolve_team_name
+from services.player_names import (
+    normalize_player_name_key,
+    normalize_footballer_name,
+    is_same_footballer,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -251,7 +257,70 @@ def _shift_timestamps_to_msk(cursor: sqlite3.Cursor) -> int:
             f"WHERE {column} IS NOT NULL AND datetime({column}) IS NOT NULL"
         )
         shifted += cursor.rowcount
-    return shifted
+def _deduplicate_squad_players_in_db(cursor: sqlite3.Cursor) -> int:
+    """Find and merge any duplicate records in squad_players for the same club by norm_team_name and norm_name."""
+    cursor.execute("""
+        SELECT norm_team_name, norm_name, COUNT(*) AS cnt
+        FROM squad_players
+        WHERE norm_name IS NOT NULL AND norm_name != '' AND norm_team_name IS NOT NULL AND norm_team_name != ''
+        GROUP BY norm_team_name, norm_name
+        HAVING cnt > 1
+    """)
+    dup_groups = cursor.fetchall()
+    merged_count = 0
+    for group in dup_groups:
+        t_norm = group["norm_team_name"]
+        n_key = group["norm_name"]
+        cursor.execute("""
+            SELECT id, team_name, player_name, position, norm_team_name
+            FROM squad_players
+            WHERE norm_team_name = ? AND norm_name = ?
+            ORDER BY id ASC
+        """, (t_norm, n_key))
+        records = cursor.fetchall()
+        if len(records) <= 1:
+            continue
+        canonical = records[0]
+        canon_id = canonical["id"]
+        canon_name = canonical["player_name"]
+        canon_pos = canonical["position"]
+
+        for duplicate in records[1:]:
+            dup_id = duplicate["id"]
+            dup_name = duplicate["player_name"]
+            dup_pos = duplicate["position"]
+
+            # If canonical has no position but duplicate has one, preserve it
+            if not canon_pos and dup_pos:
+                canon_pos = dup_pos
+                cursor.execute("UPDATE squad_players SET position = ? WHERE id = ?", (dup_pos, canon_id))
+
+            # Re-point any match_events referencing duplicate name
+            cursor.execute("""
+                UPDATE match_events
+                SET player_name = ?
+                WHERE (LOWER(team_name) = ? OR LOWER(team_name) = ?) AND player_name = ?
+            """, (canon_name, canonical["team_name"].lower(), duplicate["team_name"].lower(), dup_name))
+
+            # Re-point any matches.mvp_player referencing duplicate name
+            cursor.execute("""
+                UPDATE matches
+                SET mvp_player = ?
+                WHERE mvp_player = ? AND (
+                    LOWER(player1_team) IN (?, ?) OR LOWER(player2_team) IN (?, ?)
+                )
+            """, (canon_name, dup_name,
+                  canonical["team_name"].lower(), duplicate["team_name"].lower(),
+                  canonical["team_name"].lower(), duplicate["team_name"].lower()))
+
+            # Delete the duplicate row
+            cursor.execute("DELETE FROM squad_players WHERE id = ?", (dup_id,))
+            merged_count += 1
+            logger.info(
+                "Merged duplicate squad player: id=%d ('%s') into canonical id=%d ('%s') in '%s'",
+                dup_id, dup_name, canon_id, canon_name, canonical["team_name"]
+            )
+    return merged_count
 
 
 def init_db() -> None:
@@ -318,6 +387,8 @@ def init_db() -> None:
                 team_name TEXT NOT NULL,
                 player_name TEXT NOT NULL,
                 position TEXT,
+                norm_name TEXT,
+                norm_team_name TEXT,
                 UNIQUE(team_name, player_name)
             )
         """)
@@ -1788,6 +1859,39 @@ def init_db() -> None:
             cursor.execute("ALTER TABLE squad_players ADD COLUMN position TEXT")
             logger.info("Migrated squad_players table: added 'position' column.")
 
+        # Safe migration for squad_players.norm_name and norm_team_name
+        if "norm_name" not in squad_cols:
+            cursor.execute("ALTER TABLE squad_players ADD COLUMN norm_name TEXT")
+            logger.info("Migrated squad_players table: added 'norm_name' column.")
+        if "norm_team_name" not in squad_cols:
+            cursor.execute("ALTER TABLE squad_players ADD COLUMN norm_team_name TEXT")
+            logger.info("Migrated squad_players table: added 'norm_team_name' column.")
+
+        cursor.execute("""
+            SELECT id, team_name, player_name 
+            FROM squad_players 
+            WHERE norm_name IS NULL OR norm_name = '' 
+               OR norm_team_name IS NULL OR norm_team_name = ''
+        """)
+        unmigrated_players = cursor.fetchall()
+        for p_row in unmigrated_players:
+            p_key = normalize_player_name_key(p_row["player_name"])
+            t_key = normalize_team_name(resolve_team_name(p_row["team_name"]) or p_row["team_name"])
+            cursor.execute(
+                "UPDATE squad_players SET norm_name = ?, norm_team_name = ? WHERE id = ?",
+                (p_key, t_key, p_row["id"])
+            )
+
+        # Deduplicate existing duplicate entries within each club
+        _deduplicate_squad_players_in_db(cursor)
+
+        # Unique index on (norm_team_name, norm_name) physically prevents duplicate players in same club
+        cursor.execute("DROP INDEX IF EXISTS idx_squad_players_team_norm")
+        cursor.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_squad_players_team_norm "
+            "ON squad_players(norm_team_name, norm_name)"
+        )
+
         # ─── 018: старые строки писались по UTC — переводим на московское время ─
         cursor.execute("SELECT 1 FROM schema_migrations WHERE version = '018_utc_to_msk_timestamps'")
         if not cursor.fetchone():
@@ -2835,7 +2939,11 @@ def confirm_and_finalize_match(match_id: int, p1_score: int, p2_score: int, even
             p_name = item[1].strip()
             e_type = item[2]
             cnt = item[3] if len(item) > 3 else 1
-            key = (t_name, p_name, e_type)
+
+            squad_match = find_player_in_squad(p_name, t_name, conn=conn)
+            canon_p_name = squad_match["player_name"] if squad_match else p_name
+
+            key = (t_name, canon_p_name, e_type)
             aggregated[key] = aggregated.get(key, 0) + cnt
 
         for (t_name, p_name, e_type), cnt in aggregated.items():
@@ -2844,6 +2952,17 @@ def confirm_and_finalize_match(match_id: int, p1_score: int, p2_score: int, even
                 (match_id, t_name, p_name, e_type, cnt)
             )
         mvp_clean = (mvp_player or "").strip() or None
+        if mvp_clean:
+            cursor.execute("SELECT player1_team, player2_team FROM matches WHERE id = ?", (match_id,))
+            m_row = cursor.fetchone()
+            if m_row:
+                t1, t2 = m_row["player1_team"], m_row["player2_team"]
+                m1 = find_player_in_squad(mvp_clean, t1, conn=conn) if t1 else None
+                m2 = find_player_in_squad(mvp_clean, t2, conn=conn) if t2 else None
+                if m1 and not m2:
+                    mvp_clean = m1["player_name"]
+                elif m2 and not m1:
+                    mvp_clean = m2["player_name"]
         cursor.execute(
             "UPDATE matches SET player1_score = ?, player2_score = ?, reported_by = ?, photo_id = ?, "
             "mvp_player = ?, status = 'confirmed', played_at = ? WHERE id = ?",
@@ -4917,14 +5036,72 @@ def save_squad_players(team_name: str, player_names: list) -> int:
     """Save or add players to a club squad."""
     return add_squad(team_name, player_names)
 
+def find_player_in_squad(
+    player_name: str,
+    team_name: str,
+    conn: sqlite3.Connection | None = None
+) -> dict | None:
+    """
+    Find existing player in a club's squad using normalized matching and aliases.
+    Strictly isolated to team_name (never matches players from other clubs).
+    Returns dict: {'id': ..., 'team_name': ..., 'player_name': ..., 'position': ..., 'norm_name': ..., 'norm_team_name': ...} or None.
+    """
+    if not player_name or not team_name:
+        return None
+    p_norm = normalize_player_name_key(player_name)
+    if not p_norm:
+        return None
+    t_clean = team_name.strip()
+    t_norm = normalize_team_name(resolve_team_name(t_clean) or t_clean)
+
+    def _search(c):
+        # 1. Exact match on (norm_team_name, norm_name) (fast unique index lookup)
+        c.execute("""
+            SELECT id, team_name, player_name, position, norm_name, norm_team_name
+            FROM squad_players
+            WHERE (norm_team_name = ? OR LOWER(team_name) = LOWER(?)) AND norm_name = ?
+            LIMIT 1
+        """, (t_norm, t_clean, p_norm))
+        row = c.fetchone()
+        if row:
+            return dict(row)
+
+        # 2. Fuzzy / alias match against all players of this club
+        c.execute("""
+            SELECT id, team_name, player_name, position, norm_name, norm_team_name
+            FROM squad_players
+            WHERE norm_team_name = ? OR LOWER(team_name) = LOWER(?)
+            ORDER BY id ASC
+        """, (t_norm, t_clean))
+        all_club_players = c.fetchall()
+        for r in all_club_players:
+            if is_same_footballer(player_name, r["player_name"]):
+                return dict(r)
+        return None
+
+    if conn is not None:
+        cursor = conn.cursor()
+        return _search(cursor)
+    else:
+        with transaction() as local_conn:
+            cursor = local_conn.cursor()
+            return _search(cursor)
+
+
 def add_squad(team_name: str, player_names: list) -> int:
     """
     Add players to a club's squad with authentic positions.
     Accepts list of names: ["Vinicius Jr", ...] or tuples: [("Vinicius Jr", "LW"), ...] or dicts.
     Auto-detects authentic real-world position if not specified.
+    Uses normalized upsert: does NOT create a new squad_players.id if player already exists in the club.
     """
     from services.player_positions import detect_player_position, normalize_position
 
+    if not team_name or not player_names:
+        return 0
+
+    t_clean = team_name.strip()
+    t_norm = normalize_team_name(resolve_team_name(t_clean) or t_clean)
     added = 0
     with transaction() as conn:
         cursor = conn.cursor()
@@ -4942,25 +5119,45 @@ def add_squad(team_name: str, player_names: list) -> int:
             if not clean or len(clean) > 50:
                 continue
 
-            if not pos:
-                pos = detect_player_position(clean, team_name)
-            else:
-                pos = normalize_position(pos)
+            pos_clean = normalize_position(pos) if pos else detect_player_position(clean, t_clean)
+            norm_key = normalize_player_name_key(clean)
+            if not norm_key:
+                continue
+
+            existing = find_player_in_squad(clean, t_clean, conn=conn)
+            if existing:
+                # Player already exists in club: do NOT create new ID!
+                # Enrich position if existing row has none and new pos is detected
+                if not existing.get("position") and pos_clean:
+                    cursor.execute(
+                        "UPDATE squad_players SET position = ? WHERE id = ?",
+                        (pos_clean, existing["id"])
+                    )
+                if not existing.get("norm_name") or not existing.get("norm_team_name"):
+                    cursor.execute(
+                        "UPDATE squad_players SET norm_name = ?, norm_team_name = ? WHERE id = ?",
+                        (norm_key, t_norm, existing["id"])
+                    )
+                continue
 
             try:
                 cursor.execute(
                     """
-                    INSERT INTO squad_players (team_name, player_name, position) 
-                    VALUES (?, ?, ?)
+                    INSERT INTO squad_players (team_name, player_name, position, norm_name, norm_team_name) 
+                    VALUES (?, ?, ?, ?, ?)
                     ON CONFLICT(team_name, player_name) DO UPDATE SET
-                        position = COALESCE(excluded.position, squad_players.position)
+                        position = COALESCE(excluded.position, squad_players.position),
+                        norm_name = COALESCE(excluded.norm_name, squad_players.norm_name),
+                        norm_team_name = COALESCE(excluded.norm_team_name, squad_players.norm_team_name)
                     """,
-                    (team_name.strip(), clean, pos)
+                    (t_clean, clean, pos_clean, norm_key, t_norm)
                 )
                 if cursor.rowcount > 0:
                     added += 1
+            except sqlite3.IntegrityError:
+                logger.info("Player '%s' already exists in club '%s' (unique index)", clean, t_clean)
             except sqlite3.Error as e:
-                logger.warning(f"Failed to add player '{clean}' to {team_name}: {e}")
+                logger.warning(f"Failed to add player '{clean}' to {t_clean}: {e}")
     return added
 
 
@@ -5070,17 +5267,31 @@ def set_player_position(player_name: str, team_name: str, position: str) -> bool
     from services.player_positions import normalize_position
 
     norm_pos = normalize_position(position)
+    norm_key = normalize_player_name_key(player_name)
+    t_clean = team_name.strip()
+    t_norm = normalize_team_name(resolve_team_name(t_clean) or t_clean)
     with transaction() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            INSERT INTO squad_players (team_name, player_name, position)
-            VALUES (?, ?, ?)
-            ON CONFLICT(team_name, player_name) DO UPDATE SET position = excluded.position
-            """,
-            (team_name.strip(), player_name.strip(), norm_pos)
-        )
-        return cursor.rowcount > 0
+        existing = find_player_in_squad(player_name, team_name, conn=conn)
+        if existing:
+            cursor.execute(
+                "UPDATE squad_players SET position = ?, norm_name = ?, norm_team_name = ? WHERE id = ?",
+                (norm_pos, norm_key, t_norm, existing["id"])
+            )
+            return True
+        else:
+            cursor.execute(
+                """
+                INSERT INTO squad_players (team_name, player_name, position, norm_name, norm_team_name)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(team_name, player_name) DO UPDATE SET 
+                    position = excluded.position,
+                    norm_name = excluded.norm_name,
+                    norm_team_name = excluded.norm_team_name
+                """,
+                (t_clean, player_name.strip(), norm_pos, norm_key, t_norm)
+            )
+            return cursor.rowcount > 0
 
 
 def clear_squad(team_name: str) -> int:
@@ -5096,15 +5307,90 @@ def clear_squad(team_name: str) -> int:
 
 def replace_squad(team_name: str, player_names: list) -> tuple[int, int]:
     """
-    Replace a club's squad with `player_names`. Returns (deleted, added).
-
-    The nested transaction() calls join the outer scope, so the roster is never
-    left empty if adding the new players raises.
+    Synchronize/replace a club's squad with `player_names` via upsert.
+    Preserves canonical squad_players.id for existing players instead of deleting and recreating them.
+    Returns (deleted, added).
     """
-    with transaction():
-        deleted = clear_squad(team_name)
-        added = add_squad(team_name, player_names)
-        return deleted, added
+    from services.player_positions import detect_player_position, normalize_position
+
+    if not team_name:
+        return 0, 0
+
+    t_clean = team_name.strip()
+    t_norm = normalize_team_name(resolve_team_name(t_clean) or t_clean)
+    added = 0
+    deleted = 0
+
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, player_name, position, norm_name, norm_team_name FROM squad_players WHERE norm_team_name = ? OR LOWER(team_name) = LOWER(?)",
+            (t_norm, t_clean)
+        )
+        current_roster = [dict(r) for r in cursor.fetchall()]
+        retained_ids = set()
+
+        for item in player_names:
+            pos = None
+            if isinstance(item, (tuple, list)) and len(item) >= 2:
+                name, pos = item[0], item[1]
+            elif isinstance(item, dict):
+                name = item.get("player_name") or item.get("name")
+                pos = item.get("position") or item.get("pos")
+            else:
+                name = str(item)
+
+            clean = name.strip() if name else ""
+            if not clean or len(clean) > 50:
+                continue
+
+            pos_clean = normalize_position(pos) if pos else detect_player_position(clean, t_clean)
+            norm_key = normalize_player_name_key(clean)
+            if not norm_key:
+                continue
+
+            matched_player = None
+            for p in current_roster:
+                if p["id"] in retained_ids:
+                    continue
+                if p.get("norm_name") == norm_key or is_same_footballer(clean, p["player_name"]):
+                    matched_player = p
+                    break
+
+            if matched_player:
+                p_id = matched_player["id"]
+                retained_ids.add(p_id)
+                if pos_clean and pos_clean != matched_player.get("position"):
+                    cursor.execute("UPDATE squad_players SET position = ? WHERE id = ?", (pos_clean, p_id))
+                if not matched_player.get("norm_name") or not matched_player.get("norm_team_name"):
+                    cursor.execute("UPDATE squad_players SET norm_name = ?, norm_team_name = ? WHERE id = ?", (norm_key, t_norm, p_id))
+            else:
+                try:
+                    cursor.execute(
+                        """
+                        INSERT INTO squad_players (team_name, player_name, position, norm_name, norm_team_name)
+                        VALUES (?, ?, ?, ?, ?)
+                        ON CONFLICT(team_name, player_name) DO UPDATE SET
+                            position = COALESCE(excluded.position, squad_players.position),
+                            norm_name = COALESCE(excluded.norm_name, squad_players.norm_name),
+                            norm_team_name = COALESCE(excluded.norm_team_name, squad_players.norm_team_name)
+                        """,
+                        (t_clean, clean, pos_clean, norm_key, t_norm)
+                    )
+                    new_id = cursor.lastrowid
+                    if new_id:
+                        retained_ids.add(new_id)
+                    added += 1
+                except sqlite3.IntegrityError:
+                    pass
+
+        # Delete only players who were NOT retained in the new roster
+        for p in current_roster:
+            if p["id"] not in retained_ids:
+                cursor.execute("DELETE FROM squad_players WHERE id = ?", (p["id"],))
+                deleted += 1
+
+    return deleted, added
 
 
 def remove_player_from_squad(team_name: str, player_name: str) -> bool:
@@ -5120,20 +5406,24 @@ def remove_player_from_squad(team_name: str, player_name: str) -> bool:
 
 def get_missing_squad_players(team_name: str) -> list[str]:
     """Return player names that appear in match_events for a club but are absent from its squad."""
+    if not team_name:
+        return []
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
             SELECT DISTINCT me.player_name
             FROM match_events me
-            LEFT JOIN squad_players sp
-              ON LOWER(sp.player_name) = LOWER(me.player_name)
-             AND LOWER(sp.team_name) = LOWER(me.team_name)
             WHERE LOWER(me.team_name) = LOWER(?)
               AND me.player_name IS NOT NULL AND me.player_name != ''
-              AND sp.id IS NULL
             ORDER BY me.player_name COLLATE NOCASE ASC
         """, (team_name.strip(),))
-        return [row["player_name"] for row in cursor.fetchall()]
+        event_names = [row["player_name"] for row in cursor.fetchall()]
+
+        missing = []
+        for pname in event_names:
+            if not find_player_in_squad(pname, team_name, conn=conn):
+                missing.append(pname)
+        return missing
 
 
 def add_missing_squad_players(team_name: str | None = None) -> int:
@@ -5160,13 +5450,28 @@ def add_missing_squad_players(team_name: str | None = None) -> int:
             tname = row["team_name"]
             if not pname or not tname:
                 continue
+            existing = find_player_in_squad(pname, tname, conn=conn)
+            if existing:
+                # Align match_events spelling to canonical squad_players name if they differ
+                if existing["player_name"] != pname:
+                    cursor.execute(
+                        "UPDATE match_events SET player_name = ? WHERE LOWER(team_name) = LOWER(?) AND player_name = ?",
+                        (existing["player_name"], tname.strip(), pname)
+                    )
+                continue
+
+            norm_key = normalize_player_name_key(pname)
+            t_clean = tname.strip()
+            t_norm = normalize_team_name(resolve_team_name(t_clean) or t_clean)
             try:
                 cursor.execute(
-                    "INSERT OR IGNORE INTO squad_players (team_name, player_name) VALUES (?, ?)",
-                    (tname.strip(), pname.strip())
+                    "INSERT INTO squad_players (team_name, player_name, norm_name, norm_team_name) VALUES (?, ?, ?, ?)",
+                    (t_clean, pname.strip(), norm_key, t_norm)
                 )
                 if cursor.rowcount > 0:
                     added += 1
+            except sqlite3.IntegrityError:
+                pass
             except sqlite3.Error as e:
                 logger.warning(f"Failed to add player '{pname}' to {tname}: {e}")
     return added
@@ -7334,18 +7639,19 @@ def get_clubs_summary_for_division(division_id: int, season_id: int | None = Non
 
 def rename_player(old_name: str, new_name: str, team_name: str | None = None) -> tuple[int, int]:
     """
-    Rename a player across squad_players and match_events.
+    Rename a player across squad_players, match_events, and matches.mvp_player.
     Returns (squad_updated_count, events_updated_count).
     """
     old_clean = old_name.strip()
     new_clean = new_name.strip()
+    new_norm = normalize_player_name_key(new_clean)
     with transaction() as conn:
         cursor = conn.cursor()
         if team_name:
             t_clean = team_name.strip()
             cursor.execute(
-                "UPDATE squad_players SET player_name = ? WHERE LOWER(player_name) = LOWER(?) AND LOWER(team_name) = LOWER(?)",
-                (new_clean, old_clean, t_clean)
+                "UPDATE squad_players SET player_name = ?, norm_name = ? WHERE LOWER(player_name) = LOWER(?) AND LOWER(team_name) = LOWER(?)",
+                (new_clean, new_norm, old_clean, t_clean)
             )
             c1 = cursor.rowcount
             cursor.execute(
@@ -7353,10 +7659,14 @@ def rename_player(old_name: str, new_name: str, team_name: str | None = None) ->
                 (new_clean, old_clean, t_clean)
             )
             c2 = cursor.rowcount
+            cursor.execute(
+                "UPDATE matches SET mvp_player = ? WHERE LOWER(mvp_player) = LOWER(?) AND (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?))",
+                (new_clean, old_clean, t_clean, t_clean)
+            )
         else:
             cursor.execute(
-                "UPDATE squad_players SET player_name = ? WHERE LOWER(player_name) = LOWER(?)",
-                (new_clean, old_clean)
+                "UPDATE squad_players SET player_name = ?, norm_name = ? WHERE LOWER(player_name) = LOWER(?)",
+                (new_clean, new_norm, old_clean)
             )
             c1 = cursor.rowcount
             cursor.execute(
@@ -7364,6 +7674,10 @@ def rename_player(old_name: str, new_name: str, team_name: str | None = None) ->
                 (new_clean, old_clean)
             )
             c2 = cursor.rowcount
+            cursor.execute(
+                "UPDATE matches SET mvp_player = ? WHERE LOWER(mvp_player) = LOWER(?)",
+                (new_clean, old_clean)
+            )
         return (c1, c2)
 
 

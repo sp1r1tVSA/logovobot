@@ -42,6 +42,14 @@ This repository contains **Logovobot** (Логово Фифарей / ИИ «Т�
 - Enable WAL mode (`PRAGMA journal_mode=WAL;`).
 - Never perform string concatenation in SQL queries — always use `?` placeholders.
 - When matching team names, use `resolve_team_name()` / `teams_match()` / `normalize_team_name()` — they live in `club_registry.py` and are re-exported from `database.py`. The canonical list is `config.CLUB_REGISTRY`; a new club must be added there, otherwise it resolves only to itself. Resolution stops at the first unambiguous tier, so an ambiguous name yields *no* match rather than a guess — call `resolve_team_name_ex()` when the caller needs to know whether the answer was confident.
+- **Squad Player Uniqueness & Normalization (Один игрок = одна запись)**:
+  - Inside a specific club (`team_name`), one real footballer MUST have exactly one record in `squad_players`, regardless of spelling variations, Unicode forms, letter case, whitespace, hyphens, or diacritics.
+  - SQLite constraint: `idx_squad_players_team_norm` UNIQUE(`norm_team_name`, `norm_name`).
+  - Normalization: Always normalize player names using `services.player_names.normalize_player_name_key()` (NFKC/NFKD, lowercase, whitespace collapsing, hyphen/quote unification, diacritic stripping, Cyrillic transliteration).
+  - Pre-insertion check: Before adding a player, perform a normalized lookup via `find_player_in_squad(player_name, team_name, conn)`. Never create a new `squad_players.id` if the player exists in that club.
+  - Non-destructive updates / Upsert: Use upsert or diff-based synchronization (`add_squad`, `replace_squad`, `set_player_position`). Never unconditionally delete and recreate squads (`replace_squad` preserves canonical player IDs and positions).
+  - Relation consistency: `match_events.player_name` and `matches.mvp_player` must align with the canonical `player_name` in `squad_players` and be updated on player renames (`rename_player`).
+  - Strict Club Isolation: Do NOT merge players across different clubs (e.g. `Rodrigo` in Real Madrid != `Rodrigo` in Atlético).
 
 ### 2. Vision OCR & Drafts Pipeline (`ai_recognizer.py` + `handlers/drafts.py`)
 - **No Squad Hints in Gemini Prompt**: Gemini Vision must perform pure optical text extraction from screenshots. Do not pass DB squads into the AI prompt to prevent team hallucination.
