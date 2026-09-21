@@ -1438,7 +1438,9 @@ async def admin_div_manage_matches(update: Update, context: ContextTypes.DEFAULT
     for r in rounds:
         info = await asyncio.to_thread(database.get_round_info, r, div_id)
         status_icon = ROUND_PHASE_ICONS[debt_policy.round_phase(info, now_msk())]
-        row.append(InlineKeyboardButton(f"{status_icon} Тур {r}", callback_data=f"admin_div_round:{div_id}:{r}"))
+        # Кружок — статус тура для игры; линия ставок живёт отдельно от него.
+        line_mark = " 🎰" if info and info.get("bets_open") and not info.get("is_open") else ""
+        row.append(InlineKeyboardButton(f"{status_icon} Тур {r}{line_mark}", callback_data=f"admin_div_round:{div_id}:{r}"))
         if len(row) == 2:
             keyboard.append(row)
             row = []
@@ -1449,7 +1451,12 @@ async def admin_div_manage_matches(update: Update, context: ContextTypes.DEFAULT
     keyboard.append([InlineKeyboardButton("« Назад", callback_data=home_cb)])
 
     if rounds:
-        text = f"⚔️ <b>Матчи дивизиона {html.escape(str(div_name))}</b>\n\nВыберите тур:"
+        text = (
+            f"⚔️ <b>Матчи дивизиона {html.escape(str(div_name))}</b>\n\n"
+            "⚪ не открыт · 🟢 открыт · 🟠 дедлайн прошёл · 🔴 закрыт\n"
+            "🎰 — на тур открыта линия ставок\n\n"
+            "Выберите тур:"
+        )
     else:
         text = f"⚔️ <b>Матчи дивизиона {html.escape(str(div_name))}</b>\n\nМатчи ещё не созданы."
 
