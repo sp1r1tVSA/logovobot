@@ -306,9 +306,10 @@ class TestMatchExtension(DebtTechnicalResultsBase):
         self._place_bet(outcome="p1", odd=2.00)
         self._close_round(hours_overdue=50.0)
 
-        # Админа уже дёрнули на 48-м часе.
-        database.record_debt_stage(self.MATCH_ID, "admin_escalated_48h")
-        self.assertTrue(database.has_debt_stage(self.MATCH_ID, "admin_escalated_48h"))
+        # Админа уже дёрнули по сроку долга.
+        database.sync_match_debts()
+        self.assertTrue(database.mark_debt_stage(self.MATCH_ID, "escalated"))
+        self.assertEqual(database.get_match_debt(self.MATCH_ID)["state"], "escalated")
 
         until = database.extend_match_deadline_by_hours(self.MATCH_ID, 24)
         self.assertIsNotNone(until)
@@ -325,7 +326,9 @@ class TestMatchExtension(DebtTechnicalResultsBase):
         self.assertLess(delta_h, 25.0)
 
         # Эскалация сброшена: после продления админа спросят заново.
-        self.assertFalse(database.has_debt_stage(self.MATCH_ID, "admin_escalated_48h"))
+        debt = database.get_match_debt(self.MATCH_ID)
+        self.assertIsNone(debt["escalated_at"])
+        self.assertEqual(debt["state"], "active")
 
         # ГЛАВНОЕ: ставки не возвращены, они висят до реального исхода.
         self.assertEqual(self._bet_item_statuses(), ["pending"])
@@ -363,19 +366,20 @@ class TestOneWarnPerDebtRule(DebtTechnicalResultsBase):
         self._close_round(hours_overdue=30.0)
 
         ctx = self._make_context()
+        # Первый прогон — сообщение о долге, второй — мягкое предупреждение.
+        asyncio.run(admin_handlers._run_debt_lifecycle_tracker(ctx))
         asyncio.run(admin_handlers._run_debt_lifecycle_tracker(ctx))
 
         # 30 часов просрочки — напоминание ушло, варнов нет.
-        self.assertTrue(database.has_debt_stage(self.MATCH_ID, "warn_24h"))
+        debt = database.get_match_debt(self.MATCH_ID)
+        self.assertIsNotNone(debt["last_reminder_at"])
+        self.assertIsNotNone(debt["soft_warned_at"])
         self.assertEqual(database.get_user_warn_count(self.P1_ID), 0)
         self.assertEqual(database.get_user_warn_count(self.P2_ID), 0)
 
-        # Каскад +48/+72/+96 удалён вместе с авто-варном на 24 часах.
-        for stage in ("warn_48h", "warn_72h", "warn_96h"):
-            self.assertFalse(database.has_debt_stage(self.MATCH_ID, stage))
-
-        # И до 48 часов админа не дёргают.
-        self.assertFalse(database.has_debt_stage(self.MATCH_ID, "admin_escalated_48h"))
+        # И до срока долга админа не дёргают.
+        self.assertIsNone(debt["escalated_at"])
+        self.assertEqual(debt["state"], "active")
 
         self.assertTrue(ctx.bot.send_message.await_count >= 1)
 

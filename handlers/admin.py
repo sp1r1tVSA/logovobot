@@ -29,7 +29,7 @@ from config import MAX_WARNS_LIMIT, GROUP_ID
 
 from handlers.squad_ai import offer_recognized_squad
 from services.graphics import player_photos
-from services import debt_policy
+from services import debt_lifecycle, debt_policy
 from services.tournament_validator import RoundRobinValidator
 from services.schedule_generator import (
     generate_asymmetric_round_robin_fixtures,
@@ -6616,12 +6616,22 @@ async def _resolve_debt_admins(division_id: int | None) -> list[int]:
     return [a for a in admins if a and not (a in seen or seen.add(a))]
 
 
-async def _escalate_debt_to_admin(context: ContextTypes.DEFAULT_TYPE, m: dict) -> bool:
-    """48h escalation: send the one-click verdict card to the division admins.
+def _debt_deadline_str(m: dict) -> str:
+    esc = m.get("escalate_at")
+    return esc.strftime("%d.%m.%Y %H:%M") if isinstance(esc, datetime.datetime) else "—"
 
-    Returns True as soon as at least one admin received the card — the caller
-    then records the `admin_escalated_48h` stage so the 30-minute tracker does
-    not re-send it on every run.
+
+async def _escalate_debt_to_admin(
+    context: ContextTypes.DEFAULT_TYPE,
+    m: dict,
+    *,
+    recipients: list[int] | None = None,
+    repeat: bool = False,
+) -> bool:
+    """Карточка вердикта по долгу: админам дивизиона (или `recipients`).
+
+    Возвращает True, если карточку получил хотя бы один админ — только тогда
+    трекер отмечает этап в `match_debts`, иначе повторит на следующем прогоне.
     """
     m_id = m["id"]
     rn = m.get("round_number", "?")
@@ -6641,13 +6651,15 @@ async def _escalate_debt_to_admin(context: ContextTypes.DEFAULT_TYPE, m: dict) -
         except Exception:
             pass
 
+    title = "ДОЛГ ВСЁ ЕЩЁ БЕЗ ВЕРДИКТА" if repeat else "ДОЛГ: ТРЕБУЕТСЯ ВЕРДИКТ"
     text = (
-        f"⚖️ <b>ДОЛГ 48Ч: ТРЕБУЕТСЯ ВЕРДИКТ</b>{div_name}\n\n"
+        f"⚖️ <b>{title}</b>{div_name}\n\n"
         f"🏆 <b>{rn}-й тур</b> · матч #{m_id}\n"
         f"🏠 <b>{t1}</b> ({u1})\n"
         f"✈️ <b>{t2}</b> ({u2})\n"
-        f"⏳ Просрочка: <b>{hours}ч</b>\n\n"
-        f"<i>Матч не сыгран через 48 часов после дедлайна. Выберите решение:</i>\n"
+        f"⏳ Долг идёт: <b>{hours}ч</b>\n"
+        f"⌛ Срок отыгрыша истёк: <b>{_debt_deadline_str(m)}</b>\n\n"
+        f"<i>Матч не сыгран в срок. Выберите решение:</i>\n"
         f"• <b>ТП</b> — победителю +3 очка и −1 варн за долг, виновнику +1 варн.\n"
         f"• <b>ТН 0:0</b> — по 1 очку каждому и <b>по +1 варну обоим</b>.\n"
         f"• <b>Продлить</b> — долг замораживается, ставки остаются в игре.\n\n"
@@ -6662,8 +6674,10 @@ async def _escalate_debt_to_admin(context: ContextTypes.DEFAULT_TYPE, m: dict) -
         [InlineKeyboardButton("⚽️ Карточка матча", callback_data=f"admin_view_match_{m_id}")],
     ])
 
+    if recipients is None:
+        recipients = await _resolve_debt_admins(div_id)
     delivered = False
-    for admin_id in await _resolve_debt_admins(div_id):
+    for admin_id in recipients:
         try:
             await context.bot.send_message(
                 chat_id=admin_id, text=text, reply_markup=keyboard, parse_mode="HTML"
@@ -6674,18 +6688,72 @@ async def _escalate_debt_to_admin(context: ContextTypes.DEFAULT_TYPE, m: dict) -
     return delivered
 
 
+async def _global_escalation_recipients(division_id: int | None) -> list[int]:
+    """Глобальные админы, которые ещё не получали карточку как админы дивизиона."""
+    already = set(await _resolve_debt_admins(division_id))
+    seen: set[int] = set()
+    out: list[int] = []
+    for a in (config.ADMIN_IDS or []):
+        a = int(a)
+        if a and a not in already and a not in seen:
+            seen.add(a)
+            out.append(a)
+    return out
+
+
+def _debt_dm_text(kind: str, m: dict, warns: int) -> str:
+    """Одно ЛС о долге для обоих участников: первое, повторное и мягкое предупреждение."""
+    rn = m.get("round_number", "?")
+    t1 = html.escape(m.get("player1_team") or "Команда 1")
+    t2 = html.escape(m.get("player2_team") or "Команда 2")
+    u1 = f"@{html.escape(m['p1_username'])}" if m.get("p1_username") else t1
+    u2 = f"@{html.escape(m['p2_username'])}" if m.get("p2_username") else t2
+    left = max(0, int(m.get("hours_to_escalation") or 0))
+    headers = {
+        debt_lifecycle.NOTIFY: "⏳ <b>Матч стал долгом!</b>",
+        debt_lifecycle.REMIND: "⏰ <b>Напоминание о несыгранном долге!</b>",
+        debt_lifecycle.SOFT_WARN: "🔔 <b>Долг всё ещё не сыгран — меньше суток до вердикта.</b>",
+    }
+    grace = int(m.get("grace_hours") or 0)
+    term = f"{config.DEBT_ESCALATION_HOURS}+{grace}ч" if grace else f"{config.DEBT_ESCALATION_HOURS}ч"
+    return (
+        f"{headers.get(kind, headers[debt_lifecycle.REMIND])}\n\n"
+        f"🏆 <b>{rn}-й тур:</b> 🏠 <b>{t1}</b> ({u1}) 🆚 ✈️ <b>{t2}</b> ({u2})\n"
+        f"⏱ Срок отыгрыша ({term}): до <b>{_debt_deadline_str(m)}</b>"
+        + (f" — осталось <b>{debt_policy.hours_label(left)}</b>\n" if left > 0 else "\n")
+        + f"📊 Ваши текущие варны: <b>{warns}/{MAX_WARNS_LIMIT}</b>\n\n"
+        f"🎁 <i>Сыгранный долг списывает варн за долг (−1 варн).</i>\n"
+        f"📸 <i>Соперник игнорирует — отправьте пруфы переписки админу дивизиона, ТП получит виновник.</i>\n"
+        f"🤝 <i>Если оба молчат — после срока ТН 0:0 и <b>по +1 варну обоим</b>.</i>\n"
+        f"⚠️ <i>При {MAX_WARNS_LIMIT}/{MAX_WARNS_LIMIT} варнах участник исключается из лиги.</i>"
+    )
+
+
+async def _debt_participants(m: dict) -> list[dict]:
+    """Живые участники долга (id + варны). Клуб без владельца просто пропускается."""
+    out: list[dict] = []
+    for side in ("1", "2"):
+        pid = m.get(f"player{side}_id")
+        user = await asyncio.to_thread(database.get_user, pid) if pid and pid > 0 else None
+        if not user and m.get(f"player{side}_team"):
+            user = await asyncio.to_thread(
+                database.find_user_by_team, m.get(f"player{side}_team"), m.get("division_id")
+            )
+        user = dict(user) if user else None
+        if not user or not user.get("telegram_id") or int(user["telegram_id"]) <= 0:
+            continue
+        out.append({"id": int(user["telegram_id"]), "warns": int(user.get("warn_count") or 0)})
+    return out
+
+
 async def job_debt_lifecycle_tracker(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Automated debt lifecycle tracking (48-hour regulation):
-    - 0h overdue: match becomes a ДОЛГ, both participants get the 48h rules in DM.
-    - Every 12h: cycle reminder in DM.
-    - 24h overdue: soft reminder in DM only — NO warn is issued here.
-    - 48h overdue (and not extended): escalate to the division admin with a
-      one-click verdict card (ТП хозяевам / ТП гостям / ТН / продлить).
-    - A warn is only ever granted by the final verdict, so one debt match can
-      cost a player at most ONE warn. On 4/4 warns the player is auto-kicked.
-    - If is_extended == 1: the debt clock is frozen and nothing escalates. An
-      expired extension (`extended_until`) is resumed automatically here.
+    """Трекер долгов: план — `services.debt_lifecycle`, отметки — `match_debts`.
+
+    Первое ЛС участникам, повтор каждые DEBT_REMINDER_INTERVAL_HOURS, мягкое
+    предупреждение за DEBT_SOFT_WARNING_HOURS до срока, карточка вердикта админам
+    дивизиона в `escalate_at`, повтор каждые DEBT_REESCALATION_INTERVAL_HOURS и
+    глобальным админам через DEBT_GLOBAL_ESCALATION_DELAY_HOURS. Варн даёт только
+    вердикт. Продлённый матч заморожен; истёкшее продление снимается здесь.
     """
     if _debt_tracker_lock.locked():
         logger.info("Debt tracker run skipped: another run is already in progress.")
@@ -6705,194 +6773,63 @@ async def _run_debt_lifecycle_tracker(context: ContextTypes.DEFAULT_TYPE) -> Non
     if not overdue_matches:
         return
 
-    now = now_msk()
-
-    warns_updated = False
-
     logger.info(f"Checking debt tracker: {len(overdue_matches)} overdue matches found")
-
     for m in overdue_matches:
-        m_id = m["id"]
-        rn = m["round_number"]
-        is_extended = bool(m.get("is_extended", 0))
-        hours_overdue = m.get("hours_overdue", 0.0)
+        try:
+            await _process_debt(context, m)
+        except Exception:
+            logger.exception(f"Debt tracker failed on match #{m.get('id')}")
 
-        p1_id = m.get("player1_id")
-        p2_id = m.get("player2_id")
-        t1 = html.escape(m.get("player1_team") or "Команда 1")
-        t2 = html.escape(m.get("player2_team") or "Команда 2")
-        u1 = f"@{html.escape(m['p1_username'])}" if m.get("p1_username") else t1
-        u2 = f"@{html.escape(m['p2_username'])}" if m.get("p2_username") else t2
 
-        # Fetch current user objects or resolve by team name
-        p1_user = await asyncio.to_thread(database.get_user, p1_id) if p1_id else None
-        if not p1_user and m.get("player1_team"):
-            p1_user = await asyncio.to_thread(database.find_user_by_team, m.get("player1_team"), m.get("division_id"))
-            if p1_user:
-                p1_id = p1_user["telegram_id"]
-        p1_user = dict(p1_user) if p1_user else None
+async def _process_debt(context: ContextTypes.DEFAULT_TYPE, m: dict) -> None:
+    """Исполнить план `debt_lifecycle.plan_debt_actions` для одного долга."""
+    m_id = m["id"]
+    if not m.get("debt"):
+        # Без строки match_debts отметить этап некуда — иначе ЛС уходили бы
+        # каждые 30 минут. Строку заведёт следующий sync_match_debts.
+        logger.warning(f"Debt match #{m_id} has no match_debts row; skipped")
+        return
 
-        p2_user = await asyncio.to_thread(database.get_user, p2_id) if p2_id else None
-        if not p2_user and m.get("player2_team"):
-            p2_user = await asyncio.to_thread(database.find_user_by_team, m.get("player2_team"), m.get("division_id"))
-            if p2_user:
-                p2_id = p2_user["telegram_id"]
-        p2_user = dict(p2_user) if p2_user else None
+    now = now_msk()
+    actions = debt_lifecycle.plan_debt_actions(m, now)
+    if debt_lifecycle.EXPIRE_EXTENSION in actions:
+        await asyncio.to_thread(database.expire_match_extension, m_id)
+        # Срок пересчитывается с учётом закрытой заморозки.
+        fresh = await asyncio.to_thread(database.get_detailed_overdue_matches, m.get("division_id"))
+        m = next((x for x in fresh if x["id"] == m_id), None)
+        if m is None or not m.get("debt"):
+            return
+        actions = debt_lifecycle.plan_debt_actions(m, now)
 
-        p1_valid = bool(p1_id and p1_id > 0)
-        p2_valid = bool(p2_id and p2_id > 0)
-
-        # 0. An admin extension that has run out resumes the debt clock right
-        # away, so the match can escalate again in this very run instead of
-        # staying frozen until someone touches it manually.
-        if is_extended and m.get("extended_until"):
-            expiry = database.parse_flexible_datetime(m["extended_until"])
-            if expiry and now >= expiry:
-                await asyncio.to_thread(database.expire_match_extension, m_id)
-                is_extended = False
-
-        # 1. Initial Notification: Moment deadline passed (0h)
-        # Skipped for extended matches.
-        if not is_extended and not (
-            await asyncio.to_thread(database.has_debt_stage, m_id, "deadline_passed")
-        ):
-            dm_initial_text = (
-                f"⏳ <b>Внимание: дедлайн тура истёк!</b>\n\n"
-                f"Матч переведён в категорию <b>ДОЛГ</b>:\n"
-                f"🏆 <b>{rn}-й тур</b>\n"
-                f"🏠 <b>{t1}</b> ({u1}) 🆚 ✈️ <b>{t2}</b> ({u2})\n\n"
-                f"⏱ <b>У вас ровно 48 часов, чтобы отыграть этот матч.</b>\n\n"
-                f"🎁 <i>Факт сыгранного долга автоматически аннулирует варн за долг (−1 варн).</i>\n"
-                f"📸 <i>Если соперник игнорирует — отправьте пруфы переписки админу дивизиона, "
-                f"и ТП будет назначено виновнику.</i>\n"
-                f"🤝 <i>Если оба участника молчат — через 48 часов будет зафиксирована "
-                f"техническая ничья ТН 0:0 (по 1 очку каждому) и <b>обоим начислится по +1 варну</b>.</i>\n\n"
-                f"⚠️ <i>Лимит варнов — {MAX_WARNS_LIMIT}. При {MAX_WARNS_LIMIT}/{MAX_WARNS_LIMIT} "
-                f"участник автоматически исключается из лиги, а клуб уходит на замену.</i>"
-            )
-            initial_delivered = False
-            for pid, is_v in ((p1_id, p1_valid), (p2_id, p2_valid)):
-                if pid and is_v:
-                    try:
-                        await context.bot.send_message(chat_id=pid, text=dm_initial_text, parse_mode="HTML")
-                        initial_delivered = True
-                    except Exception:
-                        pass
-            # Only persist the stage once at least one DM reached a player;
-            # otherwise the next run retries the initial notification.
-            if initial_delivered:
-                await asyncio.to_thread(database.record_debt_stage, m_id, "deadline_passed")
-                await asyncio.to_thread(database.record_debt_12h_reminder, m_id)
-
-        # Skip reminders AND warns for extended matches, or when either participant
-        # cannot be resolved to an active player (e.g. opponent was kicked / club
-        # vacant) — an unplayable match must never generate warnings or reminder
-        # spam for the remaining player.
-        if is_extended or not (p1_valid and p2_valid):
-            continue
-
-        # 2. Cycle Reminders in DM (every 12 hours)
-        last_remind_dt = await asyncio.to_thread(database.get_last_debt_12h_reminder, m_id)
-        should_send_12h = False
-        if last_remind_dt is None:
-            should_send_12h = True
-        else:
-            diff_hours = (now - last_remind_dt).total_seconds() / 3600.0
-            if diff_hours >= 12.0:
-                should_send_12h = True
-
-        if should_send_12h:
-            hours_overdue_int = int(hours_overdue)
-            # The only deadline that matters now is the 48h verdict, not a
-            # 24-hour warn cycle — that cascade no longer exists.
-            hours_left = 48 - hours_overdue_int
-            if hours_left > 0:
-                verdict_time_str = f"~{hours_left}ч"
-            else:
-                verdict_time_str = "в любой момент"
-
-            delivered_any = False
-
-            # Send to player 1
-            if p1_id and p1_valid:
-                p1_warns = p1_user.get("warn_count", 0) if p1_user else 0
-                p1_dm = (
-                    f"⏰ <b>Напоминание о несыгранном долге!</b>\n\n"
-                    f"🏆 <b>{rn}-й тур:</b> 🏠 <b>{t1}</b> ({u1}) 🆚 ✈️ <b>{t2}</b> ({u2})\n"
-                    f"⏳ Просрочка: <b>{hours_overdue_int}ч</b> из 48ч\n"
-                    f"⚖️ До вердикта админа (ТП / ТН): <b>{verdict_time_str}</b>\n"
-                    f"📊 Ваши текущие варны: <b>{p1_warns}/{MAX_WARNS_LIMIT}</b>\n\n"
-                    f"<i>Пожалуйста, сыграйте матч и внесите результат в бота.</i>"
-                )
+    for action in actions:
+        if action in (debt_lifecycle.NOTIFY, debt_lifecycle.REMIND, debt_lifecycle.SOFT_WARN):
+            players = await _debt_participants(m)
+            if len(players) < 2:
+                logger.warning(f"Debt match #{m_id}: {2 - len(players)} side(s) without an owner")
+            delivered = not players  # некому писать — этап считается пройденным
+            for pl in players:
                 try:
-                    await context.bot.send_message(chat_id=p1_id, text=p1_dm, parse_mode="HTML")
-                    delivered_any = True
-                except Exception:
-                    pass
-
-            # Send to player 2
-            if p2_id and p2_valid:
-                p2_warns = p2_user.get("warn_count", 0) if p2_user else 0
-                p2_dm = (
-                    f"⏰ <b>Напоминание о несыгранном долге!</b>\n\n"
-                    f"🏆 <b>{rn}-й тур:</b> 🏠 <b>{t1}</b> ({u1}) 🆚 ✈️ <b>{t2}</b> ({u2})\n"
-                    f"⏳ Просрочка: <b>{hours_overdue_int}ч</b> из 48ч\n"
-                    f"⚖️ До вердикта админа (ТП / ТН): <b>{verdict_time_str}</b>\n"
-                    f"📊 Ваши текущие варны: <b>{p2_warns}/{MAX_WARNS_LIMIT}</b>\n\n"
-                    f"<i>Пожалуйста, сыграйте матч и внесите результат в бота.</i>"
-                )
-                try:
-                    await context.bot.send_message(chat_id=p2_id, text=p2_dm, parse_mode="HTML")
-                    delivered_any = True
-                except Exception:
-                    pass
-
-            # Persist the 12h timestamp ONLY if at least one DM was actually
-            # delivered — otherwise the next run retries immediately instead of
-            # silently losing the reminder window for 12 hours.
-            if delivered_any:
-                await asyncio.to_thread(database.record_debt_12h_reminder, m_id)
-
-        # 3. Soft reminder at 24h — NO warn is issued here.
-        # Under the 48-hour regulation a debt match can only ever cost a player
-        # one warn, and that warn is granted by the final verdict (ТП / ТН).
-        if hours_overdue >= 24.0 and not (
-            await asyncio.to_thread(database.has_debt_stage, m_id, "warn_24h")
-        ):
-            soft_text = (
-                f"🔔 <b>Прошло 24 часа с дедлайна — матч всё ещё не сыгран.</b>\n\n"
-                f"🏆 <b>{rn}-й тур:</b> 🏠 <b>{t1}</b> ({u1}) 🆚 ✈️ <b>{t2}</b> ({u2})\n\n"
-                f"⏱ <i>Остались ещё сутки: ровно через 48 часов после дедлайна "
-                f"админ дивизиона вынесет вердикт.</i>\n"
-                f"🎁 <i>Сыграйте долг сейчас — варн за долг будет списан (−1 варн).</i>\n"
-                f"📸 <i>Соперник игнорирует? Отправьте пруфы переписки админу дивизиона — "
-                f"ТП получит виновник.</i>\n"
-                f"🤝 <i>Обоюдное молчание = ТН 0:0 и по +1 варну каждому.</i>\n\n"
-                f"ℹ️ <b>Варн за эти 24 часа НЕ начислен.</b>"
-            )
-            soft_delivered = False
-            for pid, is_v in ((p1_id, p1_valid), (p2_id, p2_valid)):
-                if not (pid and is_v):
-                    continue
-                try:
-                    await context.bot.send_message(chat_id=pid, text=soft_text, parse_mode="HTML")
-                    soft_delivered = True
-                except Exception:
-                    pass
-            if soft_delivered:
-                await asyncio.to_thread(database.record_debt_stage, m_id, "warn_24h")
-
-        # 4. Escalation to the division admin at 48h.
-        # Recorded as a stage so the admin is not pinged every 30 minutes.
-        if hours_overdue >= 48.0 and not (
-            await asyncio.to_thread(database.has_debt_stage, m_id, "admin_escalated_48h")
-        ):
-            escalated = await _escalate_debt_to_admin(context, m)
-            if escalated:
-                await asyncio.to_thread(database.record_debt_stage, m_id, "admin_escalated_48h")
-
-    if warns_updated:
-        await _post_or_update_debts_in_warns(context)
+                    await context.bot.send_message(
+                        chat_id=pl["id"], text=_debt_dm_text(action, m, pl["warns"]), parse_mode="HTML"
+                    )
+                    delivered = True
+                except Exception as e:
+                    logger.warning(f"Failed to DM debt #{m_id} to {pl['id']}: {e}")
+            if delivered:
+                stage = "soft_warned" if action == debt_lifecycle.SOFT_WARN else "reminded"
+                await asyncio.to_thread(database.mark_debt_stage, m_id, stage, now)
+        elif action == debt_lifecycle.ESCALATE:
+            if await _escalate_debt_to_admin(context, m):
+                await asyncio.to_thread(database.mark_debt_stage, m_id, "escalated", now)
+        elif action == debt_lifecycle.REESCALATE:
+            if await _escalate_debt_to_admin(context, m, repeat=True):
+                await asyncio.to_thread(database.mark_debt_stage, m_id, "reescalated", now)
+        elif action == debt_lifecycle.ESCALATE_GLOBAL:
+            recipients = await _global_escalation_recipients(m.get("division_id"))
+            if not recipients or await _escalate_debt_to_admin(
+                context, m, recipients=recipients, repeat=True
+            ):
+                await asyncio.to_thread(database.mark_debt_stage, m_id, "global_escalated", now)
 
 
 @admin_only

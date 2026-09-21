@@ -8171,6 +8171,50 @@ def get_match_debt(match_id: int) -> dict | None:
         return dict(row) if row else None
 
 
+# Отметки трекера долгов. SQL фиксирован на каждый этап — никакой подстановки
+# имён колонок. Отметка ставится, только если строка долга ещё жива.
+_DEBT_MARK_SQL = {
+    "reminded": (
+        "UPDATE match_debts SET last_reminder_at = ? "
+        "WHERE match_id = ? AND state IN ('active', 'escalated')"
+    ),
+    "soft_warned": (
+        "UPDATE match_debts SET soft_warned_at = ?, last_reminder_at = ? "
+        "WHERE match_id = ? AND state IN ('active', 'escalated') AND soft_warned_at IS NULL"
+    ),
+    "escalated": (
+        "UPDATE match_debts SET state = 'escalated', escalated_at = ?, last_escalation_at = ?, "
+        "escalation_count = COALESCE(escalation_count, 0) + 1 "
+        "WHERE match_id = ? AND state = 'active' AND escalated_at IS NULL"
+    ),
+    "reescalated": (
+        "UPDATE match_debts SET last_escalation_at = ?, "
+        "escalation_count = COALESCE(escalation_count, 0) + 1 "
+        "WHERE match_id = ? AND state = 'escalated'"
+    ),
+    "global_escalated": (
+        "UPDATE match_debts SET global_escalated_at = ? "
+        "WHERE match_id = ? AND state = 'escalated' AND global_escalated_at IS NULL"
+    ),
+}
+_DEBT_MARK_ARITY = {"soft_warned": 2, "escalated": 2}
+
+
+def mark_debt_stage(match_id: int, stage: str, now: datetime.datetime | None = None) -> bool:
+    """Отметить выполненный этап долга: reminded / soft_warned / escalated / reescalated / global_escalated.
+
+    Возвращает True, если строка изменилась (повтор того же этапа — False).
+    """
+    sql = _DEBT_MARK_SQL.get(stage)
+    if sql is None:
+        raise ValueError(f"unknown debt stage: {stage}")
+    ts = _ts(now or now_msk())
+    params = (ts,) * _DEBT_MARK_ARITY.get(stage, 1) + (match_id,)
+    with transaction() as conn:
+        cursor = conn.execute(sql, params)
+        return cursor.rowcount > 0
+
+
 # ─── Жизненный цикл тура ──────────────────────────────────────────────────
 
 def validate_round_deadline(deadline_text: str | None, now: datetime.datetime | None = None) -> datetime.datetime:
