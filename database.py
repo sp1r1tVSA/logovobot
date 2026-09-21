@@ -4318,10 +4318,6 @@ def extend_match_deadline_by_hours(match_id: int, hours: int) -> str | None:
         until_str = until.strftime("%Y-%m-%d %H:%M:%S")
         cursor.execute("UPDATE matches SET extended_until = ? WHERE id = ?", (until_str, match_id))
         cursor.execute(
-            "DELETE FROM debt_reminders WHERE match_id = ? AND stage = ?",
-            (match_id, "admin_escalated_48h")
-        )
-        cursor.execute(
             "UPDATE match_debts SET escalated_at = NULL, last_escalation_at = NULL, "
             "global_escalated_at = NULL, "
             "state = CASE WHEN state = 'escalated' THEN 'active' ELSE state END "
@@ -7179,10 +7175,8 @@ def get_club_card_data(team_name: str) -> dict:
             if not is_cup:
                 overdue = debt_policy.is_debt(dict(pm), r_info, debt_rows.get(pm["id"]), now_dt)
             else:
-                # Cup matches: overdue only if recorded in debt reminders
-                cursor.execute("SELECT 1 FROM debt_reminders WHERE match_id = ? LIMIT 1", (pm["id"],))
-                if cursor.fetchone():
-                    overdue = True
+                # Кубок: долг, только если строка match_debts уже заведена
+                overdue = pm["id"] in debt_rows
 
             if overdue:
                 debts_count += 1
@@ -7895,54 +7889,6 @@ def get_all_unplayed_league_matches(division_id: int | None = None, season_id: i
         m["p1_team"] = m.get("player1_team")
         m["p2_team"] = m.get("player2_team")
     return matches
-
-
-def record_debt_stage(match_id: int, stage: str) -> None:
-    """Record a debt lifecycle stage for a match (e.g. 'deadline_passed', 'warn_24h', 'warn_48h', etc.)."""
-    with transaction() as conn:
-        cursor = conn.cursor()
-        now_str = now_msk_str()
-        cursor.execute(
-            "INSERT OR REPLACE INTO debt_reminders (match_id, stage, sent_at) VALUES (?, ?, ?)",
-            (match_id, stage, now_str)
-        )
-
-
-def has_debt_stage(match_id: int, stage: str) -> bool:
-    """Check whether a debt lifecycle stage has already been recorded for a match."""
-    with transaction() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT 1 FROM debt_reminders WHERE match_id = ? AND stage = ?", (match_id, stage))
-        return cursor.fetchone() is not None
-
-
-def clear_debt_stage(match_id: int, stage: str) -> None:
-    """Forget a previously recorded debt lifecycle stage so it can fire again."""
-    with transaction() as conn:
-        conn.execute("DELETE FROM debt_reminders WHERE match_id = ? AND stage = ?", (match_id, stage))
-
-
-def record_debt_12h_reminder(match_id: int) -> None:
-    """Record timestamp of 12h cycle debt reminder."""
-    with transaction() as conn:
-        cursor = conn.cursor()
-        now_str = now_msk_str()
-        cursor.execute("""
-            INSERT INTO debt_reminders (match_id, stage, sent_at)
-            VALUES (?, 'cycle_reminder_last', ?)
-            ON CONFLICT(match_id, stage) DO UPDATE SET sent_at = ?
-        """, (match_id, now_str, now_str))
-
-
-def get_last_debt_12h_reminder(match_id: int) -> datetime.datetime | None:
-    """Get datetime when last cycle reminder was sent for a match."""
-    with transaction() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT sent_at FROM debt_reminders WHERE match_id = ? AND stage = 'cycle_reminder_last'", (match_id,))
-        row = cursor.fetchone()
-        if not row or not row["sent_at"]:
-            return None
-        return parse_flexible_datetime(row["sent_at"])
 
 
 def _load_round_states(rounds_rows) -> dict[tuple[int, int], dict]:

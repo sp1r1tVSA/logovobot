@@ -35,35 +35,6 @@ class TestDebtLifecycle(unittest.TestCase):
         except Exception:
             pass
 
-    def test_debt_reminders_table_and_stages(self):
-        """Test recording and checking debt lifecycle stages."""
-        match_id = 999
-        with database.transaction() as conn:
-            conn.execute("INSERT INTO matches (id, round_number, status) VALUES (?, 1, 'pending')", (match_id,))
-
-        self.assertFalse(database.has_debt_stage(match_id, "deadline_passed"))
-        self.assertFalse(database.has_debt_stage(match_id, "warn_24h"))
-
-        database.record_debt_stage(match_id, "deadline_passed")
-        self.assertTrue(database.has_debt_stage(match_id, "deadline_passed"))
-        self.assertFalse(database.has_debt_stage(match_id, "warn_24h"))
-
-        database.record_debt_stage(match_id, "warn_24h")
-        self.assertTrue(database.has_debt_stage(match_id, "warn_24h"))
-
-    def test_debt_12h_cycle_reminders(self):
-        """Test 12h cycle reminder timestamp tracking."""
-        match_id = 101
-        with database.transaction() as conn:
-            conn.execute("INSERT INTO matches (id, round_number, status) VALUES (?, 1, 'pending')", (match_id,))
-
-        self.assertIsNone(database.get_last_debt_12h_reminder(match_id))
-
-        database.record_debt_12h_reminder(match_id)
-        last_dt = database.get_last_debt_12h_reminder(match_id)
-        self.assertIsNotNone(last_dt)
-        self.assertIsInstance(last_dt, datetime.datetime)
-
     def test_apply_debt_played_reward(self):
         """Test reward for clearing debt matches (-1 warn, 0 stays 0)."""
         user_id = 777123

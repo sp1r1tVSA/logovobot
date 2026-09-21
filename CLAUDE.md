@@ -110,7 +110,7 @@ never prevents the bot itself from starting. Preserve that isolation.
 | `api/` (18 modules) | `aiohttp` Mini App API — `server.py`, `auth.py`, `rate_limiter.py`, and 15 `routes_*.py` modules |
 | `web/` | Mini App frontend (static `index.html`, `css/`, `js/` — `api`, `app`, `effects`, `store`, `tg`, `ui`) |
 | `utils/` | `media_utils.py`, a thin re-export wrapper over `services/animation_sender.py` |
-| `scripts/` (11 scripts) | One-off operational scripts (DB audit, backfills, imports, bulk club binding, cache refresh, season reset) |
+| `scripts/` (15 scripts) | One-off operational scripts (DB audit, backfills, imports, bulk club binding, cache refresh, season reset) |
 | `tests/` | 129 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
 | `assets/` | **Not in git** — emptied on 2026-09-18 with the КПЛ season. Runtime recreates `avatars/` and `players/` on demand; `logos/` must be refilled by hand (see below) |
 | `reports/` | Historical `PHASE_*.md` plans/matrices/reports, `FIX_0*.md` notes and `*_AUDIT.md` audits, moved off the repo root |
@@ -322,9 +322,38 @@ backend, never bolder; names reaching the Mini App are already canonicalized ser
 `DIVISION_CLUBS`; the JS copy has no such guard, so a roster or alias change means editing
 both by hand.
 
-**Discipline:** unplayed matches accrue debts, tracked from `DEBT_TRACKING_START_DATETIME`.
-Three job-queue tasks drive it — deadline reminders and the debt lifecycle tracker every
-30 min, a debts digest to the ПРЕДЫ thread every 12 h. `MAX_WARNS_LIMIT = 4`.
+**Rounds** carry an explicit `rounds.status` — `scheduled | open | closed` (migration `019`),
+with `closed_at` / `closed_by`; `is_open` is still written in step with it because the Mini
+App and betting read it. "Deadline passed" is a *computed* phase (`open` + `deadline <= now`),
+never stored. A round cannot be opened without a deadline. `close_round` is allowed at any
+time and goes through a confirmation screen; reopening a closed round is global-admin only.
+Moving a deadline or reopening cancels the debts the old deadline created.
+
+**Discipline:** whether a match is a debt is decided in exactly one place,
+`services/debt_policy.py` (`is_debt`, `debt_terms`), used alike by the match card, the
+cabinet, `/check_debts`, the tracker and `database.is_match_overdue`. A league match becomes
+a debt at its round's deadline, or at the moment the round is closed early — then it also
+gets `grace_hours`, the time that was left to the deadline rounded **up** to the hour, so an
+early close never shortens anyone's window. The regulation lives in `config.py`
+(`DEBT_REMINDER_INTERVAL_HOURS` 12, `DEBT_SOFT_WARNING_HOURS` 24, `DEBT_ESCALATION_HOURS` 48,
+`DEBT_REESCALATION_INTERVAL_HOURS` 24, `DEBT_GLOBAL_ESCALATION_DELAY_HOURS` 48), and
+`escalate_at = became_debt_at + grace_hours + 48 h` is the clock every stage counts from.
+Freezes and extensions stay on `matches` (`frozen_*`, `extended_until`) and push it back.
+
+Each debt is one `match_debts` row (migration `020`, which also carried the old
+`debt_reminders` flags over; that table is no longer written). `sync_match_debts()` creates
+and cancels rows; the tracker (`_run_debt_lifecycle_tracker`, every 30 min) asks the pure
+planner `services/debt_lifecycle.plan_debt_actions` what is due — at most one DM per run
+(notice → 12 h reminders → soft warning), escalation to the division admins at
+`escalate_at`, a repeat every 24 h, and one copy to the global admins 48 h after the first —
+and records each stage with `mark_debt_stage` only once it was delivered. **The tracker
+never warns.** Warns come only from a verdict: `database.apply_technical_verdict` applies
+score, refund and warns in one transaction (ТП: winner −1, loser +1; ТН: +1 both), and
+only for a debt, once per debt via `verdict_applied_at` — a verdict before the match
+became a debt just sets the score. A played debt gives both players −1 through
+`claim_debt_played_reward`, once per match via `reward_given_at`. Deadline reminders run
+every 30 min too, and a debts digest goes to the ПРЕДЫ thread every 12 h.
+`MAX_WARNS_LIMIT = 4`.
 
 `register_jobs()` in `main.py` schedules six more beyond those three, each in its own
 try/except block: live provider sync (45 s), intelligence cache (5 min), the notification
