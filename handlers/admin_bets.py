@@ -79,7 +79,7 @@ def _build_overview_header(stats: dict, filter_status: str | None = None, filter
     filter_note = ""
     if filter_user_id:
         u = database.get_user(filter_user_id)
-        u_name = f"@{u['username']}" if u and u.get("username") else f"ID {filter_user_id}"
+        u_name = f"@{u['username']}" if u and u["username"] else f"ID {filter_user_id}"
         filter_note = f"\n🎯 <i>Фильтр по игроку: <b>{html.escape(u_name)}</b></i>"
     elif filter_status and filter_status != "all":
         status_label = BET_STATUS_TITLES.get(filter_status, filter_status)
