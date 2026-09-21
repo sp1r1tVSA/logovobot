@@ -1546,7 +1546,9 @@ async def _render_div_round_card(query, context: ContextTypes.DEFAULT_TYPE, div_
 
     # Ручной перезапуск предсезонной линии: обычно она встаёт автоматически
     # сразу после генерации расписания, но кнопка нужна, если её закрывали.
-    keyboard.append([InlineKeyboardButton("🎰 Открыть линию на Туры 1-2", callback_data=f"admin_div_preseason_line:{div_id}")])
+    # Действие всегда про Туры 1-2, поэтому и кнопка — только на их карточках.
+    if round_number in (1, 2) and phase == debt_policy.ROUND_SCHEDULED:
+        keyboard.append([InlineKeyboardButton("🎰 Открыть линию на Туры 1-2", callback_data=f"admin_div_preseason_line:{div_id}")])
     keyboard.append([InlineKeyboardButton("⚔️ Смотреть матчи тура", callback_data=f"admin_div_round_matches:{div_id}:{round_number}")])
     keyboard.append([InlineKeyboardButton("« К турам", callback_data=f"admin_div_manage_matches:{div_id}")])
 
