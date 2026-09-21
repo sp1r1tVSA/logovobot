@@ -2743,8 +2743,9 @@ async def build_debt_footer(match: dict) -> str:
         match_id = match["id"]
         if not await asyncio.to_thread(database.is_match_overdue, match_id):
             return ""
-        if await asyncio.to_thread(database.has_debt_stage, match_id, "reward_given"):
-            # Already rewarded earlier — no note on re-posted results
+        debt = await asyncio.to_thread(database.get_match_debt, match_id) or {}
+        if debt.get("reward_given_at") or debt.get("verdict_applied_at"):
+            # Already rewarded (or closed by verdict) — no note on re-posted results
             return ""
 
         parts = []
@@ -3159,56 +3160,27 @@ async def handle_debt_played_rewards(
     p1_id: int | None = None,
     p2_id: int | None = None
 ) -> None:
-    """Check if the completed match was overdue and reward players with -1 warn."""
-    is_overdue = await asyncio.to_thread(database.is_match_overdue, match_id)
-    if not is_overdue:
-        return
+    """Сыгранный долг: −1 варн обоим участникам, один раз на матч.
 
-    # Idempotency guard: reward only once per match even if the confirmation
-    # pipeline fires multiple times (draft confirm + admin re-entry, etc.)
-    if await asyncio.to_thread(database.has_debt_stage, match_id, "reward_given"):
+    Идемпотентность и снятие варнов — в `database.claim_debt_played_reward`
+    (одна транзакция по `match_debts.reward_given_at`); здесь только сообщения.
+    `p1_id` / `p2_id` оставлены ради совместимости вызовов — участников база
+    определяет сама.
+    """
+    try:
+        rewards = await asyncio.to_thread(database.claim_debt_played_reward, match_id)
+    except Exception as e:
+        logger.error(f"Failed to claim debt reward for match {match_id}: {e}")
         return
-
+    if not rewards:
+        return
     match = await asyncio.to_thread(database.get_match, match_id)
-    if match:
-        if not p1_id and match.get("player1_id"):
-            p1_id = match["player1_id"]
-        if not p1_id and match.get("player1_team"):
-            u1 = await asyncio.to_thread(database.find_user_by_team, match.get("player1_team"))
-            if u1:
-                p1_id = u1["telegram_id"]
-
-        if not p2_id and match.get("player2_id"):
-            p2_id = match["player2_id"]
-        if not p2_id and match.get("player2_team"):
-            u2 = await asyncio.to_thread(database.find_user_by_team, match.get("player2_team"))
-            if u2:
-                p2_id = u2["telegram_id"]
 
     results_summary = []
-    rewards_applied = False
-    for p_id in (p1_id, p2_id):
-        if not p_id:
-            continue
+    for p_id, new_warns, was_unwarned in rewards:
         try:
-            # get_user returns a raw sqlite3.Row (no .get) — convert to dict.
-            # NOTE: the unwarn below is applied BEFORE building the summary
-            # entry, so record_debt_stage("reward_given") must run even if
-            # something here fails — otherwise the reward would re-fire.
-            u_info_row = await asyncio.to_thread(database.get_user, p_id)
-            new_warns, was_unwarned = await asyncio.to_thread(
-                database.apply_debt_played_reward, p_id, round_number
-            )
-            # The unwarn has now been committed — from this point the stage
-            # marker MUST be recorded even if summary/DM building fails.
-            rewards_applied = True
-            u_info = (
-                {
-                    "username": u_info_row["username"] if "username" in u_info_row.keys() else None,
-                    "team_name": u_info_row["team_name"] if "team_name" in u_info_row.keys() else None,
-                }
-                if u_info_row is not None else {}
-            )
+            u_row = await asyncio.to_thread(database.get_user, p_id)
+            u_info = dict(u_row) if u_row else {}
             results_summary.append({
                 "user_id": p_id,
                 "username": u_info.get("username"),
@@ -3233,7 +3205,6 @@ async def handle_debt_played_rewards(
                 )
                 await safe_send_notification(context.bot, p_id, zero_warn_text)
 
-            # Check if all debts are cleared
             remaining_debts = await asyncio.to_thread(database.count_user_remaining_debts, p_id)
             if remaining_debts == 0:
                 all_clear_text = (
@@ -3243,14 +3214,7 @@ async def handle_debt_played_rewards(
                 )
                 await safe_send_notification(context.bot, p_id, all_clear_text)
         except Exception as e:
-            logger.warning(f"Failed to process debt played reward for user {p_id}: {e}")
-
-    if rewards_applied:
-        # Mark rewards as granted for this match so repeat invocations are no-ops
-        try:
-            await asyncio.to_thread(database.record_debt_stage, match_id, "reward_given")
-        except Exception as e:
-            logger.error(f"CRITICAL: failed to record reward_given stage for match {match_id}: {e}")
+            logger.warning(f"Failed to notify debt played reward for user {p_id}: {e}")
 
     # Post unwarn notification to ПРЕДЫ thread
     if results_summary:

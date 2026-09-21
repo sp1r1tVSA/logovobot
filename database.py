@@ -8215,6 +8215,158 @@ def mark_debt_stage(match_id: int, stage: str, now: datetime.datetime | None = N
         return cursor.rowcount > 0
 
 
+def _debt_match(cursor, match_id: int) -> dict | None:
+    cursor.execute(
+        "SELECT id, round_number, division_id, season_id, status, played_at, tournament_type, "
+        "player1_id, player2_id, player1_team, player2_team FROM matches WHERE id = ?",
+        (match_id,)
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def _ensure_debt_row(cursor, m: dict, now: datetime.datetime) -> dict | None:
+    """Живая строка долга матча; заводит её, если матч долг, а sync ещё не прошёл.
+
+    None — матч не долг (по той же политике, что `is_match_overdue`).
+    """
+    debt_row = _load_debt_rows(cursor, [m["id"]]).get(m["id"])
+    if debt_row is not None:
+        return debt_row
+    if m.get("tournament_type") == "cup" or m.get("round_number") == -1:
+        return None
+    round_row = _match_round_row(cursor, m)
+    if not debt_policy.is_debt(m, round_row, None, now):
+        return None
+    terms = debt_policy.debt_terms(round_row, now)
+    if terms is None:
+        return None
+    _upsert_debt_row(cursor, m, terms, now)
+    return _load_debt_rows(cursor, [m["id"]]).get(m["id"])
+
+
+def _debt_participant_ids(m: dict) -> list[int]:
+    ids: list[int] = []
+    for side in ("1", "2"):
+        pid = m.get(f"player{side}_id")
+        if not pid and m.get(f"player{side}_team"):
+            owner = find_user_by_team(m.get(f"player{side}_team"), m.get("division_id"))
+            pid = owner["telegram_id"] if owner else None
+        ids.append(int(pid) if pid else 0)
+    return ids
+
+
+_VERDICTS = {
+    "home": (1, 0, "tp_home"),
+    "away": (0, 1, "tp_away"),
+    "draw": (0, 0, "tech_draw"),
+}
+
+
+def apply_technical_verdict(
+    match_id: int,
+    verdict: str,
+    admin_id: int | None = None,
+    now: datetime.datetime | None = None,
+) -> dict:
+    """ТП / ТН одной транзакцией: счёт, возврат ставок и — только для долга — варны.
+
+    `verdict` — 'home', 'away' или 'draw'. Дисциплина применяется один раз на
+    долг: `verdict_applied_at` ставится условным UPDATE, и повторный клик по
+    карточке (или вердикт после вердикта) меняет только счёт. Матч, который ещё
+    не стал долгом, получает только технический счёт — без варнов.
+
+    ТП: победителю −1 варн за долг, проигравшему +1. ТН: +1 варн обоим.
+    Возвращает {is_debt, applied, players, warned, unwarned, kick}, где warned /
+    unwarned — списки (user_id, новое число варнов), kick — кого исключить.
+    """
+    if verdict not in _VERDICTS:
+        raise ValueError(f"unknown technical verdict: {verdict}")
+    p1_score, p2_score, tech_type = _VERDICTS[verdict]
+    now = now or now_msk()
+    result = {"is_debt": False, "applied": False, "players": [0, 0],
+              "warned": [], "unwarned": [], "kick": []}
+    with transaction() as conn:
+        cursor = conn.cursor()
+        m = _debt_match(cursor, match_id)
+        if m is None:
+            raise ValueError(f"Match {match_id} not found")
+        debt_row = _ensure_debt_row(cursor, m, now)
+        p1_id, p2_id = _debt_participant_ids(m)
+        result["players"] = [p1_id, p2_id]
+
+        set_technical_result(match_id, p1_score, p2_score, tech_type)
+
+        if debt_row is None:
+            return result
+        result["is_debt"] = True
+        cursor.execute(
+            "UPDATE match_debts SET verdict_applied_at = ?, state = 'resolved', resolution = ?, "
+            "resolved_at = ?, resolved_by = ? "
+            "WHERE match_id = ? AND verdict_applied_at IS NULL AND state != 'cancelled'",
+            (_ts(now), tech_type, _ts(now), admin_id, match_id)
+        )
+        if cursor.rowcount != 1:
+            return result
+        result["applied"] = True
+
+        rn = m.get("round_number") or 0
+        if verdict == "draw":
+            losers, winner = [p1_id, p2_id], None
+            reason = f"ТН за срыв тура ({rn} тур)"
+        else:
+            winner, loser = (p1_id, p2_id) if verdict == "home" else (p2_id, p1_id)
+            losers = [loser]
+            reason = f"ТП за неявку / игнор соперника ({rn} тур)"
+        if winner:
+            new_cnt, was_unwarned = apply_debt_played_reward(winner, rn)
+            if was_unwarned:
+                result["unwarned"].append((winner, new_cnt))
+        for uid in losers:
+            if not uid:
+                continue
+            new_cnt, exceeded = add_warn(uid, admin_id, reason)
+            result["warned"].append((uid, new_cnt))
+            if exceeded:
+                result["kick"].append(uid)
+    return result
+
+
+def claim_debt_played_reward(match_id: int, now: datetime.datetime | None = None) -> list[tuple[int, int, bool]] | None:
+    """Сыгранный долг: −1 варн обоим участникам, один раз на матч.
+
+    Отметка `reward_given_at` и снятие варнов — в одной транзакции, так что
+    повторный вызов (черновик + повторный ввод админом) ничего не даёт.
+    Возвращает [(user_id, новое число варнов, снят ли варн)] или None, если
+    матч не долг, награда уже выдана или по долгу вынесен вердикт.
+    """
+    now = now or now_msk()
+    with transaction() as conn:
+        cursor = conn.cursor()
+        m = _debt_match(cursor, match_id)
+        if m is None:
+            return None
+        if _ensure_debt_row(cursor, m, now) is None:
+            return None
+        cursor.execute(
+            "UPDATE match_debts SET reward_given_at = ? "
+            "WHERE match_id = ? AND reward_given_at IS NULL AND verdict_applied_at IS NULL "
+            "AND state != 'cancelled'",
+            (_ts(now), match_id)
+        )
+        if cursor.rowcount != 1:
+            return None
+        out: list[tuple[int, int, bool]] = []
+        seen: set[int] = set()
+        for uid in _debt_participant_ids(m):
+            if not uid or uid in seen:
+                continue
+            seen.add(uid)
+            new_cnt, was_unwarned = apply_debt_played_reward(uid, m.get("round_number") or 0)
+            out.append((uid, new_cnt, was_unwarned))
+        return out
+
+
 # ─── Жизненный цикл тура ──────────────────────────────────────────────────
 
 def validate_round_deadline(deadline_text: str | None, now: datetime.datetime | None = None) -> datetime.datetime:

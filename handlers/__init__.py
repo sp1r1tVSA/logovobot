@@ -144,9 +144,7 @@ admin_round_matches,
     admin_view_match,
     admin_view_match_photo,
     admin_report_score_auto,
-    admin_set_tp_home_execute,
-    admin_set_tp_away_execute,
-    admin_set_tp_draw_execute,
+    admin_set_technical_result_execute,
     admin_reset_match_execute,
     admin_add_player_start,
     admin_add_player_username,
@@ -763,9 +761,7 @@ def _register_admin_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(admin_view_match_photo, pattern="^admin_view_match_photo_\\d+$"))
     app.add_handler(CallbackQueryHandler(admin_reset_match_execute, pattern="^admin_reset_match_execute_\\d+$"))
     app.add_handler(CallbackQueryHandler(admin_report_score_auto, pattern="^admin_report_score_auto_\\d+$"))
-    app.add_handler(CallbackQueryHandler(admin_set_tp_home_execute, pattern="^admin_tp_home_\\d+$"))
-    app.add_handler(CallbackQueryHandler(admin_set_tp_away_execute, pattern="^admin_tp_away_\\d+$"))
-    app.add_handler(CallbackQueryHandler(admin_set_tp_draw_execute, pattern="^admin_tp_draw_\\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_set_technical_result_execute, pattern="^admin_tp_(home|away|draw)_\\d+$"))
     app.add_handler(CallbackQueryHandler(admin_list_overdue, pattern=r"^admin_div_overdue:\d+$"))
     app.add_handler(CallbackQueryHandler(admin_extend_match_execute, pattern="^admin_extend_match_\\d+$"))
     app.add_handler(CallbackQueryHandler(admin_extend_menu, pattern="^admin_extend_menu_\\d+$"))

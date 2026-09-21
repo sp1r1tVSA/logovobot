@@ -3218,7 +3218,9 @@ async def admin_report_score_auto(update: Update, context: ContextTypes.DEFAULT_
     keyboard = [[InlineKeyboardButton("« Назад к карточке матча", callback_data=f"admin_view_match_{match_id}")]]
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
-async def _notify_group_about_tp(context: ContextTypes.DEFAULT_TYPE, match_id: int, tp_type: str):
+async def _notify_group_about_tp(
+    context: ContextTypes.DEFAULT_TYPE, match_id: int, tp_type: str, is_debt: bool = False
+):
     match = await asyncio.to_thread(database.get_match, match_id)
     if not match:
         return
@@ -3239,12 +3241,9 @@ async def _notify_group_about_tp(context: ContextTypes.DEFAULT_TYPE, match_id: i
 
     text = f"🚨 <b>Администратор назначил результат:</b>\n\n🏆 <b>{tour_text}</b>\n🎮 {res_text}"
 
-    # Append "debt closed" note when the match was an overdue debt
-    try:
-        from handlers.cabinet import build_debt_footer
-        text += await build_debt_footer(match)
-    except Exception as e:
-        logger.warning(f"Failed to build debt footer for TP #{match_id}: {e}")
+    # Варны по ТП/ТН описывает отчёт в ПРЕДЫ; «сыгранный долг» здесь не к месту.
+    if is_debt:
+        text += "\n\n⚖️ <i>Матч был долгом — закрыт вердиктом администратора.</i>"
 
     # Determine target chat and topic strictly by division
     target_chat_id, target_topic_id = await resolve_division_target(
@@ -3263,187 +3262,135 @@ async def _notify_group_about_tp(context: ContextTypes.DEFAULT_TYPE, match_id: i
     except Exception as e:
         logger.error(f"Failed to send TP notification to group: {e}")
 
-async def _process_technical_verdict(
-    context: ContextTypes.DEFAULT_TYPE,
-    match_id: int,
-    verdict: str,
-    admin_id: int | None = None,
+_VERDICT_ALERTS = {
+    "home": "✅ Назначено ТП 1:0 (Победа Хозяев)",
+    "away": "✅ Назначено ТП 0:1 (Победа Гостей)",
+    "draw": "✅ Назначена Техническая ничья 0:0",
+}
+
+
+async def _report_technical_verdict(
+    context: ContextTypes.DEFAULT_TYPE, match_id: int, verdict: str, outcome: dict
 ) -> None:
-    """Apply the disciplinary side of a technical result.
+    """ЛС участникам, отчёт в ПРЕДЫ и автокик — по уже применённому вердикту."""
+    m = await asyncio.to_thread(database.get_match, match_id)
+    if not m:
+        return
+    rn = m.get("round_number", 0) or 0
+    p1_id, p2_id = outcome.get("players") or (m.get("player1_id"), m.get("player2_id"))
+    t1 = html.escape(m.get("player1_team") or "Хозяева")
+    t2 = html.escape(m.get("player2_team") or "Гости")
+    u1 = f"@{html.escape(m['player1_username'])}" if m.get("player1_username") else t1
+    u2 = f"@{html.escape(m['player2_username'])}" if m.get("player2_username") else t2
+    names = {p1_id: (u1, m.get("player1_username")), p2_id: (u2, m.get("player2_username"))}
+    warned = outcome.get("warned") or []
+    unwarned = outcome.get("unwarned") or []
 
-    `verdict` is 'home', 'away' or 'draw'.
+    if verdict == "draw":
+        score_line = "🤝 <b>ТН 0:0</b> — по 1 очку каждому"
+    elif verdict == "home":
+        score_line = f"🏆 <b>ТП 1:0</b> — победа {t1}"
+    else:
+        score_line = f"🏆 <b>ТП 0:1</b> — победа {t2}"
 
-    ТП — the active player wins: +3 очка in the table and −1 варн for the debt
-    (`apply_debt_played_reward`); the player who ignored the match gets +1 варн.
-    Previously both sides were unwarned here, which rewarded the offender for
-    stalling — that is the bug this function replaces.
+    for p_id in (p1_id, p2_id):
+        if not p_id:
+            continue
+        personal = ""
+        for uid, cnt in unwarned:
+            if uid == p_id:
+                personal = (
+                    f"🎁 <b>С вас списан 1 варн за долг.</b>\n"
+                    f"📊 Текущие варны: <b>{cnt}/{MAX_WARNS_LIMIT}</b>\n"
+                )
+        for uid, cnt in warned:
+            if uid == p_id:
+                personal = (
+                    f"🚨 <b>Вам начислен +1 варн.</b>\n"
+                    f"📊 Текущие варны: <b>{cnt}/{MAX_WARNS_LIMIT}</b>\n"
+                )
+        dm = (
+            f"⚖️ <b>Вердикт по матчу-долгу</b>\n\n"
+            f"🏆 <b>{rn}-й тур:</b> 🏠 <b>{t1}</b> ({u1}) 🆚 ✈️ <b>{t2}</b> ({u2})\n"
+            f"{score_line}\n\n"
+            f"{personal}"
+            f"💰 <i>Все ставки на этот матч возвращены игрокам (кэф 1.00).</i>"
+        )
+        try:
+            await context.bot.send_message(chat_id=p_id, text=dm, parse_mode="HTML")
+        except Exception:
+            pass
 
-    ТН — обоюдное молчание: по 1 очку каждому and +1 варн for BOTH, no unwarns.
+    lines = [
+        "⚖️ <b>ДИСЦИПЛИНАРНЫЙ ВЕРДИКТ ПО ДОЛГУ</b>\n",
+        f"🏆 Матч: {rn}-й тур — <b>{t1}</b> ({u1}) 🆚 <b>{t2}</b> ({u2})",
+        score_line,
+        "",
+    ]
+    for uid, cnt in warned:
+        lines.append(f"🚨 {names.get(uid, (f'ID {uid}', None))[0]}: <b>+1 варн</b> → <b>{cnt}/{MAX_WARNS_LIMIT}</b>")
+    for uid, cnt in unwarned:
+        lines.append(
+            f"🎁 {names.get(uid, (f'ID {uid}', None))[0]}: <b>−1 варн</b> за закрытие долга → <b>{cnt}/{MAX_WARNS_LIMIT}</b>"
+        )
+    lines.append("")
+    lines.append("💰 <i>Все ставки на этот матч возвращены игрокам (Refund, кэф 1.00).</i>")
+    await _send_to_warns_thread(context, "\n".join(lines), m.get("division_id"))
 
-    Either way the bets were already fully refunded by `set_technical_result`.
+    # Автокик — только после отчёта, чтобы ветка ПРЕДЫ читалась по порядку.
+    for p_id in outcome.get("kick") or []:
+        uname = names.get(p_id, (None, None))[1]
+        team = m.get("player1_team") if p_id == p1_id else m.get("player2_team")
+        await _auto_kick_player(context, p_id, uname, team)
+
+
+@admin_only
+async def admin_set_technical_result_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """ТП хозяевам / ТП гостям / ТН — `admin_tp_(home|away|draw)_<id>`.
+
+    Счёт, возврат ставок и варны применяет `database.apply_technical_verdict` одной
+    транзакцией; варны — только если матч долг и вердикт по нему ещё не выносился.
     """
-    if verdict not in ("home", "away", "draw"):
-        logger.warning(f"Unknown technical verdict '{verdict}' for match #{match_id}")
+    query = update.callback_query
+    if not query or not is_admin(query.from_user.id):
         return
-
-    # Idempotency: a double click (or an admin re-opening the card) must not
-    # hand out a second warn for the same debt.
-    if await asyncio.to_thread(database.has_debt_stage, match_id, "verdict_processed"):
+    parsed = re.fullmatch(r"admin_tp_(home|away|draw)_(\d+)", query.data or "")
+    if not parsed:
+        await query.answer()
         return
+    verdict, match_id = parsed.group(1), int(parsed.group(2))
+    if not await _ensure_match_access(update, await asyncio.to_thread(database.get_match, match_id)):
+        return  # _deny_access уже ответил на callback
 
     try:
-        m = await asyncio.to_thread(database.get_match, match_id)
-        if not m:
-            return
+        outcome = await asyncio.to_thread(
+            database.apply_technical_verdict, match_id, verdict, query.from_user.id
+        )
+    except Exception as e:
+        logger.exception(f"Technical verdict {verdict} failed for match #{match_id}: {e}")
+        await query.answer("❌ Не удалось назначить результат.", show_alert=True)
+        return
 
-        rn = m.get("round_number", 0) or 0
-        p1_id = m.get("player1_id")
-        p2_id = m.get("player2_id")
-        t1 = html.escape(m.get("player1_team") or "Хозяева")
-        t2 = html.escape(m.get("player2_team") or "Гости")
-        u1 = f"@{html.escape(m['player1_username'])}" if m.get("player1_username") else t1
-        u2 = f"@{html.escape(m['player2_username'])}" if m.get("player2_username") else t2
+    alert = _VERDICT_ALERTS[verdict]
+    if outcome["is_debt"] and not outcome["applied"]:
+        alert += "\nВарны по этому долгу уже выданы — изменён только счёт."
+    elif not outcome["is_debt"]:
+        alert += "\nМатч ещё не долг — варны не начислялись."
+    await query.answer(alert, show_alert=True)
 
-        names = {p1_id: (u1, t1, m.get("player1_username")), p2_id: (u2, t2, m.get("player2_username"))}
-
-        unwarned: list[tuple[int, int]] = []   # (user_id, new_count)
-        warned: list[tuple[int, int]] = []     # (user_id, new_count)
-        kick_queue: list[int] = []
-
-        if verdict == "draw":
-            score_line = f"🤝 <b>ТН 0:0</b> — по 1 очку каждому"
-            reason = f"ТН за срыв тура ({rn} тур)"
-            for p_id in (p1_id, p2_id):
-                if not p_id:
-                    continue
-                new_cnt, is_exceeded = await asyncio.to_thread(
-                    database.add_warn, p_id, admin_id, reason
-                )
-                warned.append((p_id, new_cnt))
-                if is_exceeded:
-                    kick_queue.append(p_id)
-        else:
-            winner_id, loser_id = (p1_id, p2_id) if verdict == "home" else (p2_id, p1_id)
-            score_line = (
-                f"🏆 <b>ТП 1:0</b> — победа {t1}" if verdict == "home"
-                else f"🏆 <b>ТП 0:1</b> — победа {t2}"
-            )
-            if winner_id:
-                new_cnt, was_unwarned = await asyncio.to_thread(
-                    database.apply_debt_played_reward, winner_id, rn
-                )
-                if was_unwarned:
-                    unwarned.append((winner_id, new_cnt))
-            if loser_id:
-                new_cnt, is_exceeded = await asyncio.to_thread(
-                    database.add_warn, loser_id, admin_id,
-                    f"ТП за неявку / игнор соперника ({rn} тур)"
-                )
-                warned.append((loser_id, new_cnt))
-                if is_exceeded:
-                    kick_queue.append(loser_id)
-
-        await asyncio.to_thread(database.record_debt_stage, match_id, "verdict_processed")
-
-        # DM both participants with the verdict and what it cost them.
-        for p_id in (p1_id, p2_id):
-            if not p_id:
-                continue
-            personal = ""
-            for uid, cnt in unwarned:
-                if uid == p_id:
-                    personal = (
-                        f"🎁 <b>С вас списан 1 варн за долг.</b>\n"
-                        f"📊 Текущие варны: <b>{cnt}/{MAX_WARNS_LIMIT}</b>\n"
-                    )
-            for uid, cnt in warned:
-                if uid == p_id:
-                    personal = (
-                        f"🚨 <b>Вам начислен +1 варн.</b>\n"
-                        f"📊 Текущие варны: <b>{cnt}/{MAX_WARNS_LIMIT}</b>\n"
-                    )
-            dm = (
-                f"⚖️ <b>Вердикт по матчу-долгу</b>\n\n"
-                f"🏆 <b>{rn}-й тур:</b> 🏠 <b>{t1}</b> ({u1}) 🆚 ✈️ <b>{t2}</b> ({u2})\n"
-                f"{score_line}\n\n"
-                f"{personal}"
-                f"💰 <i>Все ставки на этот матч возвращены игрокам (кэф 1.00).</i>"
-            )
-            try:
-                await context.bot.send_message(chat_id=p_id, text=dm, parse_mode="HTML")
-            except Exception:
-                pass
-
-        # Disciplinary report in the ПРЕДЫ topic.
-        lines = [
-            "⚖️ <b>ДИСЦИПЛИНАРНЫЙ ВЕРДИКТ ПО ДОЛГУ</b>\n",
-            f"🏆 Матч: {rn}-й тур — <b>{t1}</b> ({u1}) 🆚 <b>{t2}</b> ({u2})",
-            score_line,
-            "",
-        ]
-        for uid, cnt in warned:
-            who = names.get(uid, (f"ID {uid}", "", None))[0]
-            lines.append(f"🚨 {who}: <b>+1 варн</b> → <b>{cnt}/{MAX_WARNS_LIMIT}</b>")
-        for uid, cnt in unwarned:
-            who = names.get(uid, (f"ID {uid}", "", None))[0]
-            lines.append(f"🎁 {who}: <b>−1 варн</b> за закрытие долга → <b>{cnt}/{MAX_WARNS_LIMIT}</b>")
-        lines.append("")
-        lines.append("💰 <i>Все ставки на этот матч возвращены игрокам (Refund, кэф 1.00).</i>")
-        await _send_to_warns_thread(context, "\n".join(lines), m.get("division_id"))
-
-        # Auto-kick only after the report, so the ПРЕДЫ thread reads in order.
-        for p_id in kick_queue:
-            _, _, uname = names.get(p_id, (None, None, None))
-            team = m.get("player1_team") if p_id == p1_id else m.get("player2_team")
-            await _auto_kick_player(context, p_id, uname, team)
-
+    await _notify_group_about_tp(context, match_id, verdict, is_debt=outcome["is_debt"])
+    if outcome["applied"]:
+        try:
+            await _report_technical_verdict(context, match_id, verdict, outcome)
+        except Exception as e:
+            logger.warning(f"Failed to report technical verdict for match #{match_id}: {e}")
+    try:
         from handlers.cabinet import refresh_debts_summary
         await refresh_debts_summary(context)
     except Exception as e:
-        logger.warning(f"Failed to process technical verdict for match #{match_id}: {e}")
-
-
-@admin_only
-async def admin_set_tp_home_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if not query or not is_admin(query.from_user.id): return
-    await query.answer()
-    match_id = int(query.data.replace("admin_tp_home_", ""))
-    if not await _ensure_match_access(update, await asyncio.to_thread(database.get_match, match_id)):
-        return
-    await asyncio.to_thread(database.set_technical_result, match_id, 1, 0, "tp_home")
-    await _notify_group_about_tp(context, match_id, "home")
-    await _process_technical_verdict(context, match_id, "home", admin_id=query.from_user.id)
-    await query.answer("✅ Назначено ТП 1:0 (Победа Хозяев)", show_alert=True)
+        logger.warning(f"Failed to refresh debts summary after verdict #{match_id}: {e}")
     await admin_view_match(update, context, match_id=match_id)
 
-@admin_only
-async def admin_set_tp_away_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if not query or not is_admin(query.from_user.id): return
-    await query.answer()
-    match_id = int(query.data.replace("admin_tp_away_", ""))
-    if not await _ensure_match_access(update, await asyncio.to_thread(database.get_match, match_id)):
-        return
-    await asyncio.to_thread(database.set_technical_result, match_id, 0, 1, "tp_away")
-    await _notify_group_about_tp(context, match_id, "away")
-    await _process_technical_verdict(context, match_id, "away", admin_id=query.from_user.id)
-    await query.answer("✅ Назначено ТП 0:1 (Победа Гостей)", show_alert=True)
-    await admin_view_match(update, context, match_id=match_id)
-
-@admin_only
-async def admin_set_tp_draw_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    query = update.callback_query
-    if not query or not is_admin(query.from_user.id): return
-    await query.answer()
-    match_id = int(query.data.replace("admin_tp_draw_", ""))
-    if not await _ensure_match_access(update, await asyncio.to_thread(database.get_match, match_id)):
-        return
-    await asyncio.to_thread(database.set_technical_result, match_id, 0, 0, "tech_draw")
-    await _notify_group_about_tp(context, match_id, "draw")
-    await _process_technical_verdict(context, match_id, "draw", admin_id=query.from_user.id)
-    await query.answer("✅ Назначена Техническая ничья 0:0", show_alert=True)
-    await admin_view_match(update, context, match_id=match_id)
 
 @admin_only
 async def admin_reset_match_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
