@@ -27,7 +27,7 @@ DEFAULT_MAX_DAILY_LOSS: int = 50_000
 DEFAULT_MAX_OPEN_EXPOSURE: int = 20_000
 # Сколько купонов игрок может держать открытыми одновременно. Экспресс из пяти
 # матчей — это один купон: ограничиваем число пари, а не число исходов.
-DEFAULT_MAX_OPEN_BETS: int = 5
+DEFAULT_MAX_OPEN_BETS: int = 12
 DEFAULT_MARKET_EXPOSURE_LIMIT: int = 250_000
 DEFAULT_DIVISION_EXPOSURE_LIMIT: int = 1_000_000
 DEFAULT_GLOBAL_EXPOSURE_LIMIT: int = 5_000_000

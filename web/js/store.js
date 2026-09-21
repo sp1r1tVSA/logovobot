@@ -380,7 +380,7 @@ class StateStore {
       max_payout: l.max_payout || 10000,
       max_open_exposure: l.max_open_exposure || 20000,
       open_exposure: l.open_exposure || 0,
-      max_open_bets: l.max_open_bets || 5,
+      max_open_bets: l.max_open_bets || 12,
       open_bets: l.open_bets || 0
     };
   }

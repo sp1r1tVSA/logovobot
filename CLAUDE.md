@@ -346,7 +346,7 @@ selections, which placement validates against — never save raw model odds into
 Every limit resolves through `BettingLimitsService` (user → division → global, falling back
 to the `DEFAULT_*` constants), and `RiskEngine.evaluate_bet` is the only gate — Telegram,
 Mini App and REST all reach it through `database.place_user_bet`, fail-closed. Besides the
-amount limits there is a **count** limit: `DEFAULT_MAX_OPEN_BETS = 5` caps how many coupons
+amount limits there is a **count** limit: `DEFAULT_MAX_OPEN_BETS = 12` caps how many coupons
 a player may keep pending at once, counted per player across divisions by
 `get_user_open_bets_count`. The unit is the coupon, not the outcome — an express of five
 matches is one `user_bets` row and one slot — and any terminal status (`won`, `lost`,
