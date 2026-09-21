@@ -511,6 +511,11 @@ class TestPreviewsTopic(TopicsLogicBase):
 
     async def test_debts_summary_goes_to_own_previews_topic(self):
         self._insert_match(self.div1, self.season_cur, 1, self.team_d1a, self.team_d1b)
+        # Долг возникает от дедлайна: открытый тур без дедлайна долгов не даёт.
+        with database.transaction() as conn:
+            conn.execute("UPDATE rounds SET deadline = '2020-01-01 00:00:00' "
+                         "WHERE season_id = ? AND division_id = ? AND round_number = 1",
+                         (self.season_cur, self.div1))
         context = _mock_context()
 
         ok, _ = await _post_or_update_debts_for_division(context, self.div1, "Дивизион Один")

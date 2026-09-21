@@ -73,6 +73,19 @@ MAX_WARNS_LIMIT = 4
 # закрыты, на два следующих выставляется ранняя линия.
 MAX_OPEN_ROUNDS_PER_DIVISION: int = 2
 
+# Регламент долгов. Все этапы долга отсчитываются от его `escalate_at`
+# (см. services/debt_policy.py и services/debt_lifecycle.py):
+# escalate_at = момент, когда матч стал долгом + grace_hours + DEBT_ESCALATION_HOURS.
+# grace_hours ≠ 0 только при досрочном закрытии тура — это остаток до дедлайна,
+# округлённый вверх до часа.
+DEBT_REMINDER_INTERVAL_HOURS: int = 12        # ЛС-напоминание о долге
+DEBT_SOFT_WARNING_HOURS: int = 24             # мягкое предупреждение за N ч до эскалации
+DEBT_ESCALATION_HOURS: int = 48               # срок отыгрыша, затем карточка вердикта админу
+DEBT_REESCALATION_INTERVAL_HOURS: int = 24    # повтор карточки, пока вердикт не вынесен
+DEBT_GLOBAL_ESCALATION_DELAY_HOURS: int = 48  # после первой эскалации — ещё и глобальным админам
+# Вехи напоминаний о дедлайне открытого тура, часы до дедлайна.
+ROUND_DEADLINE_REMINDER_HOURS: tuple[int, ...] = (72, 66, 60, 54, 48, 42, 36, 30, 24, 18, 12, 6, 1)
+
 # Logovo.bet: стартовый баланс нового кошелька (🪙). Единственный источник истины —
 # схема user_wallets.balance, get_or_create_wallet() и приветственный бонус
 # coin_transactions('welcome_bonus') берут сумму отсюда.
