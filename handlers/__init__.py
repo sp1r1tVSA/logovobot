@@ -139,7 +139,8 @@ from handlers.admin import (
     admin_open_batch_deadline,
     ADMIN_WAITING_FOR_BATCH_DEADLINE,
     admin_close_round,
-    admin_round_matches,
+    admin_close_round_confirm,
+admin_round_matches,
     admin_view_match,
     admin_view_match_photo,
     admin_report_score_auto,
@@ -752,6 +753,7 @@ def _register_admin_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(admin_toggle_round_bets, pattern=r"^admin_div_bets_(open|close):\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(admin_open_preseason_line, pattern=r"^admin_div_preseason_line:\d+$"))
     app.add_handler(CallbackQueryHandler(admin_close_round, pattern=r"^admin_div_round_close:\d+:\d+$"))
+    app.add_handler(CallbackQueryHandler(admin_close_round_confirm, pattern=r"^admin_div_round_close_ok:\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(admin_remind_round, pattern="^admin_remind_round_\\d+$"))
     app.add_handler(CallbackQueryHandler(admin_toggle_remind_match, pattern="^admin_toggle_remind_match_\\d+_\\d+$"))
     app.add_handler(CallbackQueryHandler(admin_toggle_remind_all, pattern="^admin_toggle_remind_all_\\d+$"))

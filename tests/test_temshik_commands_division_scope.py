@@ -207,25 +207,30 @@ class TestTemshikCommandsAreDivisionScoped(unittest.IsolatedAsyncioTestCase):
     # ------------------------------------------------------------- админские туры
 
     async def test_close_round_uses_the_explicit_division(self):
+        """Закрытие переводит матчи в долг — команда показывает подтверждение, а не закрывает."""
         update = build_update(self.user_a, f"Темшик закрыть тур 18 CMD Бета {self.uid}")
         with patch("handlers.text_commands.is_admin", return_value=True), \
-             patch("database.update_round_status") as upd:
+             patch("database.update_round_status") as upd, \
+             patch("database.close_round") as close, \
+             patch("database.preview_close_round", wraps=database.preview_close_round) as prev:
             handled = await handle_temshik_command(update, MagicMock())
 
         self.assertTrue(handled)
-        self.assertEqual(upd.call_args.args[0], 18)
-        self.assertIs(upd.call_args.kwargs.get("is_open"), False)
-        self.assertEqual(upd.call_args.kwargs.get("division_id"), self.div_b_id)
+        upd.assert_not_called()
+        close.assert_not_called()
+        self.assertEqual(prev.call_args.args[:2], (18, self.div_b_id))
+        kwargs = update.message.reply_text.call_args.kwargs
+        button = kwargs["reply_markup"].inline_keyboard[0][0]
+        self.assertEqual(button.callback_data, f"admin_div_round_close_ok:{self.div_b_id}:18")
         self.assertIn(f"CMD Бета {self.uid}", update.message.reply_text.call_args[0][0])
 
     async def test_close_round_is_scoped(self):
         update = build_update(self.user_a, "Темшик закрыть тур 4")
         with patch("handlers.text_commands.is_admin", return_value=True), \
-             patch("database.update_round_status") as upd:
+             patch("database.preview_close_round", wraps=database.preview_close_round) as prev:
             await handle_temshik_command(update, MagicMock())
 
-        self.assertIs(upd.call_args.kwargs.get("is_open"), False)
-        self.assertEqual(upd.call_args.kwargs.get("division_id"), self.div_a_id)
+        self.assertEqual(prev.call_args.args[:2], (4, self.div_a_id))
 
     async def test_close_round_without_any_division_refuses(self):
         """Без дивизиона тур не закрываем нигде — это запись, а не чтение."""

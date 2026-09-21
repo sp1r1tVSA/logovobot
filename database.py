@@ -7,7 +7,7 @@ import asyncio
 import json
 from typing import Generator
 from contextlib import contextmanager
-from config import DB_PATH, INITIAL_WALLET_BALANCE, MAX_OPEN_ROUNDS_PER_DIVISION
+from config import DB_PATH, INITIAL_WALLET_BALANCE, MAX_OPEN_ROUNDS_PER_DIVISION, ROUND_DEADLINE_REMINDER_HOURS
 from time_utils import SQL_NOW, now_msk, now_msk_str, today_msk
 from club_registry import normalize_team_name, resolve_team_name
 from services import debt_policy
@@ -65,6 +65,19 @@ class MaxActiveRoundsExceededError(ValueError):
             f"В дивизионе #{division_id} уже открыто {len(active_rounds)} тура(ов) "
             f"с действующим дедлайном ({active_rounds}). Лимит: {limit}."
         )
+
+
+class RoundDeadlineError(ValueError):
+    """Дедлайн тура не задан, не разбирается или уже прошёл.
+
+    Тур без дедлайна долгов не порождает и в трекер не попадает, поэтому
+    открыть его так больше нельзя: админ обязан назвать срок.
+    """
+
+    def __init__(self, deadline: str | None, reason: str):
+        self.deadline = deadline
+        self.reason = reason
+        super().__init__(reason)
 
 
 def get_connection() -> sqlite3.Connection:
@@ -545,6 +558,34 @@ def init_db() -> None:
                 FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE
             )
         """)
+        # Долг матча — одна строка на матч: срок, стадии трекера, итог.
+        # Заменяет набор флагов debt_reminders (миграция 020 переносит их сюда).
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS match_debts (
+                match_id INTEGER PRIMARY KEY,
+                division_id INTEGER,
+                season_id INTEGER,
+                round_number INTEGER,
+                became_debt_at TEXT NOT NULL,
+                grace_hours INTEGER NOT NULL DEFAULT 0,
+                escalate_at TEXT NOT NULL,
+                state TEXT NOT NULL DEFAULT 'active',
+                last_reminder_at TEXT,
+                soft_warned_at TEXT,
+                escalated_at TEXT,
+                last_escalation_at TEXT,
+                escalation_count INTEGER NOT NULL DEFAULT 0,
+                global_escalated_at TEXT,
+                resolved_at TEXT,
+                resolution TEXT,
+                resolved_by INTEGER,
+                verdict_applied_at TEXT,
+                reward_given_at TEXT,
+                created_at TEXT DEFAULT (datetime('now', '+3 hours')),
+                FOREIGN KEY(match_id) REFERENCES matches(id) ON DELETE CASCADE
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_match_debts_state ON match_debts(state)")
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS user_warns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -670,6 +711,19 @@ def init_db() -> None:
         for col_name, col_type in (
             ("bets_open", "BOOLEAN DEFAULT 0"),
             ("bets_opened_at", "TEXT"),
+        ):
+            try:
+                cursor.execute(f"ALTER TABLE rounds ADD COLUMN {col_name} {col_type}")
+            except sqlite3.OperationalError:
+                pass
+
+        # Жизненный цикл тура: scheduled → open → closed (см. services.debt_policy).
+        # `is_open` остаётся авторитетным для «открыт ли тур»; `status` различает
+        # «ещё не открывали» и «закрыт», `closed_at` нужен для срока долга.
+        for col_name, col_type in (
+            ("status", "TEXT"),
+            ("closed_at", "TEXT"),
+            ("closed_by", "INTEGER"),
         ):
             try:
                 cursor.execute(f"ALTER TABLE rounds ADD COLUMN {col_name} {col_type}")
@@ -1904,6 +1958,43 @@ def init_db() -> None:
             if shifted:
                 logger.info("Migration 018: shifted %s timestamp values from UTC to MSK", shifted)
 
+        # ─── 019: явный статус тура ─────────────────────────────────────────
+        cursor.execute("SELECT 1 FROM schema_migrations WHERE version = '019_round_status'")
+        if not cursor.fetchone():
+            cursor.execute("""
+                UPDATE rounds SET status = CASE
+                    WHEN is_open = 1 THEN 'open'
+                    WHEN deadline IS NOT NULL AND TRIM(deadline) != '' THEN 'closed'
+                    ELSE 'scheduled'
+                END
+                WHERE status IS NULL
+            """)
+            cursor.execute(
+                "SELECT division_id, round_number FROM rounds "
+                "WHERE is_open = 1 AND (deadline IS NULL OR TRIM(deadline) = '')"
+            )
+            no_deadline = [(r["division_id"], r["round_number"]) for r in cursor.fetchall()]
+            if no_deadline:
+                logger.warning(
+                    "Migration 019: open rounds without a deadline never become debts, "
+                    "set a deadline for them: %s", no_deadline
+                )
+            cursor.execute("""
+                INSERT OR IGNORE INTO schema_migrations (version, description)
+                VALUES ('019_round_status', 'rounds.status/closed_at/closed_by: explicit round lifecycle')
+            """)
+
+        # ─── 020: долги — отдельная таблица вместо флагов debt_reminders ───
+        cursor.execute("SELECT 1 FROM schema_migrations WHERE version = '020_match_debts'")
+        if not cursor.fetchone():
+            migrated = _snapshot_legacy_debts(cursor, now_msk())
+            cursor.execute("""
+                INSERT OR IGNORE INTO schema_migrations (version, description)
+                VALUES ('020_match_debts', 'match_debts: one row per debt, stages moved from debt_reminders')
+            """)
+            if migrated:
+                logger.info("Migration 020: %s debts moved to match_debts", migrated)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -3095,6 +3186,15 @@ def reset_match(match_id: int) -> None:
         cursor.execute("DELETE FROM match_events WHERE match_id = ?", (match_id,))
         # Reset debt lifecycle: recorded warn milestones and pending confirmation reports
         cursor.execute("DELETE FROM debt_reminders WHERE match_id = ?", (match_id,))
+        # Долг снова открыт: срок и выданная награда сохраняются (повторно её
+        # не дадут), вердикт и стадии трекера — сбрасываются.
+        cursor.execute(
+            "UPDATE match_debts SET state = 'active', verdict_applied_at = NULL, "
+            "resolved_at = NULL, resolution = NULL, resolved_by = NULL, "
+            "last_reminder_at = NULL, soft_warned_at = NULL, escalated_at = NULL, last_escalation_at = NULL, escalation_count = 0, global_escalated_at = NULL "
+            "WHERE match_id = ? AND state != 'cancelled'",
+            (match_id,)
+        )
         cursor.execute("DELETE FROM pending_reports WHERE match_id = ?", (match_id,))
 
         if s_id:
@@ -3488,9 +3588,9 @@ def get_rounds_pending_digest(season_id: int | None = None) -> list[dict]:
                   AND p.content_type = 'digest'
             WHERE (r.season_id = ? OR r.season_id IS NULL)
               AND p.round_number IS NULL
-            GROUP BY r.division_id, r.round_number, r.season_id, r.is_open
+            GROUP BY r.division_id, r.round_number, r.season_id, r.is_open, r.status
             HAVING matches_confirmed > 0
-               AND (matches_confirmed = matches_total OR r.is_open = 0)
+               AND (matches_confirmed = matches_total OR (r.is_open = 0 AND COALESCE(r.status, 'closed') != 'scheduled'))
             ORDER BY r.division_id, r.round_number
         """, (target_season_id,))
         return [dict(row) for row in cursor.fetchall()]
@@ -3580,12 +3680,36 @@ def has_reminder_been_sent(round_number: int, reminder_type: str, division_id: i
             )
         return cursor.fetchone() is not None
 
+
+def get_sent_reminder_tags(round_number: int, division_id: int) -> set[str]:
+    """Все теги напоминаний, уже отправленных по туру дивизиона."""
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT reminder_type FROM round_reminders WHERE round_number = ? AND division_id = ?",
+            (round_number, division_id)
+        ).fetchall()
+        return {r["reminder_type"] for r in rows}
+
+
+def record_reminders_sent(round_number: int, tags: list[str], division_id: int) -> None:
+    """Пометить несколько вех напоминаний разом (догон пропущенных)."""
+    now = now_msk_str()
+    with transaction() as conn:
+        for tag in tags:
+            conn.execute(
+                "INSERT OR IGNORE INTO round_reminders (division_id, round_number, reminder_type, sent_at) "
+                "VALUES (?, ?, ?, ?)",
+                (division_id, round_number, tag, now)
+            )
+
+
 def clear_all_rounds_and_matches() -> None:
     """Completely wipe all rounds, matches, reminders, and match events from DB."""
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM match_events")
         cursor.execute("DELETE FROM round_reminders")
+        cursor.execute("DELETE FROM match_debts")
         cursor.execute("DELETE FROM matches")
         cursor.execute("DELETE FROM rounds")
 
@@ -3961,8 +4085,8 @@ def get_next_rounds_to_open(
 ) -> list[int]:
     """Следующие `count` туров дивизиона, готовых к открытию.
 
-    Отсчёт идёт от максимального когда-либо открытого тура (истёкший дедлайн
-    значения не имеет — тур всё равно был открыт), поэтому после туров 1–2 сразу
+    Отсчёт идёт от максимального когда-либо открытого тура — открытого сейчас
+    или уже закрытого (истёкший дедлайн значения не имеет), поэтому после туров 1–2 сразу
     предлагаются 3–4. Если не открывался ни один — `[1, 2]`. Туры без
     сгенерированного расписания отбрасываются: открыть их всё равно нельзя.
     """
@@ -3971,7 +4095,7 @@ def get_next_rounds_to_open(
         cursor = conn.cursor()
         cursor.execute(
             "SELECT MAX(round_number) AS max_r FROM rounds "
-            "WHERE is_open = 1 AND division_id = ? AND (season_id = ? OR season_id IS NULL)",
+            "WHERE (is_open = 1 OR status = 'closed') AND division_id = ? AND (season_id = ? OR season_id IS NULL)",
             (division_id, s_id)
         )
         row = cursor.fetchone()
@@ -4073,6 +4197,16 @@ def open_rounds_batch(
             else:
                 for scope_div_id in _round_scope_divisions(cursor, r_num, s_id):
                     close_round_betting_line(cursor, r_num, division_id=scope_div_id, season_id=s_id)
+
+        now = now_msk()
+        for r_num in opened:
+            scope = [division_id] if division_id is not None else _round_scope_divisions(cursor, r_num, s_id)
+            for scope_div_id in scope:
+                cursor.execute(
+                    "DELETE FROM round_reminders WHERE round_number = ? AND division_id = ?",
+                    (r_num, scope_div_id)
+                )
+                _after_round_opened(cursor, r_num, scope_div_id, s_id, deadline, now)
 
     if skipped:
         logger.warning(
@@ -4186,6 +4320,13 @@ def extend_match_deadline_by_hours(match_id: int, hours: int) -> str | None:
         cursor.execute(
             "DELETE FROM debt_reminders WHERE match_id = ? AND stage = ?",
             (match_id, "admin_escalated_48h")
+        )
+        cursor.execute(
+            "UPDATE match_debts SET escalated_at = NULL, last_escalation_at = NULL, "
+            "global_escalated_at = NULL, "
+            "state = CASE WHEN state = 'escalated' THEN 'active' ELSE state END "
+            "WHERE match_id = ?",
+            (match_id,)
         )
         return until_str
 
@@ -4680,6 +4821,12 @@ def set_player_club(player_ref: str, new_club: str) -> tuple[bool, str]:
                 "(SELECT id FROM matches WHERE status = 'pending' AND (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?)))",
                 (new_club.strip(), new_club.strip())
             )
+            cursor.execute(
+                "UPDATE match_debts SET state = 'active', last_reminder_at = NULL, soft_warned_at = NULL, escalated_at = NULL, last_escalation_at = NULL, escalation_count = 0, global_escalated_at = NULL "
+                "WHERE state IN ('active', 'escalated') AND match_id IN "
+                "(SELECT id FROM matches WHERE status = 'pending' AND (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?)))",
+                (new_club.strip(), new_club.strip())
+            )
 
         message = f"Клуб игрока {p_label} изменён на «{new_club_clean}»."
         if previous_owners:
@@ -4771,6 +4918,7 @@ def clear_entire_league() -> None:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM match_events")
         cursor.execute("DELETE FROM round_reminders")
+        cursor.execute("DELETE FROM match_debts")
         cursor.execute("DELETE FROM matches")
         cursor.execute("DELETE FROM rounds")
         cursor.execute("DELETE FROM users WHERE role != 'admin'")
@@ -4816,6 +4964,15 @@ def assign_player_to_club(username: str, club: str, division_id: int = 1) -> tup
             # the new owner must not inherit recorded auto-warn milestones.
             cursor.execute("""
                 DELETE FROM debt_reminders WHERE match_id IN (
+                    SELECT id FROM matches
+                    WHERE status = 'pending'
+                      AND (division_id = ? OR division_id IS NULL)
+                      AND (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?))
+                )
+            """, (division_id, club_clean, club_clean))
+            cursor.execute("""
+                UPDATE match_debts SET state = 'active', last_reminder_at = NULL, soft_warned_at = NULL, escalated_at = NULL, last_escalation_at = NULL, escalation_count = 0, global_escalated_at = NULL
+                WHERE state IN ('active', 'escalated') AND match_id IN (
                     SELECT id FROM matches
                     WHERE status = 'pending'
                       AND (division_id = ? OR division_id IS NULL)
@@ -5568,12 +5725,12 @@ def get_round_info(round_number: int, division_id: int | None = None, season_id:
 
         if division_id is not None:
             cursor.execute(
-                "SELECT round_number, is_open, COALESCE(bets_open, 0) AS bets_open, bets_opened_at, deadline, division_id, season_id FROM rounds WHERE (season_id = ? OR season_id IS NULL) AND division_id = ? AND round_number = ?",
+                "SELECT round_number, is_open, COALESCE(bets_open, 0) AS bets_open, bets_opened_at, deadline, division_id, season_id, status, closed_at, closed_by FROM rounds WHERE (season_id = ? OR season_id IS NULL) AND division_id = ? AND round_number = ?",
                 (s_id, division_id, round_number)
             )
         else:
             cursor.execute(
-                "SELECT round_number, is_open, COALESCE(bets_open, 0) AS bets_open, bets_opened_at, deadline, division_id, season_id FROM rounds WHERE (season_id = ? OR season_id IS NULL) AND round_number = ? LIMIT 1",
+                "SELECT round_number, is_open, COALESCE(bets_open, 0) AS bets_open, bets_opened_at, deadline, division_id, season_id, status, closed_at, closed_by FROM rounds WHERE (season_id = ? OR season_id IS NULL) AND round_number = ? LIMIT 1",
                 (s_id, round_number)
             )
         row = cursor.fetchone()
@@ -6060,7 +6217,7 @@ def find_self_participation_match(cursor, user_id: int | None, selections: list[
     return None
 
 
-def update_round_status(round_number: int, is_open: bool, deadline: str | None = None, division_id: int | None = None, season_id: int | None = None) -> None:
+def update_round_status(round_number: int, is_open: bool, deadline: str | None = None, division_id: int | None = None, season_id: int | None = None, closed_by: int | None = None) -> None:
     """Open/close a round. When opening without an explicit deadline, any stale
     stored deadline is cleared so it cannot instantly mark matches as overdue.
     Whenever the deadline is (re)set, per-round reminder flags are reset so
@@ -6069,7 +6226,14 @@ def update_round_status(round_number: int, is_open: bool, deadline: str | None =
     Открытие тура без расписания запрещено: если в `matches` нет ни одного матча
     для (season, division, round), бросается `RoundScheduleMissingError` и в БД
     не пишется ничего — ни строки тура, ни `is_open = 1`. Закрытие тура
-    (`is_open=False`) проверке не подлежит: закрыть пустой тур всегда можно."""
+    (`is_open=False`) проверке не подлежит: закрыть пустой тур всегда можно.
+
+    Низкоуровневая операция: дедлайн здесь не проверяется и закрытый тур
+    открывается повторно без вопросов. Хендлеры идут через
+    `validate_round_deadline`, `close_round` и `reopen_round`, где живут
+    правила регламента. Закрытие тура переводит его несыгранные матчи в долг
+    (`match_debts`), открытие и смена дедлайна снимают долги, по которым ещё
+    не было ни вердикта, ни награды."""
     if season_id is None:
         act = get_active_season()
         s_id = act["id"] if act else 1
@@ -6175,6 +6339,14 @@ def update_round_status(round_number: int, is_open: bool, deadline: str | None =
 
             if deadline is not None:
                 cursor.execute("DELETE FROM round_reminders WHERE round_number = ?", (round_number,))
+
+        now = now_msk()
+        scope = [division_id] if division_id is not None else _round_scope_divisions(cursor, round_number, s_id)
+        for scope_div_id in scope:
+            if is_open:
+                _after_round_opened(cursor, round_number, scope_div_id, s_id, deadline, now)
+            else:
+                _mark_round_closed(cursor, round_number, scope_div_id, s_id, closed_by, now)
 
     if is_open:
         # 🎰 Линия тура N здесь НЕ генерируется: открытие тура для игры её закрывает.
@@ -7821,6 +7993,396 @@ def _load_debt_rows(cursor, match_ids=None) -> dict[int, dict]:
     return rows
 
 
+
+# ─── Долги матчей: таблица match_debts ────────────────────────────────────
+#
+# Политика («долг или нет, и с какого момента») живёт в services.debt_policy.
+# Здесь — только хранение: строка появляется, когда матч становится долгом
+# (закрытие тура или синхронизация после дедлайна), и хранит срок, стадии
+# трекера и итог. Состояния: active / escalated / resolved / cancelled.
+# `cancelled` — долг снят переносом дедлайна или повторным открытием тура;
+# такая строка не считается долгом и может ожить при новом дедлайне.
+
+_DEBT_TS = "%Y-%m-%d %H:%M:%S"
+_DEBT_OPEN_STATES = ("active", "escalated")
+
+
+def _ts(value: datetime.datetime | None) -> str | None:
+    return value.strftime(_DEBT_TS) if value else None
+
+
+def _upsert_debt_row(cursor, match: dict, terms: debt_policy.DebtTerms, now: datetime.datetime) -> bool:
+    """Завести долг матча. Живую строку не трогает; снятую (`cancelled`) — оживляет."""
+    cursor.execute("""
+        INSERT INTO match_debts (
+            match_id, division_id, season_id, round_number,
+            became_debt_at, grace_hours, escalate_at, state, created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'active', ?)
+        ON CONFLICT(match_id) DO UPDATE SET
+            division_id = excluded.division_id,
+            season_id = excluded.season_id,
+            round_number = excluded.round_number,
+            became_debt_at = excluded.became_debt_at,
+            grace_hours = excluded.grace_hours,
+            escalate_at = excluded.escalate_at,
+            state = 'active',
+            last_reminder_at = NULL,
+            soft_warned_at = NULL,
+            escalated_at = NULL,
+            last_escalation_at = NULL,
+            escalation_count = 0,
+            global_escalated_at = NULL,
+            resolved_at = NULL,
+            resolution = NULL,
+            resolved_by = NULL,
+            created_at = excluded.created_at
+        WHERE match_debts.state = 'cancelled'
+    """, (
+        match["id"], match.get("division_id") or 1, match.get("season_id"), match.get("round_number"),
+        _ts(terms.became_debt_at), terms.grace_hours, _ts(terms.escalate_at), _ts(now),
+    ))
+    return cursor.rowcount > 0
+
+
+def _snapshot_legacy_debts(cursor, now: datetime.datetime) -> int:
+    """Миграция 020: перенести долги из флагов debt_reminders в match_debts.
+
+    Несыгранный матч лиги — долг, если дедлайн его тура прошёл (старое правило
+    без случая «открытый тур без дедлайна»). Сыгранные и кубковые матчи
+    переносятся, только если у них уже есть стадии: там записаны выданные
+    награды и вердикты, повторять которые нельзя.
+    """
+    try:
+        cursor.execute("SELECT match_id, stage, sent_at FROM debt_reminders")
+        stage_rows = cursor.fetchall()
+    except sqlite3.OperationalError:
+        stage_rows = []
+    stages: dict[int, dict[str, str | None]] = {}
+    for r in stage_rows:
+        stages.setdefault(r["match_id"], {})[r["stage"]] = r["sent_at"]
+
+    cursor.execute("SELECT * FROM rounds")
+    rounds_by_key: dict[tuple[int, int], list[dict]] = {}
+    for r in cursor.fetchall():
+        r = dict(r)
+        rounds_by_key.setdefault((r.get("division_id") or 1, r["round_number"]), []).append(r)
+
+    cursor.execute(
+        "SELECT id, round_number, division_id, season_id, status, played_at, tournament_type FROM matches"
+    )
+    migrated = 0
+    for m in [dict(r) for r in cursor.fetchall()]:
+        st = stages.get(m["id"], {})
+        is_cup = m.get("tournament_type") == "cup" or m["round_number"] == -1
+        deadline = None
+        if not is_cup:
+            cands = rounds_by_key.get((m.get("division_id") or 1, m["round_number"]), [])
+            r_row = next((r for r in cands if r.get("season_id") == m.get("season_id")), None) or next(
+                (r for r in cands if r.get("season_id") is None or m.get("season_id") is None), None
+            )
+            deadline = debt_policy.round_deadline(r_row)
+        pending = m["status"] == "pending"
+        if pending and not is_cup:
+            if deadline is None or deadline > now:
+                continue
+        elif not st:
+            continue
+
+        became = deadline if deadline is not None and deadline <= now else None
+        if became is None:
+            sent = [d for d in (parse_flexible_datetime(v) for v in st.values() if v) if d]
+            became = min(sent) if sent else now
+        terms = debt_policy.terms_for(became)
+
+        escalated = st.get("admin_escalated_48h")
+        if not pending:
+            state = "resolved"
+        elif escalated:
+            state = "escalated"
+        else:
+            state = "active"
+        cursor.execute("""
+            INSERT OR IGNORE INTO match_debts (
+                match_id, division_id, season_id, round_number,
+                became_debt_at, grace_hours, escalate_at, state,
+                last_reminder_at, soft_warned_at, escalated_at, last_escalation_at, escalation_count,
+                resolved_at, resolution, verdict_applied_at, reward_given_at, created_at
+            )
+            VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            m["id"], m.get("division_id") or 1, m.get("season_id"), m["round_number"],
+            _ts(terms.became_debt_at), _ts(terms.escalate_at), state,
+            st.get("cycle_reminder_last") or st.get("deadline_passed"),
+            st.get("warn_24h"),
+            escalated, escalated, 1 if escalated else 0,
+            (m.get("played_at") or _ts(now)) if not pending else None,
+            "played" if not pending else None,
+            st.get("verdict_processed"),
+            st.get("reward_given"),
+            _ts(now),
+        ))
+        migrated += cursor.rowcount
+    return migrated
+
+
+def sync_match_debts(now: datetime.datetime | None = None, season_id: int | None = None) -> dict:
+    """Привести match_debts в соответствие с политикой — зовёт трекер долгов.
+
+    Заводит строки для несыгранных матчей, чей тур прошёл дедлайн, и закрывает
+    (`resolved`, `played`) живые строки матчей, результат которых подтверждён.
+    Идемпотентна: повторный вызов ничего не меняет.
+    """
+    now = now or now_msk()
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        rounds = _load_round_states(_fetch_round_rows(cursor, s_id))
+        cursor.execute("""
+            SELECT id, round_number, division_id, season_id, status
+            FROM matches
+            WHERE status = 'pending'
+              AND (tournament_type IS NULL OR tournament_type = 'league')
+              AND (season_id = ? OR season_id IS NULL)
+        """, (s_id,))
+        matches = [dict(r) for r in cursor.fetchall()]
+        existing = _load_debt_rows(cursor)
+        created = 0
+        for m in matches:
+            if m["id"] in existing:
+                continue
+            terms = debt_policy.debt_terms(rounds.get((m.get("division_id") or 1, m["round_number"])), now)
+            if terms is not None and _upsert_debt_row(cursor, m, terms, now):
+                created += 1
+
+        cursor.execute("""
+            UPDATE match_debts SET state = 'resolved', resolution = 'played', resolved_at = ?
+            WHERE state IN ('active', 'escalated')
+              AND match_id IN (SELECT id FROM matches WHERE status = 'confirmed')
+        """, (_ts(now),))
+        resolved = cursor.rowcount
+    return {"created": created, "resolved": resolved}
+
+
+def get_match_debt(match_id: int) -> dict | None:
+    """Строка match_debts матча (включая снятую) или None."""
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM match_debts WHERE match_id = ?", (match_id,)).fetchone()
+        return dict(row) if row else None
+
+
+# ─── Жизненный цикл тура ──────────────────────────────────────────────────
+
+def validate_round_deadline(deadline_text: str | None, now: datetime.datetime | None = None) -> datetime.datetime:
+    """Дедлайн обязателен и должен быть в будущем. Возвращает разобранный момент."""
+    text = (deadline_text or "").strip()
+    if not text:
+        raise RoundDeadlineError(deadline_text, "Дедлайн не указан.")
+    try:
+        dl = datetime.datetime.strptime(text, "%d.%m.%Y %H:%M")
+    except ValueError:
+        dl = parse_flexible_datetime(text)
+    if dl is None:
+        raise RoundDeadlineError(deadline_text, "Неверный формат дедлайна. Используйте ДД.ММ.ГГГГ ЧЧ:ММ.")
+    if dl <= (now or now_msk()):
+        raise RoundDeadlineError(deadline_text, "Дедлайн уже прошёл — укажите момент в будущем.")
+    return dl
+
+
+def _round_row(cursor, round_number: int, division_id: int, season_id: int) -> dict | None:
+    cursor.execute(
+        "SELECT * FROM rounds WHERE (season_id = ? OR season_id IS NULL) AND division_id = ? AND round_number = ? "
+        "ORDER BY season_id IS NULL LIMIT 1",
+        (season_id, division_id, round_number)
+    )
+    row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def _round_pending_league_matches(cursor, round_number: int, division_id: int, season_id: int) -> list[dict]:
+    cursor.execute("""
+        SELECT id, round_number, division_id, season_id, player1_id, player2_id, player1_team, player2_team
+        FROM matches
+        WHERE round_number = ? AND COALESCE(division_id, 1) = ?
+          AND (season_id = ? OR season_id IS NULL)
+          AND status = 'pending'
+          AND (tournament_type IS NULL OR tournament_type = 'league')
+        ORDER BY id
+    """, (round_number, division_id, season_id))
+    return [dict(r) for r in cursor.fetchall()]
+
+
+def _close_terms(round_row: dict | None, closed_at: datetime.datetime) -> debt_policy.DebtTerms:
+    """Срок долга для матчей тура, закрываемого в `closed_at`.
+
+    До дедлайна — регламентные часы плюс остаток до дедлайна; после дедлайна —
+    от дедлайна. Старый тур без дедлайна считается от момента закрытия.
+    """
+    deadline = debt_policy.round_deadline(round_row)
+    early = debt_policy.early_close_terms(deadline, closed_at)
+    if early is not None:
+        return early
+    return debt_policy.terms_for(deadline if deadline is not None else closed_at)
+
+
+def _cancel_round_debts(cursor, round_number: int, division_id: int, season_id: int,
+                        now: datetime.datetime, reason: str) -> int:
+    """Снять долги тура, по которым ещё не было ни вердикта, ни награды."""
+    cursor.execute("""
+        UPDATE match_debts SET state = 'cancelled', resolution = ?, resolved_at = ?
+        WHERE state IN ('active', 'escalated')
+          AND verdict_applied_at IS NULL AND reward_given_at IS NULL
+          AND match_id IN (
+              SELECT id FROM matches
+              WHERE round_number = ? AND COALESCE(division_id, 1) = ?
+                AND (season_id = ? OR season_id IS NULL)
+                AND status = 'pending'
+                AND (tournament_type IS NULL OR tournament_type = 'league')
+          )
+    """, (reason, _ts(now), round_number, division_id, season_id))
+    return cursor.rowcount
+
+
+def _mark_passed_milestones(cursor, round_number: int, division_id: int,
+                            deadline: datetime.datetime, now: datetime.datetime) -> None:
+    """Вехи напоминаний, которые к моменту открытия уже позади, считаются отправленными.
+
+    Иначе тур, открытый за 71 час до дедлайна, сразу получал бы «осталось 72 часа».
+    """
+    hours_left = (deadline - now).total_seconds() / 3600.0
+    for h in ROUND_DEADLINE_REMINDER_HOURS:
+        if h > hours_left:
+            cursor.execute(
+                "INSERT OR IGNORE INTO round_reminders (division_id, round_number, reminder_type, sent_at) "
+                "VALUES (?, ?, ?, ?)",
+                (division_id, round_number, f"{h}h", _ts(now))
+            )
+
+
+def _after_round_opened(cursor, round_number: int, division_id: int, season_id: int,
+                        deadline: str | None, now: datetime.datetime) -> None:
+    """Статус `open`; долги тура, начатые по прежнему сроку, снимаются."""
+    cursor.execute(
+        "UPDATE rounds SET status = 'open', closed_at = NULL, closed_by = NULL "
+        "WHERE (season_id = ? OR season_id IS NULL) AND division_id = ? AND round_number = ?",
+        (season_id, division_id, round_number)
+    )
+    _cancel_round_debts(cursor, round_number, division_id, season_id, now, "deadline_moved")
+    dl = parse_flexible_datetime(deadline) if deadline else None
+    if dl is not None:
+        _mark_passed_milestones(cursor, round_number, division_id, dl, now)
+
+
+def _mark_round_closed(cursor, round_number: int, division_id: int, season_id: int,
+                       closed_by: int | None, now: datetime.datetime) -> int:
+    """Статус `closed`, несыгранные матчи — в долг. Возвращает число новых долгов.
+
+    Тур, который ещё не открывали, закрытием не становится: у него нет срока,
+    и превращать его расписание в долги нельзя. Повторное закрытие уже
+    закрытого тура момент закрытия не сдвигает.
+    """
+    row = _round_row(cursor, round_number, division_id, season_id)
+    if row is None:
+        return 0
+    stored = row.get("status")
+    if stored == debt_policy.ROUND_SCHEDULED or (stored is None and not row.get("deadline")):
+        return 0
+    closed_at = debt_policy.round_deadline({"deadline": row.get("closed_at")}) if stored == debt_policy.ROUND_CLOSED else None
+    if closed_at is None:
+        closed_at = now
+        cursor.execute(
+            "UPDATE rounds SET status = 'closed', closed_at = ?, closed_by = ? "
+            "WHERE (season_id = ? OR season_id IS NULL) AND division_id = ? AND round_number = ?",
+            (_ts(closed_at), closed_by, season_id, division_id, round_number)
+        )
+    terms = _close_terms(row, closed_at)
+    created = 0
+    for m in _round_pending_league_matches(cursor, round_number, division_id, season_id):
+        if _upsert_debt_row(cursor, m, terms, now):
+            created += 1
+    return created
+
+
+def preview_close_round(round_number: int, division_id: int, season_id: int | None = None,
+                        now: datetime.datetime | None = None) -> dict:
+    """Что будет, если закрыть тур сейчас: какие матчи уйдут в долг и до какого срока."""
+    now = now or now_msk()
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        row = _round_row(cursor, round_number, division_id, s_id)
+        matches = _round_pending_league_matches(cursor, round_number, division_id, s_id)
+    terms = _close_terms(row, now)
+    return {
+        "round_number": round_number,
+        "division_id": division_id,
+        "status": debt_policy.round_phase(row, now),
+        "deadline": (row or {}).get("deadline"),
+        "matches": matches,
+        "early": terms.grace_hours > 0,
+        "grace_hours": terms.grace_hours,
+        "escalate_at": terms.escalate_at,
+    }
+
+
+def close_round(round_number: int, division_id: int, admin_id: int | None = None,
+                season_id: int | None = None) -> dict:
+    """Закрыть тур: приём результатов идёт дальше, но несыгранные матчи — уже долги.
+
+    Возвращает срок долга и список новых долгов тура с участниками — для
+    объявления и личных сообщений.
+    """
+    s_id = _resolve_season_id(season_id)
+    with _bet_placement_lock, transaction() as conn:
+        update_round_status(round_number, is_open=False, division_id=division_id,
+                            season_id=s_id, closed_by=admin_id)
+        row = _round_row(conn.cursor(), round_number, division_id, s_id)
+    closed_at = debt_policy.round_deadline({"deadline": (row or {}).get("closed_at")}) or now_msk()
+    terms = _close_terms(row, closed_at)
+    debts = [
+        m for m in get_detailed_overdue_matches(division_id=division_id, season_id=s_id)
+        if m["round_number"] == round_number
+    ]
+    return {
+        "round_number": round_number,
+        "division_id": division_id,
+        "closed_at": closed_at,
+        "early": terms.grace_hours > 0,
+        "grace_hours": terms.grace_hours,
+        "escalate_at": terms.escalate_at,
+        "debts": debts,
+    }
+
+
+def reopen_round(round_number: int, division_id: int, deadline: str,
+                 season_id: int | None = None) -> list[int]:
+    """Вернуть закрытый тур в игру с новым дедлайном (решение глобального админа).
+
+    Долги тура без вердикта и без награды снимаются; права проверяет хендлер.
+    """
+    validate_round_deadline(deadline)
+    return update_round_status(round_number, is_open=True, deadline=deadline,
+                               division_id=division_id, season_id=season_id)
+
+
+def get_rounds_awaiting_close(now: datetime.datetime | None = None) -> list[dict]:
+    """Открытые туры, дедлайн которых прошёл, а админы об этом ещё не уведомлены."""
+    now = now or now_msk()
+    result = []
+    for r in get_open_rounds_with_deadlines():
+        dl = parse_flexible_datetime(r.get("deadline"))
+        div_id = r.get("division_id") or 1
+        if dl is None or dl > now:
+            continue
+        if has_reminder_been_sent(r["round_number"], "deadline_passed_admin", div_id):
+            continue
+        s_id = _resolve_season_id(r.get("season_id"))
+        with transaction() as conn:
+            pending = len(_round_pending_league_matches(conn.cursor(), r["round_number"], div_id, s_id))
+        result.append({**r, "division_id": div_id, "pending": pending})
+    return result
+
+
 def _team_owner_resolver(user_rows: list[dict]):
     """Владелец клуба по названию в пределах дивизиона матча (точное имя, затем алиасы)."""
     def get_team_owner(t_name: str | None, match_div_id: int | None = None) -> dict | None:
@@ -7956,11 +8518,6 @@ def is_match_overdue(match_id: int) -> bool:
             return False
         m = dict(row)
         debt_row = _load_debt_rows(cursor, [match_id]).get(match_id)
-        if debt_row is None:
-            # Долги, начатые до миграции 020, отмечены только в debt_reminders.
-            cursor.execute("SELECT 1 FROM debt_reminders WHERE match_id = ? LIMIT 1", (match_id,))
-            if cursor.fetchone():
-                return True
         if m.get("tournament_type") == "cup" or m["round_number"] == -1:
             return debt_row is not None
         return debt_policy.is_debt(m, _match_round_row(cursor, m), debt_row, now_msk())
@@ -8043,6 +8600,10 @@ def reset_all_debt_reminders() -> None:
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM debt_reminders")
+        cursor.execute(
+            "UPDATE match_debts SET state = 'active', last_reminder_at = NULL, soft_warned_at = NULL, escalated_at = NULL, last_escalation_at = NULL, escalation_count = 0, global_escalated_at = NULL "
+            "WHERE state IN ('active', 'escalated')"
+        )
 
 
 def admin_reset_all_warns_and_debts() -> int:
@@ -8052,6 +8613,10 @@ def admin_reset_all_warns_and_debts() -> int:
         cursor.execute("UPDATE users SET warn_count = 0 WHERE warn_count > 0")
         affected = cursor.rowcount
         cursor.execute("DELETE FROM debt_reminders")
+        cursor.execute(
+            "UPDATE match_debts SET state = 'active', last_reminder_at = NULL, soft_warned_at = NULL, escalated_at = NULL, last_escalation_at = NULL, escalation_count = 0, global_escalated_at = NULL "
+            "WHERE state IN ('active', 'escalated')"
+        )
         cursor.execute("DELETE FROM user_warns")
         return affected
 

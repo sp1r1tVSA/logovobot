@@ -181,6 +181,49 @@ def hours_to_escalation(terms: DebtTerms, frozen: float, now: _dt.datetime) -> f
     return (effective_escalate_at(terms, frozen) - now).total_seconds() / 3600.0
 
 
+def plan_deadline_reminder(
+    hours_left: float,
+    sent_tags: set[str] | frozenset[str],
+    milestones: tuple[int, ...] | None = None,
+) -> tuple[int, list[str]] | None:
+    """Какое напоминание о дедлайне тура отправить сейчас.
+
+    Вехи — `ROUND_DEADLINE_REMINDER_HOURS`. Отправляется ближайшая к дедлайну
+    уже наступившая неотправленная веха; более ранние неотправленные
+    помечаются вместе с ней. Пропущенный запуск джоба (рестарт бота) поэтому
+    даёт одно сообщение с актуальным остатком, а не пачку устаревших.
+    Возвращает (часы вехи, теги к записи) или None.
+    """
+    if hours_left <= 0:
+        return None
+    ms = sorted(config.ROUND_DEADLINE_REMINDER_HOURS if milestones is None else milestones)
+    due = [h for h in ms if h >= hours_left and f"{h}h" not in sent_tags]
+    if not due:
+        return None
+    return due[0], [f"{h}h" for h in due]
+
+
+def deadline_reminder_label(milestone: int, hours_left: float) -> str:
+    """Подпись «осталось …»: веха, если до неё рукой подать, иначе фактический остаток."""
+    if milestone == 1:
+        return "1 час! 🚨"
+    if milestone - hours_left <= 1.5:
+        return hours_label(milestone)
+    return hours_label(max(1, int(hours_left)))
+
+
+def hours_label(hours: int) -> str:
+    """«1 час», «24 часа», «48 часов»."""
+    n = abs(int(hours))
+    if n % 10 == 1 and n % 100 != 11:
+        word = "час"
+    elif 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        word = "часа"
+    else:
+        word = "часов"
+    return f"{hours} {word}"
+
+
 def resolve_terms(
     debt_row: Mapping[str, Any] | None,
     round_row: Mapping[str, Any] | None,

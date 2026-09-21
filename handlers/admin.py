@@ -29,6 +29,7 @@ from config import MAX_WARNS_LIMIT, GROUP_ID
 
 from handlers.squad_ai import offer_recognized_squad
 from services.graphics import player_photos
+from services import debt_policy
 from services.tournament_validator import RoundRobinValidator
 from services.schedule_generator import (
     generate_asymmetric_round_robin_fixtures,
@@ -1436,7 +1437,7 @@ async def admin_div_manage_matches(update: Update, context: ContextTypes.DEFAULT
     row = []
     for r in rounds:
         info = await asyncio.to_thread(database.get_round_info, r, div_id)
-        status_icon = "🟢" if info and info.get("is_open") else "🔴"
+        status_icon = ROUND_PHASE_ICONS[debt_policy.round_phase(info, now_msk())]
         row.append(InlineKeyboardButton(f"{status_icon} Тур {r}", callback_data=f"admin_div_round:{div_id}:{r}"))
         if len(row) == 2:
             keyboard.append(row)
@@ -1468,6 +1469,26 @@ async def admin_div_round(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     await _render_div_round_card(query, context, div_id, round_number)
 
 
+ROUND_PHASE_ICONS = {
+    debt_policy.ROUND_SCHEDULED: "⚪",
+    debt_policy.ROUND_OPEN: "🟢",
+    debt_policy.ROUND_OVERDUE: "🟠",
+    debt_policy.ROUND_CLOSED: "🔴",
+}
+ROUND_PHASE_LABELS = {
+    debt_policy.ROUND_SCHEDULED: "Не открыт",
+    debt_policy.ROUND_OPEN: "Открыт",
+    debt_policy.ROUND_OVERDUE: "Дедлайн прошёл — ждёт закрытия",
+    debt_policy.ROUND_CLOSED: "Закрыт",
+}
+
+
+def _fmt_msk(value) -> str:
+    """ДД.ММ.ГГГГ ЧЧ:ММ для datetime или хранимой строки времени."""
+    dt = value if isinstance(value, datetime.datetime) else database.parse_flexible_datetime(value)
+    return dt.strftime("%d.%m.%Y %H:%M") if dt else str(value or "—")
+
+
 async def _render_div_round_card(query, context: ContextTypes.DEFAULT_TYPE, div_id: int, round_number: int) -> None:
     """Нарисовать карточку тура дивизиона. Callback query уже отвечен вызывающим."""
     # Экраны напоминаний и списка матчей тура ключуются одним номером тура;
@@ -1484,15 +1505,21 @@ async def _render_div_round_card(query, context: ContextTypes.DEFAULT_TYPE, div_
     is_open = info["is_open"]
     deadline = info["deadline"]
     bets_open = bool(info.get("bets_open"))
+    phase = debt_policy.round_phase(info, now_msk())
 
     div = await asyncio.to_thread(database.get_division, div_id)
     div_name = div["name"] if div else f"#{div_id}"
 
     text = f"📅 <b>Управление: {round_number}-й Тур</b>\n"
     text += f"Дивизион: <b>{html.escape(str(div_name))}</b>\n\n"
-    text += f"Статус: {'🟢 Открыт' if is_open else '🔴 Закрыт'}\n"
-    if is_open and deadline:
+    text += f"Статус: {ROUND_PHASE_ICONS[phase]} {ROUND_PHASE_LABELS[phase]}"
+    if phase == debt_policy.ROUND_CLOSED and info.get("closed_at"):
+        text += f" ({html.escape(_fmt_msk(info['closed_at']))})"
+    text += "\n"
+    if deadline and phase != debt_policy.ROUND_SCHEDULED:
         text += f"Дедлайн: {html.escape(str(deadline))}\n"
+    elif is_open:
+        text += "⚠️ Дедлайн не задан — долги по туру не начислятся. Задайте его кнопкой ниже.\n"
     if bets_open and not is_open:
         text += "Линия Logovo.bet: 🎰 открыта заранее (тур ещё не открыт для игры)\n"
     else:
@@ -1501,7 +1528,14 @@ async def _render_div_round_card(query, context: ContextTypes.DEFAULT_TYPE, div_
     keyboard = []
     if is_open:
         keyboard.append([InlineKeyboardButton("🔴 Закрыть тур", callback_data=f"admin_div_round_close:{div_id}:{round_number}")])
+        keyboard.append([InlineKeyboardButton("🕒 Изменить дедлайн", callback_data=f"admin_div_round_open:{div_id}:{round_number}")])
         keyboard.append([InlineKeyboardButton("⏰ Напомнить должникам", callback_data=f"admin_remind_round_{round_number}")])
+    elif phase == debt_policy.ROUND_CLOSED:
+        # Закрытый тур уже породил долги — вернуть его в игру вправе только
+        # глобальный админ; долги без вердикта при этом снимаются.
+        user = getattr(query, "from_user", None)
+        if user and is_global_admin(user.id):
+            keyboard.append([InlineKeyboardButton("♻️ Переоткрыть тур", callback_data=f"admin_div_round_open:{div_id}:{round_number}")])
     else:
         keyboard.append([InlineKeyboardButton("🟢 Открыть тур (установить дедлайн)", callback_data=f"admin_div_round_open:{div_id}:{round_number}")])
         # Ранняя линия: прогнозы можно принимать до открытия тура для игры.
@@ -2515,6 +2549,16 @@ async def admin_open_round_prompt(update: Update, context: ContextTypes.DEFAULT_
     # дедлайна. Уже открытый тур собственный слот не занимает: смена дедлайна
     # такому туру разрешена, иначе его нельзя было бы продлить.
     round_info = await asyncio.to_thread(database.get_round_info, round_number, div_id)
+    reopening = debt_policy.round_phase(round_info, now_msk()) == debt_policy.ROUND_CLOSED
+    if reopening and not is_global_admin(query.from_user.id):
+        await query.edit_message_text(
+            "⛔ Тур уже закрыт, и его несыгранные матчи стали долгами. "
+            "Переоткрыть закрытый тур может только глобальный админ.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("« К туру", callback_data=f"admin_div_round:{div_id}:{round_number}")]]
+            ),
+        )
+        return ConversationHandler.END
     if not (round_info and round_info.get("is_open")):
         active = await asyncio.to_thread(database.get_active_open_rounds, div_id)
         if len(active) >= config.MAX_OPEN_ROUNDS_PER_DIVISION:
@@ -2531,9 +2575,15 @@ async def admin_open_round_prompt(update: Update, context: ContextTypes.DEFAULT_
     context.user_data["admin_round_open_div"] = div_id
 
     keyboard = [[InlineKeyboardButton("Отмена", callback_data="admin_cancel_match_action")]]
+    reopen_note = (
+        "♻️ Тур будет переоткрыт: долги его матчей, по которым ещё не было "
+        "вердикта, снимутся и начнутся заново от нового дедлайна.\n\n"
+        if reopening else ""
+    )
     await query.edit_message_text(
-        f"Укажите строгий дедлайн для {round_number}-го тура.\n"
-        "Формат: `ДД.ММ.ГГГГ ЧЧ:ММ` (например: `29.07.2026 23:59`)\n\n"
+        f"{reopen_note}Укажите строгий дедлайн для {round_number}-го тура.\n"
+        "Формат: `ДД.ММ.ГГГГ ЧЧ:ММ` (например: `29.07.2026 23:59`)\n"
+        "Дедлайн обязателен и должен быть в будущем.\n\n"
         "Отправьте текст дедлайна:",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup(keyboard)
@@ -2550,14 +2600,14 @@ async def admin_open_round_save(update: Update, context: ContextTypes.DEFAULT_TY
     if not update.message or not update.message.text:
         return ADMIN_WAITING_FOR_DEADLINE
         
-    deadline_text = update.message.text
-    
+    deadline_text = update.message.text.strip()
+
     try:
-        dt = datetime.datetime.strptime(deadline_text.strip(), "%d.%m.%Y %H:%M")
-    except ValueError:
-        await update.message.reply_text("❌ Неверный формат. Пожалуйста, используйте формат: `ДД.ММ.ГГГГ ЧЧ:ММ`", parse_mode="Markdown")
+        database.validate_round_deadline(deadline_text)
+    except database.RoundDeadlineError as e:
+        await update.message.reply_text(f"❌ {e.reason}\nОтправьте дедлайн ещё раз (ДД.ММ.ГГГГ ЧЧ:ММ).")
         return ADMIN_WAITING_FOR_DEADLINE
-        
+
     round_number = context.user_data.pop("admin_round_to_open", None)
     div_id = context.user_data.pop("admin_round_open_div", None)
     if not round_number or not div_id:
@@ -2567,6 +2617,11 @@ async def admin_open_round_save(update: Update, context: ContextTypes.DEFAULT_TY
     # дедлайна и вводом ответа матчи тура могли быть удалены.
     r_info = await asyncio.to_thread(database.get_round_info, round_number, div_id)
     was_bets_open = bool(r_info and r_info.get("bets_open"))
+    prev_phase = debt_policy.round_phase(r_info, now_msk())
+    # Тур мог закрыться, пока админ набирал дату.
+    if prev_phase == debt_policy.ROUND_CLOSED and not is_global_admin(user.id):
+        await update.message.reply_text("⛔ Тур уже закрыт. Переоткрыть его может только глобальный админ.")
+        return ConversationHandler.END
 
     try:
         advanced = await asyncio.to_thread(
@@ -2591,12 +2646,18 @@ async def admin_open_round_save(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return ConversationHandler.END
 
+    if prev_phase in (debt_policy.ROUND_OPEN, debt_policy.ROUND_OVERDUE):
+        headline = f"🕒 <b>Дедлайн {round_number}-го тура изменён</b>"
+    elif prev_phase == debt_policy.ROUND_CLOSED:
+        headline = f"♻️ <b>{round_number}-й Тур переоткрыт!</b>"
+    else:
+        headline = f"🟢 <b>Открыт {round_number}-й Тур!</b>"
     announced = await _announce_rounds_opened(
         context,
         div_id,
-        f"🟢 <b>Открыт {round_number}-й Тур!</b>\n\n🕒 Дедлайн: {html.escape(deadline_text)}\n\n"
+        f"{headline}\n\n🕒 Дедлайн: {html.escape(deadline_text)}\n\n"
         "Пожалуйста, сыграйте свои матчи и внесите результаты до истечения срока.",
-        include_table=(round_number == 1),
+        include_table=(round_number == 1 and prev_phase == debt_policy.ROUND_SCHEDULED),
     )
 
     notice = (
@@ -2692,11 +2753,11 @@ async def admin_open_batch_deadline(update: Update, context: ContextTypes.DEFAUL
         
     deadline_text = update.message.text.strip()
     try:
-        dt = datetime.datetime.strptime(deadline_text, "%d.%m.%Y %H:%M")
-    except ValueError:
-        await update.message.reply_text("❌ Неверный формат даты. Используйте: `ДД.ММ.ГГГГ ЧЧ:ММ`", parse_mode="Markdown")
+        database.validate_round_deadline(deadline_text)
+    except database.RoundDeadlineError as e:
+        await update.message.reply_text(f"❌ {e.reason}\nОтправьте дедлайн ещё раз (ДД.ММ.ГГГГ ЧЧ:ММ).")
         return ADMIN_WAITING_FOR_BATCH_DEADLINE
-        
+
     start_r = context.user_data.pop("batch_start", None)
     end_r = context.user_data.pop("batch_end", None)
     div_id = context.user_data.pop("batch_div_id", None)
@@ -2804,13 +2865,124 @@ async def admin_close_round(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not await _ensure_division_access(update, div_id):
         return
 
-    await asyncio.to_thread(database.update_round_status, round_number, is_open=False, division_id=div_id)
-
-    keyboard = [[InlineKeyboardButton("« Вернуться", callback_data=f"admin_div_round:{div_id}:{round_number}")]]
+    preview = await asyncio.to_thread(database.preview_close_round, round_number, div_id)
+    keyboard = [
+        [InlineKeyboardButton("🔴 Да, закрыть тур", callback_data=f"admin_div_round_close_ok:{div_id}:{round_number}")],
+        [InlineKeyboardButton("« Отмена", callback_data=f"admin_div_round:{div_id}:{round_number}")],
+    ]
     await query.edit_message_text(
-        f"🔴 {round_number}-й тур закрыт. Прием результатов остановлен.",
+        close_round_preview_text(preview),
+        parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup(keyboard)
     )
+
+
+def _debt_term_line(early: bool, grace_hours: int, escalate_at) -> str:
+    base = f"до <b>{_fmt_msk(escalate_at)}</b> ({config.DEBT_ESCALATION_HOURS} ч"
+    if early and grace_hours:
+        base += f" + {grace_hours} ч до дедлайна"
+    return base + ")"
+
+
+def close_round_preview_text(preview: dict) -> str:
+    """Экран подтверждения закрытия: сколько матчей уйдёт в долг и до какого срока."""
+    rn = preview["round_number"]
+    pending = preview.get("matches") or []
+    text = f"🔴 <b>Закрыть {rn}-й тур?</b>\n\n"
+    if preview.get("status") == debt_policy.ROUND_CLOSED:
+        text += "Тур уже закрыт — повторное закрытие ничего не меняет.\n"
+        return text
+    if not pending:
+        text += "Все матчи тура сыграны — долгов не будет."
+        return text
+    text += f"В долг уйдут матчей: <b>{len(pending)}</b>.\n"
+    text += "Срок отыгрыша " + _debt_term_line(preview["early"], preview["grace_hours"], preview["escalate_at"]) + ".\n"
+    if preview.get("early"):
+        text += "Тур закрывается раньше дедлайна: остаток времени до него добавлен к сроку.\n"
+    text += "\nРезультаты этих матчей принимаются и после закрытия — как отыгрыш долга.\n\n"
+    for m in pending[:15]:
+        text += f"• {html.escape(str(m.get('player1_team') or '?'))} — {html.escape(str(m.get('player2_team') or '?'))}\n"
+    if len(pending) > 15:
+        text += f"… и ещё {len(pending) - 15}\n"
+    return text
+
+
+def _close_round_announcement(result: dict) -> str:
+    rn = result["round_number"]
+    debts = result.get("debts") or []
+    text = f"🔴 <b>{rn}-й Тур закрыт.</b>\n\n"
+    if not debts:
+        return text + "Все матчи тура сыграны. Спасибо!"
+    text += f"Несыгранные матчи ({len(debts)}) переходят в долг.\n"
+    text += "Срок отыгрыша " + _debt_term_line(result["early"], result["grace_hours"], result["escalate_at"]) + ".\n\n"
+    for m in debts:
+        p1 = f"@{m['p1_username']}" if m.get("p1_username") else (m.get("player1_team") or "?")
+        p2 = f"@{m['p2_username']}" if m.get("p2_username") else (m.get("player2_team") or "?")
+        text += (
+            f"• {html.escape(str(m.get('player1_team') or '?'))} ({html.escape(str(p1))}) — "
+            f"{html.escape(str(m.get('player2_team') or '?'))} ({html.escape(str(p2))})\n"
+        )
+    return text
+
+
+@admin_only
+async def admin_close_round_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Закрыть тур после подтверждения: матчи — в долг, объявление, ЛС должникам."""
+    query = update.callback_query
+    if not query or not is_admin(query.from_user.id):
+        return
+    await query.answer()
+
+    div_id, round_number = _parse_div_round_arg(query)
+    if div_id is None or round_number is None:
+        await _deny_access(update, "⛔ Некорректные данные")
+        return
+    if not await _ensure_division_access(update, div_id):
+        return
+
+    keyboard = [[InlineKeyboardButton("« К туру", callback_data=f"admin_div_round:{div_id}:{round_number}")]]
+    info = await asyncio.to_thread(database.get_round_info, round_number, div_id)
+    if debt_policy.round_phase(info, now_msk()) == debt_policy.ROUND_CLOSED:
+        await query.edit_message_text(f"🔴 {round_number}-й тур уже закрыт.", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
+
+    result = await asyncio.to_thread(database.close_round, round_number, div_id, query.from_user.id)
+    debts = result.get("debts") or []
+
+    announced = await _announce_rounds_opened(context, div_id, _close_round_announcement(result), include_table=False)
+
+    term = _debt_term_line(result["early"], result["grace_hours"], result["escalate_at"])
+    notified = 0
+    for m in debts:
+        for uid, team, opp in (
+            (m.get("player1_id"), m.get("player1_team"), m.get("player2_team")),
+            (m.get("player2_id"), m.get("player2_team"), m.get("player1_team")),
+        ):
+            if not uid:
+                continue
+            try:
+                ok = await safe_send_notification(
+                    context.bot, uid,
+                    f"🔴 <b>{round_number}-й тур закрыт.</b>\n\n"
+                    f"Ваш матч {html.escape(str(team or '?'))} — {html.escape(str(opp or '?'))} не сыгран "
+                    f"и перешёл в долг.\nСрок отыгрыша {term}.\n"
+                    "После срока матч уйдёт админам на технический вердикт.",
+                )
+                notified += 1 if ok else 0
+            except Exception as e:
+                logger.warning(f"Failed to notify debtor {uid} about closed round {round_number}: {e}")
+
+    text = f"🔴 {round_number}-й тур закрыт.\n"
+    if debts:
+        text += f"Долгов: {len(debts)}, срок отыгрыша {term}.\nДолжникам отправлено сообщений: {notified}.\n"
+    else:
+        text += "Все матчи сыграны — долгов нет.\n"
+    text += (
+        "Объявление отправлено в «📞 ОТЧЁТЫ»."
+        if announced
+        else "⚠️ Топик «📞 ОТЧЁТЫ» у дивизиона не настроен — объявление в группу не отправлено."
+    )
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 @admin_only
 async def admin_round_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -6117,63 +6289,74 @@ async def admin_send_selected_reminders(update: Update, context: ContextTypes.DE
         await context.bot.send_message(chat_id=target_chat_id, message_thread_id=thread_id, text=text, reply_markup=markup, parse_mode="HTML")
 
 async def job_check_deadlines_and_remind(context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Periodic job checking open rounds for approaching deadlines and sending automated reminders."""
+    """Напоминания о дедлайне открытых туров и сигнал админам, что тур пора закрыть.
+
+    Вехи — `config.ROUND_DEADLINE_REMINDER_HOURS`, выбор — `debt_policy.plan_deadline_reminder`.
+    Когда дедлайн прошёл, тур сам не закрывается: админы дивизиона получают
+    одно сообщение с кнопкой закрытия (тег `deadline_passed_admin`).
+    """
     open_rounds = await asyncio.to_thread(database.get_open_rounds_with_deadlines)
     if not open_rounds:
         return
 
     now = now_msk()
-
-    # Milestones every 6 hours down to 6h, plus 1h final warning
-    REMINDER_MILESTONES = [
-        (72, "72 часа"),
-        (66, "66 часов"),
-        (60, "60 часов"),
-        (54, "54 часа"),
-        (48, "48 часов"),
-        (42, "42 часа"),
-        (36, "36 часов"),
-        (30, "30 часов"),
-        (24, "24 часа"),
-        (18, "18 часов"),
-        (12, "12 часов"),
-        (6, "6 часов"),
-    ]
-
     for r in open_rounds:
         try:
             r_num = r["round_number"]
             div_id = r.get("division_id") or 1
-            dl_str = r["deadline"]
-
-            dl_dt = database.parse_flexible_datetime(dl_str)
+            dl_dt = database.parse_flexible_datetime(r["deadline"])
             if not dl_dt:
                 continue
 
-            time_diff = dl_dt - now
-            hours_left = time_diff.total_seconds() / 3600.0
+            hours_left = (dl_dt - now).total_seconds() / 3600.0
+            sent = await asyncio.to_thread(database.get_sent_reminder_tags, r_num, div_id)
 
             if hours_left <= 0:
-                continue  # Deadline already passed
+                if "deadline_passed_admin" not in sent:
+                    await _notify_admins_round_awaits_close(context, r_num, div_id, r["deadline"])
+                    await asyncio.to_thread(database.record_reminder_sent, r_num, "deadline_passed_admin", div_id)
+                continue
 
-            # 1. Check 6-hour cycle milestones (from 72h down to 6h)
-            matched = False
-            for m_hours, m_label in REMINDER_MILESTONES:
-                if (m_hours - 1.5) <= hours_left <= (m_hours + 1.5):
-                    tag = f"{m_hours}h"
-                    if not (await asyncio.to_thread(database.has_reminder_been_sent, r_num, tag, div_id)):
-                        await send_round_reminders(context, r_num, time_left_str=m_label, division_id=div_id)
-                        await asyncio.to_thread(database.record_reminder_sent, r_num, tag, div_id)
-                    matched = True
-                    break
-
-            # 2. Final urgent reminder (between 0.5h and 1.5h left)
-            if not matched and 0.5 <= hours_left <= 1.5:
-                if not (await asyncio.to_thread(database.has_reminder_been_sent, r_num, "1h", div_id)):
-                    await send_round_reminders(context, r_num, time_left_str="1 час! 🚨", division_id=div_id)
-                    await asyncio.to_thread(database.record_reminder_sent, r_num, "1h", div_id)
+            plan = debt_policy.plan_deadline_reminder(hours_left, sent)
+            if plan is None:
+                continue
+            milestone, tags = plan
+            await send_round_reminders(
+                context, r_num,
+                time_left_str=debt_policy.deadline_reminder_label(milestone, hours_left),
+                division_id=div_id,
+            )
+            await asyncio.to_thread(database.record_reminders_sent, r_num, tags, div_id)
         except Exception as e:
             logger.exception(f"Error checking deadline reminder for round {r.get('round_number')} div {r.get('division_id')}: {e}")
+
+
+async def _notify_admins_round_awaits_close(
+    context: ContextTypes.DEFAULT_TYPE, round_number: int, division_id: int, deadline: str
+) -> None:
+    """Дедлайн тура прошёл: админам — сколько матчей не сыграно и кнопка закрытия."""
+    preview = await asyncio.to_thread(database.preview_close_round, round_number, division_id)
+    div_name = await _division_display_name(division_id)
+    pending = len(preview.get("matches") or [])
+    text = (
+        f"🟠 <b>Дедлайн {round_number}-го тура прошёл</b> — {html.escape(div_name)}\n"
+        f"Дедлайн: {html.escape(str(deadline))}\n\n"
+    )
+    text += (
+        f"Не сыграно матчей: <b>{pending}</b> — они уже долги, отсчёт идёт от дедлайна.\n"
+        if pending else "Все матчи сыграны.\n"
+    )
+    text += "Закройте тур, когда будете готовы: результаты долгов принимаются и после закрытия."
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔴 Закрыть тур", callback_data=f"admin_div_round_close:{division_id}:{round_number}")],
+        [InlineKeyboardButton("📅 Карточка тура", callback_data=f"admin_div_round:{division_id}:{round_number}")],
+    ])
+    for admin_id in await _resolve_debt_admins(division_id):
+        try:
+            await safe_send_notification(context.bot, admin_id, text, reply_markup=keyboard)
+        except Exception as e:
+            logger.warning(f"Failed to notify admin {admin_id} that round {round_number} awaits closing: {e}")
+
 
 async def job_post_debts_to_warns(context: ContextTypes.DEFAULT_TYPE) -> None:
     """Periodic job (every 12 hours) posting/updating the debts summary in the ПРЕДЫ thread."""
@@ -6512,6 +6695,12 @@ async def job_debt_lifecycle_tracker(context: ContextTypes.DEFAULT_TYPE) -> None
 
 
 async def _run_debt_lifecycle_tracker(context: ContextTypes.DEFAULT_TYPE) -> None:
+    # Строки долгов заводятся здесь для туров, чей дедлайн прошёл без
+    # закрытия, и закрываются для матчей, результат которых подтверждён.
+    try:
+        await asyncio.to_thread(database.sync_match_debts)
+    except Exception:
+        logger.exception("sync_match_debts failed; tracker continues on the round-derived view")
     overdue_matches = await asyncio.to_thread(database.get_detailed_overdue_matches)
     if not overdue_matches:
         return
