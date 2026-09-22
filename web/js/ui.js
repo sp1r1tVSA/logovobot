@@ -913,10 +913,7 @@ export class UIRenderer {
         <!-- AI Insights & Preview Menu -->
         <div class="match-insights-container">
           <div class="market-group-card">
-            <div class="market-group-title" style="display:flex; justify-content:space-between; align-items:center;">
-              <span>🧠 Прогноз ИИ «Темшик»</span>
-              <span class="badge" style="background:rgba(59,130,246,0.15); color:#60a5fa; font-size:0.75rem; padding:2px 8px; border-radius:12px;">Ensemble v1</span>
-            </div>
+            <div class="market-group-title">🧠 Аналитика «Темшик»</div>
 
             ${insights?.probabilities ? `
               <div style="margin: 12px 0 8px 0;">
@@ -931,24 +928,20 @@ export class UIRenderer {
                   <div style="background:#ef4444; width:${insights.probabilities.away * 100}%;"></div>
                 </div>
                 <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:var(--text-muted); margin-top:4px;">
-                  <span>Уверенность модели: ${Math.round((insights.confidence || 0.6) * 100)}%</span>
+                  <span>Уверенность: ${Math.round((insights.confidence || 0.6) * 100)}%</span>
                   ${insights.elo ? `<span>Elo: ${insights.elo.rating_t1} vs ${insights.elo.rating_t2}</span>` : ''}
                 </div>
               </div>
             ` : ''}
 
-            <!-- Key Factors ("Why?") -->
+            <!-- Key Factors -->
             <div style="margin-top: 10px; border-top: 1px solid var(--border-subtle); padding-top: 10px;">
-              <div style="font-size:0.8rem; font-weight:700; color:var(--text-secondary); margin-bottom:6px;">💡 Ключевые факторы модели (Why?):</div>
+              <div style="font-size:0.8rem; font-weight:700; color:var(--text-secondary); margin-bottom:6px;">💡 Ключевые факторы:</div>
               ${((insights?.key_factors && insights.key_factors.length > 0) ? insights.key_factors : (insights?.insights || [])).map(txt => `
                 <div class="insight-card" style="padding:6px 10px; margin-bottom:6px; font-size:0.8rem; background:rgba(255,255,255,0.03); border-left:3px solid var(--primary-accent); border-radius:4px;">
                   <span>${txt}</span>
                 </div>
               `).join('')}
-            </div>
-
-            <div style="margin-top:12px; font-size:0.7rem; color:var(--text-muted); text-align:center; font-style:italic;">
-              ⚠️ Прогноз AI — аналитическая оценка, а не гарантия результата.
             </div>
           </div>
         </div>
