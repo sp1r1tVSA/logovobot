@@ -80,7 +80,7 @@ class TestPredictionIdempotency(unittest.TestCase):
         """Вернуть базу в состояние прода: уникального индекса нет, дубли есть."""
         with database.transaction() as conn:
             conn.execute("DROP INDEX IF EXISTS uniq_predictions_match_model")
-            conn.execute("DELETE FROM schema_migrations WHERE version = '019_prediction_one_row_per_model'")
+            conn.execute("DELETE FROM schema_migrations WHERE version = '021_prediction_one_row_per_model'")
             for _ in range(copies):
                 conn.execute(
                     """INSERT INTO predictions (match_id, division_id, season_id, model_version,
@@ -234,7 +234,7 @@ class TestPredictionIdempotency(unittest.TestCase):
     def test_schema_migrations_row_is_recorded(self):
         with database.transaction() as conn:
             row = conn.execute(
-                "SELECT 1 FROM schema_migrations WHERE version = '019_prediction_one_row_per_model'"
+                "SELECT 1 FROM schema_migrations WHERE version = '021_prediction_one_row_per_model'"
             ).fetchone()
         self.assertIsNotNone(row)
 
@@ -255,7 +255,7 @@ class TestPredictionIdempotency(unittest.TestCase):
         self.assertNotIn("uniq_predictions_match_model", self._index_names())
         with database.transaction() as conn:
             guard = conn.execute(
-                "SELECT 1 FROM schema_migrations WHERE version = '019_prediction_one_row_per_model'"
+                "SELECT 1 FROM schema_migrations WHERE version = '021_prediction_one_row_per_model'"
             ).fetchone()
         self.assertIsNone(guard, "миграция отметилась выполненной, не создав индекс")
 
@@ -263,7 +263,7 @@ class TestPredictionIdempotency(unittest.TestCase):
                          "исторические predictions изменились или удалились")
         self.assertEqual(len(ids_before), 3)
         joined = "\n".join(logs.output)
-        self.assertIn("019_prediction_one_row_per_model", joined)
+        self.assertIn("021_prediction_one_row_per_model", joined)
         self.assertIn("not applied", joined)
 
     def test_saves_stay_idempotent_while_the_migration_is_blocked(self):

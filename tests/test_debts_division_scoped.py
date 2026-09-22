@@ -77,14 +77,23 @@ class TestDebtsAreDivisionScoped(unittest.TestCase):
         self.assertEqual(tracked, {501})
         self.assertEqual(digest, {501})
 
-    def test_closed_earlier_round_of_same_division_is_debt(self):
+    def test_earlier_round_without_deadline_is_not_debt(self):
+        """Раньше тур ниже максимального открытого считался долгом даже без
+        дедлайна. Теперь долг — только от дедлайна или досрочного закрытия."""
         with database.transaction() as conn:
             conn.execute("UPDATE rounds SET is_open = 1 WHERE division_id = 1 AND round_number = 2")
             conn.execute("UPDATE rounds SET deadline = ? WHERE division_id = 1 AND round_number = 2",
                          ((datetime.datetime.now() + datetime.timedelta(days=3)).strftime("%d.%m.%Y %H:%M"),))
         ids = {m["id"] for m in database.get_detailed_overdue_matches()}
-        self.assertEqual(ids, {101})
+        self.assertEqual(ids, set())
 
+    def test_closed_round_with_passed_deadline_is_debt(self):
+        with database.transaction() as conn:
+            conn.execute("UPDATE rounds SET deadline = ? WHERE division_id = 1 AND round_number = 1", (self.past_dl,))
+        ids = {m["id"] for m in database.get_detailed_overdue_matches()}
+        self.assertEqual(ids, {101})
+        self.assertTrue(database.is_match_overdue(101))
+        self.assertFalse(database.is_match_overdue(102))
 
 if __name__ == "__main__":
     unittest.main()

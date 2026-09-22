@@ -1,8 +1,8 @@
 """48-часовой регламент долгов: ТП / ТН, продление и правило одного варна.
 
-Покрывает связку `database.set_technical_result` →
-`services.settlement_engine.settle_match_predictions(..., "voided")` →
-`handlers.admin._process_technical_verdict`:
+Покрывает связку `database.apply_technical_verdict` (→ `set_technical_result` →
+`services.settlement_engine.settle_match_predictions(..., "voided")`) →
+`handlers.admin._report_technical_verdict`:
 
 * ТП — победитель получает 3 очка и −1 варн, игнорщик 0 очков и +1 варн
   (раньше варн снимался с ОБОИХ — это и был баг);
@@ -18,7 +18,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -176,9 +176,12 @@ class DebtTechnicalResultsBase(unittest.TestCase):
         self.fail(f"Команда {team} не найдена в таблице дивизиона")
 
     def _verdict(self, verdict: str):
-        from handlers.admin import _process_technical_verdict
+        from handlers.admin import _report_technical_verdict
         ctx = self._make_context()
-        asyncio.run(_process_technical_verdict(ctx, self.MATCH_ID, verdict, admin_id=self.ADMIN_ID))
+        outcome = database.apply_technical_verdict(self.MATCH_ID, verdict, admin_id=self.ADMIN_ID)
+        if outcome["applied"]:
+            asyncio.run(_report_technical_verdict(ctx, self.MATCH_ID, verdict, outcome))
+        self.last_outcome = outcome
         return ctx
 
 
@@ -191,7 +194,6 @@ class TestTechnicalWinHome(DebtTechnicalResultsBase):
         self._place_bet(outcome="p1", odd=2.00)
         self._close_round()
 
-        database.set_technical_result(self.MATCH_ID, 1, 0, "tp_home")
         self._verdict("home")
 
         m = self._match_row()
@@ -244,7 +246,6 @@ class TestTechnicalWinAway(DebtTechnicalResultsBase):
         self._place_bet(outcome="p1", odd=2.00)
         self._close_round()
 
-        database.set_technical_result(self.MATCH_ID, 0, 1, "tp_away")
         self._verdict("away")
 
         m = self._match_row()
@@ -275,7 +276,6 @@ class TestTechnicalDraw(DebtTechnicalResultsBase):
         self._place_bet(outcome="p1", odd=2.00)
         self._close_round()
 
-        database.set_technical_result(self.MATCH_ID, 0, 0, "tech_draw")
         self._verdict("draw")
 
         m = self._match_row()
@@ -306,9 +306,10 @@ class TestMatchExtension(DebtTechnicalResultsBase):
         self._place_bet(outcome="p1", odd=2.00)
         self._close_round(hours_overdue=50.0)
 
-        # Админа уже дёрнули на 48-м часе.
-        database.record_debt_stage(self.MATCH_ID, "admin_escalated_48h")
-        self.assertTrue(database.has_debt_stage(self.MATCH_ID, "admin_escalated_48h"))
+        # Админа уже дёрнули по сроку долга.
+        database.sync_match_debts()
+        self.assertTrue(database.mark_debt_stage(self.MATCH_ID, "escalated"))
+        self.assertEqual(database.get_match_debt(self.MATCH_ID)["state"], "escalated")
 
         until = database.extend_match_deadline_by_hours(self.MATCH_ID, 24)
         self.assertIsNotNone(until)
@@ -325,7 +326,9 @@ class TestMatchExtension(DebtTechnicalResultsBase):
         self.assertLess(delta_h, 25.0)
 
         # Эскалация сброшена: после продления админа спросят заново.
-        self.assertFalse(database.has_debt_stage(self.MATCH_ID, "admin_escalated_48h"))
+        debt = database.get_match_debt(self.MATCH_ID)
+        self.assertIsNone(debt["escalated_at"])
+        self.assertEqual(debt["state"], "active")
 
         # ГЛАВНОЕ: ставки не возвращены, они висят до реального исхода.
         self.assertEqual(self._bet_item_statuses(), ["pending"])
@@ -363,19 +366,20 @@ class TestOneWarnPerDebtRule(DebtTechnicalResultsBase):
         self._close_round(hours_overdue=30.0)
 
         ctx = self._make_context()
+        # Первый прогон — сообщение о долге, второй — мягкое предупреждение.
+        asyncio.run(admin_handlers._run_debt_lifecycle_tracker(ctx))
         asyncio.run(admin_handlers._run_debt_lifecycle_tracker(ctx))
 
         # 30 часов просрочки — напоминание ушло, варнов нет.
-        self.assertTrue(database.has_debt_stage(self.MATCH_ID, "warn_24h"))
+        debt = database.get_match_debt(self.MATCH_ID)
+        self.assertIsNotNone(debt["last_reminder_at"])
+        self.assertIsNotNone(debt["soft_warned_at"])
         self.assertEqual(database.get_user_warn_count(self.P1_ID), 0)
         self.assertEqual(database.get_user_warn_count(self.P2_ID), 0)
 
-        # Каскад +48/+72/+96 удалён вместе с авто-варном на 24 часах.
-        for stage in ("warn_48h", "warn_72h", "warn_96h"):
-            self.assertFalse(database.has_debt_stage(self.MATCH_ID, stage))
-
-        # И до 48 часов админа не дёргают.
-        self.assertFalse(database.has_debt_stage(self.MATCH_ID, "admin_escalated_48h"))
+        # И до срока долга админа не дёргают.
+        self.assertIsNone(debt["escalated_at"])
+        self.assertEqual(debt["state"], "active")
 
         self.assertTrue(ctx.bot.send_message.await_count >= 1)
 
@@ -398,12 +402,14 @@ class TestOneWarnPerDebtRule(DebtTechnicalResultsBase):
         self._seed_match()
         self._close_round()
 
-        database.set_technical_result(self.MATCH_ID, 0, 0, "tech_draw")
         self._verdict("draw")
 
         self.assertEqual(database.get_user_warn_count(self.P1_ID), 1)
         self.assertEqual(database.get_user_warn_count(self.P2_ID), 1)
-        self.assertTrue(database.has_debt_stage(self.MATCH_ID, "verdict_processed"))
+        debt = database.get_match_debt(self.MATCH_ID)
+        self.assertIsNotNone(debt["verdict_applied_at"])
+        self.assertEqual(debt["state"], "resolved")
+        self.assertEqual(debt["resolution"], "tech_draw")
 
         # Повторный клик админа по той же карточке не выдаёт второй варн.
         self._verdict("draw")
@@ -415,7 +421,6 @@ class TestOneWarnPerDebtRule(DebtTechnicalResultsBase):
         self._seed_match()
         self._close_round()
 
-        database.set_technical_result(self.MATCH_ID, 1, 0, "tp_home")
         self._verdict("home")
         self._verdict("home")
 
@@ -426,6 +431,99 @@ class TestOneWarnPerDebtRule(DebtTechnicalResultsBase):
                 (self.P2_ID,),
             ).fetchone()["c"]
         self.assertEqual(warns, 1)
+
+
+class TestVerdictOnlyForDebts(DebtTechnicalResultsBase):
+    """Вердикт до того, как матч стал долгом, — только счёт, без варнов."""
+
+    def test_verdict_before_deadline_changes_only_the_score(self):
+        self._seed_players(p1_warns=1, p2_warns=1)
+        self._seed_match()
+        self._place_bet(outcome="p1", odd=2.00)
+
+        self._verdict("home")
+
+        self.assertFalse(self.last_outcome["is_debt"])
+        self.assertFalse(self.last_outcome["applied"])
+        m = self._match_row()
+        self.assertEqual((m["player1_score"], m["player2_score"]), (1, 0))
+        self.assertEqual(database.get_user_warn_count(self.P1_ID), 1)
+        self.assertEqual(database.get_user_warn_count(self.P2_ID), 1)
+        self.assertIsNone(database.get_match_debt(self.MATCH_ID))
+        self._assert_bet_fully_refunded()
+
+    def test_second_verdict_changes_score_but_not_warns(self):
+        self._seed_players()
+        self._seed_match()
+        self._close_round()
+
+        self._verdict("home")
+        self.assertTrue(self.last_outcome["applied"])
+        self._verdict("away")
+
+        self.assertTrue(self.last_outcome["is_debt"])
+        self.assertFalse(self.last_outcome["applied"])
+        m = self._match_row()
+        self.assertEqual((m["player1_score"], m["player2_score"]), (0, 1))
+        self.assertEqual(database.get_user_warn_count(self.P1_ID), 0)
+        self.assertEqual(database.get_user_warn_count(self.P2_ID), 1)
+
+    def test_unknown_verdict_is_rejected(self):
+        with self.assertRaises(ValueError):
+            database.apply_technical_verdict(self.MATCH_ID, "forfeit")
+
+
+class TestDebtPlayedReward(DebtTechnicalResultsBase):
+    """Сыгранный долг: −1 варн обоим, один раз на матч."""
+
+    def _play(self):
+        with database.transaction() as conn:
+            conn.cursor().execute(
+                "UPDATE matches SET status = 'confirmed', player1_score = 2, player2_score = 1, "
+                "played_at = datetime('now', '+3 hours') WHERE id = ?",
+                (self.MATCH_ID,),
+            )
+
+    def test_reward_is_granted_once(self):
+        self._seed_players(p1_warns=2, p2_warns=0)
+        self._seed_match()
+        self._close_round()
+        self._play()
+
+        first = database.claim_debt_played_reward(self.MATCH_ID)
+        self.assertEqual(sorted(first), [(self.P1_ID, 1, True), (self.P2_ID, 0, False)])
+        self.assertIsNone(database.claim_debt_played_reward(self.MATCH_ID))
+        self.assertEqual(database.get_user_warn_count(self.P1_ID), 1)
+        self.assertIsNotNone(database.get_match_debt(self.MATCH_ID)["reward_given_at"])
+
+    def test_match_played_before_it_became_a_debt_gets_nothing(self):
+        self._seed_players(p1_warns=2)
+        self._seed_match()
+        self._play()
+        self.assertIsNone(database.claim_debt_played_reward(self.MATCH_ID))
+        self.assertEqual(database.get_user_warn_count(self.P1_ID), 2)
+
+    def test_no_reward_after_a_verdict(self):
+        self._seed_players(p1_warns=2, p2_warns=2)
+        self._seed_match()
+        self._close_round()
+        self._verdict("draw")
+        self.assertIsNone(database.claim_debt_played_reward(self.MATCH_ID))
+        self.assertEqual(database.get_user_warn_count(self.P1_ID), 3)
+
+    def test_handler_sends_dms_and_preds_summary(self):
+        from handlers import cabinet
+        self._seed_players(p1_warns=1)
+        self._seed_match()
+        self._close_round()
+        self._play()
+        ctx = self._make_context()
+        with patch("handlers.cabinet.safe_send_notification", new=AsyncMock()) as dm,              patch("handlers.admin._send_to_warns_thread", new=AsyncMock()) as preds:
+            asyncio.run(cabinet.handle_debt_played_rewards(ctx, self.MATCH_ID, self.ROUND))
+            asyncio.run(cabinet.handle_debt_played_rewards(ctx, self.MATCH_ID, self.ROUND))
+        self.assertEqual(preds.await_count, 1)
+        self.assertGreaterEqual(dm.await_count, 2)
+        self.assertEqual(database.get_user_warn_count(self.P1_ID), 0)
 
 
 if __name__ == "__main__":

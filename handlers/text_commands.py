@@ -576,11 +576,18 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
             )
             return True
         rn = int(nums[0])
+        # Закрытие переводит несыгранные матчи в долг — поэтому через тот же
+        # экран подтверждения, что и в админке, а не сразу.
+        from handlers.admin import close_round_preview_text
+        preview = await asyncio.to_thread(database.preview_close_round, rn, division_id)
         division_name = await _division_name(division_id)
-        await asyncio.to_thread(database.update_round_status, rn, is_open=False, division_id=division_id)
+        keyboard = [[
+            InlineKeyboardButton("🔴 Да, закрыть тур", callback_data=f"admin_div_round_close_ok:{division_id}:{rn}")
+        ]]
         await msg.reply_text(
-            f"🔒 <b>Тур {rn} — {html.escape(division_name)} закрыт.</b>",
-            parse_mode="HTML"
+            f"<b>{html.escape(division_name)}</b>\n" + close_round_preview_text(preview),
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(keyboard),
         )
         return True
 

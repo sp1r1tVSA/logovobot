@@ -35,35 +35,6 @@ class TestDebtLifecycle(unittest.TestCase):
         except Exception:
             pass
 
-    def test_debt_reminders_table_and_stages(self):
-        """Test recording and checking debt lifecycle stages."""
-        match_id = 999
-        with database.transaction() as conn:
-            conn.execute("INSERT INTO matches (id, round_number, status) VALUES (?, 1, 'pending')", (match_id,))
-
-        self.assertFalse(database.has_debt_stage(match_id, "deadline_passed"))
-        self.assertFalse(database.has_debt_stage(match_id, "warn_24h"))
-
-        database.record_debt_stage(match_id, "deadline_passed")
-        self.assertTrue(database.has_debt_stage(match_id, "deadline_passed"))
-        self.assertFalse(database.has_debt_stage(match_id, "warn_24h"))
-
-        database.record_debt_stage(match_id, "warn_24h")
-        self.assertTrue(database.has_debt_stage(match_id, "warn_24h"))
-
-    def test_debt_12h_cycle_reminders(self):
-        """Test 12h cycle reminder timestamp tracking."""
-        match_id = 101
-        with database.transaction() as conn:
-            conn.execute("INSERT INTO matches (id, round_number, status) VALUES (?, 1, 'pending')", (match_id,))
-
-        self.assertIsNone(database.get_last_debt_12h_reminder(match_id))
-
-        database.record_debt_12h_reminder(match_id)
-        last_dt = database.get_last_debt_12h_reminder(match_id)
-        self.assertIsNotNone(last_dt)
-        self.assertIsInstance(last_dt, datetime.datetime)
-
     def test_apply_debt_played_reward(self):
         """Test reward for clearing debt matches (-1 warn, 0 stays 0)."""
         user_id = 777123
@@ -146,7 +117,8 @@ class TestDebtLifecycle(unittest.TestCase):
             conn.execute("INSERT INTO rounds (round_number, is_open, deadline) VALUES (1, 0, '15.08.2026 12:00')")
             conn.execute("INSERT INTO matches (id, round_number, player1_id, player2_id, player1_team, player2_team, status) VALUES (501, 1, 301, 302, 'Ливерпуль', 'Манчестер Сити', 'pending')")
 
-            # Open round 2 without a deadline — a debt, but with a zero clock
+            # Open round 2 without a deadline — legacy state, not a debt: a debt
+            # needs a deadline to be late against (services.debt_policy)
             conn.execute("INSERT INTO rounds (round_number, is_open, deadline) VALUES (2, 1, NULL)")
             conn.execute("INSERT INTO matches (id, round_number, player1_id, player2_id, player1_team, player2_team, status) VALUES (502, 2, 301, 302, 'Ливерпуль', 'Манчестер Сити', 'pending')")
 
@@ -155,15 +127,11 @@ class TestDebtLifecycle(unittest.TestCase):
             conn.execute("INSERT INTO matches (id, round_number, player1_id, player2_id, player1_team, player2_team, status) VALUES (525, 25, 301, 302, 'Ливерпуль', 'Манчестер Сити', 'pending')")
 
         overdue = database.get_detailed_overdue_matches()
-        self.assertEqual(len(overdue), 2)
         match_ids = {m["id"] for m in overdue}
-        self.assertIn(501, match_ids)
-        self.assertIn(502, match_ids)
-        self.assertNotIn(525, match_ids)
+        self.assertEqual(match_ids, {501})
 
         by_id = {m["id"]: m for m in overdue}
         self.assertGreater(by_id[501]["hours_overdue"], 24.0)
-        self.assertEqual(by_id[502]["hours_overdue"], 0.0)
 
         # Test find_user_by_team
         u = database.find_user_by_team("ливерпуль")
@@ -171,8 +139,8 @@ class TestDebtLifecycle(unittest.TestCase):
         self.assertEqual(u["telegram_id"], 301)
 
         # Test count_user_remaining_debts
-        self.assertEqual(database.count_user_remaining_debts(301), 2)
-        self.assertEqual(database.count_user_remaining_debts(302), 2)
+        self.assertEqual(database.count_user_remaining_debts(301), 1)
+        self.assertEqual(database.count_user_remaining_debts(302), 1)
         self.assertEqual(database.count_user_remaining_debts(999), 0)
 
     def test_debt_played_reward_cross_round_and_stages(self):

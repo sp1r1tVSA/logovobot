@@ -235,6 +235,17 @@ class TestAdminBetsTracking(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b1_count, 1)
         self.assertEqual(b1_bets[0]["id"], bet_id_1)
 
+    async def test_overview_header_with_user_filter(self):
+        """Фильтр по игроку: `get_user` отдаёт sqlite3.Row, у которого нет `.get()`."""
+        from handlers.admin_bets import _build_overview_header
+
+        stats = database.get_bets_summary_stats()
+        header = _build_overview_header(stats, filter_user_id=self.bettor1_id)
+        self.assertIn("@bettor_one", header)
+
+        unknown = _build_overview_header(stats, filter_user_id=999999999)
+        self.assertIn("ID 999999999", unknown)
+
     async def test_get_bet_by_id(self):
         """Проверка детальной выборки конкретной ставки."""
         slip = [{"match_id": self.match_id, "outcome": "p1"}]
