@@ -77,6 +77,20 @@ class TestPlayerNameNormalization(unittest.TestCase):
         self.assertFalse(is_same_footballer("Lucas Hernandez", "Theo Hernandez"))
         self.assertFalse(is_same_footballer("Rodrygo Goes", "Rodrigo Silva"))
 
+    def test_match_roster_name_tiers(self):
+        from services.player_names import match_roster_name
+        roster = ["EMEGA", "ROGERS", "PEDRO NETO", "ESTÊVÃO"]
+        self.assertEqual(match_roster_name("Estevao", roster), "ESTÊVÃO")
+        self.assertEqual(match_roster_name("Neto", roster), "PEDRO NETO")
+        # A one-letter slip lands on the only close squad name.
+        self.assertEqual(match_roster_name("Emegha", roster), "EMEGA")
+        # Nobody close: no guess.
+        self.assertIsNone(match_roster_name("Palmer", roster))
+        # Short names never go fuzzy.
+        self.assertIsNone(match_roster_name("Neto", ["NETTO"]))
+        # Close to two squad players at once: ambiguous, left unmatched.
+        self.assertIsNone(match_roster_name("Martinezz", ["MARTINEZA", "MARTINEZO"]))
+
 
 class TestSquadPlayerDatabaseRules(unittest.TestCase):
     """Test database rules: upsert, deduplication, canonical IDs, club isolation."""

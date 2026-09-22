@@ -96,6 +96,59 @@ class TestClubCard(unittest.TestCase):
         self.assertEqual(card_after["league_stats"]["points"], 3)
         self.assertEqual(card_after["top_scorers"][0]["player_name"], "David Neres")
 
+    def test_club_card_ranks_inside_its_own_division(self):
+        """Клуб 5-го дивизиона считается по своей таблице, а не по всей лиге."""
+        database.register_user(3001, "chelsea_boss", "manager", "Челси")
+        database.register_user(3002, "liverpool_boss", "manager", "Ливерпуль")
+        database.register_user(3003, "porto_boss", "manager", "Порту")
+        season_id = database.get_active_season()["id"]
+        with database.transaction() as conn:
+            c = conn.cursor()
+            c.execute("UPDATE users SET division_id = 5 WHERE telegram_id IN (3001, 3002)")
+            c.execute("UPDATE users SET division_id = 1 WHERE telegram_id = 3003")
+            c.execute(
+                "INSERT INTO matches (round_number, player1_team, player2_team, player1_score, player2_score, "
+                "status, tournament_type, division_id, season_id) "
+                "VALUES (1, 'Ливерпуль', 'Челси', 4, 2, 'confirmed', 'league', 5, ?)", (season_id,)
+            )
+            c.execute(
+                "INSERT INTO matches (round_number, player1_team, player2_team, player1_score, player2_score, "
+                "status, tournament_type, division_id, season_id) "
+                "VALUES (2, 'Челси', 'Ливерпуль', 3, 0, 'confirmed', 'league', 5, ?)", (season_id,)
+            )
+
+        card = database.get_club_card_data("Челси")
+        self.assertEqual(card["division_id"], 5)
+        stats = card["league_stats"]
+        self.assertEqual((stats["played"], stats["wins"], stats["losses"]), (2, 1, 1))
+        self.assertEqual((stats["goals_scored"], stats["goals_conceded"], stats["points"]), (5, 4, 3))
+        # Ливерпуль тоже 3 очка, но разница у Челси лучше; Порту из 1-го дивизиона не в счёт.
+        self.assertEqual(stats["rank"], 1)
+        self.assertEqual(card["recent_form"], ["L", "W"])
+
+    def test_club_card_folds_player_spellings_onto_the_squad(self):
+        """'Emegha' в событиях и 'EMEGA' в заявке — один игрок, а не два бомбардира."""
+        database.register_user(3101, "chelsea_boss", "manager", "Челси")
+        database.save_squad_players("Челси", ["EMEGA", "ROGERS"])
+        with database.transaction() as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO matches (round_number, player1_team, player2_team, player1_score, player2_score, status, tournament_type) "
+                "VALUES (1, 'Челси', 'Аль-Наср', 4, 1, 'confirmed', 'league')"
+            )
+            m_id = c.lastrowid
+            c.execute("INSERT INTO match_events (match_id, player_name, team_name, event_type, count) VALUES (?, 'EMEGA', 'Челси', 'goal', 1)", (m_id,))
+            c.execute("INSERT INTO match_events (match_id, player_name, team_name, event_type, count) VALUES (?, 'Emegha', 'Челси', 'goal', 3)", (m_id,))
+            c.execute("INSERT INTO match_events (match_id, player_name, team_name, event_type, count) VALUES (?, 'Emegha', 'Челси', 'assist', 1)", (m_id,))
+
+        card = database.get_club_card_data("Челси")
+        self.assertEqual(card["top_scorers"], [{"player_name": "EMEGA", "goals": 4, "assists": 1}])
+        self.assertEqual(card["top_assists"][0]["player_name"], "EMEGA")
+
+        squad = {p["player_name"]: p for p in database.get_club_squad_stats("Челси")}
+        self.assertEqual(set(squad), {"EMEGA", "ROGERS"})
+        self.assertEqual(squad["EMEGA"]["goals"], 4)
+
     def test_club_match_history_and_summary(self):
         """Test get_club_match_history and get_all_clubs_summary."""
         with database.transaction() as conn:

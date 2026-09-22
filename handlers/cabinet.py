@@ -672,7 +672,9 @@ async def send_or_edit_club_card(update: Update, context: ContextTypes.DEFAULT_T
     mgr_id = mgr.get("telegram_id") if mgr else None
     avatar_path = await get_cached_or_fetch_user_avatar(context.bot, mgr_id) if mgr_id else None
 
-    buf = await asyncio.to_thread(club_card_generator.generate_club_card, card_data, avatar_path)
+    buf = await asyncio.to_thread(
+        club_card_generator.generate_club_card, card_data, avatar_path, card_data.get("division_id")
+    )
 
     # Compact inline keyboard (2 buttons per row, minimal labels)
     keyboard = [

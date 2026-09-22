@@ -12,6 +12,7 @@ Provides deterministic normalization:
 
 import re
 import unicodedata
+from difflib import SequenceMatcher
 
 SPECIAL_CHAR_MAP: dict[str, str] = {
     'ø': 'o', 'Ø': 'O',
@@ -125,3 +126,47 @@ def is_same_footballer(name1: str, name2: str) -> bool:
             return True
 
     return False
+
+
+# A one-letter OCR/typing slip ('Emegha' for the squad's 'EMEGA') scores ~0.9;
+# two different surnames of one club rarely come that close, and the margin
+# keeps a name that sits near two squad players unmatched.
+ROSTER_FUZZY_MIN_LEN = 5
+ROSTER_FUZZY_THRESHOLD = 0.85
+ROSTER_FUZZY_MARGIN = 0.07
+
+
+def match_roster_name(name: str | None, roster: list[str]) -> str | None:
+    """
+    Squad name of one club that `name` stands for, or None.
+
+    Tiers stop at the first unambiguous answer: exact normalized key, then
+    `is_same_footballer`, then a guarded fuzzy match on the compact key. A tie at
+    any tier returns None instead of guessing. Meant for read-side aggregation
+    (stats of one club); it never decides anything that is written back.
+    """
+    key = normalize_player_name_key(name)
+    if not key or not roster:
+        return None
+
+    hits = {n for n in roster if normalize_player_name_key(n) == key}
+    if not hits:
+        hits = {n for n in roster if is_same_footballer(name, n)}
+    if hits:
+        return hits.pop() if len(hits) == 1 else None
+
+    compact = key.replace(" ", "")
+    if len(compact) < ROSTER_FUZZY_MIN_LEN:
+        return None
+    scored = sorted(
+        (
+            (SequenceMatcher(None, compact, normalize_player_name_key(n).replace(" ", "")).ratio(), n)
+            for n in roster
+        ),
+        reverse=True,
+    )
+    best_score, best_name = scored[0]
+    runner_up = scored[1][0] if len(scored) > 1 else 0.0
+    if best_score >= ROSTER_FUZZY_THRESHOLD and best_score - runner_up >= ROSTER_FUZZY_MARGIN:
+        return best_name
+    return None

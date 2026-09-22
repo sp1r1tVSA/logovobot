@@ -16,6 +16,7 @@ from services.player_names import (
     normalize_player_name_key,
     normalize_footballer_name,
     is_same_footballer,
+    match_roster_name,
 )
 
 logger = logging.getLogger(__name__)
@@ -8424,13 +8425,55 @@ def list_cup_topics(season_id: int | None = None) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+def _club_player_event_totals(cursor: sqlite3.Cursor, canon: str, roster: list[str], season_id: int) -> list[dict]:
+    """Season goals/assists of one club's players, each spelling folded onto its squad name.
+
+    Events keep the name as it was recognized, so one footballer can sit under
+    several spellings ('EMEGA' and 'Emegha'); summing per raw string would list
+    him twice. A spelling that stands for no squad player is kept, merged only
+    with spellings of the same normalized key.
+    """
+    cursor.execute("""
+        SELECT
+            me.player_name, me.team_name,
+            COALESCE(SUM(CASE WHEN me.event_type = 'goal' THEN me.count ELSE 0 END), 0) AS goals,
+            COALESCE(SUM(CASE WHEN me.event_type = 'assist' THEN me.count ELSE 0 END), 0) AS assists
+        FROM match_events me
+        JOIN matches m ON me.match_id = m.id
+        WHERE m.status = 'confirmed'
+          AND (m.season_id = ? OR m.season_id IS NULL)
+        GROUP BY me.team_name, me.player_name
+        ORDER BY MIN(me.id) ASC
+    """, (season_id,))
+    totals: dict[str, dict] = {}
+    for r in cursor.fetchall():
+        raw = (r["player_name"] or "").strip()
+        if not raw or not teams_match(r["team_name"], canon):
+            continue
+        name = match_roster_name(raw, roster) or raw
+        key = normalize_player_name_key(name) or name.lower()
+        entry = totals.setdefault(key, {"player_name": name, "goals": 0, "assists": 0})
+        entry["goals"] += r["goals"]
+        entry["assists"] += r["assists"]
+    return list(totals.values())
+
+
 def get_club_card_data(team_name: str) -> dict:
     """
     Get comprehensive club profile & statistics independent of who the current manager is.
+
+    Standings, form and player stats are those of the active season, in the
+    division the club plays in: the table is only meaningful inside one division,
+    and ranking a club among every club of the league put a division-5 side at
+    "#54" with its matches not counted at all.
     """
+    act = get_active_season()
+    season_id = act["id"] if act else 1
+    canon = resolve_team_name(team_name) or team_name.strip()
+    division_id = get_team_division_id(canon, season_id=season_id)
+
     with transaction() as conn:
         cursor = conn.cursor()
-        canon = resolve_team_name(team_name) or team_name.strip()
 
         # 1. Current Manager
         cursor.execute(
@@ -8453,7 +8496,7 @@ def get_club_card_data(team_name: str) -> dict:
             }
 
         # 2. Standings & League Stats
-        standings = get_standings()
+        standings = get_standings(division_id=division_id, season_id=season_id)
         league_stats = {
             "rank": 0,
             "played": 0,
@@ -8481,7 +8524,7 @@ def get_club_card_data(team_name: str) -> dict:
                 break
 
         # 3. Recent Form (Last 5 matches)
-        form_map = get_teams_recent_form(limit=5)
+        form_map = get_teams_recent_form(limit=5, division_id=division_id, season_id=season_id)
         recent_form = form_map.get(canon.lower(), [])
 
         # 4. Cup Stats
@@ -8515,36 +8558,16 @@ def get_club_card_data(team_name: str) -> dict:
                 "is_eliminated": bool(c_row["winner_name"] and not teams_match(c_row["winner_name"], canon)),
             }
 
-        # 5. Top Scorers and Assisters of the Club
-        cursor.execute("""
-            SELECT 
-                me.player_name, me.team_name,
-                COALESCE(SUM(CASE WHEN me.event_type = 'goal' THEN me.count ELSE 0 END), 0) AS goals,
-                COALESCE(SUM(CASE WHEN me.event_type = 'assist' THEN me.count ELSE 0 END), 0) AS assists
-            FROM match_events me
-            JOIN matches m ON me.match_id = m.id
-            WHERE m.status = 'confirmed'
-            GROUP BY LOWER(me.team_name), LOWER(me.player_name)
-        """)
-        all_events = cursor.fetchall()
-        event_players_dict: dict[str, dict] = {}
-        for r in all_events:
-            if teams_match(r["team_name"], canon):
-                p_name = r["player_name"]
-                if p_name not in event_players_dict:
-                    event_players_dict[p_name] = {"player_name": p_name, "goals": 0, "assists": 0}
-                event_players_dict[p_name]["goals"] += r["goals"]
-                event_players_dict[p_name]["assists"] += r["assists"]
-        event_players = list(event_players_dict.values())
-        
-        top_scorers = [p for p in sorted(event_players, key=lambda x: (x["goals"], x["assists"]), reverse=True) if p["goals"] > 0][:5]
-        top_assists = [p for p in sorted(event_players, key=lambda x: (x["assists"], x["goals"]), reverse=True) if p["assists"] > 0][:5]
-
-        # 6. Registered Squad
+        # 5. Registered Squad
         cursor.execute(
             "SELECT player_name, team_name FROM squad_players ORDER BY id ASC"
         )
         squad_names = [r["player_name"] for r in cursor.fetchall() if teams_match(r["team_name"], canon)]
+
+        # 6. Top Scorers and Assisters of the Club
+        event_players = _club_player_event_totals(cursor, canon, squad_names, season_id)
+        top_scorers = [p for p in sorted(event_players, key=lambda x: (x["goals"], x["assists"]), reverse=True) if p["goals"] > 0][:5]
+        top_assists = [p for p in sorted(event_players, key=lambda x: (x["assists"], x["goals"]), reverse=True) if p["assists"] > 0][:5]
 
         # 7. Unplayed Matches & Debts
         cursor.execute("SELECT * FROM rounds")
@@ -8602,6 +8625,7 @@ def get_club_card_data(team_name: str) -> dict:
 
         return {
             "team_name": canon,
+            "division_id": division_id,
             "manager": manager,
             "league_stats": league_stats,
             "recent_form": recent_form,
@@ -8618,7 +8642,11 @@ def get_club_card_data(team_name: str) -> dict:
 def get_club_squad_stats(team_name: str) -> list[dict]:
     """
     Get full list of squad players for a club with their individual goal and assist stats.
+
+    Stats are the active season's, the same numbers the club card shows.
     """
+    act = get_active_season()
+    season_id = act["id"] if act else 1
     with transaction() as conn:
         cursor = conn.cursor()
         canon = resolve_team_name(team_name) or team_name.strip()
@@ -8628,31 +8656,16 @@ def get_club_squad_stats(team_name: str) -> list[dict]:
         )
         squad_names = [r["player_name"] for r in cursor.fetchall() if teams_match(r["team_name"], canon)]
 
-        cursor.execute("""
-            SELECT 
-                me.player_name, me.team_name,
-                COALESCE(SUM(CASE WHEN me.event_type = 'goal' THEN me.count ELSE 0 END), 0) AS goals,
-                COALESCE(SUM(CASE WHEN me.event_type = 'assist' THEN me.count ELSE 0 END), 0) AS assists
-            FROM match_events me
-            JOIN matches m ON me.match_id = m.id
-            WHERE m.status = 'confirmed'
-            GROUP BY LOWER(me.team_name), LOWER(me.player_name)
-        """)
-        stats_map: dict[str, dict] = {}
-        for r in cursor.fetchall():
-            if teams_match(r["team_name"], canon):
-                p_l = r["player_name"].lower()
-                if p_l not in stats_map:
-                    stats_map[p_l] = {"goals": 0, "assists": 0}
-                stats_map[p_l]["goals"] += r["goals"]
-                stats_map[p_l]["assists"] += r["assists"]
+        stats_map = {
+            p["player_name"]: p
+            for p in _club_player_event_totals(cursor, canon, squad_names, season_id)
+        }
 
         result = []
         seen = set()
         for p_name in squad_names:
-            p_lower = p_name.lower()
-            seen.add(p_lower)
-            p_stat = stats_map.get(p_lower, {"goals": 0, "assists": 0})
+            seen.add(p_name)
+            p_stat = stats_map.get(p_name, {"goals": 0, "assists": 0})
             result.append({
                 "player_name": p_name,
                 "goals": p_stat["goals"],
@@ -8661,10 +8674,10 @@ def get_club_squad_stats(team_name: str) -> list[dict]:
                 "is_registered": True,
             })
 
-        for p_lower, p_stat in stats_map.items():
-            if p_lower not in seen:
+        for p_name, p_stat in stats_map.items():
+            if p_name not in seen:
                 result.append({
-                    "player_name": p_lower.title(),
+                    "player_name": p_name,
                     "goals": p_stat["goals"],
                     "assists": p_stat["assists"],
                     "points": p_stat["goals"] + p_stat["assists"],
