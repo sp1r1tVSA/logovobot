@@ -381,6 +381,7 @@ _AUDIT_FILLERS = ("1", "-1", "x")
 _AUDIT_OPAQUE_ALLOWLIST = {
     ("admin", "back_cb"),     # context.user_data["admin_player_back_cb"]
     ("squad_ai", "back_cb"),  # pending["back_cb"] из ожидающего разбора состава
+    ("cabinet", "confirm_cb"),  # кубок: кнопка, что привела к выбору победителя (cb_confirm_ai_final_/cb_submit_report_to_guest_)
 }
 
 _AUDIT_ALT_TOKEN = re.compile(r"[\w/-]{1,16}")

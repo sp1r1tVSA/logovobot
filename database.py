@@ -8,6 +8,7 @@ import json
 from typing import Generator
 from contextlib import contextmanager
 from config import DB_PATH, INITIAL_WALLET_BALANCE, MAX_OPEN_ROUNDS_PER_DIVISION, ROUND_DEADLINE_REMINDER_HOURS
+from constants import CUP_DIVISION_SENTINEL, CUP_SERIES_GAMES, CUP_STAGES, CUP_STAGE_ORDER
 from time_utils import SQL_NOW, now_msk, now_msk_str, today_msk
 from club_registry import normalize_team_name, resolve_team_name
 from services import debt_policy
@@ -399,6 +400,74 @@ def _ensure_prediction_uniqueness(cursor: sqlite3.Cursor) -> bool:
     return True
 
 
+MIGRATION_022_CUP_GENERAL = "022_cup_general_stage"
+MIGRATION_023_CUP_TOPICS = "023_cup_topics"
+CUP_SERIES_UNIQUE_INDEX = "idx_cup_series_stage_num_unique"
+
+
+def _ensure_cup_schema(cursor: sqlite3.Cursor) -> bool:
+    """Довести `cup_series` до схемы общего кубка (миграция 022).
+
+    Таблица заведена давно, но ни один продуктовый путь в неё ничего не писал, так
+    что дублей в развёрнутой базе быть не должно. Проверка ниже всё равно стоит
+    дешёвой ценой: индекс создаётся один раз, а промахнуться на ней — значит уронить
+    `init_db()` на пустой по факту, но не проверенной таблице.
+
+    Уникальный индекс на (stage, series_num) — не косметика: без него повторная
+    жеребьёвка того же этапа молча удваивает сетку, и `get_cup_bracket` начинает
+    показывать две серии с одним номером.
+
+    Правило то же, что у `predictions`: миграция аддитивная, ничего не удаляет, а
+    при найденных дублях не применяется и остаётся в logger.error — поверх дублей
+    ``CREATE UNIQUE INDEX`` упал бы и оборвал весь ``init_db()``.
+    """
+    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (MIGRATION_022_CUP_GENERAL,))
+    if cursor.fetchone():
+        return True
+
+    try:
+        cursor.execute("ALTER TABLE cup_series ADD COLUMN stage_id INTEGER")
+    except sqlite3.OperationalError:
+        pass  # колонка уже добавлена предыдущим стартом
+    try:
+        cursor.execute("ALTER TABLE cup_series ADD COLUMN winner_source TEXT")
+    except sqlite3.OperationalError:
+        pass
+
+    cursor.execute("""
+        SELECT COUNT(*) AS dup_keys, COALESCE(SUM(extra), 0) AS redundant_rows
+        FROM (
+            SELECT COUNT(*) - 1 AS extra
+            FROM cup_series
+            GROUP BY stage, series_num
+            HAVING COUNT(*) > 1
+        )
+    """)
+    stats = cursor.fetchone()
+    dup_keys = stats["dup_keys"] if stats else 0
+    redundant_rows = stats["redundant_rows"] if stats else 0
+    if dup_keys:
+        logger.error(
+            "Migration %s not applied: cup_series holds %s duplicated (stage, series_num) "
+            "key(s) across %s redundant row(s). A UNIQUE index cannot be created over them "
+            "and nothing was deleted.",
+            MIGRATION_022_CUP_GENERAL, dup_keys, redundant_rows
+        )
+        return False
+
+    cursor.execute(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {CUP_SERIES_UNIQUE_INDEX} "
+        f"ON cup_series(stage, series_num)"
+    )
+    cursor.execute("""
+        INSERT OR IGNORE INTO schema_migrations (version, description)
+        VALUES (?, 'Общий кубок: cup_stages, matches.stage_id/cup_winner_team, cup_series.stage_id/winner_source')
+    """, (MIGRATION_022_CUP_GENERAL,))
+    logger.info("Migration %s: unique index on cup_series(stage, series_num) created",
+                MIGRATION_022_CUP_GENERAL)
+    return True
+
+
 def init_db() -> None:
     """Initialize the database tables."""
     logger.info("Initializing database tables...")
@@ -701,6 +770,53 @@ def init_db() -> None:
             )
         """)
 
+        # ─── Общий кубок: стадии ──────────────────────────────────────────────
+        # Одна строка = один этап плей-офф на сезон. Имена колонок повторяют
+        # `rounds` намеренно: предикат «принимать ли ставки» у лиги и кубка один
+        # (`_evaluate_gate_row`), различается только то, где лежит строка-разрешение.
+        # Стадия нигде не ограничивается CHECK-списком: `division_topics` показал,
+        # как дорого потом вырезать из таблицы restrictive CHECK.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cup_stages (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                season_id INTEGER NOT NULL DEFAULT 1,
+                stage TEXT NOT NULL,
+                stage_order INTEGER NOT NULL,
+                is_open BOOLEAN NOT NULL DEFAULT 0,
+                bets_open BOOLEAN NOT NULL DEFAULT 0,
+                bets_opened_at TEXT,
+                opened_at TEXT,
+                opened_by INTEGER,
+                deadline TEXT,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', '+3 hours')),
+                UNIQUE(season_id, stage)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cup_stages_season ON cup_stages(season_id, stage_order)")
+
+        # ─── Общий кубок: темы вещания ────────────────────────────────────────
+        # Отдельная таблица, а не строка в `division_topics`: там `division_id` —
+        # FK на `divisions`, а кубок дивизионом не является. Синтетический
+        # «дивизион КУБОК» притащил бы его в 11 дивизионные читалки и во вкладки
+        # Mini App; здесь кубковая тема не может просочиться ни в один пикер лиги.
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS cup_topics (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                season_id INTEGER NOT NULL DEFAULT 1,
+                topic_type TEXT NOT NULL,
+                group_chat_id INTEGER NOT NULL,
+                message_thread_id INTEGER NOT NULL,
+                created_at TEXT NOT NULL DEFAULT (datetime('now', '+3 hours')),
+                UNIQUE(season_id, topic_type),
+                FOREIGN KEY(season_id) REFERENCES seasons(id)
+            )
+        """)
+        cursor.execute("CREATE INDEX IF NOT EXISTS idx_cup_topics_chat ON cup_topics(group_chat_id, message_thread_id)")
+        cursor.execute("""
+            INSERT OR IGNORE INTO schema_migrations (version, description)
+            VALUES (?, 'Общий кубок: таблица cup_topics (темы вещания этапа)')
+        """, (MIGRATION_023_CUP_TOPICS,))
+
         # Safely migration-add new columns to matches using predefined SAFE_COLUMNS tuple.
         # Note: String interpolation is safe here as column names/types are hardcoded internal constants, not user input.
         SAFE_COLUMNS = (
@@ -734,6 +850,18 @@ def init_db() -> None:
             # Admin extension of a debt match (+24h / +48h): the moment the
             # extension expires and the debt clock resumes.
             ("extended_until", "TEXT DEFAULT NULL"),
+            # Общий кубок: этап (`cup_stages.id`) и клуб, прошедший дальше.
+            # Последний — именно поле, а не производная от счёта: в кубке не бывает
+            # ничьей, а 2:2 в основное время разрешается послематчевыми, поэтому
+            # победителя игры нельзя вывести из player1_score/player2_score.
+            ("stage_id", "INTEGER"),
+            ("cup_winner_team", "TEXT"),
+            # Строка-заголовок серии: мета-объект «серия целиком», а не игра. Живёт
+            # в `matches`, чтобы рынки на серию («кто проходит», «счёт серии»,
+            # «будет ли третья игра») обслуживались теми же `markets`, `bet_items`
+            # и `settlement_engine`, что и рынки на матч: «счёт» заголовка — победы
+            # в серии. Каждому читателю реальных игр такая строка не видна.
+            ("is_series_header", "INTEGER NOT NULL DEFAULT 0"),
         )
         for col_name, col_type in SAFE_COLUMNS:
             try:
@@ -2066,6 +2194,9 @@ def init_db() -> None:
         # ─── 021: predictions — одна строка на (match_id, model_version) ───────
         _ensure_prediction_uniqueness(cursor)
 
+        # ─── 022: общий кубок — стадии, серии, поля матча ─────────────────────
+        _ensure_cup_schema(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -3046,6 +3177,7 @@ def get_match(match_id: int) -> dict | None:
                 m.photo_id, m.dispute_photos, m.reported_by, m.mvp_player,
                 m.proposed_time, m.proposed_by, m.time_status,
                 m.tournament_type, m.cup_stage, m.cup_series_id, m.game_num_in_series, m.division_id, m.season_id,
+                m.cup_winner_team,
                 m.player1_team AS direct_p1_team, m.player2_team AS direct_p2_team,
                 u1.username AS player1_nickname, u1.team_name AS u1_team, u1.username AS player1_username,
                 u2.username AS player2_nickname, u2.team_name AS u2_team, u2.username AS player2_username
@@ -3136,6 +3268,11 @@ def confirm_and_finalize_match(match_id: int, p1_score: int, p2_score: int, even
             # Матч исчез между проверкой и записью — откатываем, чтобы не остаться
             # с событиями без результата.
             raise RuntimeError(f"Match {match_id} was not saved: UPDATE touched {cursor.rowcount} rows")
+        # Кубок: результат игры двигает серию, и серия может решиться этим же
+        # матчем. Скоуп тот же, что у записи счёта: подтверждённая игра с
+        # нерешённой серией — это сетка, в следующий этап по которой прошёл не
+        # тот клуб. Ошибка здесь откатывает подтверждение целиком.
+        advance_cup_series(cursor, match_id, actor_id=reporter_id)
         try:
             settle_match_bets(match_id, p1_score, p2_score)
         except Exception as e:
@@ -3245,8 +3382,10 @@ def reset_match(match_id: int) -> None:
         m = cursor.fetchone()
         s_id = m["cup_series_id"] if m else None
 
+        # cup_winner_team — ответ о послематчевых для снятого результата. Оставь
+        # его, и переигровку вничью молча засчитали бы прежнему победителю.
         cursor.execute(
-            "UPDATE matches SET status = 'pending', player1_score = NULL, player2_score = NULL, reported_by = NULL, photo_id = NULL, dispute_photos = NULL, mvp_player = NULL WHERE id = ?",
+            "UPDATE matches SET status = 'pending', player1_score = NULL, player2_score = NULL, reported_by = NULL, photo_id = NULL, dispute_photos = NULL, mvp_player = NULL, cup_winner_team = NULL WHERE id = ?",
             (match_id,)
         )
         # A fresh start also drops any freeze state from the previous result
@@ -3269,22 +3408,35 @@ def reset_match(match_id: int) -> None:
         cursor.execute("DELETE FROM pending_reports WHERE match_id = ?", (match_id,))
 
         if s_id:
-            # Recalculate cup_series wins
-            cursor.execute("SELECT player1_team, player2_team, player1_score, player2_score FROM matches WHERE cup_series_id = ? AND status = 'confirmed'", (s_id,))
-            confirmed = cursor.fetchall()
+            # Победы в серии пересчитываются тем же кодом, что и при подтверждении
+            # игры: по полю победителя, а не сравнением голов. Из сравнения голов
+            # 2:2 не даёт победителя вовсе, и после сброса одной игры серия
+            # потеряла бы засчитанную победу.
             cursor.execute("SELECT team1_name, team2_name FROM cup_series WHERE id = ?", (s_id,))
-            s_row = cursor.fetchone()
-            if s_row:
-                t1, t2 = s_row["team1_name"], s_row["team2_name"]
-                t1_wins = 0
-                t2_wins = 0
-                for cm in confirmed:
-                    c1, c2 = cm["player1_score"] or 0, cm["player2_score"] or 0
-                    if c1 > c2 and cm["player1_team"] and cm["player1_team"].lower() == t1.lower(): t1_wins += 1
-                    elif c2 > c1 and cm["player2_team"] and cm["player2_team"].lower() == t2.lower(): t2_wins += 1
-                    elif c1 > c2 and cm["player1_team"] and cm["player1_team"].lower() == t2.lower(): t2_wins += 1
-                    elif c2 > c1 and cm["player2_team"] and cm["player2_team"].lower() == t1.lower(): t1_wins += 1
-                cursor.execute("UPDATE cup_series SET team1_wins = ?, team2_wins = ?, winner_name = NULL, status = 'active' WHERE id = ?", (t1_wins, t2_wins, s_id))
+            if cursor.fetchone():
+                try:
+                    state = recompute_cup_series(cursor, s_id)
+                except ValueError as e:
+                    logger.warning("Cup series #%s not recalculated after reset of match #%s: %s", s_id, match_id, e)
+                else:
+                    # Серия, решённая и без сброшенной игры (2:1 → 2:0), остаётся
+                    # решённой, и ставки на заголовок сразу пересчитываются под
+                    # новый счёт. Ставшая нерешённой — открывается, а игры, снятые
+                    # её досрочным концом, возвращаются в расписание; заголовок
+                    # вернуть в pending нельзя, его приводит к серии следующее
+                    # решение (`_sync_cup_series_header` из `advance_cup_series`).
+                    cursor.execute(
+                        "UPDATE cup_series SET team1_wins = ?, team2_wins = ?, winner_name = ?, "
+                        "winner_source = ?, status = ? WHERE id = ?",
+                        (
+                            state["team1_wins"], state["team2_wins"], state["winner_name"],
+                            state["winner_source"], "completed" if state["decided"] else "active", s_id,
+                        )
+                    )
+                    if state["decided"]:
+                        _sync_cup_series_header(cursor, s_id, state)
+                    else:
+                        _reopen_cup_series_games(cursor, s_id)
 
 def propose_match_time(match_id: int, user_id: int, time_str: str) -> None:
     """Propose or update match time by player."""
@@ -5961,6 +6113,35 @@ def _round_scope_divisions(cursor, round_number: int, season_id: int) -> list[in
     return sorted(divs)
 
 
+def _close_line_scope(cursor, match_ids_sql: str, params: tuple) -> None:
+    """Погасить линию по выборке id матчей — во всех трёх схемах разом.
+
+    Правило «закрыть линию = снять legacy-тайл, закрыть рынки и заблокировать
+    исходы» живёт здесь в единственном экземпляре: тур лиги и этап кубка передают
+    только свою выборку матчей. Рассчитанный рынок ('settled'/'voided') не трогается.
+
+    `match_ids_sql` — служебный SQL-фрагмент (`SELECT id FROM matches WHERE ...`),
+    а не пользовательский ввод: подстановка та же, что в `SAFE_COLUMNS` и в
+    плейсхолдерах `prune_round_markets`. Фрагмент входит в каждый из трёх запросов
+    ровно один раз, поэтому параметры во всех трёх — одни и те же.
+    """
+    cursor.execute(
+        f"UPDATE bet_markets SET is_active = 0 WHERE match_id IN ({match_ids_sql})",
+        params
+    )
+    cursor.execute(
+        f"UPDATE markets SET status = 'closed' "
+        f"WHERE status IN ('open', 'suspended') AND match_id IN ({match_ids_sql})",
+        params
+    )
+    cursor.execute(
+        f"UPDATE market_selections SET status = 'locked' "
+        f"WHERE status = 'active' AND market_id IN "
+        f"(SELECT id FROM markets WHERE match_id IN ({match_ids_sql}))",
+        params
+    )
+
+
 def close_round_betting_line(cursor, round_number: int, division_id: int, season_id: int) -> None:
     """Закрыть линию тура во ВСЕХ схемах разом — строго в пределах одного scope.
 
@@ -5974,7 +6155,6 @@ def close_round_betting_line(cursor, round_number: int, division_id: int, season
     сезонах сразу). Одновременно закрываются реляционные `markets` /
     `market_selections`, из которых берёт коэффициенты Mini App.
 
-    Уже рассчитанные рынки ('settled'/'voided') не трогаются.
     Вызывается ВНУТРИ уже открытой транзакции.
     """
     if division_id is None or season_id is None:
@@ -5983,36 +6163,11 @@ def close_round_betting_line(cursor, round_number: int, division_id: int, season
             "глобальный scope для операций с линией недопустим"
         )
 
-    scope_params = (round_number, division_id, season_id)
-
-    # Legacy schema (Telegram): scope берётся из матча, других связей у таблицы нет.
-    cursor.execute(
-        "UPDATE bet_markets SET is_active = 0 "
-        "WHERE match_id IN ("
-        "    SELECT id FROM matches WHERE round_number = ? "
-        "    AND COALESCE(division_id, 1) = ? AND COALESCE(season_id, 1) = ?"
-        ")",
-        scope_params
-    )
-    cursor.execute(
-        "UPDATE markets SET status = 'closed' "
-        "WHERE status IN ('open', 'suspended') "
-        "AND match_id IN ("
-        "    SELECT id FROM matches WHERE round_number = ? "
-        "    AND COALESCE(division_id, 1) = ? AND COALESCE(season_id, 1) = ?"
-        ")",
-        scope_params
-    )
-    cursor.execute(
-        "UPDATE market_selections SET status = 'locked' "
-        "WHERE status = 'active' "
-        "AND market_id IN ("
-        "    SELECT id FROM markets WHERE match_id IN ("
-        "        SELECT id FROM matches WHERE round_number = ? "
-        "        AND COALESCE(division_id, 1) = ? AND COALESCE(season_id, 1) = ?"
-        "    )"
-        ")",
-        scope_params
+    _close_line_scope(
+        cursor,
+        "SELECT id FROM matches WHERE round_number = ? "
+        "AND COALESCE(division_id, 1) = ? AND COALESCE(season_id, 1) = ?",
+        (round_number, division_id, season_id)
     )
 
 
@@ -6123,26 +6278,21 @@ def prune_round_markets(
 
 
 def _match_line_is_open(cursor, match_id: int) -> bool:
-    """Принимает ли тур матча ставки прямо сейчас — по `evaluate_round_betting_gate`.
+    """Принимает ли матч ставки прямо сейчас — по `evaluate_betting_gate`.
 
     Линию начавшегося тура (is_open = 1 или bets_open = 0), тура с истёкшим
     дедлайном и сыгранного матча трогать нельзя: её закрыли намеренно, и
     переоткрытый рынок снова дал бы кэшаут по ставкам уже идущего тура.
     """
     cursor.execute(
-        "SELECT round_number, division_id, season_id FROM matches WHERE id = ?",
+        "SELECT round_number, division_id, season_id, tournament_type, stage_id "
+        "FROM matches WHERE id = ?",
         (match_id,)
     )
     row = cursor.fetchone()
     if row is None:
         return False
-    allowed, _reason, _message = evaluate_round_betting_gate(
-        cursor,
-        row["round_number"],
-        row["division_id"] if row["division_id"] is not None else 1,
-        row["season_id"],
-        match_id=match_id,
-    )
+    allowed, _reason, _message = evaluate_betting_gate(cursor, row, match_id=match_id)
     return bool(allowed)
 
 
@@ -6210,16 +6360,17 @@ def get_bet_legs_for_notice(cursor, bet_id: int) -> list[dict]:
     cursor.execute(
         """
         SELECT bi.outcome_type, bi.odd, bi.status,
-               COALESCE(m.player1_team,
+               COALESCE(m.player1_team, cs.team1_name,
                         (SELECT bm.team1_name FROM bet_markets bm WHERE bm.match_id = bi.match_id LIMIT 1),
                         'Хозяева') AS team1_name,
-               COALESCE(m.player2_team,
+               COALESCE(m.player2_team, cs.team2_name,
                         (SELECT bm.team2_name FROM bet_markets bm WHERE bm.match_id = bi.match_id LIMIT 1),
                         'Гости') AS team2_name,
                m.player1_score, m.player2_score,
                mkt.market_key, ms.selection_name
         FROM bet_items bi
         LEFT JOIN matches m ON bi.match_id = m.id
+        LEFT JOIN cup_series cs ON cs.id = m.cup_series_id
         LEFT JOIN markets mkt ON bi.market_id = mkt.id
         LEFT JOIN market_selections ms ON bi.selection_id = ms.id
         WHERE bi.bet_id = ?
@@ -6285,6 +6436,49 @@ def reopen_match_markets(match_id: int) -> int:
         return reopened
 
 
+def _evaluate_gate_row(
+    cursor,
+    gate_row,
+    scope_label: str,
+    match_id: int | None = None,
+) -> tuple[bool, str | None, str | None]:
+    """ЕДИНСТВЕННАЯ реализация правила приёма прогнозов — по строке-разрешению.
+
+    `gate_row` — это `rounds` одного тура или `cup_stages` одного этапа. Колонки в
+    `cup_stages` названы так же, как в `rounds`, именно ради этого метода: предикат
+    «линия открыта, игра ещё не началась, дедлайн не истёк, матч не сыгран» у лиги и
+    кубка один, и второй копии у него быть не может (`FIX_01`, `FIX_03` и `FIX_04`
+    выросли как раз из проверок, которые разъехались между слоями).
+
+    `scope_label` — только то, как назвать скоуп в тексте для человека («Тур 5»,
+    «Этап 1/64»); на решение он не влияет.
+
+    Возвращает (allowed, reason, message). Вызывается внутри транзакции.
+    """
+    if gate_row["is_open"]:
+        return False, "ROUND_STARTED", f"{scope_label} уже открыт — приём прогнозов закрыт."
+
+    if not gate_row["bets_open"]:
+        return False, "LINE_CLOSED", f"Приём прогнозов на {scope_label} закрыт."
+
+    if gate_row["deadline"]:
+        dl_dt = _parse_round_deadline(gate_row["deadline"])
+        if dl_dt and now_msk() > dl_dt:
+            return False, "DEADLINE_PASSED", f"Дедлайн для прогнозов на {scope_label} истек."
+
+    # Принцип pre-match: на сыгранный матч ставку не принять даже при открытой
+    # линии тура (матч мог быть подтверждён досрочно или получить ТП/ТН).
+    if match_id is not None:
+        cursor.execute("SELECT status FROM matches WHERE id = ? LIMIT 1", (match_id,))
+        m_row = cursor.fetchone()
+        if not m_row:
+            return False, "MATCH_NOT_FOUND", f"Матч #{match_id} не найден."
+        if m_row["status"] in ("confirmed", "completed"):
+            return False, "MATCH_FINISHED", f"Матч #{match_id} уже сыгран — приём прогнозов закрыт."
+
+    return True, None, None
+
+
 def evaluate_round_betting_gate(
     cursor,
     round_number: int | None,
@@ -6292,7 +6486,7 @@ def evaluate_round_betting_gate(
     season_id: int | None = None,
     match_id: int | None = None,
 ) -> tuple[bool, str | None, str | None]:
-    """ЕДИНОЕ серверное правило приёма ставок на тур.
+    """Серверное правило приёма ставок на тур лиги.
 
     Ставка разрешена ТОЛЬКО когда тур ещё не открыт для игры, а линия открыта:
 
@@ -6306,7 +6500,8 @@ def evaluate_round_betting_gate(
     не больше одной, поэтому выборка точная, без ORDER BY и без подстановок.
 
     Любое другое состояние — отказ. Отсутствие строки нужного тура — тоже отказ:
-    разрешающего fallback здесь нет и быть не должно.
+    разрешающего fallback здесь нет и быть не должно. Сам предикат живёт в
+    `_evaluate_gate_row` и общий у лиги с кубком.
 
     Возвращает (allowed, reason, message). Вызывается внутри транзакции.
     Используется и `place_user_bet`, и `RiskEngine`, чтобы Telegram, Mini App
@@ -6333,28 +6528,102 @@ def evaluate_round_betting_gate(
     if not r_row:
         return False, "ROUND_NOT_FOUND", f"Тур {round_number} не найден — приём прогнозов недоступен."
 
-    if r_row["is_open"]:
-        return False, "ROUND_STARTED", f"Тур {round_number} уже открыт — приём прогнозов закрыт."
+    return _evaluate_gate_row(cursor, r_row, f"Тур {round_number}", match_id=match_id)
 
-    if not r_row["bets_open"]:
-        return False, "LINE_CLOSED", f"Приём прогнозов на Тур {round_number} закрыт."
 
-    if r_row["deadline"]:
-        dl_dt = _parse_round_deadline(r_row["deadline"])
-        if dl_dt and now_msk() > dl_dt:
-            return False, "DEADLINE_PASSED", f"Дедлайн для прогнозов на Тур {round_number} истек."
+def evaluate_cup_stage_gate(
+    cursor,
+    stage_id: int | None,
+    match_id: int | None = None,
+) -> tuple[bool, str | None, str | None]:
+    """Серверное правило приёма ставок на этап кубка — тот же предикат, другая строка.
 
-    # Принцип pre-match: на сыгранный матч ставку не принять даже при открытой
-    # линии тура (матч мог быть подтверждён досрочно или получить ТП/ТН).
-    if match_id is not None:
-        cursor.execute("SELECT status FROM matches WHERE id = ? LIMIT 1", (match_id,))
-        m_row = cursor.fetchone()
-        if not m_row:
-            return False, "MATCH_NOT_FOUND", f"Матч #{match_id} не найден."
-        if m_row["status"] in ("confirmed", "completed"):
-            return False, "MATCH_FINISHED", f"Матч #{match_id} уже сыгран — приём прогнозов закрыт."
+    Отличается только тем, где искать разрешение: `cup_stages.id` вместо
+    (`season_id`, `division_id`, `round_number`). У этапа может не быть дедлайна —
+    тогда проверка срока просто пропускается, как и в лиге: «открыть кубок» закрывает
+    линию раньше любого дедлайна.
+    """
+    if not stage_id:
+        return False, "STAGE_UNKNOWN", "Матч не привязан к этапу кубка — приём прогнозов недоступен."
 
-    return True, None, None
+    cursor.execute(
+        "SELECT stage, is_open, COALESCE(bets_open, 0) AS bets_open, deadline "
+        "FROM cup_stages WHERE id = ? LIMIT 1",
+        (stage_id,)
+    )
+    st_row = cursor.fetchone()
+    if not st_row:
+        return False, "STAGE_NOT_FOUND", f"Этап кубка #{stage_id} не найден — приём прогнозов недоступен."
+
+    return _evaluate_gate_row(cursor, st_row, f"Этап {st_row['stage']}", match_id=match_id)
+
+
+def _row_col(row, name, default=None):
+    """Значение колонки из `sqlite3.Row` или dict; `default` — если колонки нет.
+
+    Строку матча передают разные слои: `place_user_bet` читает `SELECT *`,
+    RiskEngine — узкий `SELECT`. Отсутствующая колонка не должна становиться
+    KeyError внутри проверки приёма ставки.
+    """
+    if row is None:
+        return default
+    try:
+        keys = row.keys()
+    except AttributeError:
+        return row.get(name, default) if hasattr(row, "get") else default
+    return row[name] if name in keys else default
+
+
+def match_is_cup(match_row) -> bool:
+    """Кубковая ли это строка `matches`: игра серии или её заголовок.
+
+    Строке без `tournament_type` кубок не сочувствует: отсутствие поля читается
+    как «лига» — то же соглашение, что в `evaluate_betting_gate`.
+    """
+    return (_row_col(match_row, "tournament_type") or "league") == "cup"
+
+
+def cup_outcome_missing_error(match_row, out_type: str) -> dict | None:
+    """Отказ «такого исхода в кубковой линии нет» — или None, если матч лиговый.
+
+    Кубку нечего ловить в legacy-`bet_markets`: тайлов этапу не заводят
+    (`get_cup_stage_line`), поэтому отсутствующий реляционный исход означает
+    ровно одно — рынка не существует, а не «рынок закрыли». Ничьей в кубке нет,
+    поэтому `x`/`1X`/`X2`/`12` отсутствуют по построению росписи, и на заголовке
+    серии нет ни индивидуальных тоталов, ни форы. Отличать это от технической
+    недоступности нужно и игроку, и Mini App: `x` в экспрессе лиги — ошибка
+    кэша, `x` в кубке — исходы такого просто не бывает.
+    """
+    if not match_is_cup(match_row):
+        return None
+    return {
+        "error": "MARKET_NOT_OFFERED",
+        "match_id": _row_col(match_row, "id"),
+        "outcome": out_type,
+        "message": f"Исход '{out_type}' в линии общего кубка не разыгрывается.",
+    }
+
+
+def evaluate_betting_gate(cursor, match_row, match_id: int | None = None) -> tuple[bool, str | None, str | None]:
+    """Где искать разрешающую строку для этого матча: тур лиги или этап кубка.
+
+    Кубковая ветка включается только когда матч явно кубковый И привязан к этапу.
+    Кубковый матч без `stage_id` уходит в лиговый путь и получает отказ там
+    (`ROUND_NOT_FOUND`) — отсутствующая привязка не должна становиться разрешением,
+    поэтому fallback намеренно один и он отказывающий.
+
+    `match_row` — строка `matches` (sqlite3.Row или dict).
+    """
+    if match_is_cup(match_row) and _row_col(match_row, "stage_id"):
+        return evaluate_cup_stage_gate(cursor, _row_col(match_row, "stage_id"), match_id=match_id)
+
+    return evaluate_round_betting_gate(
+        cursor,
+        _row_col(match_row, "round_number"),
+        _row_col(match_row, "division_id"),
+        _row_col(match_row, "season_id"),
+        match_id=match_id,
+    )
 
 
 def find_self_participation_match(cursor, user_id: int | None, selections: list[dict]) -> int | None:
@@ -6364,11 +6633,15 @@ def find_self_participation_match(cursor, user_id: int | None, selections: list[
     где он играет сам. Перебираются ВСЕ исходы купона: одного попадания
     достаточно, чтобы отклонить весь экспресс целиком.
 
-    Участие определяется двумя способами, и достаточно любого:
+    Участие определяется тремя способами, и достаточно любого:
       * `matches.player1_id` / `player2_id` — Telegram ID (`users.telegram_id`);
       * `matches.player1_team` / `player2_team` — имя клуба, если ID в строке матча
         не заполнен (legacy-расписания). Имена клубов глобально уникальны
-        (`idx_users_team_name_unique`), поэтому такое сопоставление однозначно.
+        (`idx_users_team_name_unique`), поэтому такое сопоставление однозначно;
+      * строка-заголовок серии общего кубка: у неё ни ID, ни имён клубов нет
+        (`create_cup_series_header`), иначе она попал бы в «Мои матчи» и в приёмку
+        отчётов. Ставящий участвует в серии, если его клуб стоит в её паре
+        (`cup_series.team1_name` / `team2_name`).
 
     Возвращает id первого найденного матча или None. Вызывается внутри транзакции;
     дивизион матча и дивизион игрока намеренно не сравниваются — ставить на чужие
@@ -6397,6 +6670,18 @@ def find_self_participation_match(cursor, user_id: int | None, selections: list[
                       AND (
                           LOWER(TRIM(m.player1_team)) = LOWER(TRIM(u.team_name))
                           OR LOWER(TRIM(m.player2_team)) = LOWER(TRIM(u.team_name))
+                      )
+                  )
+                  OR (
+                      m.is_series_header = 1
+                      AND u.team_name IS NOT NULL AND TRIM(u.team_name) != ''
+                      AND EXISTS (
+                          SELECT 1 FROM cup_series cs
+                          WHERE cs.id = m.cup_series_id
+                            AND (
+                                LOWER(TRIM(cs.team1_name)) = LOWER(TRIM(u.team_name))
+                                OR LOWER(TRIM(cs.team2_name)) = LOWER(TRIM(u.team_name))
+                            )
                       )
                   )
               )
@@ -7211,6 +7496,932 @@ def get_all_cup_series() -> list[dict]:
             ORDER BY id ASC
         """)
         return [dict(r) for r in cursor.fetchall()]
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 🏆 ОБЩИЙ КУБОК — СТАДИИ, СЕТКА, МАТЧИ СЕРИИ
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def create_cup_stage(stage: str, season_id: int | None = None, deadline: str | None = None) -> int:
+    """Завести этап общего кубка. Повторный вызов возвращает уже существующую строку.
+
+    Идемпотентность здесь нужна не для красоты: `create_cup_series` обеспечивает
+    стадию сам, и без этого он плодил бы дубли этапов на каждом запуске жеребьёвки.
+    """
+    if stage not in CUP_STAGE_ORDER:
+        raise ValueError(
+            f"Неизвестная стадия кубка: {stage!r}. Допустимы: {', '.join(CUP_STAGES)}."
+        )
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM cup_stages WHERE season_id = ? AND stage = ? LIMIT 1",
+            (s_id, stage)
+        )
+        row = cursor.fetchone()
+        if row:
+            return row["id"]
+        cursor.execute(
+            """
+            INSERT INTO cup_stages (season_id, stage, stage_order, deadline, created_at)
+            VALUES (?, ?, ?, ?, datetime('now', '+3 hours'))
+            """,
+            (s_id, stage, CUP_STAGE_ORDER[stage], deadline)
+        )
+        return cursor.lastrowid
+
+
+def get_cup_stage(stage: str, season_id: int | None = None) -> dict | None:
+    """Строка этапа по имени (тот же ключ, что выдаёт гейт и линия)."""
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM cup_stages WHERE season_id = ? AND stage = ? LIMIT 1", (s_id, stage))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_cup_stage_by_id(stage_id: int) -> dict | None:
+    """Строка этапа по id — тем же ключом работают кнопки панели админа."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM cup_stages WHERE id = ? LIMIT 1", (stage_id,))
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def list_cup_stages(season_id: int | None = None) -> list[dict]:
+    """Все этапы сезона в порядке игры."""
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM cup_stages WHERE season_id = ? ORDER BY stage_order ASC",
+            (s_id,)
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def count_cup_stage_matches(stage_id: int) -> int:
+    """Сколько матчей этапа уже заведено — по нему решается, есть ли что выставлять."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM matches WHERE stage_id = ?", (stage_id,))
+        return int(cursor.fetchone()[0])
+
+
+def open_cup_stage_bets(stage_id: int, actor_id: int | None = None) -> tuple[bool, str]:
+    """Открыть приём прогнозов на этап.
+
+    Тот же инвариант, что у лиги: `is_open = 1 AND bets_open = 1` недопустимо,
+    поэтому линию нельзя вернуть этапу, который уже играют. Матчей на этапе нет —
+    открывать нечего (селектор линии иначе показывает пустой этап как живой).
+    """
+    with _bet_placement_lock, transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, stage, is_open, COALESCE(bets_open, 0) AS bets_open FROM cup_stages WHERE id = ?", (stage_id,))
+        stage_row = cursor.fetchone()
+        if not stage_row:
+            return False, f"Этап кубка #{stage_id} не найден."
+        if stage_row["is_open"]:
+            return False, f"Этап {stage_row['stage']} уже открыт для игры — приём прогнозов закрыт."
+        if stage_row["bets_open"]:
+            return False, f"Приём прогнозов на этап {stage_row['stage']} уже открыт."
+
+        # `transaction()` ре-ентрельна, так что счётчик остаётся внутри этого же
+        # заблокированного транзакционного скоупа — второго чтения тех же строк нет.
+        if count_cup_stage_matches(stage_id) == 0:
+            return False, f"На этапе {stage_row['stage']} нет матчей — выставлять в линию нечего."
+
+        cursor.execute(
+            "UPDATE cup_stages SET bets_open = 1, bets_opened_at = ? WHERE id = ?",
+            (now_msk_str(), stage_id)
+        )
+    logger.info("Cup stage #%s (%s) betting line opened by %s", stage_id, stage_row["stage"], actor_id)
+    return True, f"Приём прогнозов на этап {stage_row['stage']} открыт."
+
+
+def start_cup_stage(stage_id: int, actor_id: int | None = None) -> tuple[bool, str]:
+    """Открыть этап для игры; линия закрывается тем же переходом."""
+    with _bet_placement_lock, transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, stage, is_open FROM cup_stages WHERE id = ?", (stage_id,))
+        stage_row = cursor.fetchone()
+        if not stage_row:
+            return False, f"Этап кубка #{stage_id} не найден."
+        if stage_row["is_open"]:
+            return False, f"Этап {stage_row['stage']} уже открыт."
+        cursor.execute(
+            "UPDATE cup_stages SET is_open = 1, bets_open = 0, opened_at = ?, opened_by = ? WHERE id = ?",
+            (now_msk_str(), actor_id, stage_id)
+        )
+        # Та же линия, что у лиги: закрытый приём прогнозов должен быть виден и в
+        # самих рынках, иначе Mini App продолжает показывать кубковую пару как
+        # доступную для ставки, а отказ приходит только на попытке поставить.
+        _close_line_scope(cursor, "SELECT id FROM matches WHERE stage_id = ?", (stage_id,))
+    logger.info("Cup stage #%s (%s) opened for play by %s", stage_id, stage_row["stage"], actor_id)
+    return True, f"Этап {stage_row['stage']} открыт для игры."
+
+
+def create_cup_series(stage: str, pairs: list[tuple[str, str]], season_id: int | None = None) -> list[int]:
+    """Завести сетку этапа по готовым парам; порядок пар = номера серий.
+
+    Валидация целиком до первой записи: жеребьёвка, у которой один клуб встречается
+    в двух парах, даёт сетку, где клуб выбывает и не выбывает одновременно, а
+    починить её потом можно только переигрыванием матчей.
+
+    Стадия обеспечивается здесь, а не ожидается готовой: заводить этап отдельной
+    кнопкой — значит иметь путь, где серии существуют без строки `cup_stages`, и
+    гейт на них отвечает отказом.
+    """
+    s_id = _resolve_season_id(season_id)
+    if not pairs:
+        raise ValueError("Список пар пуст — сетку этапа не из чего построить.")
+
+    canonical: list[tuple[str, str]] = []
+    seen: dict[str, str] = {}
+    for index, pair in enumerate(pairs, start=1):
+        try:
+            raw1, raw2 = pair
+        except (TypeError, ValueError):
+            raise ValueError(f"Пара #{index} должна быть из двух клубов: {pair!r}")
+        t1 = (resolve_team_name(raw1) or str(raw1).strip())
+        t2 = (resolve_team_name(raw2) or str(raw2).strip())
+        if not t1 or not t2:
+            raise ValueError(f"Пара #{index}: имя клуба пустое.")
+        if t1.lower() == t2.lower():
+            raise ValueError(f"Пара #{index}: клуб играет сам с собой ({t1}).")
+        for club in (t1, t2):
+            key = club.lower()
+            if key in seen:
+                raise ValueError(f"{club} встречается в сетке дважды: в парах {seen[key]} и {index}.")
+            seen[key] = str(index)
+        canonical.append((t1, t2))
+
+    stage_id = create_cup_stage(stage, season_id=s_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM cup_series WHERE stage_id = ?", (stage_id,))
+        existing = int(cursor.fetchone()[0])
+        if existing:
+            raise ValueError(
+                f"Стадия {stage}: сетка уже заведена ({existing} сер.). "
+                "Правь серии поштучно, а не повторной жеребьёвкой."
+            )
+        ids: list[int] = []
+        for num, (t1, t2) in enumerate(canonical, start=1):
+            cursor.execute(
+                """
+                INSERT INTO cup_series (stage, series_num, team1_name, team2_name,
+                                        team1_wins, team2_wins, status, stage_id)
+                VALUES (?, ?, ?, ?, 0, 0, 'active', ?)
+                """,
+                (stage, num, t1, t2, stage_id)
+            )
+            ids.append(cursor.lastrowid)
+    return ids
+
+
+def get_cup_bracket(stage: str, season_id: int | None = None) -> list[dict]:
+    """Серии этапа в порядке номеров."""
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT cs.id, cs.stage, cs.series_num, cs.team1_name, cs.team2_name,
+                   cs.team1_wins, cs.team2_wins, cs.winner_name, cs.status, cs.stage_id
+            FROM cup_series cs
+            JOIN cup_stages st ON st.id = cs.stage_id
+            WHERE cs.stage = ? AND st.season_id = ?
+            ORDER BY cs.series_num ASC
+            """,
+            (stage, s_id)
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def get_cup_stage_games(stage_id: int) -> list[dict]:
+    """Сыгранные и несыгранные игры этапа со счётом — для сетки Mini App.
+
+    Заголовки серий сюда не входят: у них нет своего счёта, итог серии живёт
+    в `cup_series.team1_wins`/`team2_wins`.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT m.id AS match_id, m.cup_series_id AS series_id, m.game_num_in_series,
+                   m.status, m.player1_score, m.player2_score, m.cup_winner_team
+            FROM matches m
+            JOIN cup_series cs ON cs.id = m.cup_series_id
+            WHERE cs.stage_id = ? AND COALESCE(m.is_series_header, 0) = 0
+            ORDER BY cs.series_num ASC, m.game_num_in_series ASC
+            """,
+            (stage_id,)
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def get_cup_series_pair(series_id: int | None) -> tuple[str, str] | None:
+    """Пара клубов серии — единственный источник имён для её заголовка."""
+    if series_id is None:
+        return None
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT team1_name, team2_name FROM cup_series WHERE id = ?", (series_id,))
+        row = cursor.fetchone()
+    if not row:
+        return None
+    return row["team1_name"], row["team2_name"]
+
+
+_CUP_SERIES_WRITE_SELECT = (
+    "SELECT cs.id, cs.series_num, cs.stage, cs.stage_id, cs.team1_name, cs.team2_name, "
+    "st.season_id "
+    "FROM cup_series cs LEFT JOIN cup_stages st ON st.id = cs.stage_id "
+)
+
+
+def _cup_series_row(cursor, series_id: int):
+    """Серия вместе со своим этапом — общий источник для записи игр и заголовка."""
+    cursor.execute(_CUP_SERIES_WRITE_SELECT + "WHERE cs.id = ?", (series_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise ValueError(f"Серия кубка #{series_id} не найдена.")
+    if row["stage_id"] is None:
+        raise ValueError(
+            f"Серия #{series_id} не привязана к этапу — заведи сетку через create_cup_series."
+        )
+    return row
+
+
+def _insert_cup_series_match(cursor, series, game_num: int | None, is_header: bool) -> int:
+    """Строка `matches` серии: её игра (`game_num`) или её заголовок.
+
+    `division_id` — sentinel, а не NULL: NULL в этом проекте читается как
+    «дивизион 1», и кубковая строка утонула бы в сетке Дивизиона 1. `round_number = -1`
+    — то же соглашение, что уже используют читалки кубковых очков.
+
+    Заголовок серии заводится БЕЗ `player1_id`/`player2_id` и без имён клубов:
+    это мета-объект «серия целиком», а не игра, и связывать его с расписанием,
+    «Моими матчами» и приёмкой отчётов не должен ни один читатель. Имена для
+    тайла линии берутся из `cup_series` через `cup_series_id`, а 322-защита
+    (`find_self_participation_match`) добирается до клубов той же связью.
+    """
+    if is_header:
+        u1_id = u2_id = None
+        t1 = t2 = None
+    else:
+        u1 = find_user_by_team(series["team1_name"])
+        u2 = find_user_by_team(series["team2_name"])
+        u1_id = u1["telegram_id"] if u1 else None
+        u2_id = u2["telegram_id"] if u2 else None
+        t1 = series["team1_name"]
+        t2 = series["team2_name"]
+
+    cursor.execute(
+        """
+        INSERT INTO matches (round_number, player1_id, player2_id, player1_team, player2_team,
+                             status, division_id, season_id, tournament_type, cup_stage,
+                             cup_series_id, game_num_in_series, stage_id, is_series_header)
+        VALUES (-1, ?, ?, ?, ?, 'pending', ?, ?, 'cup', ?, ?, ?, ?, ?)
+        """,
+        (
+            u1_id,
+            u2_id,
+            t1,
+            t2,
+            CUP_DIVISION_SENTINEL,
+            series["season_id"],
+            series["stage"],
+            series["id"],
+            game_num,
+            series["stage_id"],
+            1 if is_header else 0,
+        )
+    )
+    return cursor.lastrowid
+
+
+def create_cup_series_match(series_id: int, game_num: int = 1) -> int:
+    """Завести игру серии."""
+    if game_num < 1:
+        raise ValueError(f"Номер игры в серии должен быть не меньше 1, получено {game_num}.")
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM matches WHERE cup_series_id = ? AND game_num_in_series = ? LIMIT 1",
+            (series_id, game_num)
+        )
+        if cursor.fetchone():
+            raise ValueError(f"Игра {game_num} серии #{series_id} уже заведена.")
+        series = _cup_series_row(cursor, series_id)
+        return _insert_cup_series_match(cursor, series, game_num=game_num, is_header=False)
+
+
+def create_cup_series_header(series_id: int) -> int:
+    """Завести (или вернуть существующую) строку-заголовок серии.
+
+    Идемпотентность обязательна: линия этапа пересобирается при каждом показе
+    страницы, и без проверки у серии плодился бы второй объект рынка на те же
+    «кто проходит» и «счёт серии».
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id FROM matches WHERE cup_series_id = ? AND is_series_header = 1 LIMIT 1",
+            (series_id,)
+        )
+        row = cursor.fetchone()
+        if row:
+            return int(row["id"])
+        series = _cup_series_row(cursor, series_id)
+        return _insert_cup_series_match(cursor, series, game_num=None, is_header=True)
+
+
+# ═════════════════════════════════════════════════════════════════════════════
+# 🏆 ОБЩИЙ КУБОК — ПРОГРЕСС СЕРИИ ПОСЛЕ ПОДТВЕРЖДЕНИЯ ИГРЫ
+# ═════════════════════════════════════════════════════════════════════════════
+
+
+def _cup_game_winner_club(match_row) -> tuple[str | None, str]:
+    """Клуб, взявший игру, и способ: ('Интер Милан', 'penalties') | (None, ...).
+
+    Решающий счёт основного времени решает игру сам: послематчевые бывают только
+    после ничьей, поэтому `cup_winner_team`, спорящий со счётом 3:1, — это
+    устаревший ответ (прошлая попытка отчёта, сброс матча), а не результат.
+    Поле победителя читается только при равном счёте. Равный счёт без него — не
+    ничья (её в кубке нет), а недообработанный результат: послематчевые нигде не
+    записаны. Выдумывать победителя нельзя, поэтому вызывающий обязан получить
+    ValueError и не подтверждать такую игру.
+    """
+    winner = (_row_col(match_row, "cup_winner_team") or "").strip()
+    t1 = _row_col(match_row, "player1_team")
+    t2 = _row_col(match_row, "player2_team")
+    s1 = _row_col(match_row, "player1_score")
+    s2 = _row_col(match_row, "player2_score")
+
+    if s1 is not None and s2 is not None and s1 != s2:
+        club = t1 if s1 > s2 else t2
+        if winner and not (club and teams_match(winner, club)):
+            logger.warning(
+                "Cup match #%s: stale winner %r ignored, main time %s:%s decides for %r",
+                _row_col(match_row, "id"), winner, s1, s2, club
+            )
+        return club, "main_time"
+
+    if winner:
+        if t1 and teams_match(winner, t1):
+            return t1, "penalties"
+        if t2 and teams_match(winner, t2):
+            return t2, "penalties"
+        raise ValueError(
+            f"Победитель {winner!r} не играет в матче #{_row_col(match_row, 'id')}: "
+            f"в паре {t1!r} и {t2!r}."
+        )
+
+    if s1 is None or s2 is None:
+        return None, "pending"
+    return None, "undecided"
+
+
+def recompute_cup_series(cursor, series_id: int) -> dict:
+    """Победы в серии по её подтверждённым играм — один пересчёт на всех вызывающих.
+
+    Отсчёт идёт от пары `cup_series`, а не от порядка клубов в строке матча:
+    жеребьёвка задаёт пару один раз, а игры серии могут быть записаны и в другом
+    порядке. Способ разрешения (основное время/послематчевые) берётся у игры,
+    которая довела счёт до двух побед.
+    """
+    cursor.execute(
+        "SELECT id, player1_team, player2_team, player1_score, player2_score, cup_winner_team "
+        "FROM matches WHERE cup_series_id = ? AND is_series_header = 0 AND status = 'confirmed' "
+        "ORDER BY game_num_in_series ASC, id ASC",
+        (series_id,)
+    )
+    games = cursor.fetchall()
+    cursor.execute("SELECT id, team1_name, team2_name FROM cup_series WHERE id = ?", (series_id,))
+    series = cursor.fetchone()
+    if not series:
+        raise ValueError(f"Серия кубка #{series_id} не найдена.")
+
+    t1_name, t2_name = series["team1_name"], series["team2_name"]
+    wins1 = wins2 = 0
+    winner_source = None
+    for g in games:
+        club, source = _cup_game_winner_club(g)
+        if club is None:
+            if source == "undecided":
+                raise ValueError(
+                    f"Игра #{g['id']} серии {t1_name} — {t2_name} закончилась равным счётом, "
+                    "а победитель не указан: в кубке ничьих не бывает."
+                )
+            continue
+        if teams_match(club, t1_name):
+            wins1 += 1
+            if wins1 >= 2 and winner_source is None:
+                winner_source = source
+        elif teams_match(club, t2_name):
+            wins2 += 1
+            if wins2 >= 2 and winner_source is None:
+                winner_source = source
+
+    winner_name = None
+    if wins1 >= 2:
+        winner_name = t1_name
+    elif wins2 >= 2:
+        winner_name = t2_name
+    return {
+        "series_id": series_id,
+        "team1_wins": wins1,
+        "team2_wins": wins2,
+        "winner_name": winner_name,
+        "winner_source": winner_source,
+        "decided": winner_name is not None,
+    }
+
+
+def _sync_cup_series_header(cursor, series_id: int, state: dict) -> str | None:
+    """Привести ставки на заголовок решённой серии к её счёту: 'settled' | 'resettled' | None.
+
+    Заголовок рассчитывается обычным `settle_match_predictions` со счётом =
+    победы в серии, поэтому «проход», «счёт серии» и «третья игра» обслуживаются
+    действующими правилами без новых веток.
+
+    Рассчитанный однажды заголовок (`status = 'confirmed'`) может разойтись с
+    серией: сброс игры (`reset_match`) снимает победу, и серия решается заново —
+    другим счётом или другим клубом. `settle_match_predictions` трогает только
+    pending-купоны и оставил бы прежние выплаты, поэтому расхождение
+    пересчитывается `resettle_match_predictions` — тем же путём, что правка счёта
+    лигового матча. Совпадающий счёт не трогается: повторный вызов на решённой
+    серии ничего не пересчитывает.
+    """
+    cursor.execute(
+        "SELECT id, status, player1_score, player2_score FROM matches "
+        "WHERE cup_series_id = ? AND is_series_header = 1 LIMIT 1",
+        (series_id,)
+    )
+    header = cursor.fetchone()
+    if not header:
+        return None
+    header_id = int(header["id"])
+    wins1, wins2 = state["team1_wins"], state["team2_wins"]
+
+    if header["status"] == "confirmed":
+        if (header["player1_score"], header["player2_score"]) == (wins1, wins2):
+            return None
+        from services.settlement_engine import resettle_match_predictions
+
+        resettle_match_predictions(header_id, wins1, wins2, match_status="finished")
+        logger.info(
+            "Cup series #%s header #%s resettled: %s:%s → %s:%s", series_id, header_id,
+            header["player1_score"], header["player2_score"], wins1, wins2
+        )
+        return "resettled"
+
+    from services.settlement_engine import settle_match_predictions
+
+    # `settle_match_predictions` берёт итоговый статус из строки матча:
+    # подтверждённый остаётся подтверждённым, pending уходит в переданный
+    # статус. Без этого заголовок серии остался бы со статусом 'finished',
+    # которого среди лиговых статусов нет.
+    cursor.execute("UPDATE matches SET status = 'confirmed' WHERE id = ?", (header_id,))
+    settle_match_predictions(header_id, wins1, wins2, match_status="finished")
+    return "settled"
+
+
+def _reopen_cup_series_games(cursor, series_id: int) -> int:
+    """Вернуть в расписание игры, снятые досрочным концом серии; число таких игр.
+
+    Нужно, когда сброс игры (`reset_match`) снова делает серию нерешённой: игра 3,
+    снятая после 2:0, снова может понадобиться. Её рынки остаются аннулированными —
+    void финален, ставки по ней уже возвращены, — поэтому игра возвращается без
+    линии, только как матч сетки. Снимает игры серии только `advance_cup_series`,
+    так что каждая отменённая игра серии — его рук дело.
+    """
+    cursor.execute(
+        "UPDATE matches SET status = 'pending', player1_score = NULL, player2_score = NULL, "
+        "cup_winner_team = NULL "
+        "WHERE cup_series_id = ? AND is_series_header = 0 AND status = 'cancelled'",
+        (series_id,)
+    )
+    return cursor.rowcount
+
+
+def advance_cup_series(cursor, match_id: int, actor_id: int | None = None) -> dict | None:
+    """Двигать серию после подтверждения её игры; если серия решена — закрыть её.
+
+    Вызывается на курсоре `confirm_and_finalize_match`, то есть в той же
+    транзакции, что записывает счёт и рассчитывает ставки игры. Атомарность здесь
+    не формальность: подтверждённая игра без движения серии — это сетка, где
+    результат учтён, а в 1/32 прошёл не тот клуб.
+
+    Закрытие серии состоит из трёх шагов, и все три обязаны пережить повторный
+    вызов:
+      * несыгранные игры (серия закончилась 2:0) снимаются, а их рынки
+        аннулируются каноническим `void_market` — тем же путём ноги возвращаются
+        по всем купонам и остаются возвращёнными;
+      * строка-заголовок серии рассчитывается со счётом = победы в серии
+        (`_sync_cup_series_header`), а если серия после сброса игры решилась
+        другим счётом — пересчитывается;
+      * повторный вызов на решённой серии с тем же счётом заголовок ещё раз не
+        считает.
+    """
+    cursor.execute("SELECT * FROM matches WHERE id = ?", (match_id,))
+    match_row = cursor.fetchone()
+    if not match_row or not match_is_cup(match_row) or _row_col(match_row, "is_series_header"):
+        return None
+    series_id = _row_col(match_row, "cup_series_id")
+    if not series_id:
+        return None
+
+    club, source = _cup_game_winner_club(match_row)
+    if club is None and source == "undecided":
+        raise ValueError(
+            f"Игра #{match_id} закончилась со счётом "
+            f"{_row_col(match_row, 'player1_score')}:{_row_col(match_row, 'player2_score')} — "
+            "укажи, кто прошёл дальше (послематчевые в кубке считаются жребием)."
+        )
+    if club and (_row_col(match_row, "cup_winner_team") or "").strip() != club:
+        # Поле победителя всегда равно тому, кто взял игру: на него опирается и
+        # расчёт ставки, и пересчёт серии после сброса матча. Устаревший ответ,
+        # который перебил решающий счёт, здесь же и заменяется.
+        cursor.execute("UPDATE matches SET cup_winner_team = ? WHERE id = ?", (club, match_id))
+
+    cursor.execute("SELECT winner_name FROM cup_series WHERE id = ?", (series_id,))
+    before = cursor.fetchone()
+    if not before:
+        raise ValueError(f"Серия кубка #{series_id} не найдена.")
+    was_decided = bool(before["winner_name"])
+
+    state = recompute_cup_series(cursor, series_id)
+    cursor.execute(
+        "UPDATE cup_series SET team1_wins = ?, team2_wins = ?, winner_name = ?, winner_source = ?, "
+        "status = ? WHERE id = ?",
+        (
+            state["team1_wins"], state["team2_wins"], state["winner_name"],
+            state["winner_source"], "completed" if state["decided"] else "active", series_id,
+        )
+    )
+    summary = dict(state)
+    summary["voided_games"] = []
+    summary["header_settled"] = False
+    if not state["decided"]:
+        return summary
+
+    if not was_decided:
+        cursor.execute(
+            "SELECT id FROM matches WHERE cup_series_id = ? AND is_series_header = 0 "
+            "AND status NOT IN ('confirmed', 'completed', 'cancelled') ORDER BY game_num_in_series",
+            (series_id,)
+        )
+        for pending in cursor.fetchall():
+            game_id = int(pending["id"])
+            # 'closed' — обязательная часть выборки: старт этапа закрывает линию
+            # (`_close_line_scope`), и к досрочному концу серии рынки несыгранной
+            # игры уже не 'open'. Без них ставка на игру 3 висела бы в pending
+            # вечно — без возврата и с занятым слотом лимита открытых купонов.
+            cursor.execute(
+                "SELECT id FROM markets WHERE match_id = ? AND status IN ('open', 'suspended', 'closed')",
+                (game_id,)
+            )
+            market_ids = [int(r["id"]) for r in cursor.fetchall()]
+            cursor.execute("UPDATE matches SET status = 'cancelled' WHERE id = ?", (game_id,))
+            for market_id in market_ids:
+                void_market(market_id, actor_id or 0, "Серия завершена досрочно — игра не была сыграна")
+            summary["voided_games"].append({"match_id": game_id, "voided_markets": len(market_ids)})
+
+    summary["header_settled"] = _sync_cup_series_header(cursor, series_id, state) is not None
+    if was_decided:
+        return summary
+
+    logger.info(
+        "Cup series #%s decided: %s — %s (%s), voided %s unplayed game(s)",
+        series_id, state["team1_wins"], state["team2_wins"], state["winner_name"],
+        len(summary["voided_games"])
+    )
+    return summary
+
+
+def set_cup_game_winner(match_id: int, club: str, actor_id: int | None = None) -> tuple[bool, str]:
+    """Записать клуб, прошедший дальше, для ещё не подтверждённой игры серии.
+
+    Поле нужно ровно для равного счёта основного времени: послематчевых на
+    скриншоте статистики нет, и без этого ответа `advance_cup_series` отказался
+    бы подтверждать результат. Запись идемпотентна и не трогает сыгранный матч —
+    менять прошедшего клуб можно только переигровкой (reset_match).
+    """
+    clean = (club or "").strip()
+    if not clean:
+        return False, "Не указано, кто прошёл дальше."
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, status, tournament_type, is_series_header, player1_team, player2_team, "
+            "player1_score, player2_score FROM matches WHERE id = ?",
+            (match_id,)
+        )
+        row = cursor.fetchone()
+        if not row:
+            return False, f"Матч #{match_id} не найден."
+        if not match_is_cup(row) or row["is_series_header"]:
+            return False, "Победитель указывается только для игры общего кубка."
+        if row["status"] in ("confirmed", "completed"):
+            return False, "Матч уже подтверждён — смени результат через сброс матча."
+        t1, t2 = row["player1_team"], row["player2_team"]
+        target = t1 if (t1 and teams_match(clean, t1)) else (t2 if (t2 and teams_match(clean, t2)) else None)
+        if not target:
+            return False, f"{clean} не играет в матче #{match_id}."
+        s1, s2 = row["player1_score"], row["player2_score"]
+        if s1 is not None and s2 is not None and s1 != s2:
+            # Послематчевые бывают только после ничьей: при решающем счёте
+            # проход уже определён, и другой ответ был бы неправдой.
+            by_score = t1 if s1 > s2 else t2
+            if target != by_score:
+                return False, (
+                    f"Счёт основного времени {s1}:{s2} — игру взял {by_score}. "
+                    "Победитель по послематчевым указывается только при равном счёте."
+                )
+        cursor.execute("UPDATE matches SET cup_winner_team = ? WHERE id = ?", (target, match_id))
+    logger.info("Cup match #%s: winner %s declared by %s", match_id, target, actor_id)
+    return True, target
+
+
+def provision_cup_stage_line(
+    stage: str,
+    season_id: int | None = None,
+    games_per_series: int = CUP_SERIES_GAMES,
+) -> dict:
+    """Завести этапу игры всех серий и заголовок каждой серии — одним проходом.
+
+    Строки будущих игр существуют заранее, потому что линия открывается на этап
+    целиком и закрывается его стартом: игру 2, заведённую после счёта 1:0, было бы
+    уже нечем открыть для ставок (см. `constants.CUP_SERIES_GAMES`).
+
+    Уже заведённые строки не трогаются — повторный вызов обязан давать тот же
+    набор `match_id`, иначе пересчёт линии плодил бы рынки-дубли.
+    """
+    if games_per_series < 1:
+        raise ValueError(f"В серии не может быть {games_per_series} игр.")
+    s_id = _resolve_season_id(season_id)
+    if not get_cup_stage(stage, season_id=s_id):
+        raise ValueError(f"Этап кубка {stage} не заведён — сетку строит create_cup_series.")
+
+    created_games = 0
+    created_headers = 0
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _CUP_SERIES_WRITE_SELECT +
+            "WHERE st.stage = ? AND st.season_id = ? ORDER BY cs.series_num ASC",
+            (stage, s_id)
+        )
+        series_rows = cursor.fetchall()
+        for series in series_rows:
+            cursor.execute(
+                "SELECT game_num_in_series, is_series_header FROM matches WHERE cup_series_id = ?",
+                (series["id"],)
+            )
+            rows = cursor.fetchall()
+            have_games = {r["game_num_in_series"] for r in rows if not r["is_series_header"]}
+            for game_num in range(1, games_per_series + 1):
+                if game_num in have_games:
+                    continue
+                _insert_cup_series_match(cursor, series, game_num=game_num, is_header=False)
+                created_games += 1
+            if not any(r["is_series_header"] for r in rows):
+                _insert_cup_series_match(cursor, series, game_num=None, is_header=True)
+                created_headers += 1
+
+    return {
+        "stage": stage,
+        "season_id": s_id,
+        "series": len(series_rows),
+        "created_games": created_games,
+        "created_headers": created_headers,
+    }
+
+
+# Сыгранные и отменённые матчи из линии кубка выпадают: их результат живёт в
+# сетке, а в ставках им делать нечего (то же правило, что у `get_active_bet_markets`).
+_CUP_LINE_HIDDEN_STATUSES = ("confirmed", "completed", "finished", "cancelled")
+
+# Компактный набор коэффициентов тайла: (market_key, selection_key) → имя поля.
+# Заголовок серии пользуется теми же полями: `p1`/`p2` там «кто проходит»,
+# `tb25`/`tm25` — «будет ли третья игра» (тот же `total_goals` по счёту серии).
+_CUP_TILE_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("1x2", "p1", "p1"),
+    ("1x2", "p2", "p2"),
+    ("total_goals", "over_2.5", "tb25"),
+    ("total_goals", "under_2.5", "tm25"),
+    ("btts", "btts_yes", "btts_yes"),
+    ("btts", "btts_no", "btts_no"),
+)
+
+
+def get_cup_stage_matches(
+    stage: str,
+    season_id: int | None = None,
+    unplayed_only: bool = False,
+) -> list[dict]:
+    """Плоский список матчей этапа: каждая игра каждой серии и заголовок серии.
+
+    Клубы берутся из `cup_series`, а не из строки матча: у заголовка серии своих
+    имён нет намеренно (`create_cup_series_header`), а у игры они дублируют пару.
+    `stage_id`/`season_id` возвращаются вместе с матчем — по ним работает гейт и
+    ценовая модель.
+    """
+    s_id = _resolve_season_id(season_id)
+    stage_row = get_cup_stage(stage, season_id=s_id)
+    if not stage_row:
+        return []
+    query = """
+            SELECT m.id AS match_id, m.cup_series_id AS series_id, cs.series_num,
+                   m.is_series_header, m.game_num_in_series, m.status,
+                   m.stage_id, m.season_id,
+                   cs.team1_name, cs.team2_name
+            FROM matches m
+            JOIN cup_series cs ON cs.id = m.cup_series_id
+            WHERE cs.stage = ? AND cs.stage_id = ?
+        """
+    params: list = [stage, stage_row["id"]]
+    if unplayed_only:
+        placeholders = ",".join("?" for _ in _CUP_LINE_HIDDEN_STATUSES)
+        query += f" AND m.status NOT IN ({placeholders})"
+        params.extend(_CUP_LINE_HIDDEN_STATUSES)
+    query += " ORDER BY cs.series_num ASC, m.is_series_header DESC, m.game_num_in_series ASC"
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(query, params)
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def get_cup_stage_line(stage: str, season_id: int | None = None) -> dict:
+    """Линия этапа: серии с заголовками и играми и коэффициенты из реляционной схемы.
+
+    Кубковый тайл намеренно НЕ заводится в `bet_markets`: `odd_x` там NOT NULL, а
+    ничьей в кубке нет — хранить пришлось бы выдуманное число; и каждая читалка
+    этой таблицы джойнит `rounds`, к которому этап отношения не имеет. Источник
+    коэффициентов — `markets`/`market_selections`, та же схема, из которой Mini App
+    берёт полную роспись матча. `/api/matches/{id}/markets` отдаёт её и для кубка:
+    имена заголовку подставляет из `cup_series`, а на лету рынки кубку не заводит —
+    лиговая модель выставила бы ему ничью.
+
+    Сыгранные матчи из линии исключаются: их результат живёт в сетке, а не в ставках.
+    """
+    s_id = _resolve_season_id(season_id)
+    result = {"stage": get_cup_stage(stage, season_id=s_id), "series": []}
+    match_rows = get_cup_stage_matches(stage, season_id=s_id, unplayed_only=True)
+    if not match_rows:
+        return result
+
+    by_series: dict[int, dict] = {}
+    ordered: list[dict] = []
+    tiles: list[dict] = []
+    for r in match_rows:
+        entry = by_series.get(r["series_id"])
+        if entry is None:
+            entry = {
+                "series_id": r["series_id"],
+                "series_num": r["series_num"],
+                "team1_name": r["team1_name"],
+                "team2_name": r["team2_name"],
+                "header": None,
+                "games": [],
+            }
+            by_series[r["series_id"]] = entry
+            ordered.append(entry)
+        tile = {
+            "match_id": r["match_id"],
+            "stage_id": r["stage_id"],
+            "is_series_header": bool(r["is_series_header"]),
+            "game_num_in_series": r["game_num_in_series"],
+            "status": r["status"],
+            "team1_name": r["team1_name"],
+            "team2_name": r["team2_name"],
+            "odds": {},
+        }
+        tiles.append(tile)
+        if r["is_series_header"]:
+            entry["header"] = tile
+        else:
+            entry["games"].append(tile)
+
+    with transaction() as conn:
+        cursor = conn.cursor()
+        placeholders = ",".join("?" for _ in tiles)
+        cursor.execute(
+            f"""
+            SELECT mk.match_id, mk.market_key, ms.selection_key, ms.odds_value
+            FROM markets mk
+            JOIN market_selections ms ON ms.market_id = mk.id
+            WHERE mk.match_id IN ({placeholders})
+              AND mk.status = 'open' AND ms.status = 'active'
+            """,
+            tuple(t["match_id"] for t in tiles)
+        )
+        priced = {(r["match_id"], r["market_key"], r["selection_key"]): float(r["odds_value"])
+                  for r in cursor.fetchall()}
+
+    for tile in tiles:
+        odds = {}
+        for market_key, selection_key, field in _CUP_TILE_FIELDS:
+            value = priced.get((tile["match_id"], market_key, selection_key))
+            if value is not None:
+                odds[field] = round(value, 2)
+        tile["odds"] = odds
+        tile["is_line"] = bool(odds)
+
+    result["series"] = ordered
+    return result
+
+
+def bind_cup_topic(
+    topic_type: str,
+    group_chat_id: int,
+    message_thread_id: int,
+    season_id: int | None = None,
+) -> dict:
+    """Привязать тему форума к кубковому вещанию сезона (идемпотентно).
+
+    Тема берётся из сообщения, под которым админ вызвал команду: `topic_type`
+    различает, что в этой теме публикуется — линию этапа или результаты. Одна
+    тема = одно назначение: две роли в одной теме означали бы, что отчёты
+    прилетают под линию, и наоборот.
+    """
+    from constants import CUP_TOPIC_TYPES
+
+    s_id = _resolve_season_id(season_id)
+    norm = (topic_type or "").strip().lower()
+    if norm not in CUP_TOPIC_TYPES:
+        return {"status": "error", "error": f"Неизвестный тип кубковой темы: {topic_type}"}
+    if not group_chat_id or message_thread_id is None:
+        return {"status": "error", "error": "Нет координат темы (группа/message_thread_id)."}
+
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, topic_type FROM cup_topics WHERE group_chat_id = ? AND message_thread_id = ?",
+            (group_chat_id, message_thread_id)
+        )
+        occupying = cursor.fetchone()
+        if occupying and occupying["topic_type"] != norm:
+            return {
+                "status": "conflict_topic",
+                "occupied_by": occupying["topic_type"],
+                "error": "Эта тема уже назначена для другого кубкового формата.",
+            }
+        cursor.execute(
+            "SELECT id, group_chat_id, message_thread_id FROM cup_topics WHERE season_id = ? AND topic_type = ?",
+            (s_id, norm)
+        )
+        current = cursor.fetchone()
+        if current:
+            if (current["group_chat_id"], current["message_thread_id"]) == (group_chat_id, message_thread_id):
+                return {"status": "already_bound", "topic_type": norm, "season_id": s_id,
+                        "group_chat_id": group_chat_id, "message_thread_id": message_thread_id}
+            # Переназначение: тема переезжает, старой записи больше нет — иначе
+            # `get_cup_topic` вернул бы тему, в которую никто не смотрит.
+            cursor.execute("DELETE FROM cup_topics WHERE id = ?", (current["id"],))
+        cursor.execute(
+            "INSERT INTO cup_topics (season_id, topic_type, group_chat_id, message_thread_id, created_at) "
+            "VALUES (?, ?, ?, ?, datetime('now', '+3 hours'))",
+            (s_id, norm, group_chat_id, message_thread_id)
+        )
+    return {"status": "bound", "topic_type": norm, "season_id": s_id,
+            "group_chat_id": group_chat_id, "message_thread_id": message_thread_id}
+
+
+def get_cup_topic(topic_type: str, season_id: int | None = None) -> dict | None:
+    """Тема кубкового вещания: {'group_chat_id', 'message_thread_id'} или None."""
+    from constants import CUP_TOPIC_TYPES
+
+    norm = (topic_type or "").strip().lower()
+    if norm not in CUP_TOPIC_TYPES:
+        return None
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        row = conn.cursor().execute(
+            "SELECT season_id, topic_type, group_chat_id, message_thread_id "
+            "FROM cup_topics WHERE season_id = ? AND topic_type = ?",
+            (s_id, norm)
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_cup_topics(season_id: int | None = None) -> list[dict]:
+    """Все назначенные кубковые темы сезона — для экрана управления."""
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        rows = conn.cursor().execute(
+            "SELECT topic_type, group_chat_id, message_thread_id FROM cup_topics "
+            "WHERE season_id = ? ORDER BY topic_type",
+            (s_id,)
+        ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_club_card_data(team_name: str) -> dict:
@@ -9779,8 +10990,19 @@ def place_user_bet(
                     "message": risk_decision.message or f"Коэффициент изменился: {details.get('old_odd')} → {details.get('new_odd')}"
                 }
 
-            if risk_decision.reason == "OPEN_BETS_LIMIT":
-                # Отдаём и сам потолок, и фактическое число открытых купонов:
+            if risk_decision.reason == "MARKET_NOT_OFFERED":
+                # Кубковый исход, которого в росписи нет вовсе (`x`, `12`, ИТБ на
+                # заголовке серии). Матч и исход отдаются структурированно: Mini App
+                # подсвечивает конкретную ногу купона, а не показывает общий отказ.
+                details = risk_decision.details or {}
+                return False, {
+                    "error": "MARKET_NOT_OFFERED",
+                    "match_id": details.get("match_id"),
+                    "outcome": details.get("outcome"),
+                    "message": risk_decision.message
+                    or "Исход в линии общего кубка не разыгрывается."
+                }
+            if risk_decision.reason == "OPEN_BETS_LIMIT":                # Отдаём и сам потолок, и фактическое число открытых купонов:
                 # Mini App показывает счётчик слотов и поправит его по ответу,
                 # не дожидаясь следующего bootstrap.
                 details = risk_decision.details or {}
@@ -9808,6 +11030,7 @@ def place_user_bet(
         total_odd = 1.0
         validated_items = []
         seen_matches = set()
+        seen_cup_series = set()
 
         for s in selections:
             m_id = s.get("match_id")
@@ -9830,18 +11053,32 @@ def place_user_bet(
             if match_row["status"] not in ("scheduled", "pending", "live", "open"):
                 return False, f"Матч #{m_id} уже сыгран или завершен (статус: {match_row['status']})."
 
-            # Единое серверное правило приёма ставок на тур: is_open = 0 AND bets_open = 1.
+            # Единое серверное правило приёма ставок: is_open = 0 AND bets_open = 1.
             # То же самое правило применяет RiskEngine — Telegram, Mini App и REST API
             # проверяются одним инвариантом. Разрешающего fallback здесь нет:
-            # если строки тура нет, ставка отклоняется.
-            r_num = match_row["round_number"] if "round_number" in match_row.keys() else None
-            m_div_id = match_row["division_id"] if "division_id" in match_row.keys() and match_row["division_id"] is not None else 1
-            m_season_id = match_row["season_id"] if "season_id" in match_row.keys() else None
-            allowed, _reason, gate_message = evaluate_round_betting_gate(
-                cursor, r_num, m_div_id, m_season_id, match_id=m_id
-            )
+            # если строки тура (или этапа) нет, ставка отклоняется.
+            allowed, _reason, gate_message = evaluate_betting_gate(cursor, match_row, match_id=m_id)
             if not allowed:
                 return False, gate_message
+
+            # Кубковый экспресс: матчи одной серии — не независимые события.
+            # Исход серии есть функция от её игр, поэтому «П1 в игре 1» + «проход
+            # этой же серии» в одном купоне перемножают коэффициенты там, где
+            # вероятности складываются, и купон становится арбитражем против
+            # модели. Правило шире лигового SGP-запрета намеренно: там соседние
+            # туры независимы, здесь одна серия.
+            if len(selections) > 1 and match_is_cup(match_row):
+                series_id = _row_col(match_row, "cup_series_id")
+                if series_id:
+                    if series_id in seen_cup_series:
+                        return False, {
+                            "error": "SERIES_CORRELATED",
+                            "series_id": series_id,
+                            "match_id": m_id,
+                            "message": "В одном экспрессе нельзя совмещать исходы разных игр одной серии кубка "
+                                       "и её итога: это не независимые события.",
+                        }
+                    seen_cup_series.add(series_id)
 
             # Determine odds value from relational schema or legacy bet_markets
             odd_val = None
@@ -9880,7 +11117,7 @@ def place_user_bet(
                         resolved_market_id = ms_match["market_id"]
                         resolved_sel_id = ms_match["sel_id"]
 
-            if odd_val is None and match_row["status"] != "live":
+            if odd_val is None and not match_is_cup(match_row) and match_row["status"] != "live":
                 cursor.execute("SELECT * FROM bet_markets WHERE match_id = ? AND is_active = 1", (m_id,))
                 bm_row = cursor.fetchone()
                 if bm_row:
@@ -9889,6 +11126,9 @@ def place_user_bet(
                         odd_val = bm_row[col]
 
             if odd_val is None:
+                cup_error = cup_outcome_missing_error(match_row, out_type)
+                if cup_error:
+                    return False, cup_error
                 return False, f"Исход '{out_type}' на матч #{m_id} недоступен или заблокирован."
 
             odd_val = round(float(odd_val), 2)
@@ -10179,9 +11419,13 @@ def get_user_bet_by_id(arg1: int | None = None, arg2: int | None = None, user_id
         cursor.execute(
             """
             SELECT bi.*, 
-                   COALESCE(m.player1_team, bm.team1_name, 'Хозяева') as team1_name,
-                   COALESCE(m.player2_team, bm.team2_name, 'Гости') as team2_name,
+                   COALESCE(m.player1_team, cs.team1_name, bm.team1_name, 'Хозяева') as team1_name,
+                   COALESCE(m.player2_team, cs.team2_name, bm.team2_name, 'Гости') as team2_name,
                    COALESCE(m.round_number, bm.tour, 1) as tour,
+                   m.tournament_type,
+                   cs.stage AS cup_stage,
+                   m.game_num_in_series,
+                   COALESCE(m.is_series_header, 0) AS is_series_header,
                    m.status as match_status,
                    m.player1_score,
                    m.player2_score,
@@ -10192,6 +11436,7 @@ def get_user_bet_by_id(arg1: int | None = None, arg2: int | None = None, user_id
                    ms.selection_name
             FROM bet_items bi
             LEFT JOIN matches m ON bi.match_id = m.id
+            LEFT JOIN cup_series cs ON cs.id = m.cup_series_id
             LEFT JOIN bet_markets bm ON bi.match_id = bm.match_id
             LEFT JOIN markets mkt ON bi.market_id = mkt.id
             LEFT JOIN market_selections ms ON bi.selection_id = ms.id
@@ -10223,9 +11468,13 @@ def get_user_bets(user_id: int, status: str | None = None, limit: int = 20, offs
             cursor.execute(
                 """
                 SELECT bi.*, 
-                       COALESCE(m.player1_team, bm.team1_name, 'Хозяева') as team1_name,
-                       COALESCE(m.player2_team, bm.team2_name, 'Гости') as team2_name,
+                       COALESCE(m.player1_team, cs.team1_name, bm.team1_name, 'Хозяева') as team1_name,
+                       COALESCE(m.player2_team, cs.team2_name, bm.team2_name, 'Гости') as team2_name,
                        COALESCE(m.round_number, bm.tour, 1) as tour,
+                       m.tournament_type,
+                       cs.stage AS cup_stage,
+                       m.game_num_in_series,
+                       COALESCE(m.is_series_header, 0) AS is_series_header,
                        m.status as match_status,
                        m.player1_score,
                        m.player2_score,
@@ -10236,6 +11485,7 @@ def get_user_bets(user_id: int, status: str | None = None, limit: int = 20, offs
                        ms.selection_name
                 FROM bet_items bi
                 LEFT JOIN matches m ON bi.match_id = m.id
+                LEFT JOIN cup_series cs ON cs.id = m.cup_series_id
                 LEFT JOIN bet_markets bm ON bi.match_id = bm.match_id
                 LEFT JOIN markets mkt ON bi.market_id = mkt.id
                 LEFT JOIN market_selections ms ON bi.selection_id = ms.id
@@ -10308,9 +11558,13 @@ def get_all_bets(
             cursor.execute(
                 """
                 SELECT bi.*, 
-                       COALESCE(m.player1_team, bm.team1_name, 'Хозяева') as team1_name,
-                       COALESCE(m.player2_team, bm.team2_name, 'Гости') as team2_name,
+                       COALESCE(m.player1_team, cs.team1_name, bm.team1_name, 'Хозяева') as team1_name,
+                       COALESCE(m.player2_team, cs.team2_name, bm.team2_name, 'Гости') as team2_name,
                        COALESCE(m.round_number, bm.tour, 1) as tour,
+                       m.tournament_type,
+                       cs.stage AS cup_stage,
+                       m.game_num_in_series,
+                       COALESCE(m.is_series_header, 0) AS is_series_header,
                        m.division_id,
                        d.name as division_name,
                        m.status as match_status,
@@ -10324,6 +11578,7 @@ def get_all_bets(
                        ms.selection_name
                 FROM bet_items bi
                 LEFT JOIN matches m ON bi.match_id = m.id
+                LEFT JOIN cup_series cs ON cs.id = m.cup_series_id
                 LEFT JOIN divisions d ON m.division_id = d.id
                 LEFT JOIN bet_markets bm ON bi.match_id = bm.match_id
                 LEFT JOIN markets mkt ON bi.market_id = mkt.id
@@ -10416,9 +11671,13 @@ def get_bet_by_id(bet_id: int) -> dict | None:
         cursor.execute(
             """
             SELECT bi.*, 
-                   COALESCE(m.player1_team, bm.team1_name, 'Хозяева') as team1_name,
-                   COALESCE(m.player2_team, bm.team2_name, 'Гости') as team2_name,
+                   COALESCE(m.player1_team, cs.team1_name, bm.team1_name, 'Хозяева') as team1_name,
+                   COALESCE(m.player2_team, cs.team2_name, bm.team2_name, 'Гости') as team2_name,
                        COALESCE(m.round_number, bm.tour, 1) as tour,
+                       m.tournament_type,
+                       cs.stage AS cup_stage,
+                       m.game_num_in_series,
+                       COALESCE(m.is_series_header, 0) AS is_series_header,
                        m.division_id,
                        d.name as division_name,
                        m.status as match_status,
@@ -10432,6 +11691,7 @@ def get_bet_by_id(bet_id: int) -> dict | None:
                        ms.selection_name
                 FROM bet_items bi
                 LEFT JOIN matches m ON bi.match_id = m.id
+                LEFT JOIN cup_series cs ON cs.id = m.cup_series_id
                 LEFT JOIN divisions d ON m.division_id = d.id
                 LEFT JOIN bet_markets bm ON bi.match_id = bm.match_id
                 LEFT JOIN markets mkt ON bi.market_id = mkt.id

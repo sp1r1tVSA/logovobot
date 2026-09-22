@@ -57,6 +57,7 @@ from handlers.cabinet import (
     cb_report_choice_auto,
     cb_report_choice_manual,
     cb_confirm_ai_final,
+    cb_cup_winner,
     cb_report_home_goals,
     cb_report_away_goals,
     cb_pick_goal,
@@ -261,6 +262,7 @@ from handlers.topic_management import (
     cmd_bind_group,
     cb_bind_group,
 )
+from handlers.cup_management import register_cup_handlers
 from handlers.admin_bets import (
     cmd_admin_bets,
     cb_admin_bets_navigate,
@@ -517,6 +519,9 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(cb_report_choice_auto, pattern="^cb_report_choice_auto_\\d+$"))
     app.add_handler(CallbackQueryHandler(cb_report_choice_manual, pattern="^cb_report_choice_manual_\\d+$"))
     app.add_handler(CallbackQueryHandler(cb_confirm_ai_final, pattern="^cb_confirm_ai_final_\\d+$"))
+    # Шаг кубковой приёмки результата («кто прошёл дальше») обязан стоять до
+    # catch-all группы 0: иначе нажатие утонуло бы в AI-чате.
+    app.add_handler(CallbackQueryHandler(cb_cup_winner, pattern="^cb_cup_winner_\\d+_[12]$"))
     app.add_handler(CallbackQueryHandler(cb_report_home_goals, pattern="^cb_report_hg_\\d+$"))
     app.add_handler(CallbackQueryHandler(cb_report_away_goals, pattern="^cb_report_ag_\\d+$"))
     app.add_handler(CallbackQueryHandler(cb_pick_goal, pattern="^cb_pick_goal_idx_\\d+$"))
@@ -709,6 +714,10 @@ def _register_admin_handlers(app: Application) -> None:
 
     app.add_handler(CommandHandler("set_div_topic", admin_set_div_topic_cmd))
     register_topic_management_handlers(app)
+
+    # Общий кубок: панель этапов и тема вещания. До catch-all группы 0 — иначе
+    # кнопки утонули бы в AI-чате (ловушка №4 из AGENTS.md).
+    register_cup_handlers(app)
 
     app.add_handler(CommandHandler("set_squad_topic", admin_set_squad_topic))
     app.add_handler(CommandHandler("set_drafts_topic", admin_set_drafts_topic))

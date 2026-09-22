@@ -243,7 +243,11 @@ class RiskEngine:
                     )
 
                 # Validate match status
-                cursor.execute("SELECT status, division_id, season_id, round_number FROM matches WHERE id = ?", (m_id,))
+                cursor.execute(
+                    "SELECT id, status, division_id, season_id, round_number, tournament_type, stage_id "
+                    "FROM matches WHERE id = ?",
+                    (m_id,)
+                )
                 match_row = cursor.fetchone()
                 if not match_row:
                     return RiskDecision(
@@ -260,14 +264,14 @@ class RiskEngine:
                         message=f"Матч #{m_id} уже сыгран или завершен."
                     )
 
-                # Единое серверное правило приёма ставок на тур —
-                # то же, что применяет database.place_user_bet:
-                # ставка разрешена только при rounds.is_open = 0 AND rounds.bets_open = 1.
-                r_num = match_row["round_number"] if "round_number" in match_row.keys() else None
-                m_div_id = match_row["division_id"] if "division_id" in match_row.keys() and match_row["division_id"] is not None else 1
-                m_season_id = match_row["season_id"] if "season_id" in match_row.keys() else None
-                allowed, _gate_reason, gate_message = database.evaluate_round_betting_gate(
-                    cursor, r_num, m_div_id, m_season_id, match_id=m_id
+                # Единое серверное правило приёма ставок — то же, что применяет
+                # database.place_user_bet: ставка разрешена только при
+                # is_open = 0 AND bets_open = 1. Строку-разрешение ищет сам диспетчер:
+                # для лиги это `rounds` матча, для кубка — его `cup_stages`. Здесь
+                # намеренно нет `division_id or 1`: подставлять дивизион матчу, который
+                # в дивизион не входит, — значит проверять не тот тур.
+                allowed, _gate_reason, gate_message = database.evaluate_betting_gate(
+                    cursor, match_row, match_id=m_id
                 )
                 if not allowed:
                     return RiskDecision(
@@ -326,8 +330,11 @@ class RiskEngine:
                         details={"match_id": m_id, "market_id": mkt_id, "market_status": mkt_status, "sel_status": sel_status}
                     )
 
-                # Fallback to legacy bet_markets if relational market not found
-                if odd_val is None:
+                # Fallback to legacy bet_markets if relational market not found.
+                # Кубку такой fallback не нужен: тайлов этапа в `bet_markets` не
+                # заводится, и отсутствующий реляционный исход там — «рынка не
+                # бывает», а не «рынок закрыли» (см. cup_outcome_missing_error).
+                if odd_val is None and not database.match_is_cup(match_row):
                     cursor.execute("SELECT * FROM bet_markets WHERE match_id = ? AND is_active = 1", (m_id,))
                     bm_row = cursor.fetchone()
                     if bm_row:
@@ -336,6 +343,15 @@ class RiskEngine:
                             odd_val = bm_row[col]
 
                 if odd_val is None:
+                    cup_error = database.cup_outcome_missing_error(match_row, out_type)
+                    if cup_error:
+                        return RiskDecision(
+                            decision="REJECT",
+                            allowed=False,
+                            reason=cup_error["error"],
+                            message=cup_error["message"],
+                            details=cup_error
+                        )
                     return RiskDecision(
                         decision="REJECT",
                         allowed=False,

@@ -61,7 +61,18 @@ class StateStore {
       oddsMovers: [],
       hotMatches: [],
       recommendations: [],
-      capperLeaderboard: []
+      capperLeaderboard: [],
+      // Лобби показывает либо линию дивизиона, либо общий кубок.
+      lobbyMode: 'league', // 'league' | 'cup'
+      cup: {
+        stages: [],
+        selectedStageId: null,
+        view: 'line', // 'line' | 'bracket'
+        line: null,
+        bracket: null,
+        loading: false,
+        error: null
+      }
     };
     this.listeners = new Set();
   }
@@ -242,8 +253,38 @@ class StateStore {
       market_name: extra.market_name || null,
       team1_name: match.team1_name || match.player1_team || 'Хозяева',
       team2_name: match.team2_name || match.player2_team || 'Гости',
-      tour: match.tour || match.round_number || 1
+      tour: match.tour || match.round_number || 1,
+      // Подпись события вместо «Тур N» — у кубка туров нет.
+      ...(extra.meta ? { meta: extra.meta } : {})
     };
+  }
+
+  // --- Общий кубок ---
+  setLobbyMode(mode) {
+    this.state.lobbyMode = mode === 'cup' ? 'cup' : 'league';
+    this.notify();
+  }
+
+  setCupState(patch) {
+    this.state.cup = { ...this.state.cup, ...patch };
+    this.notify();
+  }
+
+  /** Тайл кубковой линии по match_id — с именами пары из серии. */
+  findCupTile(matchId) {
+    const series = this.state.cup.line?.series || [];
+    for (const entry of series) {
+      for (const tile of [entry.header, ...(entry.games || [])]) {
+        if (tile && tile.match_id === matchId) {
+          return {
+            ...tile,
+            team1_name: tile.team1_name || entry.team1_name,
+            team2_name: tile.team2_name || entry.team2_name
+          };
+        }
+      }
+    }
+    return null;
   }
 
   toggleSelection(match, outcome, odd, extra = {}) {

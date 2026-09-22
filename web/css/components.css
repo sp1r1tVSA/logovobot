@@ -3108,3 +3108,226 @@ img.team-logo-img + .team-logo-fallback {
     font-size: 0.7rem;
   }
 }
+
+/* ─── Общий кубок (режим лобби «🏆 Кубок») ─── */
+.cup-tab-btn {
+  border-color: rgba(245, 176, 39, 0.35);
+}
+.cup-stage-chips {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding: 2px 0 10px;
+  scrollbar-width: none;
+}
+.cup-stage-chips::-webkit-scrollbar {
+  display: none;
+}
+.cup-stage-chip {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 6px 12px;
+  border-radius: var(--radius-full);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.cup-stage-chip.active {
+  color: var(--accent-gold);
+  border-color: var(--accent-gold);
+  background: var(--accent-gold-light);
+}
+.cup-stage-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--color-success);
+  box-shadow: 0 0 6px var(--color-success);
+}
+.cup-stage-count {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.cup-view-toggle {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 4px;
+  margin-bottom: 12px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.cup-view-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 700;
+  padding: 7px 0;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+.cup-view-btn.active {
+  background: var(--accent-gold-light);
+  color: var(--accent-gold);
+}
+.cup-line-notice {
+  font-size: 0.8rem;
+  color: var(--color-warning);
+  background: var(--color-warning-bg);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  margin-bottom: 12px;
+}
+.cup-empty {
+  text-align: center;
+  padding: 44px 20px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.cup-empty-icon {
+  font-size: 2.2rem;
+  margin-bottom: 8px;
+}
+.cup-empty-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: var(--text-primary);
+  margin-bottom: 4px;
+}
+.cup-error {
+  color: var(--color-danger);
+}
+.cup-series-num,
+.cup-series-status {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.cup-series-card.completed {
+  opacity: 0.85;
+}
+.cup-series-score {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.1rem;
+  font-weight: 900;
+  color: var(--text-primary);
+}
+.cup-team.winner {
+  color: var(--accent-gold);
+}
+.cup-team.loser {
+  color: var(--text-muted);
+}
+.cup-market-title {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 4px 0 6px;
+}
+.cup-series-card .odds-grid-2col {
+  margin-bottom: 8px;
+}
+.cup-odd-locked {
+  background: var(--bg-tertiary);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  opacity: 0.55;
+}
+.cup-odd-locked .odd-val {
+  color: var(--text-muted);
+}
+.cup-game-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.cup-game-num {
+  flex-shrink: 0;
+  width: 52px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+}
+.cup-game-odds {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+}
+.cup-game-odds .odd-btn,
+.cup-game-odds .cup-odd-locked {
+  padding: 6px 2px;
+}
+.cup-game-odds .odd-label {
+  font-size: 0.64rem;
+}
+.cup-game-odds .odd-val {
+  font-size: 0.9rem;
+}
+.cup-game-more {
+  flex-shrink: 0;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--radius-xs);
+  border: 1px solid var(--border-subtle);
+  background: var(--bg-tertiary);
+  color: var(--accent-gold);
+  font-size: 1rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+.cup-bracket-games {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 8px;
+}
+.cup-bracket-game {
+  display: grid;
+  grid-template-columns: 60px 80px minmax(0, 1fr);
+  gap: 8px;
+  font-size: 0.78rem;
+  color: var(--text-secondary);
+}
+.cup-bracket-game.voided {
+  color: var(--text-muted);
+  font-style: italic;
+}
+.cup-bracket-game-score {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.cup-bracket-game-winner {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+}
+.cup-series-winner {
+  margin-top: 8px;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--accent-gold);
+}

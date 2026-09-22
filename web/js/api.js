@@ -119,6 +119,19 @@ class ApiClient {
     return this.request(`/api/markets/tours${q}`);
   }
 
+  // Общий кубок: этапы сезона, линия и сетка этапа. Ставки — через /api/predictions.
+  getCup() {
+    return this.request('/api/cup');
+  }
+
+  getCupLine(stageId) {
+    return this.request(`/api/cup/stages/${stageId}/line`);
+  }
+
+  getCupBracket(stageId) {
+    return this.request(`/api/cup/stages/${stageId}/bracket`);
+  }
+
   getMatchMarkets(matchId) {
     return this.request(`/api/matches/${matchId}/markets`);
   }

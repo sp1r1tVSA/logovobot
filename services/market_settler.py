@@ -17,10 +17,18 @@ def evaluate_market_selection(
     score2: int,
     match_status: str = "finished",
     ht_score1: int | None = None,
-    ht_score2: int | None = None
+    ht_score2: int | None = None,
+    winner_side: str | None = None
 ) -> OutcomeResult:
     """
     Evaluate whether a selection outcome is won, lost, voided, or refunded.
+
+    `winner_side` ('p1' | 'p2' | None) — поле победителя ИГРЫ для матчей, где
+    ничьей не бывает. В общем кубке основное время может кончиться 2:2 и
+    разрешиться послематчевыми, поэтому «П1» там означает «клуб 1 взял игру», а
+    не «клуб 1 забил больше». Для всех прочих рынков (тоталы, ОЗ, инд. тоталы,
+    фора, точный счёт) основанием остаётся счёт основного времени: «ТМ2.5»
+    проигрывает при 2:2 независимо от того, кто выиграл по послематчевым.
     """
     if match_status in ("cancelled", "voided"):
         return "voided"
@@ -35,10 +43,14 @@ def evaluate_market_selection(
     # 1. 1X2 (Match Winner)
     if market_key in ("1x2", "match_winner", "outcome", "match_result"):
         if selection_key in ("p1", "1", "home"):
+            if winner_side is not None:
+                return "won" if winner_side == "p1" else "lost"
             return "won" if s1 > s2 else "lost"
         if selection_key in ("x", "draw"):
             return "won" if s1 == s2 else "lost"
         if selection_key in ("p2", "2", "away"):
+            if winner_side is not None:
+                return "won" if winner_side == "p2" else "lost"
             return "won" if s2 > s1 else "lost"
 
     # 2. Double Chance

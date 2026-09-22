@@ -18,6 +18,7 @@ from api.routes_wallet import (
     handle_get_wallet,
 )
 from api.routes_markets import handle_get_tours, handle_get_match_markets, handle_get_odds_history
+from api.routes_cup import handle_get_cup, handle_get_cup_bracket, handle_get_cup_line
 from api.routes_predictions import (
     handle_place_prediction,
     handle_get_predictions,
@@ -310,6 +311,11 @@ def create_app() -> web.Application:
     app.router.add_get("/api/markets/tours", handle_get_tours)
     app.router.add_get("/api/matches/{id}/markets", handle_get_match_markets)
     app.router.add_get("/api/markets/{id}/odds-history", handle_get_odds_history)
+
+    # 2b. Общий кубок: этапы, сетка и линия этапа (ставки — через /api/predictions)
+    app.router.add_get("/api/cup", handle_get_cup)
+    app.router.add_get("/api/cup/stages/{id}/bracket", handle_get_cup_bracket)
+    app.router.add_get("/api/cup/stages/{id}/line", handle_get_cup_line)
 
     # 3. Match Center 3.0
     app.router.add_get("/api/matches", handle_get_matches)

@@ -373,6 +373,12 @@ const OUTCOME_NAMES = {
   'it2_under_1.5': 'ИТМ2 (1.5)'
 };
 
+/** «1/64 финала», «Финал» — подпись этапа кубка. */
+export function cupStageLabel(stage) {
+  if (!stage) return 'Кубок';
+  return stage === 'final' ? 'Финал' : `${stage} финала`;
+}
+
 /** Market title for a slip item added without one (Line-tab tiles, old drafts). */
 export function marketNameForOutcome(key) {
   const k = String(key || '').toLowerCase();
@@ -461,7 +467,7 @@ export class UIRenderer {
     if (bannerEl) bannerEl.innerHTML = '';
   }
 
-  static renderDivisionTabs(divisions, selectedDivisionId, containerId = 'lobby-division-tabs-container') {
+  static renderDivisionTabs(divisions, selectedDivisionId, containerId = 'lobby-division-tabs-container', lobbyMode = null) {
     const container = document.getElementById(containerId);
     if (!container) return;
 
@@ -473,8 +479,16 @@ export class UIRenderer {
       { id: 5, name: 'Дивизион 5' }
     ];
 
-    container.innerHTML = divs.map(d => `
-      <button class="division-tab-btn ${d.id === selectedDivisionId ? 'active' : ''}" 
+    // Чип кубка есть только в лобби: турнирные таблицы кубка не показывают.
+    const isCup = lobbyMode === 'cup';
+    const cupChip = lobbyMode !== null ? `
+      <button class="division-tab-btn cup-tab-btn ${isCup ? 'active' : ''}" data-cup-tab="1">
+        🏆 Кубок
+      </button>
+    ` : '';
+
+    container.innerHTML = cupChip + divs.map(d => `
+      <button class="division-tab-btn ${!isCup && d.id === selectedDivisionId ? 'active' : ''}" 
               data-division-id="${d.id}">
         🛡️ ${d.name || `Дивизион ${d.id}`}
       </button>
@@ -657,6 +671,231 @@ export class UIRenderer {
           </div>
         </div>
       `;
+    }).join('');
+  }
+
+  /** Лобби в режиме кубка прячет линию дивизиона и хабы лиги. */
+  static renderLobbyMode(mode) {
+    const isCup = mode === 'cup';
+    ['matches-list-container', 'hot-matches-container', 'odds-movers-container', 'recommendations-container']
+      .forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.style.display = isCup ? 'none' : '';
+      });
+    const cupEl = document.getElementById('cup-view-container');
+    if (cupEl) cupEl.style.display = isCup ? '' : 'none';
+  }
+
+  /**
+   * Кнопка исхода кубковой линии. Без живого коэффициента — неактивная плашка,
+   * а не выдуманное число: закрытую линию сервер отдаёт с пустыми `odds`.
+   */
+  static _cupOddBtn(tile, key, label, meta, names = {}) {
+    const odd = tile?.odds?.[key];
+    if (!tile || tile.is_line === false || typeof odd !== 'number' || odd <= 1.0) {
+      return `
+        <div class="cup-odd-locked">
+          <span class="odd-label">${escapeHtml(label)}</span>
+          <span class="odd-val">—</span>
+        </div>`;
+    }
+    const active = store.isSelectionActive(tile.match_id, key);
+    return `
+      <div class="odd-btn ${active ? 'selected' : ''}"
+           data-match-id="${tile.match_id}" data-outcome="${key}" data-odd="${odd}"
+           data-slip-meta="${escapeHtml(meta)}"
+           ${names.market ? `data-market-name="${escapeHtml(names.market)}"` : ''}
+           ${names.selection ? `data-selection-name="${escapeHtml(names.selection)}"` : ''}>
+        <span class="odd-label">${escapeHtml(label)}</span>
+        <span class="odd-val">${odd.toFixed(2)}</span>
+      </div>`;
+  }
+
+  static _cupTeamsRow(t1, t2, score1 = null, score2 = null, winner = null) {
+    const hasScore = score1 !== null && score2 !== null;
+    const cls = (name) => (winner ? (name === winner ? 'cup-team winner' : 'cup-team loser') : 'cup-team');
+    return `
+      <div class="match-teams-row">
+        <div class="team-block-side left">
+          <div class="team-meta-wrap left">
+            <span class="team-name ${cls(t1)}" title="${escapeHtml(t1)}">${escapeHtml(t1)}</span>
+          </div>
+          ${renderTeamLogoHtml(t1, 28)}
+        </div>
+        <div class="match-vs-divider ${hasScore ? 'cup-series-score' : ''}">${hasScore ? `${score1} : ${score2}` : 'VS'}</div>
+        <div class="team-block-side right">
+          ${renderTeamLogoHtml(t2, 28)}
+          <div class="team-meta-wrap right">
+            <span class="team-name ${cls(t2)}" title="${escapeHtml(t2)}">${escapeHtml(t2)}</span>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  static renderCupView(cup, searchQuery = '') {
+    const container = document.getElementById('cup-view-container');
+    if (!container) return;
+    const stages = cup?.stages || [];
+
+    if (cup?.loading && stages.length === 0) {
+      container.innerHTML = `<div class="cup-empty"><div class="cup-empty-icon">⏳</div>Загрузка кубка...</div>`;
+      return;
+    }
+    if (stages.length === 0) {
+      container.innerHTML = `
+        <div class="cup-empty">
+          <div class="cup-empty-icon">🏆</div>
+          <div class="cup-empty-title">${cup?.error ? escapeHtml(cup.error) : 'Сетка кубка ещё не сформирована'}</div>
+          <div>Линия появится, когда администратор откроет ставки на этап.</div>
+        </div>`;
+      return;
+    }
+
+    const selectedId = cup.selectedStageId;
+    const stageChips = stages.map(s => `
+      <button class="cup-stage-chip ${s.id === selectedId ? 'active' : ''}" data-stage-id="${s.id}">
+        ${s.bets_open ? '<span class="cup-stage-dot" title="Ставки открыты"></span>' : ''}
+        ${escapeHtml(cupStageLabel(s.stage))}
+        ${s.series_total ? `<span class="cup-stage-count">${s.series_completed}/${s.series_total}</span>` : ''}
+      </button>`).join('');
+
+    const view = cup.view === 'bracket' ? 'bracket' : 'line';
+    const toggle = `
+      <div class="cup-view-toggle">
+        <button class="cup-view-btn ${view === 'line' ? 'active' : ''}" data-cup-view="line">Линия</button>
+        <button class="cup-view-btn ${view === 'bracket' ? 'active' : ''}" data-cup-view="bracket">Сетка</button>
+      </div>`;
+
+    let body;
+    if (cup.loading) {
+      body = `<div class="cup-empty"><div class="cup-empty-icon">⏳</div>Загрузка этапа...</div>`;
+    } else if (cup.error) {
+      body = `<div class="cup-empty cup-error">${escapeHtml(cup.error)}</div>`;
+    } else {
+      body = view === 'bracket'
+        ? UIRenderer._renderCupBracket(cup.bracket, searchQuery)
+        : UIRenderer._renderCupLine(cup.line, searchQuery);
+    }
+
+    container.innerHTML = `
+      <div class="cup-stage-chips scroll-row">${stageChips}</div>
+      ${toggle}
+      ${body}`;
+  }
+
+  static _cupSeriesFilter(series, searchQuery) {
+    const q = (searchQuery || '').toLowerCase().trim();
+    if (!q) return series;
+    return series.filter(s =>
+      (s.team1_name || '').toLowerCase().includes(q) ||
+      (s.team2_name || '').toLowerCase().includes(q));
+  }
+
+  static _renderCupLine(line, searchQuery) {
+    if (!line) return '';
+    const stage = line.stage || {};
+    const label = cupStageLabel(stage.stage);
+    const all = line.series || [];
+    const series = UIRenderer._cupSeriesFilter(all, searchQuery);
+    const notice = stage.bets_open ? '' : `
+      <div class="cup-line-notice">🔒 Ставки на этап «${escapeHtml(label)}» сейчас не принимаются</div>`;
+
+    if (all.length === 0) {
+      return `${notice}<div class="cup-empty"><div class="cup-empty-icon">🏆</div>В этом этапе пока нет пар</div>`;
+    }
+    if (series.length === 0) {
+      return `<div class="cup-empty">Нет пар по запросу «${escapeHtml(searchQuery)}»</div>`;
+    }
+
+    return notice + series.map(s => {
+      const t1 = s.team1_name;
+      const t2 = s.team2_name;
+      const h = s.header ? { ...s.header, team1_name: t1, team2_name: t2 } : null;
+      const seriesMeta = `Кубок · ${label} · серия`;
+      const headerBlock = h ? `
+        <div class="cup-market-title">Проход дальше</div>
+        <div class="odds-grid-2col">
+          ${UIRenderer._cupOddBtn(h, 'p1', 'П1', seriesMeta, { market: 'Проход в следующий раунд', selection: `Проходит ${t1}` })}
+          ${UIRenderer._cupOddBtn(h, 'p2', 'П2', seriesMeta, { market: 'Проход в следующий раунд', selection: `Проходит ${t2}` })}
+        </div>
+        <div class="cup-market-title">Будет ли третья игра</div>
+        <div class="odds-grid-2col">
+          ${UIRenderer._cupOddBtn(h, 'tb25', 'Да', seriesMeta, { market: 'Третья игра', selection: 'Будет' })}
+          ${UIRenderer._cupOddBtn(h, 'tm25', 'Нет', seriesMeta, { market: 'Третья игра', selection: 'Не будет' })}
+        </div>` : '';
+
+      const games = (s.games || []).map(g => {
+        const tile = { ...g, team1_name: t1, team2_name: t2 };
+        const n = g.game_num_in_series;
+        const meta = `Кубок · ${label} · игра ${n}`;
+        const market = `Игра ${n}: исход`;
+        return `
+          <div class="cup-game-row">
+            <div class="cup-game-num">Игра ${n}</div>
+            <div class="cup-game-odds">
+              ${UIRenderer._cupOddBtn(tile, 'p1', 'П1', meta, { market })}
+              ${UIRenderer._cupOddBtn(tile, 'p2', 'П2', meta, { market })}
+              ${UIRenderer._cupOddBtn(tile, 'tb25', 'ТБ 2.5', meta)}
+              ${UIRenderer._cupOddBtn(tile, 'tm25', 'ТМ 2.5', meta)}
+            </div>
+            ${g.is_line !== false ? `<button class="cup-game-more btn-more-markets" data-match-id="${g.match_id}" aria-label="Все рынки игры">+</button>` : ''}
+          </div>`;
+      }).join('');
+
+      return `
+        <div class="match-card cup-series-card" data-series-id="${s.series_id}">
+          <div class="match-card-header">
+            <div style="display: flex; align-items: center; gap: 8px;">
+              <span class="match-tour-tag">🏆 ${escapeHtml(label)}</span>
+              <span class="cup-series-num">Серия ${s.series_num} · до 2 побед</span>
+            </div>
+          </div>
+          ${UIRenderer._cupTeamsRow(t1, t2)}
+          ${headerBlock}
+          ${games ? `<div class="cup-market-title">Игры серии</div>${games}` : ''}
+          ${h && h.is_line !== false ? `
+            <div class="match-card-actions">
+              <button class="btn-match-action accent btn-more-markets" data-match-id="${h.match_id}">
+                ⚡ Все рынки серии
+              </button>
+            </div>` : ''}
+        </div>`;
+    }).join('');
+  }
+
+  static _renderCupBracket(bracket, searchQuery) {
+    if (!bracket) return '';
+    const all = bracket.series || [];
+    if (all.length === 0) {
+      return `<div class="cup-empty"><div class="cup-empty-icon">🏆</div>В этом этапе пока нет пар</div>`;
+    }
+    const series = UIRenderer._cupSeriesFilter(all, searchQuery);
+    if (series.length === 0) {
+      return `<div class="cup-empty">Нет пар по запросу «${escapeHtml(searchQuery)}»</div>`;
+    }
+    const STATUS = { completed: 'Серия завершена', active: 'Идёт серия' };
+    return series.map(s => {
+      const games = (s.games || []).map(g => {
+        const played = g.score1 !== null && g.score1 !== undefined && g.score2 !== null && g.score2 !== undefined;
+        const voided = g.status === 'cancelled';
+        const score = voided ? 'не игралась' : (played ? `${g.score1} : ${g.score2}` : '—');
+        return `
+          <div class="cup-bracket-game ${voided ? 'voided' : ''}">
+            <span>Игра ${g.game_num}</span>
+            <span class="cup-bracket-game-score">${escapeHtml(score)}</span>
+            <span class="cup-bracket-game-winner">${g.winner_team ? escapeHtml(g.winner_team) : ''}</span>
+          </div>`;
+      }).join('');
+      return `
+        <div class="match-card cup-series-card ${s.status === 'completed' ? 'completed' : ''}">
+          <div class="match-card-header">
+            <span class="cup-series-num">Серия ${s.series_num}</span>
+            <span class="cup-series-status">${escapeHtml(STATUS[s.status] || s.status || '')}</span>
+          </div>
+          ${UIRenderer._cupTeamsRow(s.team1_name, s.team2_name, s.team1_wins, s.team2_wins, s.winner_name)}
+          ${games ? `<div class="cup-bracket-games">${games}</div>` : ''}
+          ${s.winner_name ? `<div class="cup-series-winner">Проходит: ${escapeHtml(s.winner_name)}</div>` : ''}
+        </div>`;
     }).join('');
   }
 
@@ -1340,7 +1579,7 @@ export class UIRenderer {
                         <div class="coupon-match-sub live" style="font-size: 0.68rem; color: #ff4757; font-weight: 700; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.02em; white-space: nowrap;">LIVE ${it.live_minute ? it.live_minute + "'" : ''}</div>
                       ` : `
                         <div class="coupon-vs" style="font-family: \'Outfit\', sans-serif; font-size: 0.82rem; font-weight: 800; color: var(--text-muted); letter-spacing: 0.04em; line-height: 1.1;">VS</div>
-                        <div class="coupon-match-sub" style="font-size: 0.68rem; color: var(--text-muted); font-weight: 500; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.02em; white-space: nowrap;">${it.tour ? `Тур ${it.tour}` : 'Матч'}</div>
+                        <div class="coupon-match-sub" style="font-size: 0.68rem; color: var(--text-muted); font-weight: 500; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.02em; white-space: nowrap;">${it.tournament_type === 'cup' ? escapeHtml(cupStageLabel(it.cup_stage)) : (it.tour ? `Тур ${it.tour}` : 'Матч')}</div>
                       `}
                     </div>
 
@@ -1823,7 +2062,7 @@ export class UIRenderer {
           </div>
           <div class="slip-card-match">
             <div class="slip-card-teams">${escapeHtml(s.team1_name)} — ${escapeHtml(s.team2_name)}</div>
-            <div class="slip-card-meta">Тур ${escapeHtml(s.tour || 1)} · ${escapeHtml(market)}</div>
+            <div class="slip-card-meta">${escapeHtml(s.meta || `Тур ${s.tour || 1}`)} · ${escapeHtml(market)}</div>
           </div>
           <button class="slip-card-remove btn-remove-slip-item" data-match-id="${s.match_id}" aria-label="Убрать событие">✕</button>
         </div>

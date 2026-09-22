@@ -1399,6 +1399,7 @@ async def cancel_score_report_and_navigate(update: Update, context: ContextTypes
         "ai_photos_list",
         "processed_media_groups",
         "report_mvp_player",
+        "cup_confirm_callback",
     ):
         context.user_data.pop(key, None)
 
@@ -2912,6 +2913,104 @@ async def build_debt_footer(match: dict) -> str:
         return ""
 
 
+# ─── Общий кубок: кто прошёл дальше ──────────────────────────────────────────
+
+
+def _cup_winner_needed(match: dict, h_score: int, a_score: int) -> bool:
+    """Надо спросить, кто прошёл дальше: кубковая игра, равный счёт, ответ не дан.
+
+    Ничьих в кубке нет, а послематчевые серии на скриншоте статистики не
+    распознаются. Без этого ответа результат занести нечем: `advance_cup_series`
+    на равном счёте без `cup_winner_team` отказывается подтверждать матч, и
+    правильно делает — иначе победа ушла бы не тому клубу.
+    """
+    if (match.get("tournament_type") or "league") != "cup":
+        return False
+    if (match.get("cup_winner_team") or "").strip():
+        return False
+    return int(h_score) == int(a_score)
+
+
+def _cup_winner_keyboard(match_id: int, team1: str, team2: str, confirm_cb: str) -> InlineKeyboardMarkup:
+    """Два клуба пары + та же кнопка подтверждения, что вела в этот шаг.
+
+    Кнопка подтверждения остаётся на карточке намеренно: выбор победителя —
+    дополнительный шаг перед ровно тем же действием, а не замена ему.
+    """
+    return InlineKeyboardMarkup([
+        [
+            InlineKeyboardButton(f"➡️ {team1}", callback_data=f"cb_cup_winner_{match_id}_1"),
+            InlineKeyboardButton(f"➡️ {team2}", callback_data=f"cb_cup_winner_{match_id}_2"),
+        ],
+        [InlineKeyboardButton("✅ Подтвердить результат", callback_data=confirm_cb)],
+    ])
+
+
+async def _show_cup_winner_prompt(query, match: dict, h_score: int, a_score: int, confirm_cb: str) -> None:
+    team1 = match.get("player1_team") or "Команда 1"
+    team2 = match.get("player2_team") or "Команда 2"
+    text = (
+        f"🏆 <b>Общий кубок, игра серии</b>\n"
+        f"Основное время: <b>{h_score}:{a_score}</b>\n\n"
+        "Ничьей в кубке нет — счёт разрешается послематчевыми. "
+        "<b>Кто проходит дальше?</b>"
+    )
+    markup = _cup_winner_keyboard(match["id"], team1, team2, confirm_cb)
+    try:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    except telegram.error.BadRequest:
+        await query.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+
+async def cb_cup_winner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Записать клуб, прошедший дальше, и вернуть карточку с подтверждением."""
+    query = update.callback_query
+    if not query:
+        return
+
+    parts = (query.data or "").split("_")
+    try:
+        match_id = int(parts[-2])
+        choice = int(parts[-1])
+    except (IndexError, ValueError):
+        await query.answer("❌ Неверные данные кнопки.", show_alert=True)
+        return
+
+    match = await asyncio.to_thread(database.get_match, match_id)
+    if not match:
+        await query.answer("❌ Матч не найден.", show_alert=True)
+        return
+
+    teams = [match.get("player1_team"), match.get("player2_team")]
+    club = teams[choice - 1] if choice in (1, 2) else None
+    ok, message = await asyncio.to_thread(
+        database.set_cup_game_winner, match_id, club, query.from_user.id
+    )
+    if not ok:
+        await query.answer(message, show_alert=True)
+        return
+
+    confirm_cb = context.user_data.get("cup_confirm_callback") or f"cb_confirm_ai_final_{match_id}"
+    await query.answer(f"Дальше проходит {message}")
+    h_score = int(context.user_data.get("report_home_goals") or 0)
+    a_score = int(context.user_data.get("report_away_goals") or 0)
+    text = (
+        f"🏆 <b>Общий кубок, игра серии</b>\n"
+        f"Основное время: <b>{h_score}:{a_score}</b>\n"
+        f"Дальше проходит: <b>{html.escape(message)}</b>\n\n"
+        "Нажми «Подтвердить результат» — счёт и проход занесём вместе."
+    )
+    try:
+        await query.edit_message_text(
+            text, parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("✅ Подтвердить результат", callback_data=confirm_cb)]]
+            ),
+        )
+    except telegram.error.BadRequest:
+        await query.message.reply_text(text, parse_mode="HTML")
+
+
 async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Instantly save and finalize match score in database from AI Vision result."""
     query = update.callback_query
@@ -2981,6 +3080,13 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
         events.append((home_team, p, "assist", c))
     for p, c in a_assists.items():
         events.append((away_team, p, "assist", c))
+
+    if _cup_winner_needed(match, h_score, a_score):
+        # Шаг перед записью: без него `advance_cup_series` отказался бы
+        # подтверждать игру с равным основным счётом.
+        context.user_data["cup_confirm_callback"] = f"cb_confirm_ai_final_{match_id}"
+        await _show_cup_winner_prompt(query, match, h_score, a_score, f"cb_confirm_ai_final_{match_id}")
+        return
 
     await asyncio.to_thread(
         database.confirm_and_finalize_match, match_id, h_score, a_score, events,
@@ -3177,6 +3283,14 @@ async def submit_report_to_guest(update: Update, context: ContextTypes.DEFAULT_T
     submitter_id = query.from_user.id
     payload = collect_report_payload(context, match)
     events = _pending_report_events(match, payload)
+
+    if _cup_winner_needed(match, payload["h_score"], payload["a_score"]):
+        context.user_data["cup_confirm_callback"] = f"cb_submit_report_to_guest_{match_id}"
+        await _show_cup_winner_prompt(
+            query, match, payload["h_score"], payload["a_score"],
+            f"cb_submit_report_to_guest_{match_id}"
+        )
+        return
 
     await asyncio.to_thread(
         database.confirm_and_finalize_match,

@@ -198,12 +198,19 @@ async def handle_get_match_markets(request: web.Request) -> web.Response:
     if not match_row:
         return web.json_response({"status": "error", "message": "Матч не найден."}, status=404)
 
+    is_cup = database.match_is_cup(match_row)
     t1 = match_row["player1_team"] or "Команда 1"
     t2 = match_row["player2_team"] or "Команда 2"
+    if is_cup:
+        # Пара кубка живёт в `cup_series`: у заголовка серии своих имён нет.
+        pair = await asyncio.to_thread(database.get_cup_series_pair, match_row["cup_series_id"])
+        if pair:
+            t1, t2 = pair
 
     markets = odds_engine.get_match_markets(match_id)
-    if not markets:
-        # Generate on the fly if not existing
+    if not markets and not is_cup:
+        # Generate on the fly if not existing. Кубок сюда не идёт: его линию
+        # выставляет панель этапа, а лиговая модель записала бы ему ничью.
         markets = odds_engine.generate_match_markets(match_id, t1, t2)
 
     # Normalize field name: alias odds_value -> current_odd for frontend consistency

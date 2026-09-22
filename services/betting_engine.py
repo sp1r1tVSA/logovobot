@@ -358,6 +358,70 @@ def generate_round_markets(tour: int, division_id: int | None = None, season_id:
     return markets
 
 
+def select_stage_matches(stage: str, season_id: int | None = None) -> list[dict]:
+    """Все матчи этапа общего кубка: каждая игра каждой серии и заголовок серии.
+
+    Квоты `CENTRAL_MATCHES_PER_ROUND` здесь нет намеренно: в лиге она отбирает
+    четыре статусные пары тура, а сетку кубка уже отобрала жеребьёвка — убрать из
+    неё матч значит убрать участника из стадии. Сыгранные игры в линию не
+    возвращаются (`get_cup_stage_matches(unplayed_only=True)`).
+    """
+    return database.get_cup_stage_matches(stage, season_id=season_id, unplayed_only=True)
+
+
+def generate_stage_markets(stage: str, season_id: int | None = None) -> list[dict]:
+    """Собрать и выставить линию этапа кубка.
+
+    Порядок тот же, что у лиги: сначала завести недостающие строки (`provision_cup_stage_line`
+    идемпотентен), затем пересчитать цены. Открытой линия остаётся ровно пока
+    работает гейт этапа — начатый этап пересчёта не получает, чтобы не вернуть в
+    продажу рынки, закрытые его стартом.
+
+    Кубок пишется только в реляционные `markets`, минуя `bet_markets`:
+    см. `database.get_cup_stage_line`.
+    """
+    if season_id is None:
+        act = database.get_active_season()
+        season_id = act["id"] if act else 1
+
+    database.provision_cup_stage_line(stage, season_id=season_id)
+
+    from services import odds_engine
+
+    priced: list[dict] = []
+    for m in select_stage_matches(stage, season_id=season_id):
+        m_id = m["match_id"]
+        if not database.match_line_is_open(m_id):
+            continue
+        try:
+            if m["is_series_header"]:
+                odds_engine.generate_cup_series_markets(
+                    m_id, m["team1_name"], m["team2_name"], season_id=season_id
+                )
+            else:
+                odds_engine.generate_cup_match_markets(
+                    m_id, m["team1_name"], m["team2_name"], season_id=season_id
+                )
+        except Exception as e:
+            logger.warning(f"Could not price cup match #{m_id} (stage {stage}): {e}")
+            continue
+        priced.append({
+            "match_id": m_id,
+            "series_id": m["series_id"],
+            "series_num": m["series_num"],
+            "is_series_header": bool(m["is_series_header"]),
+            "game_num_in_series": m["game_num_in_series"],
+            "team1_name": m["team1_name"],
+            "team2_name": m["team2_name"],
+        })
+
+    logger.info(
+        "🏆 Generated cup line for stage %s: %s objects (season=%s)",
+        stage, len(priced), season_id
+    )
+    return priced
+
+
 def regenerate_all_active_markets() -> int:
     """
     Recalculate and refresh odds for the unplayed matches already in the line.

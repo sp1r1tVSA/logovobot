@@ -6,7 +6,7 @@
 import { api } from './api.js';
 import { store } from './store.js';
 import { tgBridge } from './tg.js';
-import { UIRenderer, escapeHtml } from './ui.js';
+import { UIRenderer, escapeHtml, cupStageLabel } from './ui.js';
 import { ParticleEffects } from './effects.js';
 
 class AppController {
@@ -23,12 +23,14 @@ class AppController {
     // 1. Subscribe UI renderer to reactive store changes
     store.subscribe((state) => {
       UIRenderer.renderHeader(state.user, state.progression, state.unclaimedAchievementsCount);
-      UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'lobby-division-tabs-container');
+      UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'lobby-division-tabs-container', state.lobbyMode);
       UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'tournament-division-tabs-container');
       UIRenderer.renderHotMatches(state.hotMatches);
       UIRenderer.renderOddsMovers(state.oddsMovers);
       UIRenderer.renderRecommendations(state.recommendations, state.searchQuery);
       UIRenderer.renderMatches(state.tours, state.marketCategoryFilter, state.searchQuery, state.selectedDivisionId);
+      UIRenderer.renderLobbyMode(state.lobbyMode);
+      if (state.lobbyMode === 'cup') UIRenderer.renderCupView(state.cup, state.searchQuery);
       UIRenderer.renderMatchCenter(state.matchDetail, state.matchStats, state.matchH2H, state.matchInsights, state.matchLive, state.matchMarkets, state.matchCenterSubTab);
       UIRenderer.renderTournaments(state.standings, state.results, state.tournamentTopStats, this.currentTournamentTab, state.standingsForm, this.standingsSort, this.currentLeaderTab);
       UIRenderer.renderPredictionsHistory(state.myBets, state.myBetsFilter);
@@ -172,6 +174,42 @@ class AppController {
     } catch (e) {
       console.warn("Could not load intelligence hub:", e);
     }
+  }
+
+  /** Лобби в режиме кубка: этапы сезона, затем линия и сетка текущего этапа. */
+  async openCupLobby() {
+    store.setLobbyMode('cup');
+    store.setCupState({ loading: true, error: null });
+    try {
+      const res = await api.getCup();
+      if (res.status !== 'ok') throw new Error(res.message || 'Кубок временно недоступен');
+      const stages = res.stages || [];
+      const keep = stages.some(s => s.id === store.state.cup.selectedStageId);
+      const stageId = keep ? store.state.cup.selectedStageId : res.current_stage_id;
+      store.setCupState({ stages, loading: false });
+      if (stageId) await this.loadCupStage(stageId);
+    } catch (err) {
+      console.warn("Could not load cup:", err);
+      store.setCupState({ loading: false, error: 'Не удалось загрузить кубок' });
+    }
+  }
+
+  async loadCupStage(stageId) {
+    store.setCupState({ selectedStageId: stageId, loading: true, error: null });
+    const [lineRes, bracketRes] = await Promise.allSettled([
+      api.getCupLine(stageId),
+      api.getCupBracket(stageId)
+    ]);
+    // Пока шёл запрос, игрок мог выбрать другой этап — старый ответ не нужен.
+    if (store.state.cup.selectedStageId !== stageId) return;
+    const line = lineRes.status === 'fulfilled' && lineRes.value.status === 'ok' ? lineRes.value : null;
+    const bracket = bracketRes.status === 'fulfilled' && bracketRes.value.status === 'ok' ? bracketRes.value : null;
+    store.setCupState({
+      line,
+      bracket,
+      loading: false,
+      error: (line || bracket) ? null : 'Не удалось загрузить этап кубка'
+    });
   }
 
   async fetchProgressionData() {
@@ -419,9 +457,16 @@ class AppController {
     const lobbyDivTabs = document.getElementById('lobby-division-tabs-container');
     if (lobbyDivTabs) {
       lobbyDivTabs.addEventListener('click', async (e) => {
+        const cupBtn = e.target.closest('.cup-tab-btn');
+        if (cupBtn) {
+          tgBridge.hapticImpact('light');
+          await this.openCupLobby();
+          return;
+        }
         const btn = e.target.closest('.division-tab-btn');
         if (btn && btn.dataset.divisionId) {
           const divId = parseInt(btn.dataset.divisionId);
+          store.setLobbyMode('league');
           store.setSelectedDivisionId(divId);
           tgBridge.hapticImpact('light');
           try {
@@ -456,6 +501,27 @@ class AppController {
 
     // 3. Фильтр по турам удалён: лобби показывает единый список открытой линии.
 
+    // 4. Кубок: выбор этапа и переключатель «Линия / Сетка»
+    const cupView = document.getElementById('cup-view-container');
+    if (cupView) {
+      cupView.addEventListener('click', async (e) => {
+        const stageBtn = e.target.closest('.cup-stage-chip');
+        if (stageBtn && stageBtn.dataset.stageId) {
+          const stageId = parseInt(stageBtn.dataset.stageId);
+          tgBridge.hapticImpact('light');
+          if (stageId !== store.state.cup.selectedStageId || store.state.cup.error) {
+            await this.loadCupStage(stageId);
+          }
+          return;
+        }
+        const viewBtn = e.target.closest('.cup-view-btn');
+        if (viewBtn && viewBtn.dataset.cupView) {
+          tgBridge.hapticImpact('light');
+          store.setCupState({ view: viewBtn.dataset.cupView });
+        }
+      });
+    }
+
     // 5. Search Input
     const searchInput = document.getElementById('match-search-input');
     if (searchInput) {
@@ -485,6 +551,20 @@ class AppController {
             break;
           }
         }
+        // Кубок: тайл линии этапа — у заголовка серии имена пары берутся из серии.
+        let slipMeta = oddsBtn.dataset.slipMeta || null;
+        if (!targetMatch) {
+          const cupTile = store.findCupTile(mId);
+          if (cupTile) {
+            targetMatch = cupTile;
+            if (!slipMeta) {
+              const label = cupStageLabel(store.state.cup.line?.stage?.stage);
+              slipMeta = cupTile.is_series_header
+                ? `Кубок · ${label} · серия`
+                : `Кубок · ${label} · игра ${cupTile.game_num_in_series}`;
+            }
+          }
+        }
         if (!targetMatch && store.state.matchDetail && (store.state.matchDetail.id === mId || store.state.matchDetail.match_id === mId)) {
           targetMatch = store.state.matchDetail;
         }
@@ -496,7 +576,8 @@ class AppController {
           market_id: mktId,
           selection_id: selId,
           selection_name: selName,
-          market_name: mktName
+          market_name: mktName,
+          meta: slipMeta
         });
 
         // Update selection highlight in open modal if any

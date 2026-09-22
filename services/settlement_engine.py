@@ -14,10 +14,48 @@ import math
 import logging
 from typing import Optional
 import database
+from club_registry import teams_match
 from services.bet_outcome_text import describe_selection
 from services.market_settler import evaluate_market_selection
 
 logger = logging.getLogger(__name__)
+
+
+def _cup_winner_side(match_row, score1: Optional[int] = None, score2: Optional[int] = None) -> Optional[str]:
+    """'p1'/'p2' по полю победителя кубковой игры; None — если поля нет или матч лиговый.
+
+    Ничьих в кубке нет, и `player1_score/player2_score` — основное время: при 2:2
+    сравнение голов молча отдаёт победу не тому клубу. Единственный источник
+    истины — `matches.cup_winner_team`, заполняемый приёмкой результата. Пустое
+    поле возвращает None намеренно: расчёт тогда остаётся на старом правиле, а не
+    выдумывает победителя.
+    """
+    if match_row is None:
+        return None
+    keys = match_row.keys()
+    if "tournament_type" not in keys or "cup_winner_team" not in keys:
+        return None
+    if (match_row["tournament_type"] or "league") != "cup":
+        return None
+    if score1 is not None and score2 is not None and int(score1) != int(score2):
+        # Решающий счёт основного времени решает игру сам (послематчевые — только
+        # после ничьей): поле победителя, спорящее с ним, устарело. None отдаёт
+        # 1x2 сравнению голов — то есть тому же счёту.
+        return None
+    winner = (match_row["cup_winner_team"] or "").strip()
+    if not winner:
+        return None
+    t1 = match_row["player1_team"] if "player1_team" in keys else None
+    t2 = match_row["player2_team"] if "player2_team" in keys else None
+    if t1 and teams_match(winner, t1):
+        return "p1"
+    if t2 and teams_match(winner, t2):
+        return "p2"
+    logger.warning(
+        "Cup winner %r matches neither side of match #%s — 1x2 falls back to goal comparison",
+        winner, match_row["id"] if "id" in keys else "?"
+    )
+    return None
 
 
 def _coins(amount: int) -> str:
@@ -195,6 +233,10 @@ def settle_match_predictions(
             return []
 
         target_status = "confirmed" if match_row["status"] in ("confirmed", "completed") else match_status
+        # Победитель кубковой игры живёт не в счёте, а в `cup_winner_team`:
+        # основное время может кончиться вничью. Для лиги поле пустое, и расчёт
+        # идёт по голам, как раньше.
+        winner_side = _cup_winner_side(match_row, score1, score2)
         cursor.execute("""
             UPDATE matches
             SET player1_score = ?, player2_score = ?, ht_score1 = ?, ht_score2 = ?,
@@ -220,7 +262,8 @@ def settle_match_predictions(
                     score2=score2,
                     match_status=match_status,
                     ht_score1=ht_score1,
-                    ht_score2=ht_score2
+                    ht_score2=ht_score2,
+                    winner_side=winner_side
                 )
                 # Keep active/voided status or store result
                 new_sel_status = "voided" if sel_result == "voided" else "locked"
@@ -268,7 +311,8 @@ def settle_match_predictions(
                 score2=score2,
                 match_status=match_status,
                 ht_score1=ht_score1,
-                ht_score2=ht_score2
+                ht_score2=ht_score2,
+                winner_side=winner_side
             )
 
             # SQLite check constraint on bet_items expects 'refunded' instead of 'voided'
@@ -546,6 +590,10 @@ def resettle_match_predictions(
             return []
 
         target_status = "confirmed" if match_row["status"] in ("confirmed", "completed") else match_status
+        # Победитель кубковой игры живёт не в счёте, а в `cup_winner_team`:
+        # основное время может кончиться вничью. Для лиги поле пустое, и расчёт
+        # идёт по голам, как раньше.
+        winner_side = _cup_winner_side(match_row, score1, score2)
         cursor.execute("""
             UPDATE matches
             SET player1_score = ?, player2_score = ?, ht_score1 = ?, ht_score2 = ?,
@@ -567,7 +615,8 @@ def resettle_match_predictions(
                     score2=score2,
                     match_status=match_status,
                     ht_score1=ht_score1,
-                    ht_score2=ht_score2
+                    ht_score2=ht_score2,
+                    winner_side=winner_side
                 )
                 new_sel_status = "voided" if sel_result == "voided" else "locked"
                 cursor.execute("""
@@ -606,7 +655,8 @@ def resettle_match_predictions(
                 score2=score2,
                 match_status=match_status,
                 ht_score1=ht_score1,
-                ht_score2=ht_score2
+                ht_score2=ht_score2,
+                winner_side=winner_side
             )
             db_item_status = "refunded" if item_result == "voided" else item_result
             cursor.execute("""

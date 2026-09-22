@@ -435,6 +435,41 @@ def get_match_markets(match_id: int) -> list[dict]:
         return market_rows
 
 
+def apply_market_spec(match_id: int, spec: list) -> list[dict]:
+    """Записать спеку рынков матча в `markets` / `market_selections`.
+
+    Механизм один для лиги и кубка: строка спеки —
+    `(market_key, market_name, category, sort_order, [(selection_key, name, odd)])`,
+    цены шагают к модели не больше чем на ±15% за пересчёт
+    (`smooth_match_repricing`), а `model_odds` хранит сырую цену модели, чтобы
+    повторный показ линии не продолжал шагать к той же цели.
+
+    Исход с ценой `None` не записывается вовсе: `market_selections.odds_value` —
+    NOT NULL, а нулевая вероятность (ф1(-1.5) при_lambda 0.4) означает «такого
+    рынка нет», а не «коэффициент ноль».
+    """
+    targets = {}
+    for mk, _m_name, _cat, _sort, sels in spec:
+        for sk, _s_name, odd in sels:
+            if odd is None:
+                continue
+            targets[(mk, sk)] = round(float(odd), 2)
+
+    priced = smooth_match_repricing(_current_selection_prices(match_id), targets)
+
+    for mk, m_name, category, sort_order, sels in spec:
+        market = get_or_create_market(match_id, mk, m_name, category=category, sort_order=sort_order)
+        for sk, s_name, odd in sels:
+            if odd is None:
+                continue
+            get_or_create_selection(
+                market["id"], sk, s_name, priced[(mk, sk)],
+                update_odds=True, model_odds=targets[(mk, sk)],
+            )
+
+    return get_match_markets(match_id)
+
+
 def generate_match_markets(
     match_id: int,
     team1_name: str,
@@ -455,6 +490,13 @@ def generate_match_markets(
         m = database.get_match(match_id)
     except Exception as e:
         logger.debug(f"Could not load match #{match_id}: {e}")
+
+    if m and database.match_is_cup(m):
+        # Кубок лиговой моделью не ценится: в ней есть ничья, а в кубке её нет, и
+        # у заголовка серии нет даже имён клубов. Линию этапа выставляет
+        # `betting_engine.generate_stage_markets` — здесь только читаем её.
+        logger.warning("generate_match_markets refused for cup match #%s", match_id)
+        return get_match_markets(match_id)
 
     p1_nick = (m.get("player1_nickname") or m.get("player1_username")) if m else None
     p2_nick = (m.get("player2_nickname") or m.get("player2_username")) if m else None
@@ -540,19 +582,115 @@ def generate_match_markets(
         ]),
     ]
 
-    targets = {
-        (mk, sk): round(float(odd), 2)
-        for mk, _, _, _, sels in spec for sk, _, odd in sels
-    }
-    priced = smooth_match_repricing(_current_selection_prices(match_id), targets)
+    return apply_market_spec(match_id, spec)
 
-    # Create / Update Markets (with update_odds=True for dynamic repricing)
-    for mk, m_name, category, sort_order, sels in spec:
-        market = get_or_create_market(match_id, mk, m_name, category=category, sort_order=sort_order)
-        for sk, s_name, _ in sels:
-            get_or_create_selection(
-                market["id"], sk, s_name, priced[(mk, sk)],
-                update_odds=True, model_odds=targets[(mk, sk)],
-            )
 
-    return get_match_markets(match_id)
+# ─── Общий кубок: роспись этапа ───────────────────────────────────────────────
+# Кубковые рынки пишет та же функция, что и лиговые (`apply_market_spec`) —
+# различается только спека. Из неё намеренно убраны `X`, `1X`, `X2` и `12`:
+# ничьей в кубке нет (её разрешают послематчевые), а «П1 или П2» при
+# гарантированном победителе наступал бы всегда и при марже 7.5% был бы подарком
+# игроку. Живут кубковые рынки только в реляционной схеме — `bet_markets.odd_x`
+# это NOT NULL, и выдуманное число туда класть нечем.
+#
+# Считается цена в `services/cup_strength.py`: сила клуба = сила в СВОЁМ
+# дивизионе + надбавка за класс, без преимущества поля.
+
+
+def _cup_match_spec(team1_name: str, team2_name: str, o: dict) -> list:
+    """Роспись одной игры серии.
+
+    `1x2` здесь — победитель ИГРЫ с учётом послематчевых (в кубке их не бывает
+    ничьей), поэтому в названии рынка это сказано: calculate/послематчевые
+    различаются для игрока, когда счёт основного времени 2:2. Тоталы, ОЗ,
+    индивидуальные тоталы и фора считаются по основному времени: «ТМ2.5»
+    проигрывает при 2:2 независимо от того, кто взял игру.
+    """
+    return [
+        ("1x2", "Исход матча (с послематчевыми)", "main", 1, [
+            ("p1", f"П1 ({team1_name})", o["p1"]),
+            ("p2", f"П2 ({team2_name})", o["p2"]),
+        ]),
+        ("total_goals", "Тотал голов", "goals", 3, [
+            ("over_1.5", "Тотал больше (1.5)", o["tb15"]),
+            ("under_1.5", "Тотал меньше (1.5)", o["tm15"]),
+            ("over_2.5", "Тотал больше (2.5)", o["tb25"]),
+            ("under_2.5", "Тотал меньше (2.5)", o["tm25"]),
+            ("over_3.5", "Тотал больше (3.5)", o["tb35"]),
+            ("under_3.5", "Тотал меньше (3.5)", o["tm35"]),
+        ]),
+        ("btts", "Обе забьют", "goals", 4, [
+            ("btts_yes", "Обе забьют: Да", o["btts_yes"]),
+            ("btts_no", "Обе забьют: Нет", o["btts_no"]),
+        ]),
+        ("individual_total_1", f"Инд. тотал: {team1_name}", "goals", 5, [
+            ("it1_over_1.5", "ИТБ1 (1.5)", o["it1_over_1.5"]),
+            ("it1_under_1.5", "ИТМ1 (1.5)", o["it1_under_1.5"]),
+        ]),
+        ("individual_total_2", f"Инд. тотал: {team2_name}", "goals", 6, [
+            ("it2_over_1.5", "ИТБ2 (1.5)", o["it2_over_1.5"]),
+            ("it2_under_1.5", "ИТМ2 (1.5)", o["it2_under_1.5"]),
+        ]),
+        ("handicap", "Фора (1.5)", "main", 7, [
+            ("h1_minus_1.5", "Фора 1 (-1.5)", o["h1_minus_1.5"]),
+            ("h2_plus_1.5", "Фора 2 (+1.5)", o["h2_plus_1.5"]),
+            ("h1_plus_1.5", "Фора 1 (+1.5)", o["h1_plus_1.5"]),
+            ("h2_minus_1.5", "Фора 2 (-1.5)", o["h2_minus_1.5"]),
+        ]),
+    ]
+
+
+def generate_cup_match_markets(
+    match_id: int,
+    team1_name: str,
+    team2_name: str,
+    season_id: Optional[int] = None
+) -> list[dict]:
+    """Выставить одну игру серии общего кубка."""
+    from services.cup_strength import cup_match_odds
+
+    priced = cup_match_odds(team1_name, team2_name, season_id=season_id)
+    return apply_market_spec(match_id, _cup_match_spec(team1_name, team2_name, priced["odds"]))
+
+
+def _cup_series_spec(team1_name: str, team2_name: str, o: dict) -> list:
+    """Роспись серии целиком на её строке-заголовке.
+
+    «Счёт» заголовка — победы в серии, поэтому все три рынка обслуживает
+    действующий `market_settler` без новых правил: `1x2` сравнивает число побед
+    («кто проходит»), `correct_score` уже умеет `cs_2_0`..`cs_0_2`, а «будет ли
+    третья игра» — обычный `total_goals` с линией 2.5 поверх счёта серии.
+    """
+    return [
+        ("1x2", "Кто проходит дальше", "main", 1, [
+            ("p1", f"Проход ({team1_name})", o["p1"]),
+            ("p2", f"Проход ({team2_name})", o["p2"]),
+        ]),
+        ("correct_score", "Счёт серии", "main", 2, [
+            ("cs_2_0", "2:0", o["series_2_0"]),
+            ("cs_2_1", "2:1", o["series_2_1"]),
+            ("cs_1_2", "1:2", o["series_1_2"]),
+            ("cs_0_2", "0:2", o["series_0_2"]),
+        ]),
+        ("total_goals", "Тотал игр в серии", "goals", 3, [
+            ("over_2.5", "Третья игра будет", o["over_2.5"]),
+            ("under_2.5", "Третья игра не нужна", o["under_2.5"]),
+        ]),
+    ]
+
+
+def generate_cup_series_markets(
+    match_id: int,
+    team1_name: str,
+    team2_name: str,
+    season_id: Optional[int] = None
+) -> list[dict]:
+    """Выставить серию общего кубка на её строке-заголовке.
+
+    `match_id` — id строки `matches` с `is_series_header = 1`, имена клубов
+    приходят из `cup_series` (у заголовка своих имён нет намеренно).
+    """
+    from services.cup_strength import best_of_three_odds
+
+    priced = best_of_three_odds(team1_name, team2_name, season_id=season_id)
+    return apply_market_spec(match_id, _cup_series_spec(team1_name, team2_name, priced["odds"]))
