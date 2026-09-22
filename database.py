@@ -9620,8 +9620,12 @@ def place_user_bet(
             if risk_decision.reason == "MIN_STAKE":
                 return False, "Минимальная сумма прогноза — 10 🪙."
             if risk_decision.reason == "MAX_STAKE":
-                return False, {"error": "MAX_BET_EXCEEDED", "max_bet": _MAX_BET,
-                               "message": f"Максимальная сумма ставки — {_MAX_BET:,} 🪙."}
+                # Отказал применённый лимит (division/user override из
+                # BettingLimitsService), а не глобальный потолок — игроку
+                # показываем именно его.
+                max_bet = int((risk_decision.details or {}).get("max_bet") or _MAX_BET)
+                return False, {"error": "MAX_BET_EXCEEDED", "max_bet": max_bet,
+                               "message": f"Максимальная сумма ставки — {max_bet:,} 🪙."}
             if risk_decision.reason == "MAX_PAYOUT":
                 details = risk_decision.details or {}
                 err = {"error": "MAX_PAYOUT_EXCEEDED",
