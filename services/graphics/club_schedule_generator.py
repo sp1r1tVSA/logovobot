@@ -380,7 +380,7 @@ def generate_club_schedule(data: dict, max_matches: int = 12, division_id: int |
 
     # ── 3. FOOTER ──────────────────────────────────────────────────────────
     curr_y += 6 * SCALE
-    footer_text = "LOGOVOBOT • КИБЕРФУТБОЛЬНАЯ ПРЕМЬЕР-ЛИГА 2026"
+    footer_text = "ЛОГОВО ФИФАРЕЙ 2026"
     f_bbox = draw.textbbox((0, 0), footer_text, font=font_sm)
     draw.text(((CARD_WIDTH - (f_bbox[2] - f_bbox[0])) // 2, curr_y), footer_text, font=font_sm, fill=MUTED)
 

@@ -462,7 +462,7 @@ def generate_club_card(data: dict, avatar_path: str | None = None, division_id: 
     curr_y += OWNER_CARD_H + 16 * SCALE
 
     # ── 7. FOOTER ──────────────────────────────────────────────────────────
-    footer_text = "LOGOVOBOT • КИБЕРФУТБОЛЬНАЯ ПРЕМЬЕР-ЛИГА 2026"
+    footer_text = "ЛОГОВО ФИФАРЕЙ 2026"
     f_bbox = draw.textbbox((0, 0), footer_text, font=font_sm)
     draw.text(((CARD_WIDTH - (f_bbox[2] - f_bbox[0])) // 2, curr_y + 2 * SCALE), footer_text, font=font_sm, fill=MUTED)
 
