@@ -29,6 +29,10 @@ from handlers.cabinet import (
     cb_skip_goals,
     cb_pick_assist,
     cb_skip_assists,
+    cb_mvp_team,
+    cb_mvp_pick,
+    cb_mvp_skip,
+    cb_mvp_back,
 )
 
 
@@ -55,6 +59,11 @@ STALE_CALLBACKS = (
     (cb_skip_goals, "cb_skip_goals"),
     (cb_pick_assist, "cb_pick_assist_idx_0"),
     (cb_skip_assists, "cb_skip_assists"),
+    (cb_mvp_team, "cb_mvp_team_home"),
+    (cb_mvp_pick, "cb_mvp_pick_idx_0"),
+    (cb_mvp_pick, "cb_mvp_squad_idx_0"),
+    (cb_mvp_skip, "cb_mvp_skip"),
+    (cb_mvp_back, "cb_mvp_back"),
 )
 
 

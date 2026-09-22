@@ -1935,8 +1935,8 @@ async def cb_report_choice_manual(update: Update, context: ContextTypes.DEFAULT_
     user_id = query.from_user.id
     context.user_data["reporting_match_id"] = match_id
     context.user_data["reporting_mode"] = "manual"
-    # Ручной ввод не редактирует MVP, а к нему часто переходят как раз потому,
-    # что ИИ ошибся — поэтому корону из распознавания не переносим.
+    # К ручному вводу часто переходят как раз потому, что ИИ ошибся, — корону
+    # из распознавания не переносим: MVP выбирается заново на шаге после ассистов.
     context.user_data.pop("report_mvp_player", None)
 
     home_team = match['player1_team'] or match['player1_nickname']
@@ -2058,6 +2058,7 @@ async def cb_report_away_goals(update: Update, context: ContextTypes.DEFAULT_TYP
     context.user_data["home_assists_count"] = {}
     context.user_data["away_goals_count"] = {}
     context.user_data["away_assists_count"] = {}
+    context.user_data.pop("report_mvp_player", None)
 
     if hg > 0:
         context.user_data["current_picking_phase"] = "home_goals"
@@ -2094,7 +2095,7 @@ async def start_away_assists_picker(update: Update, context: ContextTypes.DEFAUL
         context.user_data["assists_to_pick"] = ag
         await render_squad_assists_picker(update, context, away_team)
     else:
-        await prompt_photo_upload(update, context)
+        await start_mvp_picker(update, context)
 
 async def render_squad_goals_picker(update: Update, context: ContextTypes.DEFAULT_TYPE, team_name: str) -> None:
     query = update.callback_query
@@ -2263,7 +2264,7 @@ async def cb_pick_assist(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if phase == "home_assists":
             await start_away_goals_picker(update, context)
         else:
-            await prompt_photo_upload(update, context)
+            await start_mvp_picker(update, context)
 
 async def cb_skip_assists(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
@@ -2278,7 +2279,139 @@ async def cb_skip_assists(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if phase == "home_assists":
         await start_away_goals_picker(update, context)
     else:
-        await prompt_photo_upload(update, context)
+        await start_mvp_picker(update, context)
+
+def _mvp_quick_candidates(context: ContextTypes.DEFAULT_TYPE) -> list[str]:
+    """Scorers first, then assisters, both sides, each name once — the usual MVP pool."""
+    ud = context.user_data
+    names: list[str] = []
+    for key in ("home_goals_count", "away_goals_count", "home_assists_count", "away_assists_count"):
+        for name in (ud.get(key) or {}):
+            if name and name != "Unknown" and name not in names:
+                names.append(name)
+    return names
+
+def _mvp_cancel_row(update: Update, context: ContextTypes.DEFAULT_TYPE) -> list:
+    query = update.callback_query
+    user_id = query.from_user.id if query else update.effective_user.id
+    cancel_cb = get_match_cancel_cb(context, user_id, context.user_data.get("reporting_match_id"))
+    return [InlineKeyboardButton("❌ Отмена", callback_data=cancel_cb)]
+
+async def start_mvp_picker(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Manual flow: pick the player of the match after goals and assists are in."""
+    query = update.callback_query
+    home_team = context.user_data.get("report_home_team")
+    away_team = context.user_data.get("report_away_team")
+    candidates = _mvp_quick_candidates(context)
+    context.user_data["temp_mvp_candidates"] = candidates
+
+    text = (
+        "👑 <b>Игрок матча (MVP)</b>\n\n"
+        + ("Выберите MVP среди авторов голов и ассистов или откройте состав команды:"
+           if candidates else "Откройте состав команды и выберите MVP:")
+    )
+
+    keyboard = []
+    row = []
+    for idx, player in enumerate(candidates):
+        row.append(InlineKeyboardButton(f"👑 {player}", callback_data=f"cb_mvp_pick_idx_{idx}"))
+        if len(row) == 2:
+            keyboard.append(row)
+            row = []
+    if row:
+        keyboard.append(row)
+    keyboard.append([
+        InlineKeyboardButton(f"🏠 {home_team}", callback_data="cb_mvp_team_home"),
+        InlineKeyboardButton(f"✈️ {away_team}", callback_data="cb_mvp_team_away"),
+    ])
+    keyboard.append([InlineKeyboardButton("⏩ Без MVP", callback_data="cb_mvp_skip")])
+    keyboard.append(_mvp_cancel_row(update, context))
+
+    if query:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def cb_mvp_team(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show one side's squad so any player — not only a scorer — can be the MVP."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    if await manual_report_session_lost(update, context):
+        return
+
+    side = "away" if query.data.endswith("_away") else "home"
+    team_name = context.user_data.get(f"report_{side}_team")
+    squad = await asyncio.to_thread(database.get_squad, team_name) or []
+    context.user_data["temp_mvp_squad"] = squad
+
+    icon = "✈️" if side == "away" else "🏠"
+    text = f"👑 <b>Игрок матча (MVP)</b>\n{icon} Состав: <b>{safe_escape(team_name)}</b>"
+    keyboard = []
+    if not squad:
+        text += "\n\n⚠️ <i>Состав команды пока не добавлен в систему.</i>"
+    else:
+        text += "\n\nВыберите игрока:"
+        row = []
+        for idx, player in enumerate(squad):
+            row.append(InlineKeyboardButton(f"👑 {player}", callback_data=f"cb_mvp_squad_idx_{idx}"))
+            if len(row) == 2:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("« Назад", callback_data="cb_mvp_back")])
+    keyboard.append(_mvp_cancel_row(update, context))
+
+    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def cb_mvp_pick(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Store the chosen MVP and move on to the screenshot step."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    if await manual_report_session_lost(update, context):
+        return
+
+    if query.data.startswith("cb_mvp_squad_idx_"):
+        pool = context.user_data.get("temp_mvp_squad") or []
+        idx = int(query.data.replace("cb_mvp_squad_idx_", ""))
+    else:
+        pool = context.user_data.get("temp_mvp_candidates") or []
+        idx = int(query.data.replace("cb_mvp_pick_idx_", ""))
+
+    if idx >= len(pool):
+        # The list behind the button is gone — show the picker again rather than crown a stranger.
+        await start_mvp_picker(update, context)
+        return
+
+    context.user_data["report_mvp_player"] = pool[idx]
+    await prompt_photo_upload(update, context)
+
+async def cb_mvp_skip(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    if await manual_report_session_lost(update, context):
+        return
+
+    context.user_data.pop("report_mvp_player", None)
+    await prompt_photo_upload(update, context)
+
+async def cb_mvp_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    if await manual_report_session_lost(update, context):
+        return
+
+    await start_mvp_picker(update, context)
 
 async def prompt_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     query = update.callback_query
@@ -2336,6 +2469,9 @@ async def _show_manual_confirmation(update: Update, context: ContextTypes.DEFAUL
     h_score = context.user_data.get("report_home_goals", 0)
     a_score = context.user_data.get("report_away_goals", 0)
 
+    mvp = str(context.user_data.get("report_mvp_player") or "").strip()
+    mvp_line = f"👑 <b>MVP:</b> {safe_escape(mvp)}" if mvp else "👑 <b>MVP:</b> не выбран"
+
     photo_line = "📸 <i>Скриншот(ы) прикреплены.</i>" if photo_id else "🚫 <i>Скриншот не прикреплён (ввод без скрина).</i>"
 
     text = (
@@ -2346,6 +2482,7 @@ async def _show_manual_confirmation(update: Update, context: ContextTypes.DEFAUL
         f"🎯 <b>Ассисты ({safe_escape(home_team)}):</b> {safe_escape(h_assists_summary)}\n\n"
         f"⚽ <b>Голы ({safe_escape(away_team)}):</b> {safe_escape(a_goals_summary)}\n"
         f"🎯 <b>Ассисты ({safe_escape(away_team)}):</b> {safe_escape(a_assists_summary)}\n\n"
+        f"{mvp_line}\n"
         f"{photo_line}"
     )
 

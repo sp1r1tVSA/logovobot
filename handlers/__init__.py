@@ -63,6 +63,10 @@ from handlers.cabinet import (
     cb_skip_goals,
     cb_pick_assist,
     cb_skip_assists,
+    cb_mvp_team,
+    cb_mvp_pick,
+    cb_mvp_skip,
+    cb_mvp_back,
     prompt_photo_upload,
     save_report_photo,
     ai_recognize_now,
@@ -519,6 +523,10 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(cb_skip_goals, pattern="^cb_skip_goals$"))
     app.add_handler(CallbackQueryHandler(cb_pick_assist, pattern="^cb_pick_assist_idx_\\d+$"))
     app.add_handler(CallbackQueryHandler(cb_skip_assists, pattern="^cb_skip_assists$"))
+    app.add_handler(CallbackQueryHandler(cb_mvp_team, pattern="^cb_mvp_team_(home|away)$"))
+    app.add_handler(CallbackQueryHandler(cb_mvp_pick, pattern="^cb_mvp_(pick|squad)_idx_\\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_mvp_skip, pattern="^cb_mvp_skip$"))
+    app.add_handler(CallbackQueryHandler(cb_mvp_back, pattern="^cb_mvp_back$"))
     app.add_handler(CallbackQueryHandler(submit_report_to_guest, pattern="^cb_submit_report_to_guest(_\\d+)?$"))
     # Opponent confirmation is gone; these two only defuse buttons still sitting
     # in players' chats from before the change.
