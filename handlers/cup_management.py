@@ -154,7 +154,7 @@ async def _render_panel(target, context, stage_id: int | None = None, note: str 
                 database.get_cup_bracket, selected["stage"], season_id=selected.get("season_id")
             )
             decided = any(s["winner_name"] for s in bracket)
-            keyboard.insert(0, _stage_keyboard(stage_id, decided=decided))
+            keyboard[0:0] = _stage_keyboard(stage_id, decided=decided)
     markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     text = "\n".join(lines)
     try:
