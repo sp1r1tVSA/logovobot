@@ -323,6 +323,67 @@ def _deduplicate_squad_players_in_db(cursor: sqlite3.Cursor) -> int:
     return merged_count
 
 
+PREDICTION_UNIQUE_INDEX = "uniq_predictions_match_model"
+MIGRATION_019_PREDICTION_UNIQUE = "019_prediction_one_row_per_model"
+
+
+def _ensure_prediction_uniqueness(cursor: sqlite3.Cursor) -> bool:
+    """Поднять predictions к правилу «(match_id, model_version) = одна строка».
+
+    Возвращает True только если уникальный индекс действительно стоит.
+
+    Идемпотентность записи обеспечивает ``save_ai_prediction`` (она работает и без
+    индекса), этот индекс закрепляет то же самое на уровне схемы, чтобы дубли не
+    могли вернуться ни одним из путей записи.
+
+    Миграция аддитивная и ничего не удаляет. Исторический
+    ``idx_predictions_match`` не уникальный, поэтому в уже развёрнутой базе дубли
+    есть — а на них ``CREATE UNIQUE INDEX`` падает с «index ... is not unique» и
+    оборвал бы весь ``init_db()``. Вместо молчаливой очистки: считаем дубли,
+    докладываем о них в logger.error точными числами и выходим, не записывая строку
+    в ``schema_migrations``. Следующий старт повторит попытку, а развёрнутая база
+    при этом остаётся нетронутой — удаление исторических прогнозов это отдельная
+    задача, не эта миграция.
+    """
+    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (MIGRATION_019_PREDICTION_UNIQUE,))
+    if cursor.fetchone():
+        return True
+
+    cursor.execute("""
+        SELECT COUNT(*) AS dup_keys, COALESCE(SUM(extra), 0) AS redundant_rows
+        FROM (
+            SELECT COUNT(*) - 1 AS extra
+            FROM predictions
+            GROUP BY match_id, model_version
+            HAVING COUNT(*) > 1
+        )
+    """)
+    stats = cursor.fetchone()
+    dup_keys = stats["dup_keys"] if stats else 0
+    redundant_rows = stats["redundant_rows"] if stats else 0
+    if dup_keys:
+        logger.error(
+            "Migration %s not applied: predictions holds %s duplicated (match_id, model_version) "
+            "key(s) across %s redundant row(s). A UNIQUE index cannot be created over them and "
+            "nothing was deleted. Existing rows keep their ids; save_ai_prediction stays "
+            "idempotent through its single-statement guard until the duplicates are resolved.",
+            MIGRATION_019_PREDICTION_UNIQUE, dup_keys, redundant_rows
+        )
+        return False
+
+    cursor.execute(
+        f"CREATE UNIQUE INDEX IF NOT EXISTS {PREDICTION_UNIQUE_INDEX} "
+        f"ON predictions(match_id, model_version)"
+    )
+    cursor.execute("""
+        INSERT OR IGNORE INTO schema_migrations (version, description)
+        VALUES (?, 'predictions: one row per (match_id, model_version)')
+    """, (MIGRATION_019_PREDICTION_UNIQUE,))
+    logger.info("Migration %s: unique index on predictions(match_id, model_version) created",
+                MIGRATION_019_PREDICTION_UNIQUE)
+    return True
+
+
 def init_db() -> None:
     """Initialize the database tables."""
     logger.info("Initializing database tables...")
@@ -1542,6 +1603,10 @@ def init_db() -> None:
             )
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_predictions_match ON predictions(match_id, model_version)")
+        # Уникальность по этим же колонкам появляется не здесь, а миграцией 019:
+        # на развёрнутой базе этот индекс исторически не уникальный и дубли в
+        # predictions уже есть, так что CREATE UNIQUE INDEX прямо в DDL оборвал бы
+        # init_db() на каждом старте.
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_predictions_div_season ON predictions(division_id, season_id, created_at DESC)")
 
         # ─── Phase 7: Live & Pre-Match Prediction Snapshots ───────────────────
@@ -1902,6 +1967,9 @@ def init_db() -> None:
             """)
             if shifted:
                 logger.info("Migration 018: shifted %s timestamp values from UTC to MSK", shifted)
+
+        # ─── 019: predictions — одна строка на (match_id, model_version) ───────
+        _ensure_prediction_uniqueness(cursor)
 
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
@@ -8941,7 +9009,12 @@ def place_user_bet(
                 m_r = cursor.fetchone()
                 if m_r:
                     keys = m_r.keys()
-                    div_id = m_r["division_id"] if "division_id" in keys else None
+                    # Legacy-строка матча с division_id IS NULL — это дивизион 1
+                    # (соглашение из evaluate_round_betting_gate и из per-selection
+                    # проверки ниже). Без нормализации RiskEngine получил бы None,
+                    # взял бы системные лимиты вместо лимитов дивизиона и пропустил
+                    # ветку division_exposure_limit.
+                    div_id = m_r["division_id"] if "division_id" in keys and m_r["division_id"] is not None else 1
                     risk_ctx_round = m_r["round_number"] if "round_number" in keys else None
                     risk_ctx_season = m_r["season_id"] if "season_id" in keys else None
 
@@ -11745,30 +11818,70 @@ def save_ai_prediction(
     btts_no: float | None = None,
     key_factors: list[str] | None = None
 ) -> int:
-    """Persist an AI model prediction record."""
+    """Persist an AI model prediction record.
+
+    (match_id, model_version) — одна запись: повторный вызов возвращает id уже
+    сохранённого прогноза, новую строку не создаёт и исторические поля не трогает.
+    """
     import json as _json
     factors_json = _json.dumps(key_factors or [], ensure_ascii=False)
+    values = (
+        match_id, division_id, season_id, model_version, feature_version,
+        round(home_prob, 4), round(draw_prob, 4), round(away_prob, 4),
+        round(over_1_5, 4) if over_1_5 is not None else None,
+        round(over_2_5, 4) if over_2_5 is not None else None,
+        round(over_3_5, 4) if over_3_5 is not None else None,
+        round(btts_yes, 4) if btts_yes is not None else None,
+        round(btts_no, 4) if btts_no is not None else None,
+        round(confidence, 4), factors_json
+    )
     with transaction() as conn:
         cursor = conn.cursor()
+        try:
+            cursor.execute("""
+                INSERT INTO predictions (
+                    match_id, division_id, season_id, model_version, feature_version,
+                    home_probability, draw_probability, away_probability,
+                    over_1_5_probability, over_2_5_probability, over_3_5_probability,
+                    btts_yes_probability, btts_no_probability,
+                    confidence, key_factors, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
+                ON CONFLICT(match_id, model_version) DO NOTHING
+            """, values)
+        except sqlite3.OperationalError as exc:
+            # Пока уникального индекса нет (миграция 019 на проде не прошла — ей
+            # мешают исторические дубли), ON CONFLICT(...) не компилируется уже на
+            # подготовке. Фолбэк даёт ту же атомарность одним оператором:
+            # SELECT-then-INSERT оставил бы окно между запросами.
+            if "ON CONFLICT clause does not match" not in str(exc):
+                raise
+            cursor.execute("""
+                INSERT INTO predictions (
+                    match_id, division_id, season_id, model_version, feature_version,
+                    home_probability, draw_probability, away_probability,
+                    over_1_5_probability, over_2_5_probability, over_3_5_probability,
+                    btts_yes_probability, btts_no_probability,
+                    confidence, key_factors, created_at
+                ) SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours')
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM predictions WHERE match_id = ? AND model_version = ?
+                )
+            """, values + (match_id, model_version))
+        if cursor.rowcount:
+            return int(cursor.lastrowid)
+        # Вставка заблокирована существующей строкой: отдаём её id — тот же, что
+        # вернёт get_ai_prediction (он тоже берёт последний по id).
         cursor.execute("""
-            INSERT INTO predictions (
-                match_id, division_id, season_id, model_version, feature_version,
-                home_probability, draw_probability, away_probability,
-                over_1_5_probability, over_2_5_probability, over_3_5_probability,
-                btts_yes_probability, btts_no_probability,
-                confidence, key_factors, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
-        """, (
-            match_id, division_id, season_id, model_version, feature_version,
-            round(home_prob, 4), round(draw_prob, 4), round(away_prob, 4),
-            round(over_1_5, 4) if over_1_5 is not None else None,
-            round(over_2_5, 4) if over_2_5 is not None else None,
-            round(over_3_5, 4) if over_3_5 is not None else None,
-            round(btts_yes, 4) if btts_yes is not None else None,
-            round(btts_no, 4) if btts_no is not None else None,
-            round(confidence, 4), factors_json
-        ))
-        return cursor.lastrowid
+            SELECT id FROM predictions
+            WHERE match_id = ? AND model_version = ?
+            ORDER BY id DESC LIMIT 1
+        """, (match_id, model_version))
+        row = cursor.fetchone()
+        if row is None:
+            raise RuntimeError(
+                f"Prediction for match #{match_id} ({model_version}) vanished inside its own transaction"
+            )
+        return int(row["id"])
 
 
 def get_ai_prediction(match_id: int, model_version: str = "ensemble_v1") -> dict | None:
