@@ -1988,26 +1988,28 @@ def init_db() -> None:
             cursor.execute("ALTER TABLE squad_players ADD COLUMN norm_team_name TEXT")
             logger.info("Migrated squad_players table: added 'norm_team_name' column.")
 
-        cursor.execute("""
-            SELECT id, team_name, player_name 
-            FROM squad_players 
-            WHERE norm_name IS NULL OR norm_name = '' 
-               OR norm_team_name IS NULL OR norm_team_name = ''
-        """)
-        unmigrated_players = cursor.fetchall()
-        for p_row in unmigrated_players:
+        # The index goes first: a stored norm_name is recomputed below whenever the
+        # normalizer has changed since it was written (e.g. once 'ı' began folding to
+        # 'i'), and two rows of one club can land on the same key until the dedup
+        # below merges them.
+        cursor.execute("DROP INDEX IF EXISTS idx_squad_players_team_norm")
+
+        cursor.execute("SELECT id, team_name, player_name, norm_name, norm_team_name FROM squad_players")
+        for p_row in cursor.fetchall():
             p_key = normalize_player_name_key(p_row["player_name"])
-            t_key = normalize_team_name(resolve_team_name(p_row["team_name"]) or p_row["team_name"])
-            cursor.execute(
-                "UPDATE squad_players SET norm_name = ?, norm_team_name = ? WHERE id = ?",
-                (p_key, t_key, p_row["id"])
+            t_key = p_row["norm_team_name"] or normalize_team_name(
+                resolve_team_name(p_row["team_name"]) or p_row["team_name"]
             )
+            if p_key != p_row["norm_name"] or t_key != p_row["norm_team_name"]:
+                cursor.execute(
+                    "UPDATE squad_players SET norm_name = ?, norm_team_name = ? WHERE id = ?",
+                    (p_key, t_key, p_row["id"])
+                )
 
         # Deduplicate existing duplicate entries within each club
         _deduplicate_squad_players_in_db(cursor)
 
         # Unique index on (norm_team_name, norm_name) physically prevents duplicate players in same club
-        cursor.execute("DROP INDEX IF EXISTS idx_squad_players_team_norm")
         cursor.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_squad_players_team_norm "
             "ON squad_players(norm_team_name, norm_name)"
@@ -5311,6 +5313,127 @@ def find_player_in_squad(
             return _search(cursor)
 
 
+def _load_club_roster(cursor: sqlite3.Cursor, team_name: str | None) -> list[str]:
+    """Squad player names of one club, oldest first."""
+    if not team_name or not team_name.strip():
+        return []
+    t_clean = team_name.strip()
+    t_norm = normalize_team_name(resolve_team_name(t_clean) or t_clean)
+    cursor.execute(
+        "SELECT player_name FROM squad_players "
+        "WHERE norm_team_name = ? OR LOWER(team_name) = LOWER(?) ORDER BY id ASC",
+        (t_norm, t_clean)
+    )
+    return [r["player_name"] for r in cursor.fetchall()]
+
+
+def _squad_candidates(player_name: str, roster: list[str]) -> set[str]:
+    """Squad names `player_name` may stand for: every exact-key hit, else every alias/surname hit."""
+    key = normalize_player_name_key(player_name)
+    if not key:
+        return set()
+    hits = {n for n in roster if normalize_player_name_key(n) == key}
+    if not hits:
+        hits = {n for n in roster if is_same_footballer(player_name, n)}
+    return hits
+
+
+def _canonicalize_club_player_stats(cursor: sqlite3.Cursor, team_name: str) -> int:
+    """Re-point a club's match_events and matches.mvp_player spellings to its squad names.
+
+    confirm_and_finalize_match canonicalizes names only against the squad as it is
+    at confirmation time, so goals recorded before the squad was registered keep the
+    OCR spelling ('Yıldız' beside the squad's 'YILDIZ') and the player is counted
+    twice. Run whenever players join a squad. A name is re-pointed only when it
+    stands for exactly one squad player; an ambiguous one is left as it is.
+    Returns the number of match_events rows and matches renamed.
+    """
+    roster = _load_club_roster(cursor, team_name)
+    if not roster:
+        return 0
+    squad_names = set(roster)
+    t_clean = team_name.strip()
+    t_norm = normalize_team_name(resolve_team_name(t_clean) or t_clean)
+
+    # Events and matches keep the club under the spelling of the match row, which
+    # need not be the squad's. Exact spellings are collected in Python because
+    # SQLite's LOWER() folds ASCII only and would miss Cyrillic club names.
+    cursor.execute("""
+        SELECT team_name AS t FROM match_events
+        UNION SELECT player1_team FROM matches
+        UNION SELECT player2_team FROM matches
+    """)
+    spellings = [
+        r["t"] for r in cursor.fetchall()
+        if r["t"] and (
+            r["t"].strip().lower() == t_clean.lower()
+            or normalize_team_name(resolve_team_name(r["t"].strip()) or r["t"].strip()) == t_norm
+        )
+    ]
+
+    renamed = 0
+    for spelling in spellings:
+        cursor.execute(
+            "SELECT DISTINCT player_name FROM match_events WHERE team_name = ?", (spelling,)
+        )
+        for old in [r["player_name"] for r in cursor.fetchall()]:
+            if not old or old in squad_names:
+                continue
+            hits = _squad_candidates(old, roster)
+            if len(hits) != 1:
+                continue
+            cursor.execute(
+                "UPDATE match_events SET player_name = ? WHERE team_name = ? AND player_name = ?",
+                (hits.pop(), spelling, old)
+            )
+            renamed += cursor.rowcount
+
+        # Two spellings of one player in one match are now two rows of one name.
+        cursor.execute("""
+            SELECT match_id, player_name, event_type, MIN(id) AS keep_id, SUM(count) AS total
+            FROM match_events
+            WHERE team_name = ?
+            GROUP BY match_id, player_name, event_type
+            HAVING COUNT(*) > 1
+        """, (spelling,))
+        for g in cursor.fetchall():
+            cursor.execute("UPDATE match_events SET count = ? WHERE id = ?", (g["total"], g["keep_id"]))
+            cursor.execute(
+                "DELETE FROM match_events WHERE team_name = ? AND match_id = ? "
+                "AND player_name = ? AND event_type = ? AND id != ?",
+                (spelling, g["match_id"], g["player_name"], g["event_type"], g["keep_id"])
+            )
+
+    # matches.mvp_player carries no club, so it is renamed only when exactly one
+    # player of either side answers to it.
+    rosters: dict[str, list[str]] = {t_clean: roster}
+    for spelling in spellings:
+        cursor.execute("""
+            SELECT id, mvp_player, player1_team, player2_team FROM matches
+            WHERE mvp_player IS NOT NULL AND mvp_player != ''
+              AND (player1_team = ? OR player2_team = ?)
+        """, (spelling, spelling))
+        for m in cursor.fetchall():
+            old = m["mvp_player"]
+            opponent = m["player2_team"] if m["player1_team"] == spelling else m["player1_team"]
+            opp_key = (opponent or "").strip()
+            if opp_key not in rosters:
+                rosters[opp_key] = _load_club_roster(cursor, opp_key)
+            opp_roster = rosters[opp_key]
+            if old in squad_names or old in opp_roster:
+                continue
+            hits = {("own", n) for n in _squad_candidates(old, roster)}
+            hits |= {("opp", n) for n in _squad_candidates(old, opp_roster)}
+            if len(hits) != 1:
+                continue
+            cursor.execute("UPDATE matches SET mvp_player = ? WHERE id = ?", (hits.pop()[1], m["id"]))
+            renamed += cursor.rowcount
+
+    if renamed:
+        logger.info("Re-pointed %d match stat rows of '%s' to squad names", renamed, t_clean)
+    return renamed
+
+
 def add_squad(team_name: str, player_names: list) -> int:
     """
     Add players to a club's squad with authentic positions.
@@ -5381,6 +5504,7 @@ def add_squad(team_name: str, player_names: list) -> int:
                 logger.info("Player '%s' already exists in club '%s' (unique index)", clean, t_clean)
             except sqlite3.Error as e:
                 logger.warning(f"Failed to add player '{clean}' to {t_clean}: {e}")
+        _canonicalize_club_player_stats(cursor, t_clean)
     return added
 
 
@@ -5514,7 +5638,9 @@ def set_player_position(player_name: str, team_name: str, position: str) -> bool
                 """,
                 (t_clean, player_name.strip(), norm_pos, norm_key, t_norm)
             )
-            return cursor.rowcount > 0
+            inserted = cursor.rowcount > 0
+            _canonicalize_club_player_stats(cursor, t_clean)
+            return inserted
 
 
 def clear_squad(team_name: str) -> int:
@@ -5612,6 +5738,8 @@ def replace_squad(team_name: str, player_names: list) -> tuple[int, int]:
             if p["id"] not in retained_ids:
                 cursor.execute("DELETE FROM squad_players WHERE id = ?", (p["id"],))
                 deleted += 1
+
+        _canonicalize_club_player_stats(cursor, t_clean)
 
     return deleted, added
 

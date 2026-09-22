@@ -4,7 +4,7 @@ services/player_names.py
 Unified footballer name normalization and deduplication engine.
 Provides deterministic normalization:
 - Unicode NFKC + NFKD diacritic removal (accents, umlauts, tildes)
-- European / Scandinavian special characters (ø, æ, ß, œ, ł, đ)
+- European / Scandinavian / Turkish special characters (ø, æ, ß, œ, ł, đ, ı)
 - Standardized hyphen and whitespace collapsing
 - Cyrillic-to-Latin transliteration
 - Footballer alias and token matching (e.g. 'Vini Jr' <-> 'Vinicius Junior')
@@ -20,6 +20,9 @@ SPECIAL_CHAR_MAP: dict[str, str] = {
     'ß': 'ss',
     'ł': 'l', 'Ł': 'L',
     'đ': 'd', 'Đ': 'D',
+    # Turkish dotless i has no decomposition, so NFKD would keep it and 'Yıldız'
+    # would never meet 'YILDIZ'. Dotted 'İ' needs no entry: NFKD splits off its dot.
+    'ı': 'i',
 }
 
 CYR_LAT_MAP: dict[str, str] = {
@@ -81,6 +84,7 @@ def is_same_footballer(name1: str, name2: str) -> bool:
     Check if two names refer to the same footballer in the context of a single club's roster.
     Considers:
     - Exact normalized key equivalence
+    - The same key with different word breaks ('Aldawsari' <-> 'Al Dawsari')
     - Common nicknames/aliases ('vini' <-> 'vinicius', 'jr' <-> 'junior')
     - Surname-only vs Full Name within the club ('Mbappé' <-> 'Kylian Mbappé')
     - Suffix matching ('Alexander-Arnold' <-> 'Trent Alexander-Arnold')
@@ -90,6 +94,9 @@ def is_same_footballer(name1: str, name2: str) -> bool:
     if not norm1 or not norm2:
         return False
     if norm1 == norm2:
+        return True
+    # Same letters, different word breaks: 'ALDAWSARI' <-> 'Al Dawsari'
+    if norm1.replace(" ", "") == norm2.replace(" ", ""):
         return True
 
     toks1 = [ALIAS_TOKEN_MAP.get(t, t) for t in norm1.split()]

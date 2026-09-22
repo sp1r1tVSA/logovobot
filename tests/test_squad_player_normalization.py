@@ -49,6 +49,17 @@ class TestPlayerNameNormalization(unittest.TestCase):
         self.assertEqual(normalize_player_name_key("ØDEGAARD"), "odegaard")
         self.assertEqual(normalize_player_name_key("Kæstner"), "kaestner")
 
+    def test_turkish_dotless_and_dotted_i(self):
+        # 'ı' has no decomposition, so it needs its own fold to meet the capital 'I'
+        self.assertEqual(normalize_player_name_key("Yıldız"), "yildiz")
+        self.assertEqual(normalize_player_name_key("YILDIZ"), "yildiz")
+        self.assertEqual(normalize_player_name_key("İlkay Gündoğan"), "ilkay gundogan")
+        self.assertTrue(is_same_footballer("Kenan Yıldız", "YILDIZ"))
+
+    def test_word_breaks_do_not_split_a_player(self):
+        self.assertTrue(is_same_footballer("ALDAWSARI", "Al Dawsari"))
+        self.assertTrue(is_same_footballer("De Jong", "DEJONG"))
+
     def test_cyrillic_transliteration(self):
         self.assertEqual(normalize_player_name_key("Винисиус"), "vinisius")
         self.assertEqual(normalize_player_name_key("Холанд"), "holand")
@@ -220,6 +231,123 @@ class TestSquadPlayerDatabaseRules(unittest.TestCase):
             with database.transaction() as conn:
                 conn.execute("DELETE FROM match_events WHERE match_id = 99999")
                 conn.execute("DELETE FROM matches WHERE id = 99999")
+
+    def _insert_match(self, match_id, mvp=None):
+        with database.transaction() as conn:
+            conn.execute(
+                "INSERT INTO matches (id, player1_team, player2_team, status, mvp_player) "
+                "VALUES (?, ?, ?, 'confirmed', ?)",
+                (match_id, self.club1, self.club2, mvp)
+            )
+
+    def _insert_event(self, match_id, player, count=1, team=None, event_type="goal"):
+        with database.transaction() as conn:
+            conn.execute(
+                "INSERT INTO match_events (match_id, team_name, player_name, event_type, count) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (match_id, team or self.club1, player, event_type, count)
+            )
+
+    def _events(self, match_id):
+        with database.transaction() as conn:
+            return sorted(
+                (r["team_name"], r["player_name"], r["event_type"], r["count"])
+                for r in conn.execute(
+                    "SELECT team_name, player_name, event_type, count FROM match_events WHERE match_id = ?",
+                    (match_id,)
+                ).fetchall()
+            )
+
+    def _mvp(self, match_id):
+        with database.transaction() as conn:
+            return conn.execute("SELECT mvp_player FROM matches WHERE id = ?", (match_id,)).fetchone()[0]
+
+    def _drop_match(self, match_id):
+        with database.transaction() as conn:
+            conn.execute("DELETE FROM match_events WHERE match_id = ?", (match_id,))
+            conn.execute("DELETE FROM matches WHERE id = ?", (match_id,))
+
+    def test_squad_registered_after_match_repoints_events_and_mvp(self):
+        """Stats confirmed before the squad existed are re-pointed to the squad spelling."""
+        self._insert_match(77701, mvp="Yıldız")
+        self._insert_event(77701, "Yıldız")
+        self._insert_event(77701, "YILDIZ ")  # second OCR spelling in the same match
+        self._insert_event(77701, "Yıldız", event_type="assist")
+        self._insert_event(77701, "Mystery Man")
+        try:
+            database.add_squad(self.club1, ["YILDIZ"])
+
+            self.assertEqual(self._events(77701), [
+                (self.club1, "Mystery Man", "goal", 1),
+                (self.club1, "YILDIZ", "assist", 1),
+                (self.club1, "YILDIZ", "goal", 2),
+            ])
+            self.assertEqual(self._mvp(77701), "YILDIZ")
+        finally:
+            self._drop_match(77701)
+
+    def test_ambiguous_surname_is_not_repointed(self):
+        """A surname shared by two squad players stays as recorded."""
+        self._insert_match(77702)
+        self._insert_event(77702, "Hernandez")
+        try:
+            database.replace_squad(self.club1, ["Lucas Hernandez", "Theo Hernandez"])
+            self.assertEqual(self._events(77702), [(self.club1, "Hernandez", "goal", 1)])
+        finally:
+            self._drop_match(77702)
+
+    def test_mvp_matching_both_sides_is_not_repointed(self):
+        """matches.mvp_player has no club: a name both sides answer to stays as recorded."""
+        database.add_squad(self.club2, ["Rodrigo"])
+        self._insert_match(77703, mvp="RODRIGO")
+        try:
+            database.add_squad(self.club1, ["Rodrigo"])
+            self.assertEqual(self._mvp(77703), "RODRIGO")
+        finally:
+            self._drop_match(77703)
+
+    def test_set_player_position_insert_repoints_events(self):
+        self._insert_match(77704)
+        self._insert_event(77704, "Aldawsari")
+        try:
+            database.set_player_position("Al Dawsari", self.club1, "LW")
+            self.assertEqual(self._events(77704), [(self.club1, "Al Dawsari", "goal", 1)])
+        finally:
+            self._drop_match(77704)
+
+    def test_other_club_events_are_untouched(self):
+        self._insert_match(77705)
+        self._insert_event(77705, "Yıldız", team=self.club2)
+        try:
+            database.add_squad(self.club1, ["YILDIZ"])
+            self.assertEqual(self._events(77705), [(self.club2, "Yıldız", "goal", 1)])
+        finally:
+            self._drop_match(77705)
+
+    def test_init_db_recomputes_stale_norm_names_and_merges(self):
+        """Rows keyed by an older normalizer are re-keyed on startup and merged."""
+        t_norm = normalize_team_name(resolve_team_name(self.club1) or self.club1)
+        with database.transaction() as conn:
+            # 'yldz' is what the key looked like before 'ı' was folded
+            conn.execute(
+                "INSERT INTO squad_players (team_name, player_name, position, norm_name, norm_team_name) "
+                "VALUES (?, 'YILDIZ', 'LW', 'yildiz', ?)",
+                (self.club1, t_norm)
+            )
+            conn.execute(
+                "INSERT INTO squad_players (team_name, player_name, norm_name, norm_team_name) "
+                "VALUES (?, 'Yıldız', 'yldz', ?)",
+                (self.club1, t_norm)
+            )
+
+        database.init_db()
+
+        with database.transaction() as conn:
+            rows = conn.execute(
+                "SELECT player_name, norm_name, position FROM squad_players WHERE team_name = ?",
+                (self.club1,)
+            ).fetchall()
+        self.assertEqual([tuple(r) for r in rows], [("YILDIZ", "yildiz", "LW")])
 
     def test_rename_player_updates_squad_norm_events_and_mvp(self):
         """rename_player must update player_name, norm_name, match_events, and matches.mvp_player."""
