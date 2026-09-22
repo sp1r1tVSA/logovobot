@@ -2075,6 +2075,10 @@ async def admin_div_rename_receive(update: Update, context: ContextTypes.DEFAULT
         return ADMIN_EXPECT_DIV_RENAME
 
     await asyncio.to_thread(database.update_division, div_id, name=new_name)
+    # TopicCache держит division_name копией, а не ссылкой: без перегрузки /table
+    # в топиках дивизиона рисует старое название до перезапуска процесса.
+    from services.topic_cache import topic_cache
+    await asyncio.to_thread(topic_cache.reload_cache)
     keyboard = [[InlineKeyboardButton("« К дивизиону", callback_data=f"admin_div_view_{div_id}")],
                 [InlineKeyboardButton("« К списку дивизионов", callback_data="admin_divs_hub")]]
     await update.message.reply_text(
