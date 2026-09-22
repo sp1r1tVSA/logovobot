@@ -210,6 +210,18 @@ async def handle_get_division_leaderboard(request: web.Request) -> web.Response:
     GET /api/leaderboard/division/{division_id}
     Returns division-scoped capper leaderboard with ROI, win rate, and min bets filtering.
     """
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    user_info = get_authenticated_user(init_data)
+
+    if not user_info or "id" not in user_info:
+        return web.json_response({"status": "error", "error": "unauthorized"}, status=401)
+
+    if not check_user_access(user_info["id"]):
+        return web.json_response(
+            {"status": "error", "error": "access_restricted", "message": "Logovo.bet временно недоступен."},
+            status=403
+        )
+
     try:
         division_id = int(request.match_info["division_id"])
     except (KeyError, ValueError):

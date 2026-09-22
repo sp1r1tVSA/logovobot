@@ -43,7 +43,6 @@ PATH_PARAM_VALUE = "999000111"
 PUBLIC_BY_DESIGN = {
     ("GET", "/api/matches/hot"),
     ("GET", "/api/matches/{id}/photo"),
-    ("GET", "/api/leaderboard/division/{division_id}"),
 }
 
 
