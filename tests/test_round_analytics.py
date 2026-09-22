@@ -368,5 +368,68 @@ class TestTextFallbacks(RoundAnalyticsTestBase):
         self.assertLessEqual(len(caption), 1024)
 
 
+
+class TestGeminiTextIsTelegramSafe(RoundAnalyticsTestBase):
+    """Gemini's text goes out with parse_mode=HTML — a broken tag is a BadRequest and a retry."""
+
+    def setUp(self):
+        super().setUp()
+        self._original_call = round_preview._call_gemini
+        self.addCleanup(setattr, round_preview, "_call_gemini", self._original_call)
+
+    def _preview_with(self, text):
+        round_preview._call_gemini = lambda *args, **kwargs: text
+        self._add_match(1, "A", "B")
+        self._add_round(1)
+        return round_preview.generate_preview_text(round_preview.build_preview_payload(self.div_id, 1))
+
+    def test_long_text_is_cut_at_a_line_and_tags_stay_closed(self):
+        line = "⚽️ <b>Альфа</b> — <b>Браво</b> · 45/25/30% · xG 1.4:0.9 · жара\n"
+        text = self._preview_with("<b>ПРЕВЬЮ</b>\n" + line * 60 + "<i>конец")
+
+        self.assertLessEqual(len(text), round_preview.PREVIEW_MAX_CHARS)
+        self.assertTrue(text.endswith("жара"), text[-40:])
+        self.assertEqual(text.count("<b>"), text.count("</b>"))
+        self.assertNotIn("<i>", text)
+
+    def test_unbalanced_and_foreign_markup_is_repaired(self):
+        text = self._preview_with("<b>Тур 1 <i>жара</b> счёт <3 & <a href='x'>ссылка</a> </u>")
+
+        self.assertEqual(text, "<b>Тур 1 <i>жара</i></b> счёт &lt;3 &amp; &lt;a href='x'&gt;ссылка&lt;/a&gt; ")
+
+    def test_cut_never_leaves_half_a_tag(self):
+        body = "а" * (round_preview.CAPTION_MAX_CHARS - 32) + "<b>жирный хвост</b>" + "б" * 100
+        fitted = round_preview._fit_html(body, round_preview.CAPTION_MAX_CHARS)
+
+        self.assertLessEqual(len(fitted), round_preview.CAPTION_MAX_CHARS)
+        self.assertNotIn("<", fitted.replace("<b>", "").replace("</b>", ""))
+        self.assertEqual(fitted.count("<b>"), fitted.count("</b>"))
+
+
+class TestModelPayloadIsCompact(RoundAnalyticsTestBase):
+    def test_preview_sends_one_small_record_per_fixture(self):
+        self._add_match(1, "A", "B", score1=2, score2=0, status="confirmed")
+        self._add_match(2, "B", "A")
+        self._add_round(2)
+        payload = round_preview.build_preview_payload(self.div_id, 2)
+
+        compact = round_preview._preview_for_model(payload)
+
+        self.assertEqual(compact["round"], 2)
+        fixture = compact["fixtures"][0]
+        self.assertEqual(fixture["home"]["club"], self.teams["B"])
+        self.assertEqual(fixture["away"]["form"], "W")
+        self.assertEqual(set(fixture["home"]), {"club", "pos", "pts", "form"})
+
+    def test_digest_drops_the_full_table(self):
+        self._seed_two_rounds()
+        payload = round_preview.build_digest_payload(self.div_id, 2)
+
+        compact = round_preview._digest_for_model(payload)
+
+        self.assertNotIn("table", compact)
+        self.assertLessEqual(len(compact["top3"]), 3)
+        self.assertEqual(len(compact["results"]), len(payload["results"]))
+
 if __name__ == "__main__":
     unittest.main()

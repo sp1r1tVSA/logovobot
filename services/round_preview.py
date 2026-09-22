@@ -19,6 +19,7 @@ import json
 import logging
 import os
 import random
+import re
 import urllib.error
 import urllib.request
 
@@ -35,7 +36,10 @@ logger = logging.getLogger(__name__)
 # Те же 3 модели с ротацией Round-Robin, что и в services/ai/ai_chat.py
 CANDIDATE_MODELS = GEMINI_CHAT_MODELS
 
-PREVIEW_MAX_CHARS = 3500
+# Превью — одна строка на пару и «матч тура»: ~1000-1500 символов на 8 пар.
+# PREVIEW_MAX_CHARS — жёсткий потолок, модели ставится цель пониже.
+PREVIEW_MAX_CHARS = 2000
+PREVIEW_TARGET_CHARS = 1500
 CAPTION_MAX_CHARS = 1000
 
 
@@ -121,14 +125,8 @@ def build_preview_payload(division_id: int, round_number: int, season_id: int | 
                 "p1": round(p["home_probability"] * 100, 1),
                 "px": round(p["draw_probability"] * 100, 1),
                 "p2": round(p["away_probability"] * 100, 1),
-                "confidence": p.get("confidence"),
                 "xg1": p["expected_goals"]["team1"],
                 "xg2": p["expected_goals"]["team2"],
-                "total_xg": p["expected_goals"]["total"],
-                "over_2_5": round(p["goals_markets"]["over_2_5"] * 100, 1),
-                "btts_yes": round(p["goals_markets"]["btts_yes"] * 100, 1),
-                "key_factors": p.get("key_factors") or [],
-                "sample_size": p.get("sample_size"),
             }
         except Exception as e:
             # Недостаточно данных для прогноза — пара всё равно попадает в превью
@@ -255,6 +253,117 @@ def build_digest_payload(division_id: int, round_number: int, season_id: int | N
     }
 
 
+# ─── Компактные payload-ы для модели ───────────────────────────────────────
+# Полный payload нужен шаблонам и картинке; модели хватает сжатой выжимки —
+# меньше входа, меньше соблазна пересказывать всё подряд.
+
+def _preview_for_model(payload: dict) -> dict:
+    def side(team: dict) -> dict:
+        return {
+            "club": team["name"],
+            "pos": team.get("position"),
+            "pts": team.get("points"),
+            "form": "".join(team.get("form") or []),
+        }
+
+    fixtures = []
+    for f in payload["fixtures"]:
+        item = {"home": side(f["team1"]), "away": side(f["team2"])}
+        pr = f.get("prediction")
+        if pr:
+            item["p1_x_p2"] = [pr["p1"], pr["px"], pr["p2"]]
+            item["xg"] = f"{pr['xg1']}:{pr['xg2']}"
+        fixtures.append(item)
+    return {
+        "division": payload["division_name"],
+        "round": payload["round_number"],
+        "fixtures": fixtures,
+        "match_of_the_round": payload.get("match_of_the_round"),
+    }
+
+
+def _digest_for_model(payload: dict) -> dict:
+    # Полную таблицу читатель видит на картинке — модели хватит лидеров и движения.
+    return {
+        "division": payload["division_name"],
+        "round": payload["round_number"],
+        "matches_played": payload["matches_played"],
+        "matches_total": payload["matches_total"],
+        "goals_total": payload["goals_total"],
+        "results": [
+            {k: r[k] for k in ("team1", "score1", "score2", "team2", "mvp_player")}
+            for r in payload["results"]
+        ],
+        "rout": payload.get("rout"),
+        "player_of_the_round": payload.get("player_of_the_round"),
+        "mvp_of_the_round": payload.get("mvp_of_the_round"),
+        "top3": [
+            {k: t[k] for k in ("position", "team", "points")}
+            for t in payload["table"][:3]
+        ],
+        "movers": [
+            {k: t[k] for k in ("team", "previous_position", "position")}
+            for t in payload["movers"]
+        ],
+    }
+
+
+# ─── Telegram HTML: санитайз и обрезка без поломки разметки ─────────────────
+# Пост уходит с parse_mode=HTML: незакрытый <b>, обрезанный посередине тег или
+# голый «<» дают BadRequest, пост не записывается, и джоба заново дёргает Gemini.
+
+_ALLOWED_TAG_RE = re.compile(r"</?(b|i|u|s|code)>")
+
+
+def _sanitize_html(text: str) -> str:
+    """Keep only <b>/<i>/<u>/<s>/<code>, escape everything else, balance the tags."""
+    out, stack, pos = [], [], 0
+
+    def plain(chunk: str) -> str:
+        return html.escape(html.unescape(chunk), quote=False)
+
+    for m in _ALLOWED_TAG_RE.finditer(text):
+        out.append(plain(text[pos:m.start()]))
+        pos = m.end()
+        tag = m.group(1)
+        if not m.group(0).startswith("</"):
+            stack.append(tag)
+            out.append(m.group(0))
+        elif tag in stack:
+            while stack:
+                opened = stack.pop()
+                out.append(f"</{opened}>")
+                if opened == tag:
+                    break
+        # A stray closing tag is dropped.
+    out.append(plain(text[pos:]))
+    out.extend(f"</{t}>" for t in reversed(stack))
+    return "".join(out)
+
+
+def _fit_html(text: str, limit: int) -> str:
+    """Sanitize, and if too long cut at a line or sentence end — never inside a tag."""
+    text = _sanitize_html(text)
+    if len(text) <= limit:
+        return text
+
+    # Запас под закрывающие теги, которые допишет повторный санитайз.
+    cut = text[: limit - 30]
+    line_end = cut.rfind("\n")
+    if line_end >= len(cut) // 2:
+        cut = cut[:line_end]
+    else:
+        sentence_end = max(cut.rfind(ch) for ch in (".", "!", "?", "…"))
+        if sentence_end >= len(cut) // 2:
+            cut = cut[: sentence_end + 1]
+    # Не оставлять половину тега или сущности на конце.
+    if cut.rfind("<") > cut.rfind(">"):
+        cut = cut[: cut.rfind("<")]
+    if cut.rfind("&") > cut.rfind(";"):
+        cut = cut[: cut.rfind("&")]
+    return _sanitize_html(cut.rstrip())
+
+
 # ─── Gemini text generation ────────────────────────────────────────────────
 
 _COMMON_RULES = (
@@ -263,21 +372,21 @@ _COMMON_RULES = (
     "ни очков, ни счетов, ни процентов, ни имён игроков и клубов, которых нет в данных.\n"
     "- Если какого-то показателя в данных нет (null) — просто не упоминай его.\n"
     "- Разметка только Telegram HTML: <b>жирный</b>, <i>курсив</i>. Никакого Markdown, никаких ** и #.\n"
-    "- Пиши по-русски, живо, с эмодзи, без воды и без списка «дисклеймеров».\n"
+    "- Пиши по-русски, живо, но коротко: без вступлений, воды и «дисклеймеров».\n"
 )
 
 _PREVIEW_INSTRUCTION = (
     "Ты — Темшик, аналитик и голос лиги «Логово Фифарей»: душевный 30+ мужик, батейный юмор, "
     "но по цифрам — строгий аналитик.\n\n"
-    "ЗАДАЧА: написать превью тура для топика АНАЛИТИКА по переданному JSON.\n"
+    "ЗАДАЧА: короткое превью тура для топика АНАЛИТИКА по переданному JSON.\n"
     "СТРУКТУРА:\n"
-    "1. Заголовок с номером тура и названием дивизиона.\n"
-    "2. По каждой паре — одна-две строки: команды, вероятности П1/Х/П2 в процентах, ожидаемый счёт (xG). "
-    "Можно добавить один короткий вывод из key_factors.\n"
-    "3. Блок «Матч тура» — почему именно эта пара.\n"
-    "4. Короткая концовка в своём стиле.\n\n"
+    "1. Заголовок одной строкой: номер тура и дивизион.\n"
+    "2. По каждой паре РОВНО ОДНА строка: ⚽️ <b>Хозяева</b> — <b>Гости</b> · П1/Х/П2 в процентах · "
+    "xG как ожидаемый счёт · максимум 3-5 слов своей оценки (по месту, очкам или форме).\n"
+    "3. «🔥 Матч тура» — одно предложение, почему эта пара.\n"
+    "4. Концовка — одна короткая фраза.\n\n"
     f"{_COMMON_RULES}"
-    f"- Уложись в {PREVIEW_MAX_CHARS} символов.\n"
+    f"- Весь пост — не больше {PREVIEW_TARGET_CHARS} символов.\n"
 )
 
 _DIGEST_INSTRUCTION = (
@@ -350,17 +459,17 @@ def _call_gemini(system_text: str, payload: dict, max_output_tokens: int, api_ke
 
 
 def generate_preview_text(payload: dict) -> str:
-    text = _call_gemini(_PREVIEW_INSTRUCTION, payload, max_output_tokens=1400)
+    text = _call_gemini(_PREVIEW_INSTRUCTION, _preview_for_model(payload), max_output_tokens=900)
     if not text:
         return _fallback_preview_text(payload)
-    return text[:PREVIEW_MAX_CHARS]
+    return _fit_html(text, PREVIEW_MAX_CHARS)
 
 
 def generate_digest_caption(payload: dict) -> str:
-    text = _call_gemini(_DIGEST_INSTRUCTION, payload, max_output_tokens=500)
+    text = _call_gemini(_DIGEST_INSTRUCTION, _digest_for_model(payload), max_output_tokens=500)
     if not text:
         return _fallback_digest_caption(payload)
-    return text[:CAPTION_MAX_CHARS]
+    return _fit_html(text, CAPTION_MAX_CHARS)
 
 
 # ─── Фолбэки (Gemini недоступен — тур всё равно получает публикацию) ────────
@@ -386,7 +495,7 @@ def _fallback_preview_text(payload: dict) -> str:
         lines.append("")
         lines.append(f"🔥 <b>Матч тура:</b> {html.escape(motr['team1'])} — {html.escape(motr['team2'])}")
 
-    return "\n".join(lines)[:PREVIEW_MAX_CHARS]
+    return _fit_html("\n".join(lines), PREVIEW_MAX_CHARS)
 
 
 def _fallback_digest_caption(payload: dict) -> str:
@@ -405,4 +514,4 @@ def _fallback_digest_caption(payload: dict) -> str:
     if leader:
         lines.append(f"👑 Лидер: {html.escape(str(leader['team']))} — {leader['points']} очков")
 
-    return "\n".join(lines)[:CAPTION_MAX_CHARS]
+    return _fit_html("\n".join(lines), CAPTION_MAX_CHARS)
