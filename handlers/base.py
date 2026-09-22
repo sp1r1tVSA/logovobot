@@ -16,7 +16,7 @@ from services.graphics import top_stats_generator
 from constants import (
     CB_MAIN_MENU, CB_MENU_CABINET,
     CB_MENU_DIVISIONS, CB_MENU_SUPPORT,
-    CB_ADMIN_MAIN_MENU
+    CB_ADMIN_MAIN_MENU, CUP_DIVISION_SENTINEL
 )
 
 logger = logging.getLogger(__name__)
@@ -99,6 +99,24 @@ async def resolve_division_target(
     async def _legacy_chat() -> int | None:
         chat = config.GROUP_ID or await asyncio.to_thread(database.get_group_id)
         return int(chat) if chat else None
+
+    try:
+        is_cup = division_id is not None and int(division_id) == CUP_DIVISION_SENTINEL
+    except (ValueError, TypeError):
+        is_cup = False
+
+    if is_cup:
+        c_type = "line" if "line" in topic_types else "reports"
+        try:
+            cup_topic = await asyncio.to_thread(database.get_cup_topic, c_type)
+            if cup_topic and cup_topic.get("group_chat_id") and cup_topic.get("message_thread_id"):
+                return int(cup_topic["group_chat_id"]), int(cup_topic["message_thread_id"])
+        except Exception:
+            logger.warning("resolve_division_target: cup_topic lookup failed", exc_info=True)
+        logger.warning(
+            f"resolve_division_target: cup has no binding for {c_type}; message skipped."
+        )
+        return None, None
 
     if division_id:
         try:

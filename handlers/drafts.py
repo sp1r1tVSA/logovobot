@@ -581,6 +581,9 @@ async def cb_draft_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         div_id = g.get("division_id")
         if not div_id and _m_row:
             div_id = _m_row.get("division_id")
+        from constants import CUP_DIVISION_SENTINEL
+        if (g.get("tournament_type") == "cup" or (_m_row and _m_row.get("tournament_type") == "cup")) and (div_id is None or div_id == CUP_DIVISION_SENTINEL):
+            div_id = CUP_DIVISION_SENTINEL
         target_chat_id, target_topic = await resolve_division_target(
             div_id, "results", "reports",
             legacy_topic_keys=("results_topic_id", "reports_topic_id"),

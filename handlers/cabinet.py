@@ -7,6 +7,7 @@ import html
 import database
 from time_utils import now_msk
 from handlers.base import is_admin, resolve_division_target
+from constants import CUP_DIVISION_SENTINEL
 
 import logging
 logger = logging.getLogger(__name__)
@@ -2750,7 +2751,9 @@ def build_formatted_match_post(
     pm_title: str = "🎉 <b>Результат успешно занесен в лигу!</b>",
     match_id: int | None = None,
     is_draft: bool = False,
-    mvp_player: str | None = None
+    mvp_player: str | None = None,
+    tournament_type: str | None = None,
+    cup_stage: str | None = None,
 ) -> str:
     """
     Constructs a unified match result text block with goals and assists for PM notifications and group posts.
@@ -2803,15 +2806,34 @@ def build_formatted_match_post(
     p1_str = f" (@{p1_clean})" if p1_clean else ""
     p2_str = f" (@{p2_clean})" if p2_clean else ""
 
+    match_tourn = tournament_type or (match_info.get("tournament_type") if match_info else None)
+    c_stage = cup_stage or (match_info.get("cup_stage") if match_info else None)
+    game_num = match_info.get("game_num_in_series") if match_info else None
+
+    is_cup = (
+        match_tourn == "cup"
+        or (match_info and match_info.get("division_id") == CUP_DIVISION_SENTINEL)
+        or str(round_number) in ("-1", "-1.0")
+    )
+
+    if is_cup:
+        stage_name = c_stage or "Кубок"
+        if game_num:
+            stage_label = f"Кубок · {stage_name} (Игра {game_num})"
+        else:
+            stage_label = f"Кубок · {stage_name}"
+    else:
+        stage_label = f"Тур {round_number}"
+
     div_label = ""
-    if match_info and match_info.get("division_id"):
+    if not is_cup and match_info and match_info.get("division_id"):
         div_row = database.get_division(match_info["division_id"])
         if div_row:
             div_label = f" • {safe_escape(div_row['name'])}"
 
     if is_draft:
         header = (
-            f"📝 <b>ЧЕРНОВИК РЕЗУЛЬТАТА | Тур {round_number}{div_label}</b>\n\n"
+            f"📝 <b>ЧЕРНОВИК РЕЗУЛЬТАТА | {stage_label}{div_label}</b>\n\n"
             f"🏠 <b>{home_team_esc}</b>{p1_str} <b>{h_score} : {a_score}</b> <b>{away_team_esc}</b>{p2_str} ✈️"
         )
         footer = "\n\n⏳ <i>Ожидает подтверждения администратором...</i>"
@@ -2819,18 +2841,16 @@ def build_formatted_match_post(
         match_id_str = f" #{match_id}" if match_id else ""
         header = (
             f"{pm_title}\n\n"
-            f"🏟 <b>Матч{match_id_str} (Тур {round_number}{div_label})</b>\n"
+            f"🏟 <b>Матч{match_id_str} ({stage_label}{div_label})</b>\n"
             f"🏠 <b>{home_team_esc}</b> <b>{h_score} : {a_score}</b> <b>{away_team_esc}</b> ✈️"
         )
         footer = "\n\n📊 <i>Турнирная таблица и статистика игроков обновлены.</i>"
     else:
         header = (
-            f"🏆 <b>РЕЗУЛЬТАТ МАТЧА | Тур {round_number}{div_label}</b>\n\n"
+            f"🏆 <b>РЕЗУЛЬТАТ МАТЧА | {stage_label}{div_label}</b>\n\n"
             f"🏠 <b>{home_team_esc}</b>{p1_str} <b>{h_score} : {a_score}</b> <b>{away_team_esc}</b>{p2_str} ✈️"
         )
         footer = "\n\n📸 <i>Результат официально занесен в турнирную таблицу.</i>"
-
-    return f"{header}{events_block}{footer}"
 
     return f"{header}{events_block}{footer}"
 
@@ -3188,6 +3208,8 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     # 3. Post to Group
     div_id = match.get("division_id")
+    if match.get("tournament_type") == "cup" and (div_id is None or div_id == CUP_DIVISION_SENTINEL):
+        div_id = CUP_DIVISION_SENTINEL
     target_chat_id, target_topic_id = await resolve_division_target(
         div_id, "results", "reports",
         legacy_topic_keys=("results_topic_id", "reports_topic_id"),
@@ -3541,6 +3563,8 @@ async def notify_match_confirmed(context: ContextTypes.DEFAULT_TYPE, match_id: i
     )
 
     div_id = match.get("division_id")
+    if match.get("tournament_type") == "cup" and (div_id is None or div_id == CUP_DIVISION_SENTINEL):
+        div_id = CUP_DIVISION_SENTINEL
     target_chat_id, target_topic_id = await resolve_division_target(
         div_id, "results", "reports",
         legacy_topic_keys=("results_topic_id", "reports_topic_id"),
