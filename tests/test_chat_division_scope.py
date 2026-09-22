@@ -175,14 +175,92 @@ class TestChatDivisionScope(unittest.IsolatedAsyncioTestCase):
 
         ctx_a = await self._capture_context(self.user_a1)
 
-        self.assertIn(f"• {self.team_a1} —", ctx_a)
-        self.assertIn(f"• {self.team_a2} —", ctx_a)
+        self.assertIn(f". {self.team_a1} (@", ctx_a)
+        self.assertIn(f". {self.team_a2} (@", ctx_a)
         for canon in config.CLUB_REGISTRY:
             self.assertNotIn(
-                f"• {canon} —",
+                f". {canon} (@",
                 ctx_a,
                 f"Клуб дивизиона подменён каноническим именем реестра: {canon}",
             )
+
+    async def test_form_rides_on_the_standings_line(self):
+        """Форма стоит в строке таблицы, а не отдельным списком всех клубов ещё раз."""
+        ctx_a = await self._capture_context(self.user_a1)
+
+        line_a1 = next(l for l in ctx_a.splitlines() if f". {self.team_a1} (@" in l)
+        self.assertTrue(line_a1.rstrip(" 🚀🔻").endswith("W"), line_a1)
+        self.assertEqual(ctx_a.count(f"{self.team_a1} (@"), 1)
+
+    async def test_squads_are_limited_to_the_relevant_clubs(self):
+        """Составов в промте — клуб собеседника и упомянутые клубы, а не весь дивизион."""
+        squads = {
+            self.team_a1: ["Own Striker"],
+            self.team_a2: ["Rival Keeper"],
+        }
+        with patch("handlers.chat.database.get_all_squads", return_value=squads):
+            ctx_plain = await self._capture_context(self.user_a1)
+            self.assertIn("Own Striker", ctx_plain)
+            self.assertNotIn("Rival Keeper", ctx_plain)
+
+            update = self._build_update(self.user_a1)
+            update.message.text = f"Темшик кто лучший в {self.team_a2}"
+            ctx = MagicMock()
+            ctx.bot.id = 999
+            ctx.bot.send_chat_action = AsyncMock()
+            with patch("handlers.chat.handle_temshik_command", new=AsyncMock(return_value=False)),                  patch("handlers.chat.ai_chat.generate_chat_reply", return_value="ok") as gen:
+                await handle_ai_chat(update, ctx)
+            self.assertIn("Rival Keeper", gen.call_args[0][3])
+
+    async def test_schedule_keeps_own_matches_and_the_nearest_round(self):
+        """Расписание: ближайший открытый тур целиком плюс матчи собеседника из дальних туров."""
+        with database.transaction() as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO rounds (round_number, is_open, deadline, division_id) VALUES (2, 1, ?, ?)",
+                ("08.01.2030 00:00", self.div_a_id),
+            )
+            c.execute(
+                "INSERT INTO rounds (round_number, is_open, deadline, division_id) VALUES (3, 1, ?, ?)",
+                ("15.01.2030 00:00", self.div_a_id),
+            )
+            for rnd in (2, 3):
+                c.execute(
+                    "INSERT INTO matches (round_number, player1_id, player2_id, player1_team, player2_team, "
+                    "status, division_id, season_id, tournament_type) "
+                    "VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, 'league')",
+                    (rnd, self.user_a1, self.user_a2, self.team_a1, self.team_a2, self.div_a_id, self.season_id),
+                )
+        ctx_own = await self._capture_context(self.user_a1)
+        self.assertIn("Тур 2:", ctx_own)
+        self.assertIn("Тур 3:", ctx_own)
+
+        # Тренер, у которого нет матчей в дальних турах, видит только ближайший.
+        outsider = 97403
+        database.register_user(outsider, f"cht_a3_{self.uid}", team_name=f"CHT Alpha Three {self.uid}")
+        database.assign_user_division(outsider, self.div_a_id)
+        try:
+            ctx_other = await self._capture_context(outsider)
+            self.assertIn("Тур 2:", ctx_other)
+            self.assertNotIn("Тур 3:", ctx_other)
+        finally:
+            with database.transaction() as conn:
+                conn.cursor().execute("DELETE FROM users WHERE telegram_id = ?", (outsider,))
+
+
+class TestTrimToLastSentence(unittest.TestCase):
+    def test_cut_tail_is_dropped(self):
+        from services.ai.ai_chat import _trim_to_last_sentence
+
+        self.assertEqual(
+            _trim_to_last_sentence("Шансы есть. Бери баньку и вперёд! А потом ещё надо бы"),
+            "Шансы есть. Бери баньку и вперёд!",
+        )
+
+    def test_run_on_sentence_gets_an_ellipsis(self):
+        from services.ai.ai_chat import _trim_to_last_sentence
+
+        self.assertEqual(_trim_to_last_sentence("Братан, тут такое дело, что"), "Братан, тут такое дело, что…")
 
 
 if __name__ == "__main__":

@@ -12,6 +12,9 @@ from handlers.text_commands import handle_temshik_command
 
 logger = logging.getLogger(__name__)
 
+# Сообщений истории (user + model), которые уходят в модель и хранятся в БД.
+CHAT_HISTORY_KEEP = 6
+
 
 async def _none():
     """Awaitable placeholder so asyncio.gather slots stay positional when a query is skipped."""
@@ -99,7 +102,7 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_data, active_season, chat_history, chat_mode = await asyncio.gather(
         asyncio.to_thread(database.get_user, user_id),
         asyncio.to_thread(database.get_active_season),
-        asyncio.to_thread(database.get_chat_history, user_id, 10),
+        asyncio.to_thread(database.get_chat_history, user_id, CHAT_HISTORY_KEEP),
         asyncio.to_thread(database.get_config, "chat_mode")
     )
 
@@ -128,9 +131,9 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Без дивизиона эти запросы ушли бы в legacy-ветку и смешали все дивизионы разом,
         # поэтому при неопределённом скоупе не отдаём турнирных данных вообще.
         asyncio.to_thread(database.get_standings, division_id, season_id) if division_id else _empty_list(),
-        asyncio.to_thread(database.get_top_scorers, 15, division_id, season_id) if division_id else _empty_list(),
-        asyncio.to_thread(database.get_top_assists, 15, division_id, season_id) if division_id else _empty_list(),
-        asyncio.to_thread(database.get_recent_confirmed_matches, 10, division_id, season_id) if division_id else _empty_list(),
+        asyncio.to_thread(database.get_top_scorers, 5, division_id, season_id) if division_id else _empty_list(),
+        asyncio.to_thread(database.get_top_assists, 5, division_id, season_id) if division_id else _empty_list(),
+        asyncio.to_thread(database.get_recent_confirmed_matches, 6, division_id, season_id) if division_id else _empty_list(),
         asyncio.to_thread(database.get_all_squads) if division_id else _empty_dict(),
         asyncio.to_thread(database.get_division_rounds, division_id) if division_id else _empty_list(),
         asyncio.to_thread(database.get_teams_recent_form, 5, division_id, season_id) if division_id else _empty_dict(),
@@ -164,39 +167,47 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     prom_slots = (season_rules or {}).get("promotion_slots", 3) if has_division_above else 0
     rel_slots = (season_rules or {}).get("relegation_slots", 3) if has_division_below else 0
 
-    # Standings (division-scoped) with zone markers
-    standings_text = f"🏆 ТУРНИРНАЯ ТАБЛИЦА — {division_name or 'дивизион не определён'} ({season_name}):\n"
+    # Standings (division-scoped) with zone markers and recent form inline —
+    # отдельный блок формы повторял бы все клубы таблицы второй раз.
+    standings_text = (
+        f"🏆 ТУРНИРНАЯ ТАБЛИЦА — {division_name or 'дивизион не определён'} ({season_name}):\n"
+        "Формат: место. клуб (@тренер) О очки, И-В-Н-П, мячи, ФОРМА КОМАНД (последние игры, W/D/L)\n"
+    )
     if standings:
         total_teams = len(standings)
         for i, st in enumerate(standings, 1):
             zone = ""
             if prom_slots and i <= prom_slots:
-                zone = " 🚀[зона повышения]"
+                zone = " 🚀"
             elif rel_slots and i > total_teams - rel_slots:
-                zone = " 🔻[зона вылета]"
+                zone = " 🔻"
+            form_list = recent_form_map.get((st.get("team_name") or "").lower(), [])
+            form_str = "".join(form_list) if form_list else "—"
             standings_text += (
-                f"{i}. {st['team_name']} (@{st['username'] or '—'}) — Очки: {st['points']} "
-                f"(И:{st['played']} В:{st['wins']} Н:{st['draws']} П:{st['losses']}, "
-                f"Г:{st['goals_scored']}-{st['goals_conceded']}){zone}\n"
+                f"{i}. {st['team_name']} (@{st['username'] or '—'}) О{st['points']}, "
+                f"{st['played']}-{st['wins']}-{st['draws']}-{st['losses']}, "
+                f"{st['goals_scored']}:{st['goals_conceded']}, {form_str}{zone}\n"
             )
     else:
         standings_text += "Таблица пока пустая — сыгранных матчей в этом дивизионе нет.\n"
 
     # Top Scorers
-    scorers_text = "⚽ ТОП БОМБАРДИРОВ ДИВИЗИОНА:\n"
+    scorers_text = "⚽ ТОП БОМБАРДИРОВ ДИВИЗИОНА: "
     if top_scorers:
-        for i, sc in enumerate(top_scorers, 1):
-            scorers_text += f"{i}. {sc['player_name']} ({sc['team_name']}) — {sc['total_goals']} голов\n"
+        scorers_text += "; ".join(
+            f"{sc['player_name']} ({sc['team_name']}) {sc['total_goals']}" for sc in top_scorers
+        ) + "\n"
     else:
-        scorers_text += "Пока нет зарегистрированных голов.\n"
+        scorers_text += "голов пока нет.\n"
 
     # Top Assists
-    assists_text = "🎯 ТОП АССИСТЕНТОВ ДИВИЗИОНА:\n"
+    assists_text = "🎯 ТОП АССИСТЕНТОВ ДИВИЗИОНА: "
     if top_assists:
-        for i, asst in enumerate(top_assists, 1):
-            assists_text += f"{i}. {asst['player_name']} ({asst['team_name']}) — {asst['total_assists']} ассистов\n"
+        assists_text += "; ".join(
+            f"{asst['player_name']} ({asst['team_name']}) {asst['total_assists']}" for asst in top_assists
+        ) + "\n"
     else:
-        assists_text += "Пока нет зарегистрированных ассистов.\n"
+        assists_text += "ассистов пока нет.\n"
 
     # Recent Matches
     matches_text = "📊 ПОСЛЕДНИЕ СЫГРАННЫЕ МАТЧИ ДИВИЗИОНА:\n"
@@ -206,103 +217,84 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         matches_text += "Сыгранных матчей пока нет.\n"
 
-    # Squads — stored globally by team name, so keep only clubs of this division.
-    squads_text = "👥 СОСТАВЫ КЛУБОВ ДИВИЗИОНА:\n"
-    division_squads = {
-        team: players for team, players in (all_squads or {}).items()
-        if not division_team_names or (team or "").lower() in division_team_names
-    }
-    if division_squads:
-        for team, players in division_squads.items():
-            squads_text += f"• {team}: {', '.join(players)}\n"
-    else:
-        squads_text += "Составы пока не занесены.\n"
-
     # Rounds played in this division
     rounds_list = division_rounds or []
     total_rounds = max(rounds_list) if rounds_list else 0
 
-    # Team Recent Form (get_teams_recent_form keys by lowercased team name)
-    form_text = "📈 ФОРМА КОМАНД (последние игры: W=Победа, D=Ничья, L=Поражение):\n"
-    for st in standings:
-        form_list = recent_form_map.get((st.get("team_name") or "").lower(), [])
-        form_str = "-".join(form_list) if form_list else "нет игр"
-        form_text += f"• {st['team_name']}: {form_str}\n"
-
     # Upcoming schedule — get_open_pending_matches is league-wide, so scope it here.
+    # Весь хвост открытых туров модели не нужен: только матчи собеседника
+    # и ближайший открытый тур дивизиона целиком.
+    user_team_lc = (user_team or "").lower() if user_data else ""
+    division_pending = [
+        pm for pm in pending_matches
+        if division_id is None or pm.get("division_id") == division_id
+    ]
+    nearest_round = min((pm.get("round_number") or 0 for pm in division_pending), default=None)
+    own_opponents: list[str] = []
     schedule_by_round: dict[int, list[str]] = {}
-    for pm in pending_matches:
-        if division_id is not None and pm.get("division_id") != division_id:
+    for pm in division_pending:
+        team1 = pm.get("player1_team") or "?"
+        team2 = pm.get("player2_team") or "?"
+        is_own = bool(user_team_lc) and user_team_lc in (team1.lower(), team2.lower())
+        if is_own:
+            own_opponents.append(team2 if team1.lower() == user_team_lc else team1)
+        rnd = pm.get("round_number") or 0
+        if not is_own and rnd != nearest_round:
             continue
-        rnd = pm.get("round_number", "?")
-        team1 = pm.get("player1_team", "?")
-        team2 = pm.get("player2_team", "?")
-        nick1 = pm.get("player1_nickname", "")
-        nick2 = pm.get("player2_nickname", "")
-        deadline = pm.get("deadline", "")
-        line = f"{team1} (@{nick1}) vs {team2} (@{nick2})"
-        if deadline:
-            line += f" [дедлайн: {deadline}]"
+        line = f"{team1} (@{pm.get('player1_nickname') or '—'}) vs {team2} (@{pm.get('player2_nickname') or '—'})"
+        if pm.get("deadline"):
+            line += f" [дедлайн: {pm['deadline']}]"
         schedule_by_round.setdefault(rnd, []).append(line)
 
-    schedule_text = "📅 РАСПИСАНИЕ ПРЕДСТОЯЩИХ МАТЧЕЙ ДИВИЗИОНА (ещё не сыгранные):\n"
+    schedule_text = "📅 РАСПИСАНИЕ ПРЕДСТОЯЩИХ МАТЧЕЙ (ближайший тур + матчи собеседника):\n"
     if schedule_by_round:
         for rnd in sorted(schedule_by_round.keys()):
-            schedule_text += f"\nТур {rnd}:\n"
-            for entry in schedule_by_round[rnd]:
-                schedule_text += f"  • {entry}\n"
+            schedule_text += f"Тур {rnd}: " + "; ".join(schedule_by_round[rnd]) + "\n"
     else:
-        schedule_text += "Все матчи уже сыграны или расписание ещё не загружено.\n"
+        schedule_text += "Открытых несыгранных матчей нет.\n"
 
+    # Squads — stored globally by team name. Все 16 составов раздували промт сильнее всего,
+    # поэтому отдаём только клуб собеседника, его ближайших соперников и клубы,
+    # названные в самом сообщении.
+    division_squads = {
+        team: players for team, players in (all_squads or {}).items()
+        if not division_team_names or (team or "").lower() in division_team_names
+    }
+    text_lc = user_text.lower()
+    wanted = {user_team_lc} if user_team_lc else set()
+    wanted.update(t.lower() for t in own_opponents[:2])
+    for team in division_squads:
+        tokens = [w for w in re.split(r"[\s\-]+", (team or "").lower()) if len(w) >= 5]
+        if (team or "").lower() in text_lc or any(w in text_lc for w in tokens):
+            wanted.add((team or "").lower())
+    squads_text = "👥 СОСТАВЫ (клуб собеседника, его соперники и упомянутые клубы):\n"
+    picked = [(t, p) for t, p in division_squads.items() if (t or "").lower() in wanted]
+    if picked:
+        for team, players in picked:
+            squads_text += f"• {team}: {', '.join(players)}\n"
+    else:
+        squads_text += "Нужных составов нет в базе.\n"
 
     # History of past seasons — archive from the pre-division era.
-    # Единая лига КПЛ на 16 клубов больше не существует: турнир разбит на дивизионы.
-    # Эти итоги годятся для подколов и историй про старожилов, но НЕ описывают текущий сезон.
     past_seasons_text = (
-        "📜 АРХИВ: ИСТОРИЯ ЕДИНОЙ ЛИГИ КПЛ (ЭПОХА ДО ДИВИЗИОНОВ).\n"
-        "⚠️ ВАЖНО: это ЗАКРЫТАЯ глава. Тогда была ОДНА общая лига на 16 клубов без дивизионов.\n"
-        "Сейчас турнир устроен иначе — дивизионы с повышениями и вылетами, состав участников шире.\n"
-        "Используй этот блок ТОЛЬКО как историю и материал для подколов старожилов.\n"
-        "НИКОГДА не выдавай эти таблицы и титулы за текущее положение дел.\n\n"
-        "=== ИТОГИ ПОСЛЕДНЕГО СЕЗОНА ЕДИНОЙ ЛИГИ ===\n"
-        "• Чемпион: Расинг (@Vazya4mo666) — 74 очка, 108 голов (забрал золото и +7 тренировок). Двукратный чемпион!\n"
-        "• 2 место: Брага (@Saharokk8830) — 67 очков (серебро).\n"
-        "• 3 место: АЕК (@Snikers2121) — 62 очка (бронза).\n"
-        "• 4 место: Порту (@lvckri) — 58 очков.\n"
-        "• 5 место: Бенфика (@vtrrgyg) — 57 очков. Выиграла Кубок КПЛ (3:1 vs Расинг) и 🏆Лигу Конференций (vs Аль-Наср).\n"
-        "• 6 место: Фейеноорд (@GeorgiyKostenko) — 54 очка.\n"
-        "• 7 место: Аякс (@LachesisQQQ) — 50 очков.\n"
-        "• 8-9 места: Копенгаген (@crcsss) и Бока Хуниорс (@k1nkyua) — по 45 очков.\n"
-        "• 10-13 места: Ривер Плейт (31), Селтик (28), Спортинг (27), Будё-Глимт (25).\n"
-        "• 14-16 места (аутсайдеры): ПСВ (22), Рейнджерс (16), Брюгге (@malenkihyi) (14).\n"
-        "• Герои того сезона: Igor Paixao (Бенфика, 50 голов), Gittens (44 гола). Ассистенты: Bardghji, Ndoye, Rafa (по 24).\n\n"
-        "=== ИТОГИ ПРЕДЫДУЩЕГО СЕЗОНА ЕДИНОЙ ЛИГИ ===\n"
-        "• Чемпион: Расинг (@Vazya4mo666) — вырвал золото у Браги в 1 очко!\n"
-        "• 2 место: Брага (@Saharokk8830) — 71 очко.\n"
-        "• 3 место: АЕК (@Snikers2121) — 63 очка. Победитель Кубка КПЛ.\n"
-        "• 4 место: Порту (@lvckri) — 55 очков.\n"
-        "• 5-6 места: Копенгаген (50) и ПСВ (50).\n"
-        "• Победитель Лиги Европы: Аякс (@LachesisQQQ).\n"
-        "• 15-16 места: Рейнджерс и Брюгге.\n"
-        "• Герои того сезона: Pineda (АЕК, 44 гола), Perisic (21 ассист).\n"
+        "📜 АРХИВ ЕДИНОЙ ЛИГИ КПЛ (ЭПОХА ДО ДИВИЗИОНОВ, 16 клубов) — только для баек, НЕ текущее положение:\n"
+        "• Прошлый сезон: 1. Расинг (@Vazya4mo666, двукратный чемпион), 2. Брага (@Saharokk8830), "
+        "3. АЕК (@Snikers2121); Бенфика (@vtrrgyg) взяла Кубок КПЛ и Лигу Конференций; "
+        "последний — Брюгге (@malenkihyi). Бомбардир Igor Paixao (50).\n"
+        "• Позапрошлый: 1. Расинг (на очко выше Браги), 3. АЕК — Кубок КПЛ, Аякс (@LachesisQQQ) — Лига Европы.\n"
     )
 
     # Official League Rules & Info
     league_rules_text = (
-        "📜 ОФИЦИАЛЬНЫЙ РЕГЛАМЕНТ И ПРАВИЛА ТУРНИРА ('Топ 7 лиг'):\n"
-        "• Составы и трансферы: Составы по Transfermarkt на 22.03.2026. Игроки без клуба или завершившие карьеру (Навас, Коутиньо) — ЗАПРЕЩЕНЫ. Карты Кумиров (Icons) и Героев (Heroes) — ЗАПРЕЩЕНЫ.\n"
-        "• Карточки и OVR: Максимум 111 OVR (без учета рангов). Карты 111+ запрещены. В составе и на поле во время матча должно быть ровно 6 спешл-карт (7-я спешл-карта запрещена). Также на поле должно быть минимум 5 игроков вашей команды.\n"
-        "• Прокачка и тренировки: Изначально дается 20 тренировок (минимальный порог 60 тренировок с победами). Прокачка игрока: максимум 20 тренировок и 3 усиления навыков (Фиолетовый ранг). Красный и Золотой ранги ЗАПРЕЩЕНЫ. За победы в Лиге/Кубке/Еврокубках дает +1 тренировка. За активный канал клуба — +10 тренировок (после 5 официальных матчей).\n"
-        "• 🔴 ЗАПРЕЩЕННЫЕ ПРИЕМЫ В МАТЧЕ:\n"
-        "  1. Голы с навесов и навесы со штрафных — ЗАПРЕЩЕНЫ.\n"
-        "  2. Навесы с угловых — ЗАПРЕЩЕНЫ (разыгрываем угловые только на 'балансе').\n"
-        "  3. Забросы с центра поля при розыгрыше и пасы низом на забегающего — ЗАПРЕЩЕНЫ.\n"
-        "  4. Забросы в штрафную и забросы 'на ход' — ЗАПРЕЩЕНЫ.\n"
-        "  5. Финт 'пятка об пятку' и 'переступ и выход' (на чужой половине нужно выбить мяч, на своей — пас назад).\n"
-        "  6. Умышленное затягивание времени (особенно с 70 по 90 мин).\n"
-        "• Судья турнира: @onvamneVSAplayer (принимает окончательные решения по спорам). Главный админ / правила: @antonv2801.\n"
-        "• Ограничения: Ничьи переигрывать нельзя (тех. поражение/снятие очков). Уходить с поста тренера до конца сезона запрещено (ЧС турнира).\n"
-        "• Награды: В конце сезона вручается премия 'Золотой Мяч'. Красивые голы отправлять @antonv2801.\n"
+        "📜 ОФИЦИАЛЬНЫЙ РЕГЛАМЕНТ ('Топ 7 лиг'):\n"
+        "• Составы по Transfermarkt на 22.03.2026; игроки без клуба, Кумиры и Герои запрещены.\n"
+        "• Максимум 111 OVR; ровно 6 спешл-карт; на поле минимум 5 игроков своей команды.\n"
+        "• Прокачка: до 20 тренировок и 3 усилений (фиолетовый ранг), красный и золотой ранги запрещены; "
+        "+1 тренировка за победу, +10 за активный канал клуба.\n"
+        "• Запрещено: навесы (с игры, штрафных, угловых — угловые только «на балансе»), забросы с центра, "
+        "в штрафную и «на ход», финты «пятка об пятку» и «переступ и выход», затягивание времени.\n"
+        "• Ничьи не переигрываются; уйти с поста тренера до конца сезона нельзя (ЧС).\n"
+        "• Судья: @onvamneVSAplayer. Правила и «Золотой Мяч»: @antonv2801.\n"
     )
 
     # Cup bracket — единая сетка на весь турнир, не имеет division_id.
@@ -330,16 +322,6 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         cup_info_text += "Клубы этого дивизиона в кубковой сетке сейчас не представлены.\n"
 
-    # Opponents list: club -> coach username (только тренеры этого дивизиона)
-    opponents_text = ""
-    for p in division_players or []:
-        team = p.get("team_name")
-        uname = p.get("username")
-        if team and uname:
-            opponents_text += f"• {team} — @{uname}\n"
-    if not opponents_text:
-        opponents_text = "Информация о тренерах дивизиона ещё не занесена.\n"
-
     # Tournament structure — то, что модель обязана понимать про устройство турнира.
     if division_id:
         structure_lines = [
@@ -357,11 +339,7 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             structure_lines.append(f"• Вылет: нижние {rel_slots} мест падают дивизионом НИЖЕ. 🔻")
         else:
             structure_lines.append("• Это НИЖНИЙ дивизион — ниже падать некуда.")
-        structure_lines.append(
-            "• Данные других дивизионов тебе НЕ переданы. Если спрашивают про чужой дивизион, "
-            "про сквозную таблицу всей лиги или про чемпиона всего турнира — честно скажи, "
-            "что видишь только свой дивизион, и не выдумывай цифры."
-        )
+        structure_lines.append("• Данных других дивизионов у тебя нет — про них цифры не выдумывай.")
         structure_text = "🗂 СТРУКТУРА ТУРНИРА:\n" + "\n".join(structure_lines) + "\n"
     else:
         structure_text = (
@@ -383,18 +361,23 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except (KeyError, IndexError):
             pass
 
+    # Особые собеседники — строка попадает в промт, только когда это они.
+    special_note = ""
+    if (username or "").lower() == "snikers2121":
+        special_note = ("Это сам @Snikers2121 (sniki) — великий! Относись к нему максимально "
+                        "уважительно и по-братски, защищай его, называй великим.\n")
+    elif (username or "").lower() == "sp1r1tvsa":
+        special_note = "Это админ лиги @sp1r1tVSA — его не троллить, относись уважительно, по-дружески.\n"
+
     context_data = (
         f"Пользователь, который с тобой говорит: {username} (тренер команды '{user_team}').\n"
         f"Его дивизион в этом разговоре: {division_name or 'не определён'}.{user_div_note}\n"
-        f"СНИКИ ЛИ ЭТО? {'ДА! Это сам @Snikers2121 (sniki) — великий! Относись к нему максимально уважительно и по-братски, защищай его, называй великим.' if (username or '').lower() == 'snikers2121' else 'НЕТ, это не сники — это обычный собеседник.'}\n"
-        f"АДМИН ЛИ ЛИГИ? {'ДА! Это админ @sp1r1tVSA — его не троллить, относись уважительно, по-дружески.' if (username or '').lower() == 'sp1r1tvsa' else 'НЕТ, это не админ лиги.'}\n"
+        f"{special_note}"
         f"Предупреждения (варны) у этого пользователя: {user_warn_count}/4."
         f"{' ⚠️ ВНИМАНИЕ: у игрока 3/4 варна! Следующий варн (например, ещё один долг по матчу) приведёт к автоматическому лишению клуба и кику из группы!' if user_warn_count == 3 else ''}\n\n"
         f"{structure_text}\n"
         f"ВЛАДЕЛЕЦ ТУРНИРА: @antonv2801 — он хозяин и главный по правилам, но троллить и подкалывать его можно как любого другого.\n"
-        f"СОПЕРНИКИ ПО ДИВИЗИОНУ (клуб — тренер):\n{opponents_text}\n\n"
         f"{standings_text}\n"
-        f"{form_text}\n"
         f"{schedule_text}\n"
         f"{scorers_text}\n"
         f"{assists_text}\n"
@@ -421,8 +404,8 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # 3. Save to history
     await asyncio.to_thread(database.append_chat_history, user_id, "user", user_text)
     await asyncio.to_thread(database.append_chat_history, user_id, "model", reply_text)
-    # Keep only last 10 messages (5 pairs) to avoid context bloat
-    await asyncio.to_thread(database.trim_chat_history, user_id, keep=10)
+    # Короткая память: длинные старые ответы в истории модель копирует как образец стиля.
+    await asyncio.to_thread(database.trim_chat_history, user_id, keep=CHAT_HISTORY_KEEP)
 
     # 4. Send reply
     await update.message.reply_text(reply_text)
