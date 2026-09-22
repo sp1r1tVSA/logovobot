@@ -41,8 +41,8 @@ def calculate_cashout_offer(
         if item_status == "lost":
             return False, 0, "LEG_LOST"
 
-        if item_status == "won":
-            continue  # Winning leg preserves its full value
+        if item_status in ("won", "refunded"):
+            continue  # Выигравшая нога хранит полную стоимость, аннулированная даёт 1.00
 
         # Pending leg: compute relative odds ratio
         orig_odd = float(item.get("odds_at_placement") or item.get("odd") or 1.0)

@@ -9729,7 +9729,7 @@ def place_user_bet(
                 """, (resolved_sel_id, resolved_market_id))
                 ms_row = cursor.fetchone()
                 if ms_row:
-                    if ms_row["mkt_status"] in ("suspended", "closed", "settled") or ms_row["sel_status"] in ("locked", "suspended", "settled"):
+                    if ms_row["mkt_status"] in ("suspended", "closed", "settled", "voided") or ms_row["sel_status"] in ("locked", "suspended", "settled"):
                         return False, f"Рынок на исход '{out_type}' временно приостановлен или закрыт."
                     if ms_row["mkt_status"] in ("open", "active") and ms_row["sel_status"] == "active":
                         odd_val = float(ms_row["odds_value"])
@@ -9745,7 +9745,7 @@ def place_user_bet(
                 """, [m_id, *possible_keys])
                 ms_match = cursor.fetchone()
                 if ms_match:
-                    if ms_match["mkt_status"] in ("suspended", "closed", "settled") or ms_match["sel_status"] in ("locked", "suspended", "settled"):
+                    if ms_match["mkt_status"] in ("suspended", "closed", "settled", "voided") or ms_match["sel_status"] in ("locked", "suspended", "settled"):
                         return False, f"Рынок на исход '{out_type}' временно приостановлен или закрыт."
                     if ms_match["mkt_status"] in ("open", "active") and ms_match["sel_status"] == "active":
                         odd_val = float(ms_match["odds_value"])
@@ -10418,9 +10418,11 @@ write_bet_audit_log = log_betting_audit
 # Market lifecycle valid transitions (Phase 5)
 # Market lifecycle valid transitions — aligned with DB CHECK constraint:
 # markets.status IN ('open','suspended','closed','settled','voided')
+# 'voided' доступна и из живых статусов: аннулировать рынок нужно до закрытия
+# линии (отмена матча, ошибочная роспись), а close → voided для этого не ждём.
 _MARKET_TRANSITIONS: dict[str, set[str]] = {
-    "open":      {"suspended", "closed"},
-    "suspended": {"open", "closed"},
+    "open":      {"suspended", "closed", "voided"},
+    "suspended": {"open", "closed", "voided"},
     "closed":    {"settled", "voided"},
     "settled":   set(),   # terminal state
     "voided":    set(),   # terminal state
@@ -10596,6 +10598,144 @@ def void_user_bet(bet_id: int, actor_id: int) -> dict:
     )
 
     return {"bet_id": bet_id, "user_id": user_id, "refunded_amount": stake}
+
+
+def void_market(market_id: int, actor_id: int, reason: str) -> dict:
+    """
+    Аннулировать рынок и разобрать все затронутые купоны по одним и тем же
+    правилам, по которым это делает расчёт.
+
+    Нога аннулированного рынка становится 'refunded' (CHECK `bet_items` не
+    знает статуса 'voided', см. settlement_engine). После этого:
+
+    - живая (pending) нога осталась — купон ждёт свой расчёт: settlement
+      перемноживает только 'won'-ноги, поэтому аннулированная нога сама
+      даёт 1.00 и выплата считается правильно;
+    - pending-ног не осталось — купон мёртв, и закрывает его канонический
+      владелец админского аннулирования `void_user_bet` (полный возврат
+      стейка, реестр 'admin_refund'/'bet', аудит). Своей формулы выплаты
+      здесь намеренно нет.
+
+    Идемпотентность: повторный вызов на 'voided' рынке ничего не меняет и
+    ничего не возвращает второй раз; на 'settled' — ValueError.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, status, match_id FROM markets WHERE id = ?", (market_id,))
+        market = cursor.fetchone()
+        if not market:
+            raise ValueError(f"Market #{market_id} not found.")
+        if market["status"] == "settled":
+            raise ValueError(f"Market #{market_id} is already settled and cannot be voided.")
+        old_status = market["status"]
+
+        cursor.execute("SELECT division_id, season_id FROM matches WHERE id = ?", (market["match_id"],))
+        match_row = cursor.fetchone()
+        div_id = match_row["division_id"] if match_row else None
+        season_id = match_row["season_id"] if match_row else None
+
+        if market["status"] == "voided":
+            return {
+                "market_id": market_id, "old_status": "voided", "already_voided": True,
+                "voided_legs": 0, "refunded_bets": [], "refunded_stake": 0,
+                "pending_coupons": 0, "division_id": div_id, "season_id": season_id,
+            }
+
+        transition_market_status(market_id, "voided", actor_id)
+
+        cursor.execute("""
+            SELECT DISTINCT ub.id, ub.user_id, ub.bet_type, ub.amount
+            FROM user_bets ub
+            JOIN bet_items bi ON bi.bet_id = ub.id
+            WHERE bi.market_id = ? AND ub.status = 'pending'
+            ORDER BY ub.id
+        """, (market_id,))
+        coupons = [dict(r) for r in cursor.fetchall()]
+
+        voided_legs = 0
+        refunded_bets = []
+        pending_coupons = 0
+        for coupon in coupons:
+            cursor.execute("""
+                UPDATE bet_items SET status = 'refunded'
+                WHERE bet_id = ? AND market_id = ? AND status = 'pending'
+            """, (coupon["id"], market_id))
+            voided_legs += cursor.rowcount
+
+            cursor.execute(
+                "SELECT 1 FROM bet_items WHERE bet_id = ? AND status = 'pending' LIMIT 1",
+                (coupon["id"],),
+            )
+            if cursor.fetchone():
+                pending_coupons += 1
+                continue
+
+            refund = void_user_bet(coupon["id"], actor_id)
+            cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (coupon["user_id"],))
+            balance_after = cursor.fetchone()["balance"]
+            write_bet_audit_log(
+                actor_id=actor_id,
+                action="market_void_bet_refund",
+                entity_type="bet",
+                entity_id=coupon["id"],
+                old_value={"status": "pending"},
+                new_value={"status": "refunded", "refund": refund["refunded_amount"],
+                           "reason": reason, "market_id": market_id},
+                division_id=div_id,
+                season_id=season_id,
+            )
+            refunded_bets.append({
+                "bet_id": coupon["id"],
+                "user_id": coupon["user_id"],
+                "bet_type": coupon["bet_type"],
+                "stake": refund["refunded_amount"],
+                "balance_after": balance_after,
+            })
+
+        market_summary = {
+            "market_id": market_id,
+            "old_status": old_status,
+            "already_voided": False,
+            "voided_legs": voided_legs,
+            "refunded_bets": refunded_bets,
+            "refunded_stake": sum(b["stake"] for b in refunded_bets),
+            "pending_coupons": pending_coupons,
+            "division_id": div_id,
+            "season_id": season_id,
+        }
+
+    # Уведомление, рейтинг и стрики — постфактум и не в транзакции возврата:
+    # сбой оповещения не должен отменять уже зачисленные монеты. Тот же
+    # комплект сайд-эффектов, что у ветки all_voided в settlement_engine.
+    if refunded_bets:
+        try:
+            from services.settlement_engine import notify_bet_refunded
+            from services.player_rating import PlayerRatingEngine
+            from services.streak_engine import StreakEngine
+            from services.leaderboard_service import invalidate_leaderboard_cache
+        except Exception:
+            logger.exception("MARKET_VOID_SIDE_EFFECTS_UNAVAILABLE: refunds are committed "
+                             f"on market #{market_id}, notices/ratings were skipped")
+        else:
+            for entry in market_summary["refunded_bets"]:
+                try:
+                    with transaction() as notice_conn:
+                        notify_bet_refunded(notice_conn.cursor(), entry["user_id"], entry["bet_id"],
+                                             entry["bet_type"], entry["stake"], entry["balance_after"])
+                    PlayerRatingEngine.process_bet_settlement(
+                        user_id=entry["user_id"], outcome="refunded",
+                        total_odd=1.0, stake=entry["stake"], payout=entry["stake"]
+                    )
+                    StreakEngine.process_bet_outcome(entry["user_id"], "refunded")
+                except Exception:
+                    logger.exception("MARKET_VOID_SIDE_EFFECT_FAILED: bet #%s was refunded "
+                                     f"on market #{market_id}", entry["bet_id"])
+            try:
+                invalidate_leaderboard_cache()
+            except Exception:
+                logger.warning("Could not invalidate leaderboard cache after voiding market #%s", market_id)
+
+    return market_summary
 
 
 def get_betting_audit_log(

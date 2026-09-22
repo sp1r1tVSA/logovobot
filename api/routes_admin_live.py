@@ -287,7 +287,8 @@ async def handle_admin_void_market(request: web.Request) -> web.Response:
     """
     POST /api/admin/live/markets/{id}/void
     Body: {"reason": "Technical issue", "confirm": true}
-    Destructive: transitions market to voided and safely refunds all affected bets.
+    Destructive: аннулирует рынок и разбирает затронутые купоны — правила
+    возврата, реестра и аудита принадлежат database.void_market (единый владелец).
     """
     actor_id = _get_actor_id(request)
     if not actor_id:
@@ -313,91 +314,39 @@ async def handle_admin_void_market(request: web.Request) -> web.Response:
     if not reason:
         return web.json_response({"status": "error", "message": "Reason is required to void market."}, status=400)
 
-    with database.transaction() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT id, status, match_id FROM markets WHERE id = ?", (market_id,))
-        m_row = cursor.fetchone()
-        if not m_row:
-            return web.json_response({"status": "error", "message": "Market not found."}, status=404)
+    try:
+        result = await asyncio.to_thread(database.void_market, market_id, actor_id, reason)
+    except ValueError as e:
+        message = str(e)
+        code = 404 if "not found" in message.lower() else 409
+        return web.json_response({"status": "error", "message": message}, status=code)
+    except Exception as e:
+        logger.exception("Failed to void market %s", market_id)
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
 
-        if m_row["status"] == "voided":
-            return web.json_response({"status": "ok", "message": "Market is already voided."})
+    await asyncio.to_thread(database.log_admin_action,
+        admin_id=actor_id,
+        action="live_market_void",
+        target_type="market",
+        target_id=market_id,
+        old_value=result["old_status"],
+        new_value="voided",
+        reason=reason,
+        division_id=result["division_id"],
+        season_id=result["season_id"]
+    )
 
-        # Fetch division_id
-        cursor.execute("SELECT division_id, season_id FROM matches WHERE id = ?", (m_row["match_id"],))
-        match_info = cursor.fetchone()
-        div_id = match_info["division_id"] if match_info else None
-        season_id = match_info["season_id"] if match_info else None
-
-        # Update market to voided
-        cursor.execute("UPDATE markets SET status = 'voided' WHERE id = ?", (market_id,))
-
-        # Find affected single bets to refund
-        cursor.execute("""
-            SELECT ub.id, ub.user_id, ub.amount, ub.status
-            FROM user_bets ub
-            JOIN bet_items bi ON bi.bet_id = ub.id
-            WHERE bi.market_id = ? AND ub.status = 'pending' AND ub.bet_type = 'single'
-        """, (market_id,))
-        refunded_bets = cursor.fetchall()
-
-        for b in refunded_bets:
-            cursor.execute("""
-                UPDATE user_bets
-                SET status = 'refunded', actual_payout = amount, settled_at = datetime('now', '+3 hours')
-                WHERE id = ? AND status = 'pending'
-            """, (b["id"],))
-
-            cursor.execute("""
-                UPDATE bet_items
-                SET status = 'refunded'
-                WHERE bet_id = ? AND market_id = ?
-            """, (b["id"], market_id))
-
-            # NOTE: must stay synchronous — transaction() is thread-local, so a
-            # to_thread hop here would open a second connection and self-deadlock.
-            database.get_or_create_wallet(b["user_id"])
-            cursor.execute("""
-                UPDATE user_wallets
-                SET balance = balance + ?, updated_at = datetime('now', '+3 hours')
-                WHERE user_id = ?
-            """, (b["amount"], b["user_id"]))
-
-            cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (b["user_id"],))
-            new_bal = cursor.fetchone()["balance"]
-
-            cursor.execute("""
-                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
-                VALUES (?, ?, 'refund', ?, 'user_bets', ?, datetime('now', '+3 hours'))
-            """, (b["user_id"], b["amount"], b["id"], new_bal))
-
-            database.write_bet_audit_log(
-                actor_id=actor_id,
-                action="void_bet_market",
-                entity_type="bet",
-                entity_id=b["id"],
-                old_value={"status": "pending"},
-                new_value={"status": "refunded", "reason": reason},
-                division_id=div_id,
-                season_id=season_id
-            )
-
-        database.log_admin_action(
-            admin_id=actor_id,
-            action="live_market_void",
-            target_type="market",
-            target_id=market_id,
-            old_value=m_row["status"],
-            new_value="voided",
-            reason=reason,
-            division_id=div_id,
-            season_id=season_id
-        )
-
+    refunded = result["refunded_bets"]
     return web.json_response({
         "status": "ok",
-        "message": f"Market {market_id} voided and {len(refunded_bets)} single bets refunded.",
-        "refunded_count": len(refunded_bets)
+        "message": (f"Market {market_id} voided: {result['voided_legs']} leg(s) refunded, "
+                    f"{len(refunded)} bet(s) returned ({result['refunded_stake']} coins), "
+                    f"{result['pending_coupons']} bet(s) still in play."),
+        "refunded_count": len(refunded),
+        "voided_legs": result["voided_legs"],
+        "refunded_stake": result["refunded_stake"],
+        "pending_coupons": result["pending_coupons"],
+        "already_voided": result["already_voided"]
     })
 
 

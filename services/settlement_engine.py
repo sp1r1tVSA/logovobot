@@ -90,8 +90,8 @@ def _notify_bet_won(cursor, user_id: int, bet_id: int, bet_type: Optional[str], 
     )
 
 
-def _notify_bet_refunded(cursor, user_id: int, bet_id: int, bet_type: Optional[str], stake: int,
-                         balance_after: int, resettle: bool = False) -> None:
+def notify_bet_refunded(cursor, user_id: int, bet_id: int, bet_type: Optional[str], stake: int,
+                        balance_after: int, resettle: bool = False) -> None:
     legs, _ = _leg_lines(cursor, bet_id)
     parts = []
     if legs:
@@ -203,7 +203,10 @@ def settle_match_predictions(
         """, (score1, score2, ht_score1, ht_score2, target_status, match_id))
 
         # 2. Settle relational markets & selections
-        cursor.execute("SELECT * FROM markets WHERE match_id = ?", (match_id,))
+        # Аннулированный админом рынок (markets.status='voided') не пересчитывается
+        # и не переводится в 'settled': void — финальный статус, а счёт матча его
+        # отменяет. Ноги такого рынка уже разобраны в database.void_market.
+        cursor.execute("SELECT * FROM markets WHERE match_id = ? AND status != 'voided'", (match_id,))
         markets = cursor.fetchall()
 
         for m in markets:
@@ -242,6 +245,7 @@ def settle_match_predictions(
             FROM bet_items bi
             LEFT JOIN markets m ON bi.market_id = m.id
             WHERE bi.match_id = ? AND bi.status = 'pending'
+              AND (m.id IS NULL OR m.status != 'voided')
         """, (match_id,))
         pending_items = cursor.fetchall()
 
@@ -350,7 +354,7 @@ def settle_match_predictions(
                     INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
                     VALUES (?, ?, 'refund', ?, 'bet', ?, datetime('now', '+3 hours'))
                 """, (u_id, stake, b_id, bal_after))
-                _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after)
+                notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after)
 
                 try:
                     from services.player_rating import PlayerRatingEngine
@@ -498,7 +502,7 @@ def refund_match_bets(match_id: int) -> list[dict]:
                         INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
                         VALUES (?, ?, 'bet_refund', ?, 'bet', ?, datetime('now', '+3 hours'))
                     """, (u_id, stake, b_id, bal_after))
-                    _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after)
+                    notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after)
 
                     refund_notifications.append({
                         "user_id": u_id,
@@ -550,7 +554,7 @@ def resettle_match_predictions(
         """, (score1, score2, ht_score1, ht_score2, target_status, match_id))
 
         # 2. Re-evaluate relational markets and market selections
-        cursor.execute("SELECT * FROM markets WHERE match_id = ?", (match_id,))
+        cursor.execute("SELECT * FROM markets WHERE match_id = ? AND status != 'voided'", (match_id,))
         markets = cursor.fetchall()
         for m in markets:
             cursor.execute("SELECT * FROM market_selections WHERE market_id = ?", (m["id"],))
@@ -573,11 +577,15 @@ def resettle_match_predictions(
                 """, (new_sel_status, s["id"]))
 
         # 3. Re-evaluate bet_items for this match
+        # Нога аннулированного рынка остаётся 'refunded' и при правке счёта:
+        # иначе void переживается и купон выплачивается/проигрывается по
+        # отменёному исходу.
         cursor.execute("""
             SELECT bi.*, m.market_key
             FROM bet_items bi
             LEFT JOIN markets m ON bi.market_id = m.id
             WHERE bi.match_id = ?
+              AND (m.id IS NULL OR m.status != 'voided')
         """, (match_id,))
         match_items = cursor.fetchall()
 
@@ -712,7 +720,7 @@ def resettle_match_predictions(
                     VALUES (?, ?, 'resettle_refund', ?, 'bet', ?, datetime('now', '+3 hours'))
                 """, (u_id, stake, b_id, bal_after))
                 if (prev_status, prev_payout) != ("refunded", stake):
-                    _notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after, resettle=True)
+                    notify_bet_refunded(cursor, u_id, b_id, bet["bet_type"], stake, bal_after, resettle=True)
 
                 notifications.append({
                     "user_id": u_id,
