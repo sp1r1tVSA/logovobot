@@ -149,6 +149,32 @@ class TestClubCard(unittest.TestCase):
         self.assertEqual(set(squad), {"EMEGA", "ROGERS"})
         self.assertEqual(squad["EMEGA"]["goals"], 4)
 
+    def test_mini_app_squad_folds_player_spellings_onto_the_squad(self):
+        """Вкладка «Состав клуба» в Mini App считает так же, как карточка: без дублей."""
+        database.register_user(3102, "chelsea_boss", "manager", "Челси")
+        database.save_squad_players("Челси", ["EMEGA", "ROGERS"])
+        with database.transaction() as conn:
+            c = conn.cursor()
+            c.execute(
+                "INSERT INTO matches (round_number, player1_team, player2_team, player1_score, player2_score, "
+                "status, tournament_type, mvp_player) "
+                "VALUES (1, 'Челси', 'Аль-Наср', 4, 1, 'confirmed', 'league', 'Emegha')"
+            )
+            m_id = c.lastrowid
+            c.execute("INSERT INTO match_events (match_id, player_name, team_name, event_type, count) VALUES (?, 'EMEGA', 'Челси', 'goal', 1)", (m_id,))
+            c.execute("INSERT INTO match_events (match_id, player_name, team_name, event_type, count) VALUES (?, 'Emegha', 'Челси', 'goal', 3)", (m_id,))
+            c.execute("INSERT INTO match_events (match_id, player_name, team_name, event_type, count) VALUES (?, 'Emegha', 'Челси', 'assist', 1)", (m_id,))
+            c.execute("INSERT INTO match_events (match_id, player_name, team_name, event_type, count) VALUES (?, 'ROGERS', 'Челси', 'assist', 2)", (m_id,))
+
+        stats = database.get_cabinet_squad_stats("Челси")
+        by_name = {p["player_name"]: p for p in stats["players"]}
+        self.assertEqual(set(by_name), {"EMEGA", "ROGERS"})
+        self.assertEqual((by_name["EMEGA"]["goals"], by_name["EMEGA"]["assists"]), (4, 1))
+        self.assertEqual(by_name["EMEGA"]["mvp_count"], 1)
+        self.assertEqual(stats["top_scorer"]["player_name"], "EMEGA")
+        self.assertEqual(stats["top_assistant"]["player_name"], "ROGERS")
+        self.assertEqual(stats["top_mvp"], {"player_name": "EMEGA", "mvp_count": 1})
+
     def test_club_match_history_and_summary(self):
         """Test get_club_match_history and get_all_clubs_summary."""
         with database.transaction() as conn:

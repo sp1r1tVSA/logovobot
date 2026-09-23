@@ -15060,31 +15060,25 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
     Жёлтые/красные карточки в схеме не хранятся: `match_events.event_type`
     ограничен CHECK ('goal', 'assist'), а в `squad_players` карточных колонок нет.
     Поля отдаются нулями, чтобы контракт API оставался стабильным.
+
+    Голы и ассисты считает тот же `_club_player_event_totals`, что и карточка
+    клуба: сезон активный, а разные написания одного игрока ('Emegha' из OCR и
+    'EMEGA' из заявки) сводятся к имени из состава. Корона сводится так же.
     """
     empty = {"players": [], "top_scorer": None, "top_assistant": None, "top_mvp": None}
     if not team_name:
         return empty
 
     roster = get_squad_with_positions(team_name)
+    canon = resolve_team_name(team_name) or team_name.strip()
+    act = get_active_season()
+    season_id = act["id"] if act else 1
 
-    goals: dict[str, int] = {}
-    assists: dict[str, int] = {}
     raw_mvps: dict[str, int] = {}
     with transaction() as conn:
         cursor = conn.cursor()
-        cursor.execute(
-            """
-            SELECT me.player_name, me.event_type, SUM(me.count) AS total
-            FROM match_events me
-            JOIN matches m ON me.match_id = m.id
-            WHERE LOWER(me.team_name) = LOWER(?) AND m.status = 'confirmed'
-            GROUP BY me.player_name, me.event_type
-            """,
-            (team_name.strip(),)
-        )
-        for row in cursor.fetchall():
-            bucket = goals if row["event_type"] == "goal" else assists
-            bucket[row["player_name"]] = int(row["total"] or 0)
+        squad_names = [p["player_name"] for p in roster if p.get("player_name")]
+        event_totals = _club_player_event_totals(cursor, canon, squad_names, season_id)
 
         # 👑 Награды «Игрок матча» во всех подтверждённых матчах клуба.
         # Корона могла достаться сопернику, поэтому принадлежность проверяется
@@ -15097,6 +15091,7 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
             SELECT TRIM(m.mvp_player) AS player_name, COUNT(*) AS total
             FROM matches m
             WHERE m.status = 'confirmed'
+              AND (m.season_id = ? OR m.season_id IS NULL)
               AND m.mvp_player IS NOT NULL
               AND TRIM(m.mvp_player) <> ''
               AND (LOWER(TRIM(m.player1_team)) = LOWER(TRIM(?))
@@ -15114,46 +15109,50 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
                    ))
             GROUP BY LOWER(TRIM(m.mvp_player))
             """,
-            (team_name.strip(), team_name.strip(), team_name.strip(), team_name.strip())
+            (season_id, team_name.strip(), team_name.strip(), team_name.strip(), team_name.strip())
         )
         for row in cursor.fetchall():
             raw_mvps[row["player_name"]] = int(row["total"] or 0)
 
-    names = [p.get("player_name") for p in roster if p.get("player_name")]
-    positions = {p.get("player_name"): p.get("position") for p in roster}
-    # Бомбардир мог быть распознан OCR раньше, чем состав попал в squad_players.
-    for extra in list(goals.keys()) + list(assists.keys()):
-        if extra not in positions:
-            names.append(extra)
-            positions[extra] = None
+    def _key(name: str) -> str:
+        return normalize_player_name_key(name) or name.strip().lower()
 
-    # Награды сопоставляются с игроками клуба без учёта регистра: OCR пишет имя
-    # так, как оно видно на экране, а состав мог быть заявлен иначе.
-    mvps_by_key = {k.strip().lower(): v for k, v in raw_mvps.items()}
+    # Одна строка на игрока, ключ — нормализованное имя. Порядок: заявка, затем
+    # бомбардиры, распознанные OCR раньше, чем состав попал в squad_players.
+    by_key: dict[str, dict] = {}
 
-    # Короной могли отметить игрока, которого нет ни в заявке, ни среди
-    # бомбардиров (вратарь, защитник без очков) — без своей строки его награда
-    # просто исчезла бы из карточки.
-    known_keys = {(n or "").strip().lower() for n in names}
-    for mvp_name in raw_mvps:
-        key = mvp_name.strip().lower()
-        if key and key not in known_keys:
-            known_keys.add(key)
-            names.append(mvp_name)
-            positions[mvp_name] = None
-
-    players = [
-        {
+    def _row(name: str, position: str | None = None) -> dict:
+        return by_key.setdefault(_key(name), {
             "player_name": name,
-            "position": positions.get(name),
-            "goals": goals.get(name, 0),
-            "assists": assists.get(name, 0),
-            "mvp_count": mvps_by_key.get((name or "").strip().lower(), 0),
+            "position": position,
+            "goals": 0,
+            "assists": 0,
+            "mvp_count": 0,
             "yellow_cards": 0,
             "red_cards": 0,
-        }
-        for name in names
-    ]
+        })
+
+    for p in roster:
+        if p.get("player_name"):
+            _row(p["player_name"], p.get("position"))
+    for t in event_totals:
+        row = _row(t["player_name"])
+        row["goals"] += t["goals"]
+        row["assists"] += t["assists"]
+
+    # Корона сводится к тем же строкам: сперва к имени из заявки, затем к
+    # написанию из событий. Игрока без очков и вне заявки (вратарь, защитник)
+    # она всё равно показывает — без своей строки его награда исчезла бы.
+    known_names = [r["player_name"] for r in by_key.values()]
+    for mvp_name, total in raw_mvps.items():
+        name = (
+            match_roster_name(mvp_name, squad_names)
+            or match_roster_name(mvp_name, known_names)
+            or mvp_name
+        )
+        _row(name)["mvp_count"] += total
+
+    players = list(by_key.values())
     players.sort(key=lambda p: (-p["goals"], -p["assists"], p["player_name"] or ""))
 
     top_scorer = next((p for p in players if p["goals"] > 0), None)
