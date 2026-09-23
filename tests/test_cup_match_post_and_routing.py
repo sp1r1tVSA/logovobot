@@ -3,8 +3,8 @@ tests/test_cup_match_post_and_routing.py
 
 Проверка двух предрелизных фиксов:
 1. `build_formatted_match_post` для кубковых матчей печатает этап и игру серии вместо «Тур -1».
-2. `resolve_post_target` для CUP_DIVISION_SENTINEL (0) отправляет отчёты ответом под кубковый пост
-   `reports` и не утекает в легаси results_topic_id регулярной лиги.
+2. `resolve_post_target` для CUP_DIVISION_SENTINEL (0) всегда None: результаты кубка бот в группу
+   не публикует (их выкладывают под постом сами участники) и не утекает в легаси results_topic_id лиги.
 """
 
 import os
@@ -176,34 +176,30 @@ class CupMatchPostAndRoutingTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Тур 5", post)
         self.assertNotIn("Кубок", post)
 
-    async def test_05_cup_routing_replies_under_the_cup_reports_post(self):
-        """resolve_post_target с CUP_DIVISION_SENTINEL отвечает под пост cup_topics(reports)."""
-        database.bind_cup_topic("reports", -100777888, 999, season_id=self.season_id)
+    async def test_05_cup_results_are_never_posted_by_the_bot(self):
+        """Кубок бот в группу не публикует, даже если осталась старая привязка поста."""
+        with database.transaction() as conn:
+            conn.execute(
+                "INSERT INTO cup_topics (season_id, topic_type, group_chat_id, message_thread_id, "
+                "anchor_message_id, created_at) VALUES (?, 'reports', -100777888, 0, 999, "
+                "datetime('now', '+3 hours'))",
+                (self.season_id,),
+            )
 
-        # Конфигурируем также легаси результаты регулярной лиги
-        database.set_config("group_id", "-100111222")
-        database.set_config("results_topic_id", "123")
-
-        target = await resolve_post_target(
-            CUP_DIVISION_SENTINEL,
-            "results", "reports",
-            legacy_topic_keys=("results_topic_id", "reports_topic_id")
-        )
-        self.assertEqual(
-            target,
-            {"chat_id": -100777888, "reply_to_message_id": 999, "allow_sending_without_reply": True},
-            "Кубковый результат обязан уходить ответом под кубковый пост",
+        self.assertIsNone(
+            await resolve_post_target(CUP_DIVISION_SENTINEL, "results", "reports"),
+            "Результаты кубка участники выкладывают под постом сами",
         )
 
-    async def test_06_cup_routing_does_not_leak_to_league_legacy_when_unbound(self):
-        """Если кубковый пост не назначен, результат НЕ отправляется в легаси тему лиги."""
+    async def test_06_cup_routing_does_not_leak_to_league_legacy(self):
+        """Кубковый результат НЕ отправляется в легаси тему лиги."""
         database.set_config("group_id", "-100111222")
         database.set_config("results_topic_id", "123")
 
         kwargs = dict(legacy_topic_keys=("results_topic_id", "reports_topic_id"))
         self.assertIsNone(
             await resolve_post_target(CUP_DIVISION_SENTINEL, "results", "reports", **kwargs),
-            "Без кубкового поста публикация пропускается, а не спамит в лигу",
+            "Кубковая публикация пропускается, а не спамит в лигу",
         )
         self.assertEqual(
             await resolve_division_target(CUP_DIVISION_SENTINEL, "results", "reports", **kwargs),

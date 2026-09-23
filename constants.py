@@ -12,10 +12,6 @@ CUP_STAGE_ORDER: dict[str, int] = {stage: i + 1 for i, stage in enumerate(CUP_ST
 # закончившейся 2:0, аннулируются при закрытии серии.
 CUP_SERIES_GAMES = 3
 
-# Роли кубковых постов. Отдельно от `division_topics`, потому что кубок —
-# не дивизион. Под пост уходят только результаты: линия живёт в Mini App.
-CUP_TOPIC_TYPES: tuple[str, ...] = ("reports",)
-
 # Кубковый матч не принадлежит ни одному дивизиону, а `matches.division_id IS NULL`
 # в проекте означает «дивизион 1» (COALESCE(division_id, 1) в запросах линии, долгов
 # и отчётов). Sentinel 0 не совпадает ни с одной строкой `divisions`, поэтому лиговые

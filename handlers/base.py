@@ -101,9 +101,8 @@ async def resolve_division_target(
         return int(chat) if chat else None
 
     if _is_cup_division(division_id):
-        # Кубок вещает ответом под пост, а пара (чат, тред) этого не выражает.
-        # Пропуск, а не легаси-группа: иначе кубок спамил бы в тему лиги.
-        logger.warning("resolve_division_target: cup posts go through resolve_post_target; skipped.")
+        # Кубок бот в группу не публикует. Пропуск, а не легаси-группа: иначе
+        # кубок спамил бы в тему лиги.
         return None, None
 
     if division_id:
@@ -174,38 +173,19 @@ def _is_cup_division(division_id) -> bool:
         return False
 
 
-async def resolve_cup_target() -> dict | None:
-    """Аргументы `send_*` для кубковых результатов: ответ под пост из `/cup_topic`.
-
-    `allow_sending_without_reply` — чтобы удалённый пост-якорь не ронял
-    публикацию результата: сообщение тогда просто уйдёт в тот же чат.
-    """
-    try:
-        topic = await asyncio.to_thread(database.get_cup_topic, "reports")
-    except Exception:
-        logger.warning("resolve_cup_target: cup_topic lookup failed", exc_info=True)
-        return None
-    if not topic or not topic.get("group_chat_id") or not topic.get("anchor_message_id"):
-        logger.warning("resolve_cup_target: cup has no results post; message skipped.")
-        return None
-    return {
-        "chat_id": int(topic["group_chat_id"]),
-        "reply_to_message_id": int(topic["anchor_message_id"]),
-        "allow_sending_without_reply": True,
-    }
-
-
 async def resolve_post_target(
     division_id: int | None,
     *topic_types: str,
     legacy_topic_keys: tuple[str, ...] = (),
 ) -> dict | None:
-    """Аргументы `send_*` (чат + тред либо чат + ответ под пост) или None — пропустить.
+    """Аргументы `send_*` (чат + тред) или None — пропустить.
 
-    Дивизион — то же, что `resolve_division_target`; кубок — ответ под пост-якорь.
+    Дивизион — то же, что `resolve_division_target`. Кубок — всегда None:
+    результаты кубка участники выкладывают под постом сами, бот их в группу
+    не публикует.
     """
     if _is_cup_division(division_id):
-        return await resolve_cup_target()
+        return None
     chat_id, thread_id = await resolve_division_target(
         division_id, *topic_types, legacy_topic_keys=legacy_topic_keys
     )

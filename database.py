@@ -796,6 +796,9 @@ def init_db() -> None:
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cup_stages_season ON cup_stages(season_id, stage_order)")
 
         # ─── Общий кубок: темы вещания ────────────────────────────────────────
+        # Таблица больше не читается и не пишется: /cup_topic снят, результаты
+        # кубка участники выкладывают под постом сами. Схема остаётся — таблицы
+        # здесь не удаляются.
         # Отдельная таблица, а не строка в `division_topics`: там `division_id` —
         # FK на `divisions`, а кубок дивизионом не является. Синтетический
         # «дивизион КУБОК» притащил бы его в 11 дивизионные читалки и во вкладки
@@ -8592,90 +8595,6 @@ def get_cup_stage_line(stage: str, season_id: int | None = None) -> dict:
 
     result["series"] = ordered
     return result
-
-
-def bind_cup_topic(
-    topic_type: str,
-    group_chat_id: int,
-    anchor_message_id: int,
-    season_id: int | None = None,
-) -> dict:
-    """Привязать пост-якорь к кубковому вещанию сезона (идемпотентно).
-
-    Якорь — сообщение, на которое админ ответил командой; дальше Темшик публикует
-    ответами под ним. Форум-тема не нужна: так же работает обсуждение под постом
-    канала. Под пост уходят только результаты (`CUP_TOPIC_TYPES`).
-    """
-    from constants import CUP_TOPIC_TYPES
-
-    s_id = _resolve_season_id(season_id)
-    norm = (topic_type or "").strip().lower()
-    if norm not in CUP_TOPIC_TYPES:
-        return {"status": "error", "error": f"Неизвестный тип кубковой темы: {topic_type}"}
-    if not group_chat_id or not anchor_message_id:
-        return {"status": "error", "error": "Нет координат поста (чат/сообщение)."}
-
-    with transaction() as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "SELECT id, group_chat_id, anchor_message_id FROM cup_topics WHERE season_id = ? AND topic_type = ?",
-            (s_id, norm)
-        )
-        current = cursor.fetchone()
-        if current:
-            if (current["group_chat_id"], current["anchor_message_id"]) == (group_chat_id, anchor_message_id):
-                return {"status": "already_bound", "topic_type": norm, "season_id": s_id,
-                        "group_chat_id": group_chat_id, "anchor_message_id": anchor_message_id}
-            # Переназначение: пост меняется, старой записи больше нет — иначе
-            # `get_cup_topic` вернул бы пост, под который никто не смотрит.
-            cursor.execute("DELETE FROM cup_topics WHERE id = ?", (current["id"],))
-        cursor.execute(
-            "INSERT INTO cup_topics "
-            "(season_id, topic_type, group_chat_id, message_thread_id, anchor_message_id, created_at) "
-            "VALUES (?, ?, ?, 0, ?, datetime('now', '+3 hours'))",
-            (s_id, norm, group_chat_id, anchor_message_id)
-        )
-    return {"status": "bound", "topic_type": norm, "season_id": s_id,
-            "group_chat_id": group_chat_id, "anchor_message_id": anchor_message_id}
-
-
-def get_cup_topic(topic_type: str, season_id: int | None = None) -> dict | None:
-    """Пост кубкового вещания: {'group_chat_id', 'anchor_message_id'} или None.
-
-    Строка, привязанная старой механикой (тема форума, без якоря), привязкой не
-    считается: ответить в ней не на что.
-    """
-    from constants import CUP_TOPIC_TYPES
-
-    norm = (topic_type or "").strip().lower()
-    if norm not in CUP_TOPIC_TYPES:
-        return None
-    s_id = _resolve_season_id(season_id)
-    with transaction() as conn:
-        row = conn.cursor().execute(
-            "SELECT season_id, topic_type, group_chat_id, anchor_message_id "
-            "FROM cup_topics WHERE season_id = ? AND topic_type = ? AND anchor_message_id IS NOT NULL",
-            (s_id, norm)
-        ).fetchone()
-    return dict(row) if row else None
-
-
-def list_cup_topics(season_id: int | None = None) -> list[dict]:
-    """Все назначенные кубковые посты сезона — для экрана управления.
-
-    Строки снятых форматов (прежний 'line') не показываются: под них больше
-    ничего не публикуется.
-    """
-    from constants import CUP_TOPIC_TYPES
-
-    s_id = _resolve_season_id(season_id)
-    with transaction() as conn:
-        rows = conn.cursor().execute(
-            "SELECT topic_type, group_chat_id, anchor_message_id FROM cup_topics "
-            "WHERE season_id = ? AND anchor_message_id IS NOT NULL ORDER BY topic_type",
-            (s_id,)
-        ).fetchall()
-    return [dict(r) for r in rows if r["topic_type"] in CUP_TOPIC_TYPES]
 
 
 def _player_folder(cursor: sqlite3.Cursor):
