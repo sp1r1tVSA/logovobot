@@ -605,6 +605,7 @@ async def show_division_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("📋 Турнирная таблица", callback_data=f"division_table:{season_id}:{division_id}")],
         [InlineKeyboardButton("⚽ Бомбардиры", callback_data=f"division_scorers:{season_id}:{division_id}")],
         [InlineKeyboardButton("🎯 Ассистенты", callback_data=f"division_assists:{season_id}:{division_id}")],
+        [InlineKeyboardButton("🌟 Символическая сборная", callback_data=f"division_totw:{season_id}:{division_id}")],
         [InlineKeyboardButton("« Назад к дивизионам", callback_data=CB_MENU_DIVISIONS)]
     ]
     markup = InlineKeyboardMarkup(keyboard)
@@ -805,6 +806,183 @@ async def show_division_assists(update: Update, context: ContextTypes.DEFAULT_TY
         parse_mode="HTML",
         reply_markup=markup
     )
+
+
+# ─── Символическая сборная (TOTW) ───────────────────────────────────────────
+
+TOTW_PHOTO_PREFETCH_TIMEOUT = 45
+
+
+async def render_totw(
+    division_id: int,
+    start_round: int,
+    end_round: int,
+    season_id: int | None = None,
+    use_ai: bool = True,
+    prefetch: bool = False,
+) -> tuple[dict, io.BytesIO, str]:
+    """Собрать сборную блока: (payload, PNG, подпись). Вся тяжёлая работа — в потоках.
+
+    prefetch=True подтягивает фото из сети (с общим таймаутом), иначе рендер
+    берёт только то, что уже лежит в кэше.
+    """
+    from services import totw_service
+    from services.graphics.totw_generator import generate_totw_image, prefetch_photos
+
+    payload = await asyncio.to_thread(
+        totw_service.build_totw_payload, division_id, start_round, end_round, season_id
+    )
+    if prefetch and payload.get("xi"):
+        try:
+            await asyncio.wait_for(
+                asyncio.to_thread(prefetch_photos, payload), timeout=TOTW_PHOTO_PREFETCH_TIMEOUT
+            )
+        except Exception:
+            logger.warning(f"TOTW photo prefetch did not finish for division {division_id}", exc_info=True)
+
+    img_buf = await asyncio.to_thread(generate_totw_image, payload, division_id, start_round, end_round)
+    caption = await asyncio.to_thread(
+        totw_service.generate_totw_caption,
+        payload, payload.get("division_name") or f"Дивизион {division_id}", start_round, end_round, use_ai,
+    )
+    return payload, img_buf, caption
+
+
+async def _can_publish_totw(user_id: int, division_id: int) -> bool:
+    if is_global_admin(user_id):
+        return True
+    try:
+        return bool(await asyncio.to_thread(database.is_division_admin, user_id, division_id))
+    except Exception:
+        return False
+
+
+async def send_totw_view(
+    context: ContextTypes.DEFAULT_TYPE,
+    chat_id: int,
+    thread_id: int | None,
+    user_id: int,
+    division_id: int,
+    start_round: int,
+    end_round: int,
+    season_id: int | None = None,
+    back_markup_rows: list | None = None,
+    reply_to_message_id: int | None = None,
+) -> None:
+    """Показать сборную блока в текущем чате (без ИИ и без сети — быстрый просмотр)."""
+    payload, img_buf, caption = await render_totw(
+        division_id, start_round, end_round, season_id, use_ai=False, prefetch=False
+    )
+    rows = []
+    if payload.get("xi") and await _can_publish_totw(user_id, division_id):
+        rows.append([InlineKeyboardButton(
+            "📣 Опубликовать в группу", callback_data=f"totw_publish:{division_id}:{start_round}:{end_round}"
+        )])
+    rows.extend(back_markup_rows or [])
+    await context.bot.send_photo(
+        chat_id=chat_id,
+        message_thread_id=thread_id,
+        photo=img_buf,
+        caption=caption,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows) if rows else None,
+        reply_to_message_id=reply_to_message_id,
+    )
+
+
+async def show_division_totw_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Выбор блока туров для символической сборной дивизиона."""
+    query = update.callback_query
+    try:
+        await query.answer()
+    except Exception:
+        pass
+
+    parts = query.data.split(":")
+    season_id, div_id = int(parts[1]), int(parts[2])
+
+    div_info = await asyncio.to_thread(database.get_division, div_id)
+    div_name = div_info["name"] if div_info and "name" in div_info else f"Дивизион {div_id}"
+    blocks = await asyncio.to_thread(database.get_completed_totw_blocks, div_id, season_id)
+    last_round = await asyncio.to_thread(database.get_last_completed_round, div_id, season_id)
+
+    keyboard = []
+    block_buttons = [
+        InlineKeyboardButton(f"Туры {s}–{e}", callback_data=f"division_totw_view:{season_id}:{div_id}:{s}:{e}")
+        for s, e in blocks
+    ]
+    for i in range(0, len(block_buttons), 2):
+        keyboard.append(block_buttons[i:i + 2])
+    if last_round:
+        keyboard.append([
+            InlineKeyboardButton(
+                f"Последний тур ({last_round})",
+                callback_data=f"division_totw_view:{season_id}:{div_id}:{last_round}:{last_round}",
+            ),
+            InlineKeyboardButton(
+                "Весь сезон", callback_data=f"division_totw_view:{season_id}:{div_id}:1:{last_round}"
+            ),
+        ])
+        text = (
+            f"🌟 <b>Символическая сборная — {html.escape(div_name)}</b>\n\n"
+            "4-3-3 лучших по TOTW Performance Index, не больше двух игроков одного клуба. "
+            "Каждый сыгранный блок из 5 туров публикуется в группе автоматически.\n\n"
+            "Выберите туры:"
+        )
+    else:
+        text = (
+            f"🌟 <b>Символическая сборная — {html.escape(div_name)}</b>\n\n"
+            "Ни один тур дивизиона ещё не сыгран полностью — собирать сборную пока не из кого."
+        )
+    keyboard.append([InlineKeyboardButton("« Назад к меню дивизиона", callback_data=f"division_view:{season_id}:{div_id}")])
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if query.message and query.message.photo:
+        thread_id = query.message.message_thread_id if query.message.is_topic_message else None
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+        await context.bot.send_message(
+            chat_id=query.message.chat_id, message_thread_id=thread_id,
+            text=text, reply_markup=markup, parse_mode="HTML",
+        )
+        return
+    try:
+        await query.edit_message_text(text, reply_markup=markup, parse_mode="HTML")
+    except Exception:
+        logger.debug("TOTW menu: could not edit message", exc_info=True)
+
+
+async def show_division_totw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Картинка символической сборной за выбранные туры."""
+    query = update.callback_query
+    try:
+        await query.answer("Собираю сборную…")
+    except Exception:
+        pass
+
+    _, season_raw, div_raw, start_raw, end_raw = query.data.split(":")
+    season_id, div_id = int(season_raw), int(div_raw)
+    start_round, end_round = int(start_raw), int(end_raw)
+
+    target_chat_id = query.message.chat_id if query.message else update.effective_user.id
+    thread_id = query.message.message_thread_id if query.message and query.message.is_topic_message else None
+    if query.message:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    await send_totw_view(
+        context, target_chat_id, thread_id, update.effective_user.id,
+        div_id, start_round, end_round, season_id,
+        back_markup_rows=[
+            [InlineKeyboardButton("« К выбору туров", callback_data=f"division_totw:{season_id}:{div_id}")],
+            [InlineKeyboardButton("« Назад к меню дивизиона", callback_data=f"division_view:{season_id}:{div_id}")],
+        ],
+    )
+
 
 async def show_round_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query

@@ -271,6 +271,24 @@ def _normalize_name_key(name: str) -> str:
     return re.sub(r"\s+", " ", clean)
 
 
+def known_position(player_name: str | None) -> str | None:
+    """Position from the built-in registry only — never goes online.
+
+    The same two registry steps `detect_player_position` starts with (exact key,
+    then a long-enough token), for callers such as the TOTW job that must not
+    block on HTTP. None when the registry does not know the player.
+    """
+    if not player_name:
+        return None
+    p_norm = _normalize_name_key(player_name)
+    if p_norm in KNOWN_PLAYER_POSITIONS:
+        return KNOWN_PLAYER_POSITIONS[p_norm]
+    for k, v in KNOWN_PLAYER_POSITIONS.items():
+        if len(k) >= 5 and k in p_norm:
+            return v
+    return None
+
+
 def _fetch_thesportsdb_position(player_name: str) -> str | None:
     """Query TheSportsDB API to extract player's real world position."""
     try:

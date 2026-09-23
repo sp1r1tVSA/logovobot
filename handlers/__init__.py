@@ -28,6 +28,8 @@ from handlers.base import (
     show_division_table,
     show_division_scorers,
     show_division_assists,
+    show_division_totw_menu,
+    show_division_totw,
     show_support,
     group_table_command,
     show_round_matches,
@@ -251,6 +253,8 @@ admin_round_matches,
     admin_unwarn_command,
     admin_round_preview_command,
     admin_round_digest_command,
+    admin_totw_post_command,
+    cb_totw_publish,
     admin_squads_status_command,
     admin_squads_view_cb,
     admin_squads_all_cb,
@@ -402,6 +406,8 @@ def _register_user_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(show_division_table, pattern=r"^division_table:(\d+):(\d+)$"))
     app.add_handler(CallbackQueryHandler(show_division_scorers, pattern=r"^division_scorers:(\d+):(\d+)$"))
     app.add_handler(CallbackQueryHandler(show_division_assists, pattern=r"^division_assists:(\d+):(\d+)$"))
+    app.add_handler(CallbackQueryHandler(show_division_totw_menu, pattern=r"^division_totw:(\d+):(\d+)$"))
+    app.add_handler(CallbackQueryHandler(show_division_totw, pattern=r"^division_totw_view:(\d+):(\d+):(\d+):(\d+)$"))
     app.add_handler(CallbackQueryHandler(show_support, pattern="^menu_support$"))
     app.add_handler(CallbackQueryHandler(show_main_menu, pattern="^main_menu$"))
     app.add_handler(CommandHandler("club", club_command))
@@ -411,8 +417,9 @@ def _register_user_handlers(app: Application) -> None:
     app.add_handler(CommandHandler(["tracker", "app"], tracker_command))
 
     # Вызов тренера и управление плашками клубов
-    from handlers.text_commands import cmd_summon_club, cmd_sync_club_titles
+    from handlers.text_commands import cmd_summon_club, cmd_sync_club_titles, cmd_totw
     app.add_handler(CommandHandler(["summon", "call", "pozvat"], cmd_summon_club))
+    app.add_handler(CommandHandler(["totw", "sbornaya"], cmd_totw))
     app.add_handler(CommandHandler(["set_club_titles", "sync_titles"], cmd_sync_club_titles))
 
     app.add_handler(CallbackQueryHandler(show_my_club_card, pattern="^cb_my_club_card$"))
@@ -828,6 +835,9 @@ def _register_admin_handlers(app: Application) -> None:
     # Ручной прогон автопостинга в топик АНАЛИТИКА (обычно этим занимаются джобы)
     app.add_handler(CommandHandler("round_preview", admin_round_preview_command))
     app.add_handler(CommandHandler("round_digest", admin_round_digest_command))
+    # Символическая сборная: ручная публикация (обычно — джоба job_post_totw)
+    app.add_handler(CommandHandler("totw_post", admin_totw_post_command))
+    app.add_handler(CallbackQueryHandler(cb_totw_publish, pattern=r"^totw_publish:\d+:\d+:\d+$"))
 
     # Squads status
     app.add_handler(CommandHandler(["squads_status", "squads", "sostavy"], admin_squads_status_command))

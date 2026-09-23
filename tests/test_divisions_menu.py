@@ -136,7 +136,7 @@ class TestDivisionsMenu(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(buttons[0].callback_data, CB_MAIN_MENU)
 
     async def test_05_show_division_menu(self):
-        """Verify show_division_menu displays Table, Scorers, Assists, and Back buttons."""
+        """Verify show_division_menu displays Table, Scorers, Assists, TOTW, and Back buttons."""
         update = MagicMock()
         query = MagicMock()
         query.data = "division_view:1:2"
@@ -167,6 +167,7 @@ class TestDivisionsMenu(unittest.IsolatedAsyncioTestCase):
             "division_table:1:2",
             "division_scorers:1:2",
             "division_assists:1:2",
+            "division_totw:1:2",
             CB_MENU_DIVISIONS
         ]
         actual_callbacks = [b.callback_data for row in reply_markup.inline_keyboard for b in row]

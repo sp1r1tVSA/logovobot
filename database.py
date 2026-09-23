@@ -7419,6 +7419,372 @@ def get_round_player_stats(round_number: int, division_id: int | None = None, se
         return rows
 
 
+# ─── Символическая сборная (TOTW) ─────────────────────────────────────────────
+
+TOTW_BLOCK_SIZE = 5
+TOTW_STARTERS = 11
+
+
+def _round_completion(cursor: sqlite3.Cursor, division_id: int, season_id: int) -> dict[int, tuple[int, int]]:
+    """{round_number: (matches_total, matches_confirmed)} over the division's league matches.
+
+    The same rule as `get_rounds_pending_digest`: cancelled matches do not
+    count, technical results are confirmed ones.
+    """
+    cursor.execute("""
+        SELECT m.round_number,
+               COUNT(m.id) AS matches_total,
+               SUM(CASE WHEN m.status = 'confirmed' THEN 1 ELSE 0 END) AS matches_confirmed
+        FROM matches m
+        WHERE m.division_id = ?
+          AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
+          AND (m.season_id = ? OR m.season_id IS NULL)
+          AND m.round_number > 0
+          AND m.status != 'cancelled'
+        GROUP BY m.round_number
+    """, (division_id, season_id))
+    return {
+        int(r["round_number"]): (int(r["matches_total"] or 0), int(r["matches_confirmed"] or 0))
+        for r in cursor.fetchall()
+    }
+
+
+def _is_range_complete(completion: dict[int, tuple[int, int]], start_round: int, end_round: int) -> bool:
+    for rn in range(start_round, end_round + 1):
+        total, confirmed = completion.get(rn, (0, 0))
+        if total == 0 or confirmed != total:
+            return False
+    return True
+
+
+def is_round_range_completed(start_round: int, end_round: int, division_id: int, season_id: int | None = None) -> bool:
+    """Whether every league match of rounds start..end of the division is confirmed.
+
+    A round with no matches at all is not complete: a block with a gap in it
+    is not a block that was played. A debt keeps its match `pending`, so an
+    open debt blocks the range until it is played or judged.
+    """
+    if start_round < 1 or end_round < start_round:
+        return False
+    with transaction() as conn:
+        cursor = conn.cursor()
+        target_season_id = season_id
+        if target_season_id is None:
+            act = get_active_season()
+            target_season_id = act["id"] if act else 1
+        return _is_range_complete(_round_completion(cursor, division_id, target_season_id), start_round, end_round)
+
+
+def get_completed_totw_blocks_pending_publication(
+    division_id: int | None = None,
+    season_id: int | None = None,
+    block_size: int = TOTW_BLOCK_SIZE,
+) -> list[dict]:
+    """Fully played blocks of `block_size` rounds whose TOTW has not been posted.
+
+    Blocks are 1–5, 6–10, …; the publication marker is a `round_content_posts`
+    row with content_type 'totw' at the block's END round. Returns
+    [{"division_id", "season_id", "start_round", "end_round"}, ...].
+    """
+    block_size = max(1, int(block_size))
+    with transaction() as conn:
+        cursor = conn.cursor()
+        target_season_id = season_id
+        if target_season_id is None:
+            act = get_active_season()
+            target_season_id = act["id"] if act else 1
+
+        if division_id is not None:
+            division_ids = [division_id]
+        else:
+            cursor.execute("""
+                SELECT DISTINCT division_id FROM matches
+                WHERE division_id IS NOT NULL
+                  AND (tournament_type IS NULL OR tournament_type = 'league')
+                  AND (season_id = ? OR season_id IS NULL)
+                ORDER BY division_id
+            """, (target_season_id,))
+            division_ids = [r["division_id"] for r in cursor.fetchall()]
+
+        pending: list[dict] = []
+        for div_id in division_ids:
+            completion = _round_completion(cursor, div_id, target_season_id)
+            if not completion:
+                continue
+            cursor.execute(
+                "SELECT round_number FROM round_content_posts WHERE division_id = ? AND content_type = 'totw'",
+                (div_id,)
+            )
+            posted = {int(r["round_number"]) for r in cursor.fetchall()}
+            last_round = max(completion)
+            for start in range(1, last_round + 1, block_size):
+                end = start + block_size - 1
+                if end > last_round or end in posted:
+                    continue
+                if _is_range_complete(completion, start, end):
+                    pending.append({
+                        "division_id": div_id,
+                        "season_id": target_season_id,
+                        "start_round": start,
+                        "end_round": end,
+                    })
+        return pending
+
+
+def get_completed_totw_blocks(
+    division_id: int,
+    season_id: int | None = None,
+    block_size: int = TOTW_BLOCK_SIZE,
+) -> list[tuple[int, int]]:
+    """[(start_round, end_round)] of the division's fully played blocks, posted or not."""
+    block_size = max(1, int(block_size))
+    with transaction() as conn:
+        cursor = conn.cursor()
+        target_season_id = season_id
+        if target_season_id is None:
+            act = get_active_season()
+            target_season_id = act["id"] if act else 1
+        completion = _round_completion(cursor, division_id, target_season_id)
+        if not completion:
+            return []
+        last_round = max(completion)
+        return [
+            (start, start + block_size - 1)
+            for start in range(1, last_round - block_size + 2, block_size)
+            if _is_range_complete(completion, start, start + block_size - 1)
+        ]
+
+
+def get_last_completed_round(division_id: int, season_id: int | None = None) -> int | None:
+    """Highest round of the division whose every league match is confirmed."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        target_season_id = season_id
+        if target_season_id is None:
+            act = get_active_season()
+            target_season_id = act["id"] if act else 1
+        completion = _round_completion(cursor, division_id, target_season_id)
+        done = [rn for rn, (total, confirmed) in completion.items() if total and confirmed == total]
+        return max(done) if done else None
+
+
+def _club_squad_positions(cursor: sqlite3.Cursor, canon: str) -> list[tuple[str, str]]:
+    """[(player_name, stored position)] of one club, in upload order (the XI first)."""
+    t_norm = normalize_team_name(canon)
+    cursor.execute(
+        "SELECT player_name, position FROM squad_players "
+        "WHERE norm_team_name = ? OR LOWER(team_name) = LOWER(?) ORDER BY id ASC",
+        (t_norm, canon)
+    )
+    return [((r["player_name"] or "").strip(), (r["position"] or "").strip()) for r in cursor.fetchall()]
+
+
+def _offline_squad_positions(squad: list[tuple[str, str]]) -> dict[str, str]:
+    """{player_key: position} for a squad, resolved without any network call.
+
+    The stored position is overridden by the built-in registry. A lineup
+    screenshot lists the goalkeeper last of the XI, and a goalkeeper the
+    detector never recognised is stored under its default 'ST' — so when a
+    club has no goalkeeper among its starters and the 11th starter sits on
+    that default, he is taken as the goalkeeper.
+    """
+    from services.player_positions import known_position, normalize_position
+
+    positions: dict[str, str] = {}
+    for idx, (name, stored) in enumerate(squad):
+        key = normalize_player_name_key(name) or name.lower()
+        if key in positions:
+            continue
+        pos = known_position(name) or (normalize_position(stored) if stored else "ST")
+        positions[key] = pos
+
+    starters = squad[:TOTW_STARTERS]
+    starter_keys = [normalize_player_name_key(n) or n.lower() for n, _ in starters]
+    if len(starters) == TOTW_STARTERS and not any(positions.get(k) == "GK" for k in starter_keys):
+        last_name, last_stored = starters[-1]
+        last_key = starter_keys[-1]
+        if not known_position(last_name) and normalize_position(last_stored or "ST") == "ST":
+            positions[last_key] = "GK"
+    return positions
+
+
+def get_totw_stats(
+    start_round: int,
+    end_round: int,
+    division_id: int,
+    season_id: int | None = None,
+) -> list[dict]:
+    """Per-player numbers of a block of rounds — the candidate pool of the TOTW.
+
+    Every row: player_name, team_name, position, is_starter, goals, assists,
+    mvp, braces (matches with 2+ goals), and the club's block figures
+    matches, wins, clean_sheets, goals_conceded.
+
+    The pool is everyone with a goal, an assist or an MVP crown in the block,
+    plus the XI of every club that played in it (the first 11 squad rows),
+    so a defender or a goalkeeper with no goal still has his clean sheets
+    counted. Clean sheets go to starters only — the reserves of a squad did
+    not necessarily play. Technical results carry no events and no football
+    was played, so they count for nothing here beyond the confirmation that
+    closed the block.
+
+    Positions are resolved offline (stored squad position + built-in
+    registry); this runs inside a background job and must not go online.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        target_season_id = season_id
+        if target_season_id is None:
+            act = get_active_season()
+            target_season_id = act["id"] if act else 1
+
+        cursor.execute("""
+            SELECT m.id, m.player1_team, m.player2_team, m.player1_score, m.player2_score,
+                   m.mvp_player, COALESCE(m.is_technical, 0) AS is_technical
+            FROM matches m
+            WHERE m.division_id = ?
+              AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
+              AND (m.season_id = ? OR m.season_id IS NULL)
+              AND m.round_number BETWEEN ? AND ?
+              AND m.status = 'confirmed'
+            ORDER BY m.round_number, m.id
+        """, (division_id, target_season_id, start_round, end_round))
+        matches = [dict(r) for r in cursor.fetchall() if not r["is_technical"]]
+        if not matches:
+            return []
+
+        def canon_of(team: str | None) -> str:
+            team = (team or "").strip()
+            return (resolve_team_name(team) or team) if team else ""
+
+        # Club block figures.
+        clubs: dict[str, dict] = {}
+        for m in matches:
+            s1, s2 = int(m["player1_score"] or 0), int(m["player2_score"] or 0)
+            for team, scored, conceded in ((m["player1_team"], s1, s2), (m["player2_team"], s2, s1)):
+                canon = canon_of(team)
+                if not canon:
+                    continue
+                c = clubs.setdefault(normalize_team_name(canon), {
+                    "team_name": canon, "matches": 0, "wins": 0, "clean_sheets": 0, "goals_conceded": 0,
+                })
+                c["matches"] += 1
+                c["wins"] += 1 if scored > conceded else 0
+                c["clean_sheets"] += 1 if conceded == 0 else 0
+                c["goals_conceded"] += conceded
+
+        fold = _player_folder(cursor)
+        players: dict[tuple[str, str], dict] = {}
+
+        def entry(team: str | None, name: str | None) -> dict | None:
+            if not (name or "").strip():
+                return None
+            club_key, player_key, display = fold(team, name)
+            if not club_key:
+                return None
+            row = players.get((club_key, player_key))
+            if row is None:
+                row = players[(club_key, player_key)] = {
+                    "player_name": display,
+                    "team_name": clubs.get(club_key, {}).get("team_name") or canon_of(team),
+                    "_club_key": club_key,
+                    "_player_key": player_key,
+                    "goals": 0, "assists": 0, "mvp": 0, "braces": 0, "is_starter": False,
+                }
+            return row
+
+        # Goals / assists, per match so braces can be told apart.
+        cursor.execute("""
+            SELECT me.match_id, me.team_name, me.player_name, me.event_type, SUM(me.count) AS cnt
+            FROM match_events me
+            JOIN matches m ON me.match_id = m.id
+            WHERE m.division_id = ?
+              AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
+              AND (m.season_id = ? OR m.season_id IS NULL)
+              AND m.round_number BETWEEN ? AND ?
+              AND m.status = 'confirmed'
+              AND COALESCE(m.is_technical, 0) = 0
+            GROUP BY me.match_id, me.team_name, me.player_name, me.event_type
+            ORDER BY MIN(me.id)
+        """, (division_id, target_season_id, start_round, end_round))
+        per_match_goals: dict[tuple[int, tuple[str, str]], int] = {}
+        for r in cursor.fetchall():
+            row = entry(r["team_name"], r["player_name"])
+            if row is None:
+                continue
+            cnt = int(r["cnt"] or 0)
+            if r["event_type"] == "goal":
+                row["goals"] += cnt
+                k = (r["match_id"], (row["_club_key"], row["_player_key"]))
+                per_match_goals[k] = per_match_goals.get(k, 0) + cnt
+            elif r["event_type"] == "assist":
+                row["assists"] += cnt
+        for (_mid, pkey), goals in per_match_goals.items():
+            if goals >= 2:
+                players[pkey]["braces"] += 1
+
+        # MVP crowns: the club is the side whose events or squad name him.
+        for m in matches:
+            name = (m["mvp_player"] or "").strip()
+            if not name:
+                continue
+            cursor.execute(
+                "SELECT team_name FROM match_events WHERE match_id = ? "
+                "AND LOWER(TRIM(player_name)) = LOWER(?) LIMIT 1",
+                (m["id"], name)
+            )
+            hit = cursor.fetchone()
+            team = hit["team_name"] if hit else ""
+            if not team:
+                hits = []
+                for side in (m["player1_team"], m["player2_team"]):
+                    found = match_roster_name(name, _load_club_roster(cursor, side))
+                    if found:
+                        hits.append((side, found))
+                if len(hits) == 1:
+                    team, name = hits[0]
+            if not team:
+                continue
+            row = entry(team, name)
+            if row is not None:
+                row["mvp"] += 1
+
+        # Starting XI of every club that played, and offline positions.
+        positions_by_club: dict[str, dict[str, str]] = {}
+        for club_key, club in clubs.items():
+            squad = _club_squad_positions(cursor, club["team_name"])
+            positions_by_club[club_key] = _offline_squad_positions(squad)
+            for name, _pos in squad[:TOTW_STARTERS]:
+                row = entry(club["team_name"], name)
+                if row is not None:
+                    row["is_starter"] = True
+
+        from services.player_positions import known_position
+
+        result: list[dict] = []
+        for row in players.values():
+            club = clubs.get(row["_club_key"])
+            if club is None:
+                continue
+            pos = positions_by_club.get(row["_club_key"], {}).get(row["_player_key"])
+            if not pos:
+                pos = known_position(row["player_name"]) or (
+                    "CAM" if row["assists"] > row["goals"] else "ST"
+                )
+            out = {k: v for k, v in row.items() if not k.startswith("_")}
+            out.update({
+                "team_name": club["team_name"],
+                "position": pos,
+                "matches": club["matches"],
+                "wins": club["wins"],
+                "clean_sheets": club["clean_sheets"] if row["is_starter"] else 0,
+                "goals_conceded": club["goals_conceded"],
+            })
+            result.append(out)
+        result.sort(key=lambda r: (-(r["goals"] + r["assists"] + r["mvp"]), r["team_name"], r["player_name"]))
+        return result
+
+
 def get_recent_confirmed_matches(
     limit: int = 15,
     division_id: int | None = None,

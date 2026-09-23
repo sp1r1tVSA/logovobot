@@ -24,6 +24,7 @@ from handlers.base import (
     resolve_post_target,
     round_schedule_missing_message,
     max_active_rounds_message,
+    render_totw,
 )
 from handlers.cabinet import notify_match_confirmed, safe_send_notification, cb_report_choice_manual, safe_edit_or_reply
 import config
@@ -6579,6 +6580,90 @@ async def job_post_round_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
             )
 
 
+# ─── Символическая сборная (TOTW) за блок из 5 туров ────────────────────────
+#
+# Публикуется один раз на блок (1–5, 6–10, …), когда все матчи блока
+# подтверждены — долг держит матч в pending и тем самым держит блок. Факт
+# публикации — строка round_content_posts('totw') на последнем туре блока.
+
+async def _resolve_totw_topic(division_id: int) -> tuple[int, int] | None:
+    """(group_chat_id, message_thread_id) топика ТАБЛИЦЫ, иначе АНАЛИТИКА, иначе None."""
+    from services.topic_cache import topic_cache
+
+    topics_map = None
+    for topic_type in ("tables", "analytics"):
+        div_topic = topic_cache.get_by_division(division_id, topic_type)
+        if not div_topic:
+            if topics_map is None:
+                topics_map = await asyncio.to_thread(database.get_division_topics_map, division_id)
+            div_topic = topics_map.get(topic_type)
+        if div_topic and div_topic.get("group_chat_id") and div_topic.get("message_thread_id"):
+            return int(div_topic["group_chat_id"]), int(div_topic["message_thread_id"])
+    return None
+
+
+async def post_totw(
+    context: ContextTypes.DEFAULT_TYPE,
+    division_id: int,
+    start_round: int,
+    end_round: int,
+    season_id: int | None = None,
+    force: bool = False,
+) -> bool:
+    """Опубликовать символическую сборную блока туров в группу дивизиона. True, если пост ушёл."""
+    if not force and await asyncio.to_thread(database.has_round_content_post, division_id, end_round, "totw"):
+        return False
+    if not force and not await asyncio.to_thread(
+        database.is_round_range_completed, start_round, end_round, division_id, season_id
+    ):
+        logger.info(f"TOTW skipped: division {division_id} rounds {start_round}-{end_round} are not finished.")
+        return False
+
+    topic = await _resolve_totw_topic(division_id)
+    if not topic:
+        logger.info(f"TOTW skipped: division {division_id} has no ТАБЛИЦЫ/АНАЛИТИКА topic bound.")
+        return False
+    group_id, topic_id = topic
+
+    payload, img_buf, caption = await render_totw(
+        division_id, start_round, end_round, season_id, use_ai=True, prefetch=True
+    )
+    if not payload.get("xi"):
+        logger.info(f"TOTW skipped: division {division_id} rounds {start_round}-{end_round} have no players.")
+        return False
+
+    try:
+        msg = await context.bot.send_photo(
+            chat_id=group_id, photo=img_buf, caption=caption,
+            parse_mode="HTML", message_thread_id=topic_id
+        )
+    except (BadRequest, TelegramError) as e:
+        logger.warning(f"Could not post TOTW {start_round}-{end_round} to division {division_id}: {e}")
+        return False
+
+    await asyncio.to_thread(database.record_round_content_post, division_id, end_round, "totw", msg.message_id)
+    return True
+
+
+async def job_post_totw(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Периодический джоб: сборная каждого полностью сыгранного блока из 5 туров."""
+    pending = await asyncio.to_thread(database.get_completed_totw_blocks_pending_publication)
+    for block in pending:
+        try:
+            await post_totw(
+                context,
+                division_id=block["division_id"],
+                start_round=block["start_round"],
+                end_round=block["end_round"],
+                season_id=block.get("season_id"),
+            )
+        except Exception:
+            logger.exception(
+                f"TOTW job failed for division {block.get('division_id')} "
+                f"rounds {block.get('start_round')}-{block.get('end_round')}"
+            )
+
+
 # Prevents concurrent runs (scheduled tick + manual /check_debts trigger)
 # from double-issuing auto-warns for the same overdue match.
 _debt_tracker_lock = asyncio.Lock()
@@ -6939,6 +7024,102 @@ async def admin_round_preview_command(update: Update, context: ContextTypes.DEFA
 async def admin_round_digest_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """/round_digest [номер тура] — опубликовать итоги тура в топик АНАЛИТИКА."""
     await _admin_round_content_command(update, context, "digest")
+
+
+async def admin_totw_post_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/totw_post [1-5] — опубликовать символическую сборную в группу дивизиона.
+
+    Без аргумента — все сыгранные и ещё не опубликованные блоки. С диапазоном —
+    принудительно, для каждого доступного админу дивизиона.
+    """
+    from services.totw_service import parse_round_range
+
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        await update.message.reply_text("❌ Нет прав.")
+        return
+
+    explicit = parse_round_range(" ".join(context.args or []))
+    divisions = await _admin_divisions_for(user_id)
+    if not divisions:
+        await update.message.reply_text("⚠️ Нет дивизионов, доступных для управления.")
+        return
+    allowed_ids = {d["id"] for d in divisions}
+
+    if explicit:
+        targets = [(div_id, explicit[0], explicit[1]) for div_id in sorted(allowed_ids)]
+    else:
+        pending = await asyncio.to_thread(database.get_completed_totw_blocks_pending_publication)
+        targets = [
+            (b["division_id"], b["start_round"], b["end_round"])
+            for b in pending if b["division_id"] in allowed_ids
+        ]
+
+    if not targets:
+        await update.message.reply_text(
+            "ℹ️ Символическая сборная: нечего публиковать — нет сыгранных блоков из 5 туров "
+            "или всё уже отправлено.\nПринудительно: <code>/totw_post 1-5</code>",
+            parse_mode="HTML",
+        )
+        return
+
+    await update.message.reply_text(
+        f"🔄 <i>Символическая сборная: запускаю публикацию ({len(targets)})...</i>", parse_mode="HTML"
+    )
+    sent, skipped = 0, []
+    for div_id, start_round, end_round in targets:
+        label = f"дивизион {div_id}, туры {start_round}–{end_round}"
+        try:
+            if await post_totw(context, div_id, start_round, end_round, force=bool(explicit)):
+                sent += 1
+            else:
+                skipped.append(label)
+        except Exception as e:
+            logger.exception(f"Manual TOTW failed for division {div_id} rounds {start_round}-{end_round}")
+            skipped.append(f"{label} — ошибка: {e}")
+
+    lines = [f"✅ <b>Символическая сборная</b>: опубликовано {sent} из {len(targets)}."]
+    if skipped:
+        lines.append("\n<i>Пропущено:</i>")
+        lines.extend(f"• {html.escape(s)}" for s in skipped[:10])
+    await update.message.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+async def cb_totw_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка «📣 Опубликовать в группу» под сборной: принудительная публикация блока."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    try:
+        _, div_raw, start_raw, end_raw = query.data.split(":")
+        division_id, start_round, end_round = int(div_raw), int(start_raw), int(end_raw)
+    except (ValueError, AttributeError):
+        await query.answer("Некорректная кнопка.", show_alert=True)
+        return
+
+    allowed = is_global_admin(user_id) or await asyncio.to_thread(database.is_division_admin, user_id, division_id)
+    if not allowed:
+        await query.answer("❌ Только для админов дивизиона.", show_alert=True)
+        return
+
+    await query.answer("Публикую сборную…")
+    try:
+        ok = await post_totw(context, division_id, start_round, end_round, force=True)
+    except Exception:
+        logger.exception(f"TOTW publish button failed for division {division_id} rounds {start_round}-{end_round}")
+        ok = False
+    text = (
+        f"✅ Сборная туров {start_round}–{end_round} опубликована в группе дивизиона."
+        if ok else
+        "⚠️ Не получилось опубликовать: у дивизиона нет топика ТАБЛИЦЫ/АНАЛИТИКА или за эти туры нет игроков."
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            message_thread_id=query.message.message_thread_id if query.message.is_topic_message else None,
+            text=text,
+        )
+    except (BadRequest, TelegramError):
+        logger.warning("Could not report TOTW publish result", exc_info=True)
 
 
 @admin_only

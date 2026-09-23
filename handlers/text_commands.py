@@ -12,6 +12,7 @@ from handlers.base import (
     generate_league_table_image,
     resolve_division_id,
     resolve_division_target,
+    send_totw_view,
 )
 
 logger = logging.getLogger(__name__)
@@ -144,6 +145,43 @@ async def _division_name(division_id: int) -> str:
     return (division or {}).get("name") or f"Дивизион {division_id}"
 
 
+TOTW_ACTIONS = ("сборная", "сборную", "тотв", "totw", "символическая", "символичка")
+_SEASON_WORD_REGEX = re.compile(r"(?<!\w)(?:сезон\w*|season|весь|всё|все)(?!\w)", re.IGNORECASE)
+
+
+async def _reply_totw(update: Update, context: ContextTypes.DEFAULT_TYPE, args_str: str, example: str) -> None:
+    """Символическая сборная по тексту команды: «1-5», «7», «сезон» или пусто (последний блок)."""
+    from services.totw_service import parse_round_range
+
+    msg = update.effective_message
+    division_id, rest, divisions = await resolve_command_division(update, args_str)
+    if division_id is None:
+        await msg.reply_text(_division_hint(divisions, example), parse_mode="HTML")
+        return
+
+    last_round = await asyncio.to_thread(database.get_last_completed_round, division_id)
+    bounds = parse_round_range(rest)
+    if bounds is None:
+        if not last_round:
+            division_name = await _division_name(division_id)
+            await msg.reply_text(
+                f"🌟 В дивизионе <b>{html.escape(division_name)}</b> ещё ни один тур не сыгран "
+                "полностью — собирать сборную пока не из кого.",
+                parse_mode="HTML",
+            )
+            return
+        if _SEASON_WORD_REGEX.search(rest or ""):
+            bounds = (1, last_round)
+        else:
+            blocks = await asyncio.to_thread(database.get_completed_totw_blocks, division_id)
+            bounds = blocks[-1] if blocks else (last_round, last_round)
+
+    thread_id = msg.message_thread_id if msg.is_topic_message else None
+    user_id = update.effective_user.id if update.effective_user else 0
+    await send_totw_view(
+        context, msg.chat_id, thread_id, user_id, division_id, bounds[0], bounds[1],
+        reply_to_message_id=msg.message_id,
+    )
 
 
 async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
@@ -353,6 +391,10 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
             filename = "top_assisters.png"
             await msg.reply_photo(photo=InputFile(buf, filename=filename), caption=caption, parse_mode="HTML")
             return True
+
+    if action in TOTW_ACTIONS:
+        await _reply_totw(update, context, args_str, "Темшик сборная 1-5 Дивизион 2")
+        return True
 
     if action in ("долги", "debts", "должники"):
         division_id, _, divisions = await resolve_command_division(update, args_str)
@@ -1058,6 +1100,14 @@ async def cmd_summon_club(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         f"👉 {mention}, вас ждут на матч! ⚽"
     )
     await msg.reply_text(reply_text, parse_mode="HTML")
+
+
+async def cmd_totw(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Slash command /totw [1-5 | тур | сезон] [division]."""
+    if not update.effective_message:
+        return
+    args_str = " ".join(context.args) if context.args else ""
+    await _reply_totw(update, context, args_str, "/totw 1-5 Дивизион 2")
 
 
 async def cmd_sync_club_titles(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -96,6 +96,13 @@ def register_jobs(application: Application) -> None:
     except Exception as e:
         logger.warning(f"Could not register round analytics jobs: {e}")
 
+    # Символическая сборная: раз на каждый полностью сыгранный блок из 5 туров.
+    try:
+        from handlers.admin import job_post_totw
+        application.job_queue.run_repeating(job_post_totw, interval=900, first=180)
+    except Exception as e:
+        logger.warning(f"Could not register TOTW job: {e}")
+
     # Детектор договорных матчей: только считает индекс подозрительности и
     # показывает дела супер-админу, ставки никогда не блокирует.
     try:
