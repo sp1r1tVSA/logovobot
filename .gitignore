@@ -72,6 +72,8 @@ test_*.png
 assets/players/
 assets/tmp_crops/
 assets/cards_preview/
+# Листы для глазной проверки лиц, scripts/fetch_squad_photos.py --contact-sheet
+assets/contact_sheets/
 # Club crests — fetched by scripts/download_logos.py, synced to the server separately
 assets/logos/
 players_cache/
