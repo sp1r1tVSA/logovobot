@@ -223,6 +223,19 @@ class TestRecommendationsLineScope(unittest.TestCase):
         hot = {m["id"] for m in get_hot_matches(division_id=DIV_ID, season_id=SEASON_ID, limit=10)}
         self.assertEqual(hot, {99803, 99804})
 
+    def test_recommendations_carry_coach_usernames(self) -> None:
+        """Карточка рекомендации показывает ники тренеров, как карточка матча."""
+        recs = {r["match_id"]: r for r in get_user_recommendations(
+            user_id=USER_BETTOR, limit=5, division_id=DIV_ID, season_id=SEASON_ID)}
+
+        self.assertEqual(recs[99801]["player1_username"], "eintracht_user")
+        self.assertEqual(recs[99801]["player2_username"], "mainz_user")
+        self.assertEqual(recs[99803]["player1_username"], "westham_user")
+        self.assertEqual(recs[99803]["player2_username"], "eintracht_user")
+        # Матч без привязанных тренеров — ников нет, а не чужие.
+        self.assertFalse(recs[99802]["player1_username"])
+        self.assertFalse(recs[99802]["player2_username"])
+
     def test_hot_matches_scoped_to_open_line(self) -> None:
         """Hot matches also only pick from open line rounds."""
         hot = get_hot_matches(division_id=DIV_ID, season_id=SEASON_ID, limit=10)

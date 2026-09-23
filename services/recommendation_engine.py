@@ -67,16 +67,17 @@ def _club_matches(club: str, target: str) -> bool:
     return c_norm in t_norm or t_norm in c_norm
 
 
-def _line_match_ids(division_id: Optional[int], season_id: Optional[int]) -> list[int]:
-    """Матчи, которые сейчас стоят в линии Mini App.
+def _line_markets(division_id: Optional[int], season_id: Optional[int]) -> dict[int, dict[str, Any]]:
+    """Матчи, которые сейчас стоят в линии Mini App: `match_id` → тайл линии.
 
     Открытый тур — это ещё не линия: в неё попадают только центральные пары
     (`CENTRAL_MATCHES_PER_ROUND`), и до дедлайна. Поэтому источник один —
     тот же `get_active_bet_markets`, что рисует линию; иначе рекомендации
-    предлагают матчи, на которые нельзя поставить.
+    предлагают матчи, на которые нельзя поставить. Тайл заодно несёт ники
+    тренеров, так что отдельно их искать не нужно.
     """
     markets = database.get_active_bet_markets(division_id=division_id, season_id=season_id)
-    return sorted({bm["match_id"] for bm in markets})
+    return {bm["match_id"]: bm for bm in markets}
 
 
 def get_hot_matches(
@@ -89,7 +90,7 @@ def get_hot_matches(
     Matches are constrained to the open betting line and ranked by calculated
     composite hot score.
     """
-    line_ids = _line_match_ids(division_id, season_id)
+    line_ids = sorted(_line_markets(division_id, season_id))
     if not line_ids:
         return []
 
@@ -212,7 +213,8 @@ def get_user_recommendations(
         fav_market = fav_market_row["outcome_type"] if fav_market_row else "p1"
 
         # 4. Candidates are exactly the matches of the open line
-        line_ids = _line_match_ids(target_div_id, season_id)
+        line = _line_markets(target_div_id, season_id)
+        line_ids = sorted(line)
         if not line_ids:
             return []
         placeholders = ",".join("?" for _ in line_ids)
@@ -272,6 +274,8 @@ def get_user_recommendations(
                 "round_number": m["round_number"],
                 "player1_team": m["player1_team"],
                 "player2_team": m["player2_team"],
+                "player1_username": line[m["id"]].get("player1_username"),
+                "player2_username": line[m["id"]].get("player2_username"),
                 "status": m["status"],
                 "reason": reason,
                 "priority": priority,

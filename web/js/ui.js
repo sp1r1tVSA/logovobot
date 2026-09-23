@@ -2266,6 +2266,18 @@ export class UIRenderer {
     `;
   }
 
+  /** Ники тренеров под парой клубов: в том же порядке, через то же тире. */
+  static _recPlayerTags(rec) {
+    const tag = (u) => {
+      const v = (u || '').trim();
+      return v ? (v.startsWith('@') ? v : `@${v}`) : '';
+    };
+    const t1 = tag(rec.player1_username);
+    const t2 = tag(rec.player2_username);
+    if (!t1 && !t2) return '';
+    return `<div style="font-size: 0.72rem; font-weight: 600; color: var(--text-muted); margin-top: 1px;">${escapeHtml(t1 || '—')} — ${escapeHtml(t2 || '—')}</div>`;
+  }
+
   static renderRecommendations(recommendations, searchQuery = '') {
     const el = document.getElementById('recommendations-container');
     if (!el) return;
@@ -2280,7 +2292,9 @@ export class UIRenderer {
       const q = searchQuery.toLowerCase().trim();
       list = list.filter(rec =>
         (rec.player1_team || '').toLowerCase().includes(q) ||
-        (rec.player2_team || '').toLowerCase().includes(q)
+        (rec.player2_team || '').toLowerCase().includes(q) ||
+        (rec.player1_username || '').toLowerCase().includes(q.replace(/^@/, '')) ||
+        (rec.player2_username || '').toLowerCase().includes(q.replace(/^@/, ''))
       );
       if (list.length === 0) {
         el.innerHTML = '';
@@ -2300,7 +2314,8 @@ export class UIRenderer {
           ${list.slice(0, 3).map(rec => `
             <div style="background: var(--bg-secondary); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 10px 12px; display: flex; justify-content: space-between; align-items: center;">
               <div>
-                <div style="font-weight: 800; font-size: 0.85rem; color: #fff;">${rec.player1_team} — ${rec.player2_team}</div>
+                <div style="font-weight: 800; font-size: 0.85rem; color: #fff;">${escapeHtml(rec.player1_team)} — ${escapeHtml(rec.player2_team)}</div>
+                ${UIRenderer._recPlayerTags(rec)}
                 <div style="font-size: 0.75rem; color: var(--text-gold); margin-top: 2px;">${rec.reason || 'Высокий интерес'}</div>
               </div>
               <button class="btn-open-match-center" data-match-id="${rec.match_id}" style="background: var(--bg-tertiary); border: 1px solid var(--border-subtle); color: var(--accent-gold); border-radius: var(--radius-sm); padding: 5px 10px; font-size: 0.75rem; font-weight: 800; cursor: pointer;">
