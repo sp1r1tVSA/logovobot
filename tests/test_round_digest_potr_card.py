@@ -130,7 +130,7 @@ class TestPostPlayerOfTheRoundCard(unittest.IsolatedAsyncioTestCase):
 
 
 class TestDigestSurvivesCardFailure(unittest.IsolatedAsyncioTestCase):
-    async def _post_digest(self, card_side_effect):
+    async def _post_digest(self, card_side_effect, payload=None, force=False):
         from services import round_preview
         import services.graphics.round_digest_generator as digest_gen
 
@@ -141,12 +141,12 @@ class TestDigestSurvivesCardFailure(unittest.IsolatedAsyncioTestCase):
         with patch.object(admin.database, "has_round_content_post", return_value=False), \
              patch.object(admin.database, "record_round_content_post", recorded), \
              patch.object(admin, "_resolve_analytics_topic", AsyncMock(return_value=(-100123, 42))), \
-             patch.object(round_preview, "build_digest_payload", return_value=_payload()), \
+             patch.object(round_preview, "build_digest_payload", return_value=payload or _payload()), \
              patch.object(round_preview, "generate_digest_caption", return_value="итоги"), \
              patch.object(digest_gen, "generate_round_digest_image", return_value=MagicMock()), \
              patch.object(admin, "_post_player_of_the_round_card",
                           AsyncMock(side_effect=card_side_effect)) as card:
-            posted = await admin.post_round_digest(context, division_id=3, round_number=7)
+            posted = await admin.post_round_digest(context, division_id=3, round_number=7, force=force)
         return posted, recorded, card, context
 
     async def test_digest_is_still_posted_when_the_card_blows_up(self):
@@ -161,6 +161,21 @@ class TestDigestSurvivesCardFailure(unittest.IsolatedAsyncioTestCase):
         args = card.call_args.args
         self.assertEqual(args[1:3], (-100123, 42))
         self.assertEqual(args[3]["round_number"], 7)
+
+    async def test_unfinished_round_is_not_posted(self):
+        # Тур закрыт, но один матч ещё долг — ни итогов, ни игрока тура.
+        payload = _payload(matches_total=2, matches_played=1)
+        posted, recorded, card, context = await self._post_digest(None, payload=payload)
+        self.assertFalse(posted)
+        context.bot.send_photo.assert_not_awaited()
+        recorded.assert_not_called()
+        card.assert_not_awaited()
+
+    async def test_manual_force_posts_an_unfinished_round(self):
+        payload = _payload(matches_total=2, matches_played=1)
+        posted, _, _, context = await self._post_digest(None, payload=payload, force=True)
+        self.assertTrue(posted)
+        context.bot.send_photo.assert_awaited_once()
 
 
 class TestDivisionReachesTheRenderedCard(unittest.TestCase):

@@ -155,13 +155,28 @@ class TestRoundContentPosts(RoundAnalyticsTestBase):
         pending = [r for r in database.get_rounds_pending_digest() if r["division_id"] == self.div_id]
         self.assertEqual(pending, [])
 
-    def test_closed_round_qualifies_without_every_match(self):
+    def test_closed_round_waits_for_its_debts(self):
+        # Закрытие тура превращает несыгранные матчи в долги — итоги ждут их.
         self._add_round(2, is_open=0)
         self._add_match(2, "A", "B", 2, 1, "confirmed")
-        self._add_match(2, "C", "D", None, None, "scheduled")
+        debt = self._add_match(2, "C", "D", None, None, "pending")
 
         pending = [r for r in database.get_rounds_pending_digest() if r["division_id"] == self.div_id]
+        self.assertEqual(pending, [])
+
+        # Технический результат по долгу тоже закрывает тур.
+        database.set_technical_result(debt, 3, 0, "tp_home")
+        pending = [r for r in database.get_rounds_pending_digest() if r["division_id"] == self.div_id]
         self.assertEqual([r["round_number"] for r in pending], [2])
+
+    def test_cancelled_matches_do_not_hold_the_digest(self):
+        self._add_round(3, is_open=0)
+        self._add_match(3, "A", "B", 1, 0, "confirmed")
+        self._add_match(3, "C", "D", None, None, "cancelled")
+
+        pending = [r for r in database.get_rounds_pending_digest() if r["division_id"] == self.div_id]
+        self.assertEqual([r["round_number"] for r in pending], [3])
+        self.assertEqual(pending[0]["matches_total"], 1)
 
 
 class TestRoundPlayerStats(RoundAnalyticsTestBase):

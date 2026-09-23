@@ -6507,6 +6507,15 @@ async def post_round_digest(
     if not payload.get("results"):
         logger.info(f"Round digest skipped: division {division_id} round {round_number} has no confirmed matches.")
         return False
+    # Итоги и игрок тура — только по полностью сыгранному туру. Закрытый тур с
+    # долгами ждёт, пока их доиграют или засудят; ручной /round_digest N (force)
+    # остаётся осознанным обходом.
+    if not force and payload.get("matches_played", 0) < payload.get("matches_total", 0):
+        logger.info(
+            f"Round digest skipped: division {division_id} round {round_number} is not finished "
+            f"({payload.get('matches_played')}/{payload.get('matches_total')} matches confirmed)."
+        )
+        return False
 
     img_buf = await asyncio.to_thread(generate_round_digest_image, payload)
     caption = await asyncio.to_thread(round_preview.generate_digest_caption, payload)

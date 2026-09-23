@@ -3820,8 +3820,11 @@ def get_rounds_pending_digest(season_id: int | None = None) -> list[dict]:
     """
     Finished rounds whose АНАЛИТИКА digest has not been posted yet.
 
-    A round qualifies once it has at least one confirmed match and either every
-    match of the round is confirmed or the round has been closed by an admin.
+    A round qualifies only once every match of it is confirmed (technical
+    results are confirmed too); cancelled matches do not count. Closing the
+    round is not enough: its unplayed matches become debts and are still to be
+    played or judged, and a digest posted before that crowns a player of the
+    round over half a round. `/round_digest N` remains the manual override.
     """
     with transaction() as conn:
         cursor = conn.cursor()
@@ -3842,15 +3845,16 @@ def get_rounds_pending_digest(season_id: int | None = None) -> list[dict]:
              AND m.division_id = r.division_id
              AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
              AND (m.season_id = r.season_id OR m.season_id IS NULL)
+             AND m.status != 'cancelled'
             LEFT JOIN round_content_posts p
                    ON p.division_id = r.division_id
                   AND p.round_number = r.round_number
                   AND p.content_type = 'digest'
             WHERE (r.season_id = ? OR r.season_id IS NULL)
               AND p.round_number IS NULL
-            GROUP BY r.division_id, r.round_number, r.season_id, r.is_open, r.status
+            GROUP BY r.division_id, r.round_number, r.season_id
             HAVING matches_confirmed > 0
-               AND (matches_confirmed = matches_total OR (r.is_open = 0 AND COALESCE(r.status, 'closed') != 'scheduled'))
+               AND matches_confirmed = matches_total
             ORDER BY r.division_id, r.round_number
         """, (target_season_id,))
         return [dict(row) for row in cursor.fetchall()]
