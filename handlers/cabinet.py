@@ -192,6 +192,27 @@ def match_and_enrich_squad(raw_side1_goals: list[str], raw_side2_goals: list[str
     else:
         return side2_goals, side1_goals, side2_assists, side1_assists, False
 
+def _goal_shortfall_line(sides) -> str:
+    """Warning for the AI confirmation card when fewer goals were read than scored.
+
+    A stats screenshot shows ~7 of 11 rows, so a scorer is often off screen. The
+    card must say so instead of letting the coach confirm an incomplete list.
+    `sides` is ((team, {player: goals}, score), ...).
+    """
+    gaps = [
+        f"{safe_escape(team)} — {sum(goals.values())} из {score}"
+        for team, goals, score in sides
+        if sum(goals.values()) < score
+    ]
+    if not gaps:
+        return ""
+    return (
+        f"⚠️ <b>Распознаны не все голы:</b> {'; '.join(gaps)}.\n"
+        f"<i>Автор гола мог не попасть на скриншот — проверьте и при необходимости "
+        f"исправьте вручную.</i>\n\n"
+    )
+
+
 def safe_escape(val: str | None, default: str = "") -> str:
     """Safe HTML escaping for strings that may be None."""
     if val is None:
@@ -2903,6 +2924,9 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             else:
                 context.user_data.pop("report_mvp_player", None)
             mvp_line = f"👑 <b>Игрок матча (MVP):</b> {safe_escape(mvp_player)}\n\n" if mvp_player else ""
+            shortfall_line = _goal_shortfall_line(
+                ((home_team, h_goals, h_score), (away_team, a_goals, a_score))
+            )
 
             h_goals_summary = ", ".join([f"{p} ({c})" for p, c in h_goals.items()]) if h_goals else "Нет"
             a_goals_summary = ", ".join([f"{p} ({c})" for p, c in a_goals.items()]) if a_goals else "Нет"
@@ -2921,6 +2945,7 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 f"⚽ <b>Голы ({safe_escape(away_team)}):</b> {safe_escape(a_goals_summary)}\n"
                 f"🎯 <b>Ассисты ({safe_escape(away_team)}):</b> {a_assists_str}\n\n"
                 f"{mvp_line}"
+                f"{shortfall_line}"
                 f"📸 <i>Скриншот(ы) прикреплены.</i>"
             )
 

@@ -254,6 +254,16 @@ PROMPT_TEXT = """
 действия. Никогда не обрывай чтение на предпоследней строке. Перед ответом
 ПЕРЕСЧИТАЙ количество строк в левой и в правой таблице — оно должно совпадать.
 
+⚠️⚠️ ТАБЛИЦА ПРОКРУЧИВАЕТСЯ — ГОЛОВ В ВИДИМЫХ СТРОКАХ МОЖЕТ БЫТЬ МЕНЬШЕ, ЧЕМ НА ТАБЛО:
+- На одном скриншоте видно обычно ~7 строк из 11: остальные игроки скрыты прокруткой.
+- Если сумма голов в видимых строках меньше счёта (например, счёт 3, а голов видно 2) —
+  ЭТО НОРМАЛЬНО. Автор недостающего гола просто не попал на экран.
+- ⛔ КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО добавлять строку игрока, которого НЕТ на изображении,
+  «достраивать» состав по памяти о реальном клубе или переносить цифры на другую
+  строку, чтобы сумма сошлась со счётом. Переписывай только то, что видно.
+- Каждое имя в `left_rows` / `right_rows` должно быть буквально прочитано с экрана.
+  Имя со значком (короной, смайлом) рядом — это то же имя, его строка и его цифры.
+
 ⚠️ ПРАВИЛО ЧТЕНИЯ ИМЕН И НУЛЕЙ:
 - ЧИТАЙ СТРОГО ТЕ ИМЕНА, КОТОРЫЕ НАПИСАНЫ В КОЛОНКЕ «ИГРОКИ» (PLAYERS) ДЛЯ ДАННОЙ СТРОКИ!
 - Игнорируй иконки капитана или бейджи (короны 👑, значки C, мячики ⚽) рядом с фамилией игрока — извлекай чистое имя.
@@ -286,6 +296,7 @@ PROMPT_TEXT = """
 5. **ПОЛНОТА:**
    - Запиши ВСЕ строки каждой таблицы от шапки до самой нижней, включая строку над кнопками.
    - Количество элементов в `left_rows` и `right_rows` обычно одинаковое — пересчитай.
+   - Сумма голов НЕ обязана совпадать со счётом — не подгоняй её (см. про прокрутку выше).
 
 6. **ДВА СКРИНШОТА ОДНОЙ ТАБЛИЦЫ (ПРОКРУТКА):**
    - Если прислано 2 скриншота одной игры (верх и низ состава), объедини их строки в один
@@ -400,6 +411,11 @@ _DIGIT_ORDER = {"left": ("g", "a"), "right": ("a", "g")}
 # OVR rating (86, 117) that bled into the stat columns.
 _MAX_STAT = 9
 
+# A whole starting XI. One EA FC Mobile screenshot shows ~7 rows of a scrolling
+# table, so fewer rows means scorers may be hidden and the score cannot be used
+# to tell a mirrored reading from a goal scored by an off-screen player.
+_FULL_TABLE_ROWS = 11
+
 
 def _parse_stat(value) -> int | None:
     """One stat cell as an int; a dash or blank is 0, anything unreadable is None."""
@@ -451,7 +467,11 @@ def rows_to_events(rows, side: str, score: int) -> tuple[list[str], list[str], b
     which one is goals is decided here, because mirroring the right-hand table is
     exactly where the model used to slip. The scoreboard is the ground truth: if
     the expected goal column does not add up to `score` but the other one does,
-    the model reordered the digits and the columns are swapped back.
+    the model reordered the digits and the columns are swapped back — but only
+    for a complete table. With rows scrolled off screen a short goal column is
+    usually a hidden scorer, and when visible players assisted every goal the
+    assist column matches the score by coincidence (3-2 with a hidden third
+    scorer handed Yates' and Delap's goals to their assisters).
 
     Rows repeated on two scrolled screenshots are counted once (a player appears
     in a team's table only once). Returns (goals, assists, needs_review).
@@ -476,11 +496,18 @@ def rows_to_events(rows, side: str, score: int) -> tuple[list[str], list[str], b
     goal_sum = sum(r[goal_idx] for r in parsed)
     assist_sum = sum(r[assist_idx] for r in parsed)
     if score > 0 and goal_sum != score and assist_sum == score:
-        logger.warning(
-            "OCR %s table: goal column sums to %d, the other to %d = score; "
-            "columns were read mirrored, swapping.", side, goal_sum, assist_sum,
-        )
-        goal_idx, assist_idx = assist_idx, goal_idx
+        if len(parsed) >= _FULL_TABLE_ROWS:
+            logger.warning(
+                "OCR %s table: goal column sums to %d, the other to %d = score; "
+                "columns were read mirrored, swapping.", side, goal_sum, assist_sum,
+            )
+            goal_idx, assist_idx = assist_idx, goal_idx
+        else:
+            logger.warning(
+                "OCR %s table: goal column sums to %d, the other to %d = score, but "
+                "only %d rows are visible; keeping screen order.",
+                side, goal_sum, assist_sum, len(parsed),
+            )
 
     goals, assists = [], []
     for row in parsed:

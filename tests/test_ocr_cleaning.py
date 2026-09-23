@@ -22,6 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from services.ai.ai_recognizer import (
     BADGE_WORDS,
+    PROMPT_TEXT,
     POS_TOKENS,
     apply_table_rows,
     clean_json_response,
@@ -394,6 +395,26 @@ MONACO_RIGHT = _rows(  # screen order: A, G
     ("Balogun", 1, 0), ("Biereth", 0, 0), ("Ansu Fati", 0, 0),
 )
 
+# GROUND TRUTH: ОТнубаДоПро (Ноттингем Форест) 3 - 2 gheradot76 (Париж), тур 6.
+# Only 7 of 11 rows are on screen and Forest's third scorer is scrolled off.
+# The visible assists (Schlager 1 + Gibbs-White 2) happen to add up to the
+# score, which used to "prove" a mirrored reading and handed Yates' and Delap's
+# goals to their assisters.
+FOREST_LEFT = _rows(
+    ("Yates", 1, 0), ("Schlager", 0, 1), ("Gibbs-White", 0, 2), ("Wood", 0, 0),
+    ("Hudson-Odoi", 0, 0), ("Sels", 0, 0), ("Delap", 1, 0),
+)
+PARIS_RIGHT = _rows(  # screen order: A, G
+    ("De Smet", 0, 0), ("Lopez", 0, 0), ("Marchetti", 0, 1), ("Kebbal", 0, 0),
+    ("Traoré", 0, 0), ("Ikoné", 1, 1), ("Simon", 0, 0),
+)
+
+
+def _full_table(rows):
+    """Pads a transcribed table with 0-0 bench-free rows up to a whole XI."""
+    pad = [{"name": f"Filler{i}", "digits": [0, 0]} for i in range(11 - len(rows))]
+    return list(rows) + pad
+
 
 class TestTableRows(unittest.TestCase):
     def test_bayern_real_screenshot(self):
@@ -418,7 +439,7 @@ class TestTableRows(unittest.TestCase):
 
     def test_mirrored_reading_is_swapped_back_by_the_score(self):
         """The model 'helpfully' wrote the right table as G, A instead of screen order."""
-        reordered = _rows(("Rodrygo", 2, 0), ("João Pedro", 1, 1), ("Rafa", 0, 0))
+        reordered = _full_table(_rows(("Rodrygo", 2, 0), ("João Pedro", 1, 1), ("Rafa", 0, 0)))
         with self.assertLogs("services.ai.ai_recognizer", level=logging.WARNING):
             goals, assists, review = rows_to_events(reordered, "right", 3)
         self.assertEqual(goals, ["Rodrygo", "Rodrygo", "João Pedro"])
@@ -426,11 +447,37 @@ class TestTableRows(unittest.TestCase):
         self.assertFalse(review)
 
     def test_left_table_swap_too(self):
-        reordered = [{"name": r["name"], "digits": r["digits"][::-1]} for r in BAYERN_LEFT]
+        reordered = _full_table(
+            [{"name": r["name"], "digits": r["digits"][::-1]} for r in BAYERN_LEFT]
+        )
         with self.assertLogs("services.ai.ai_recognizer", level=logging.WARNING):
             goals, assists, _ = rows_to_events(reordered, "left", 3)
         self.assertEqual(goals, ["Kane", "Kane", "Gnabry"])
         self.assertEqual(assists, ["Olise", "Kane"])
+
+    def test_hidden_scorer_does_not_trigger_the_swap(self):
+        """Forest 3-2: a scorer off screen, every goal assisted by a visible player."""
+        m = {"left_score": 3, "right_score": 2, "left_rows": FOREST_LEFT, "right_rows": PARIS_RIGHT}
+        with self.assertLogs("services.ai.ai_recognizer", level=logging.WARNING):
+            apply_table_rows(m)
+            validate_and_sanitize_match_events(m)
+        self.assertEqual(m["left_goals"], ["Yates", "Delap"])
+        self.assertEqual(m["left_assists"], ["Schlager", "Gibbs-White", "Gibbs-White"])
+        self.assertEqual(m["right_goals"], ["Marchetti", "Ikoné"])
+        self.assertEqual(m["right_assists"], ["Ikoné"])
+        self.assertTrue(m["ocr_needs_review"])
+
+    def test_partial_table_mirror_is_not_guessed(self):
+        """Without the whole XI a mirrored-looking reading keeps the screen order."""
+        reordered = _rows(("Rodrygo", 2, 0), ("João Pedro", 1, 1), ("Rafa", 0, 0))
+        with self.assertLogs("services.ai.ai_recognizer", level=logging.WARNING):
+            goals, assists, _ = rows_to_events(reordered, "right", 3)
+        self.assertEqual(goals, ["João Pedro"])
+        self.assertEqual(assists, ["Rodrygo", "Rodrygo", "João Pedro"])
+
+    def test_prompt_forbids_filling_hidden_rows(self):
+        self.assertIn("ТАБЛИЦА ПРОКРУЧИВАЕТСЯ", PROMPT_TEXT)
+        self.assertIn("не подгоняй", PROMPT_TEXT)
 
     def test_ambiguous_sums_are_not_swapped(self):
         """
