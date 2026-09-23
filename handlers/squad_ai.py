@@ -151,8 +151,9 @@ async def _prefetch_squad_photos(players: list[dict], club: str) -> None:
     """Fire-and-forget: warm the player_photos cache for a freshly recognized squad."""
     from services.graphics import player_photos
 
+    # Позиция разводит однофамильцев внутри ростера клуба («MARTÍNEZ» ST — Lautaro).
     pairs = [
-        (name, club)
+        (name, club, p.get("position"))
         for p in players
         if (name := (p.get("player_name") or p.get("name")))
     ]

@@ -1,7 +1,14 @@
 """
 player_photos.py
 
-Fetches and caches player portrait photos using hybrid free providers:
+Fetches and caches player portrait photos.
+
+Когда клуб известен (а из состава он известен всегда), игрок опознаётся внутри
+ростера своего клуба — `services/graphics/player_identity.py` — и фото берётся
+только у источника, сверенного с этой личностью. Не опознан — фото нет:
+пустая карточка исправима, чужой футболист на ней — нет.
+
+Без клуба остаётся прежний поиск по имени у провайдеров:
 1. TheSportsDB API (500-700px transparent cutouts — best quality)
 2. SoFIFA CDN (360px official EA FC renders — consistent, matches the game roster)
 3. Wikipedia / Wikimedia Commons API (real portraits, last resort)
@@ -476,8 +483,15 @@ def _fetch_photo_bytes(url: str, headers: dict | None = None) -> bytes | None:
         return None
 
 
-def fetch_and_cache(player_name: str, team: str | None = None, force_refresh: bool = False) -> str | None:
-    """Fetch photo for player_name and cache it locally."""
+def fetch_and_cache(player_name: str, team: str | None = None, force_refresh: bool = False,
+                    position: str | None = None) -> str | None:
+    """
+    Fetch photo for player_name and cache it locally.
+
+    С клубом — опознание в ростере клуба и никакого отката к глобальному поиску
+    (`_fetch_identified`). Без клуба — поиск по имени (`_fetch_by_name`).
+    `position` из состава разводит однофамильцев внутри ростера.
+    """
     _ensure_photos_dir()
     cached = get_cached_photo_path(player_name, team)
     
@@ -497,46 +511,82 @@ def fetch_and_cache(player_name: str, team: str | None = None, force_refresh: bo
         # игрока вовсе и всё скатывается к худшему источнику.
         query_name = _resolve_latin_name(player_name, team)
 
-        # Порядок по качеству: 500-700px вырезки → 360px рендер EA FC →
-        # реальный портрет из Википедии → 192px превью FotMob как крайний случай.
-        providers = [
-            ("TheSportsDB", _get_thesportsdb_url, STD_HEADERS),
-            ("SoFIFA", _get_sofifa_url, SOFIFA_HEADERS),
-            ("Wikipedia", _get_wikipedia_url, WIKI_HEADERS),
-            ("FotMob", _get_fotmob_url, FOTMOB_HEADERS),
-        ]
+        if team:
+            return _fetch_identified(player_name, query_name, team, position, cached)
+        return _fetch_by_name(player_name, query_name, cached)
 
-        # Вырезка важнее порядка провайдеров: плоский портрет от первого
-        # источника не должен перекрывать вырезку у следующего. Плоскую
-        # картинку запоминаем и пишем только если вырезки нет ни у кого —
-        # иначе `refresh_all_player_cards` будет вечно пытаться её улучшить.
-        fallback: tuple[str, bytes] | None = None
 
-        for provider_name, get_url_func, p_headers in providers:
-            photo_url = get_url_func(query_name)
-            if not photo_url:
-                continue
-            data = _fetch_photo_bytes(photo_url, headers=p_headers)
-            quality = _photo_quality(data) if data else None
-            if quality == "cutout":
-                if _write_photo(cached, data):
-                    logger.info(f"[{provider_name}] ✅ Downloaded cutout for '{player_name}'")
-                    return cached
-                return None
-            if quality == "flat" and fallback is None:
-                fallback = (provider_name, data)
-                logger.debug(f"[{provider_name}] Keeping opaque photo as a fallback.")
-            elif quality is None:
-                logger.debug(f"[{provider_name}] ⚠️ Photo URL found but file is unusable (404/403/заглушка).")
+def _fetch_identified(player_name: str, query_name: str, team: str,
+                      position: str | None, dest_path: str) -> str | None:
+    """
+    Фото игрока, опознанного в ростере клуба `team`.
 
-        if fallback:
-            provider_name, data = fallback
-            if _write_photo(cached, data):
-                logger.info(f"[{provider_name}] ✅ Downloaded photo for '{player_name}' (без прозрачности)")
-                return cached
+    Глобальный поиск по имени здесь намеренно не используется даже как запасной:
+    именно он приводил чужие лица — «BRADLEY» из Ливерпуля становился Barcola.
+    Если игрок не опознан, карточка остаётся с силуэтом.
+    """
+    from services.graphics import player_identity
 
-        logger.info(f"No photo found for player '{player_name}' in any provider")
+    identity, why, _ = player_identity.identify_player(query_name, team, position)
+    if not identity:
+        logger.info(f"[Identity] '{player_name}' ({team}) не опознан: {why} — фото не ставим")
         return None
+
+    photo = player_identity.download_photo(identity)
+    if not photo:
+        logger.info(f"[Identity] '{player_name}' ({team}) → {identity['name']}: "
+                    f"фото нет ни у одного источника")
+        return None
+
+    if _write_photo(dest_path, photo["data"]):
+        logger.info(f"[{photo['source']}] ✅ '{player_name}' ({team}) → {identity['name']} "
+                    f"[{why}] {photo['width']}x{photo['height']}")
+        return dest_path
+    return None
+
+
+def _fetch_by_name(player_name: str, query_name: str, cached: str) -> str | None:
+    """Прежний поиск по имени у провайдеров — только когда клуб неизвестен."""
+    # Порядок по качеству: 500-700px вырезки → 360px рендер EA FC →
+    # реальный портрет из Википедии → 192px превью FotMob как крайний случай.
+    providers = [
+        ("TheSportsDB", _get_thesportsdb_url, STD_HEADERS),
+        ("SoFIFA", _get_sofifa_url, SOFIFA_HEADERS),
+        ("Wikipedia", _get_wikipedia_url, WIKI_HEADERS),
+        ("FotMob", _get_fotmob_url, FOTMOB_HEADERS),
+    ]
+
+    # Вырезка важнее порядка провайдеров: плоский портрет от первого
+    # источника не должен перекрывать вырезку у следующего. Плоскую
+    # картинку запоминаем и пишем только если вырезки нет ни у кого —
+    # иначе `refresh_all_player_cards` будет вечно пытаться её улучшить.
+    fallback: tuple[str, bytes] | None = None
+
+    for provider_name, get_url_func, p_headers in providers:
+        photo_url = get_url_func(query_name)
+        if not photo_url:
+            continue
+        data = _fetch_photo_bytes(photo_url, headers=p_headers)
+        quality = _photo_quality(data) if data else None
+        if quality == "cutout":
+            if _write_photo(cached, data):
+                logger.info(f"[{provider_name}] ✅ Downloaded cutout for '{player_name}'")
+                return cached
+            return None
+        if quality == "flat" and fallback is None:
+            fallback = (provider_name, data)
+            logger.debug(f"[{provider_name}] Keeping opaque photo as a fallback.")
+        elif quality is None:
+            logger.debug(f"[{provider_name}] ⚠️ Photo URL found but file is unusable (404/403/заглушка).")
+
+    if fallback:
+        provider_name, data = fallback
+        if _write_photo(cached, data):
+            logger.info(f"[{provider_name}] ✅ Downloaded photo for '{player_name}' (без прозрачности)")
+            return cached
+
+    logger.info(f"No photo found for player '{player_name}' in any provider")
+    return None
 
 
 def get_player_photo(player_name: str, team: str | None = None, force_refresh: bool = False) -> str | None:
@@ -548,13 +598,20 @@ def get_player_photo(player_name: str, team: str | None = None, force_refresh: b
     return fetch_and_cache(player_name, team, force_refresh=force_refresh)
 
 
-def fetch_all_players(players: list[str] | list[tuple[str, str]]) -> dict[str, str | None]:
-    """Bulk-fetch photos for a list of players."""
+def fetch_all_players(players: list[str] | list[tuple]) -> dict[str, str | None]:
+    """
+    Bulk-fetch photos for a list of players.
+
+    Элемент — имя, `(имя, клуб)` или `(имя, клуб, позиция)`.
+    """
     results: dict[str, str | None] = {}
     for item in players:
-        name, team = item if isinstance(item, tuple) else (item, None)
+        if isinstance(item, tuple):
+            name, team, position = (tuple(item) + (None, None))[:3]
+        else:
+            name, team, position = item, None, None
         key = f"{name} ({team})" if team else name
-        results[key] = fetch_and_cache(name, team)
+        results[key] = fetch_and_cache(name, team, position=position)
     return results
 
 

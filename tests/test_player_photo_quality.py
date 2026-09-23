@@ -6,6 +6,10 @@
 источника лучше плоского портрета у первого. Плоская картинка пишется только
 когда вырезки нет ни у кого.
 
+Эта цепочка — путь без клуба. С клубом игрок опознаётся в ростере
+(`player_identity`), и глобальный поиск по имени не используется даже как
+запасной: см. `TestFetchWithClub`.
+
 Сеть не используется: провайдеры и загрузка замоканы, кэш уводится в tmp.
 """
 
@@ -18,6 +22,7 @@ from unittest.mock import patch
 
 from PIL import Image
 
+from services.graphics import player_identity as pi
 from services.graphics import player_photos as pp
 
 
@@ -107,7 +112,7 @@ class TestFetchPrefersCutout(unittest.TestCase):
                 patch.object(pp, "_get_sofifa_url", fake_url("SoFIFA")), \
                 patch.object(pp, "_get_wikipedia_url", fake_url("Wikipedia")), \
                 patch.object(pp, "_get_fotmob_url", fake_url("FotMob")):
-            path = pp.fetch_and_cache("Rodrygo", "Бенфика", force_refresh=True)
+            path = pp.fetch_and_cache("Rodrygo", None, force_refresh=True)
         return path, downloaded
 
     def _mode(self, path: str) -> str:
@@ -146,6 +151,82 @@ class TestFetchPrefersCutout(unittest.TestCase):
         path, downloaded = self._run({})
         self.assertIsNone(path)
         self.assertEqual(downloaded, [])
+
+
+class TestFetchWithClub(unittest.TestCase):
+    """
+    Клуб известен → опознание в ростере. Не опознан → фото нет, и к глобальному
+    поиску по имени (он и приводил чужие лица) бот не откатывается.
+    """
+
+    IDENTITY = {"id": 1, "name": "Conor Bradley", "dob": "2003-07-09",
+                "positions": ["RB"], "club_en": "Liverpool"}
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._patchers = [
+            patch.object(pp, "PHOTOS_DIR", self._tmp.name),
+            patch.object(pp, "_resolve_latin_name", side_effect=lambda name, team=None: name),
+        ]
+        # Любое обращение к старой цепочке — провал теста.
+        for getter in ("_get_thesportsdb_url", "_get_sofifa_url", "_get_wikipedia_url", "_get_fotmob_url"):
+            self._patchers.append(patch.object(
+                pp, getter, side_effect=AssertionError(f"{getter} вызван при известном клубе")))
+        for p in self._patchers:
+            p.start()
+
+    def tearDown(self):
+        for p in self._patchers:
+            p.stop()
+        self._tmp.cleanup()
+
+    def test_identified_player_is_downloaded_under_club_path(self):
+        photo = {"source": "TheSportsDB/cutout", "url": "u", "width": 500, "height": 500,
+                 "alpha": True, "data": CUTOUT}
+        with patch.object(pi, "identify_player", return_value=(self.IDENTITY, "tier=30", True)) as ident, \
+                patch.object(pi, "download_photo", return_value=photo) as dl:
+            path = pp.fetch_and_cache("BRADLEY", "Ливерпуль", force_refresh=True, position="RB")
+
+        ident.assert_called_once_with("BRADLEY", "Ливерпуль", "RB")
+        dl.assert_called_once_with(self.IDENTITY)
+        self.assertEqual(path, pp.get_cached_photo_path("BRADLEY", "Ливерпуль"))
+        with open(path, "rb") as f:
+            self.assertEqual(f.read(), CUTOUT)
+
+    def test_unidentified_player_gets_no_photo_and_no_global_search(self):
+        with patch.object(pi, "identify_player", return_value=(None, "однофамильцы: A / B", True)), \
+                patch.object(pi, "download_photo") as dl:
+            path = pp.fetch_and_cache("MARTÍNEZ", "Интер Милан", force_refresh=True)
+        self.assertIsNone(path)
+        dl.assert_not_called()
+        self.assertEqual(os.listdir(self._tmp.name), [])
+
+    def test_missing_roster_gets_no_photo_either(self):
+        with patch.object(pi, "identify_player", return_value=(None, "ростер клуба не получен", False)):
+            self.assertIsNone(pp.fetch_and_cache("MENDY", "Аль-Ахли", force_refresh=True))
+        self.assertEqual(os.listdir(self._tmp.name), [])
+
+    def test_identified_but_no_photo_anywhere(self):
+        with patch.object(pi, "identify_player", return_value=(self.IDENTITY, "tier=30", True)), \
+                patch.object(pi, "download_photo", return_value=None):
+            self.assertIsNone(pp.fetch_and_cache("BRADLEY", "Ливерпуль", force_refresh=True))
+        self.assertEqual(os.listdir(self._tmp.name), [])
+
+    def test_existing_file_is_kept_without_network(self):
+        """Фото, уже положенное скриптом, не перезаписывается без force_refresh."""
+        path = pp.get_cached_photo_path("BRADLEY", "Ливерпуль")
+        with open(path, "wb") as f:
+            f.write(CUTOUT)
+        with patch.object(pi, "identify_player", side_effect=AssertionError("сеть не нужна")):
+            self.assertEqual(pp.fetch_and_cache("BRADLEY", "Ливерпуль"), path)
+
+    def test_fetch_all_players_passes_position(self):
+        with patch.object(pp, "fetch_and_cache", return_value=None) as fetch:
+            pp.fetch_all_players([("BRADLEY", "Ливерпуль", "RB"), ("SALAH", "Ливерпуль"), "Messi"])
+        self.assertEqual(
+            [c.args + (c.kwargs.get("position"),) for c in fetch.call_args_list],
+            [("BRADLEY", "Ливерпуль", "RB"), ("SALAH", "Ливерпуль", None), ("Messi", None, None)],
+        )
 
 
 if __name__ == "__main__":

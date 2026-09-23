@@ -61,7 +61,7 @@ class TestSquadAiPhotoPrefetch(unittest.IsolatedAsyncioTestCase):
         (pairs,), _ = mock_fetch.call_args
         self.assertEqual(
             sorted(pairs),
-            sorted([("Test Player One", self.club), ("Test Player Two", self.club)]),
+            sorted([("Test Player One", self.club, "ST"), ("Test Player Two", self.club, "GK")]),
         )
 
     async def test_replace_schedules_photo_prefetch(self):
