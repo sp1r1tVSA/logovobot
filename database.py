@@ -6027,6 +6027,133 @@ def add_missing_squad_players(team_name: str | None = None) -> int:
     return added
 
 
+def _roster_match_tier(name: str, squad_name: str) -> str:
+    """Which `match_roster_name` tier tied `name` to `squad_name`: key, alias or fuzzy."""
+    if normalize_player_name_key(name) == normalize_player_name_key(squad_name):
+        return "key"
+    if is_same_footballer(name, squad_name):
+        return "alias"
+    return "fuzzy"
+
+
+def plan_player_spelling_merges(team_name: str | None = None, include_fuzzy: bool = True) -> dict:
+    """Spellings in match_events / matches.mvp_player that stand for a squad player.
+
+    Returns {"events": [...], "mvp": [...]}; each item carries `old_name`,
+    `new_name` (the squad spelling) and `method` (see `_roster_match_tier`).
+    Event items are per (team_name, old_name) with `rows` and `total`; MVP items
+    are per match. Read-only: `apply_player_spelling_merges` writes the plan.
+
+    `match_roster_name` is a read-side resolver, so this plan is meant to be
+    reviewed by a person before it is applied; `include_fuzzy=False` leaves out
+    the spellings only its fuzzy tier ties to a squad player.
+    """
+    events: list[dict] = []
+    mvp: list[dict] = []
+    with transaction() as conn:
+        cursor = conn.cursor()
+        rosters: dict[str, list[str]] = {}
+
+        def roster_of(team: str | None) -> list[str]:
+            t = (team or "").strip()
+            canon = (resolve_team_name(t) or t) if t else ""
+            if canon not in rosters:
+                rosters[canon] = _load_club_roster(cursor, canon)
+            return rosters[canon]
+
+        def squad_name(name: str, team: str | None) -> tuple[str, str] | None:
+            hit = match_roster_name(name, roster_of(team))
+            if not hit or hit == name:
+                return None
+            method = _roster_match_tier(name, hit)
+            if method == "fuzzy" and not include_fuzzy:
+                return None
+            return hit, method
+
+        query = """
+            SELECT team_name, player_name, COUNT(*) AS rows_n, COALESCE(SUM(count), 0) AS total
+            FROM match_events
+            WHERE player_name IS NOT NULL AND TRIM(player_name) != ''
+              AND team_name IS NOT NULL AND TRIM(team_name) != ''
+        """
+        params: list = []
+        if team_name:
+            query += " AND LOWER(team_name) = LOWER(?)"
+            params.append(team_name.strip())
+        query += " GROUP BY team_name, player_name ORDER BY team_name, player_name"
+        cursor.execute(query, tuple(params))
+        for row in cursor.fetchall():
+            hit = squad_name(row["player_name"], row["team_name"])
+            if hit:
+                events.append({
+                    "team_name": row["team_name"], "old_name": row["player_name"],
+                    "new_name": hit[0], "method": hit[1],
+                    "rows": row["rows_n"], "total": row["total"],
+                })
+
+        query = """
+            SELECT id, mvp_player, player1_team, player2_team
+            FROM matches
+            WHERE mvp_player IS NOT NULL AND TRIM(mvp_player) != ''
+        """
+        params = []
+        if team_name:
+            query += " AND (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?))"
+            params += [team_name.strip(), team_name.strip()]
+        query += " ORDER BY id"
+        cursor.execute(query, tuple(params))
+        for row in cursor.fetchall():
+            name = row["mvp_player"]
+            sides = [s for s in (row["player1_team"], row["player2_team"]) if s]
+            # Already a squad spelling of either side: nothing to merge.
+            if any(name in roster_of(s) for s in sides):
+                continue
+            hits = [(s, squad_name(name, s)) for s in sides]
+            hits = [(s, h) for s, h in hits if h]
+            if len(hits) == 1:
+                side, (new_name, method) = hits[0]
+                mvp.append({
+                    "match_id": row["id"], "team_name": side, "old_name": name,
+                    "new_name": new_name, "method": method,
+                })
+    return {"events": events, "mvp": mvp}
+
+
+def apply_player_spelling_merges(plan: dict) -> dict:
+    """Write a `plan_player_spelling_merges` plan in one transaction.
+
+    Every UPDATE is guarded by the old value, so a row that changed since the
+    plan was made is left alone. Returns {"events": n, "mvp": n} rows updated.
+    """
+    updated = {"events": 0, "mvp": 0}
+    with transaction() as conn:
+        cursor = conn.cursor()
+        for item in plan.get("events", []):
+            cursor.execute(
+                "UPDATE match_events SET player_name = ? WHERE team_name = ? AND player_name = ?",
+                (item["new_name"], item["team_name"], item["old_name"])
+            )
+            updated["events"] += cursor.rowcount
+        for item in plan.get("mvp", []):
+            cursor.execute(
+                "UPDATE matches SET mvp_player = ? WHERE id = ? AND mvp_player = ?",
+                (item["new_name"], item["match_id"], item["old_name"])
+            )
+            updated["mvp"] += cursor.rowcount
+    return updated
+
+
+def backup_database(target_path: str) -> None:
+    """Consistent online copy of the database, WAL included, via SQLite's backup API."""
+    src = get_connection()
+    dst = sqlite3.connect(target_path)
+    try:
+        src.backup(dst)
+    finally:
+        dst.close()
+        src.close()
+
+
 def get_club_top_scorers(team_name: str) -> list[dict]:
     """Get top goal scorers for a club across confirmed matches."""
     with transaction() as conn:

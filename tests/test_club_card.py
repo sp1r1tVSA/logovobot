@@ -242,6 +242,28 @@ class TestClubCard(unittest.TestCase):
             c.execute("SELECT player_name FROM squad_players WHERE team_name = 'Челси' ORDER BY id")
             self.assertEqual([r["player_name"] for r in c.fetchall()], ["EMEGA", "ROGERS"])
 
+    def test_spelling_merge_plan_and_apply(self):
+        """scripts/merge_player_spellings.py: план находит «Emegha», --apply переписывает, повтор пуст."""
+        self._seed_split_spellings()
+
+        plan = database.plan_player_spelling_merges()
+        self.assertEqual([(i["team_name"], i["old_name"], i["new_name"], i["method"], i["total"])
+                          for i in plan["events"]],
+                         [("Челси", "Emegha", "EMEGA", "fuzzy", 3)])
+        self.assertEqual([(i["old_name"], i["new_name"]) for i in plan["mvp"]], [("Emegha", "EMEGA")])
+        self.assertEqual(database.plan_player_spelling_merges(include_fuzzy=False),
+                         {"events": [], "mvp": []})
+
+        self.assertEqual(database.apply_player_spelling_merges(plan), {"events": 2, "mvp": 1})
+        self.assertEqual(database.plan_player_spelling_merges(), {"events": [], "mvp": []})
+        with database.transaction() as conn:
+            c = conn.cursor()
+            c.execute("SELECT DISTINCT player_name FROM match_events WHERE team_name = 'Челси' ORDER BY 1")
+            self.assertEqual([r["player_name"] for r in c.fetchall()], ["EMEGA", "ROGERS"])
+            c.execute("SELECT mvp_player FROM matches ORDER BY id")
+            self.assertEqual([r["mvp_player"] for r in c.fetchall()], ["EMEGA", "EMEGA"])
+        self.assertEqual(database.get_player_card_stats("EMEGA", "Челси")["total_goals"], 3)
+
     def test_club_match_history_and_summary(self):
         """Test get_club_match_history and get_all_clubs_summary."""
         with database.transaction() as conn:
