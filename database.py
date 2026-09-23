@@ -3554,6 +3554,8 @@ def get_active_match_by_teams(team1: str, team2: str, caption: str | None = None
                 u1.team_name AS u1_team, u2.team_name AS u2_team,
                 COALESCE(r.is_open, 0) AS is_round_open,
                 r.deadline AS round_deadline,
+                r.id AS round_row_id,
+                r.status AS round_status,
                 COALESCE(s.status, '') AS series_status,
                 (SELECT COUNT(*) FROM match_events me WHERE me.match_id = m.id) AS events_count
             FROM matches m
@@ -3598,6 +3600,21 @@ def get_active_match_by_teams(team1: str, team2: str, caption: str | None = None
 
                 score = 0
                 t_type = d.get('tournament_type') or 'league'
+
+                # Тур, который ещё не открывали, результатов не принимает. Повторный
+                # скриншот уже сыгранного матча иначе уезжал в следующую игру той же
+                # пары: подтверждённый матч выпадает из кандидатов, и скоринг брал
+                # лучшее из оставшегося — расписание будущего тура. Закрытый тур
+                # проверке не подлежит: в нём остаются долги, и их доигрывают.
+                if t_type == 'league' and d.get('round_row_id') is not None:
+                    round_state = {
+                        "is_open": d.get('is_round_open'),
+                        "status": d.get('round_status'),
+                        "deadline": d.get('round_deadline'),
+                    }
+                    if debt_policy.round_status(round_state) == debt_policy.ROUND_SCHEDULED:
+                        continue
+
                 is_pending = d['status'] in ('pending', 'reported', 'disputed')
                 is_technical = (d['status'] == 'confirmed' and d.get('events_count', 0) == 0)
                 
@@ -3646,7 +3663,7 @@ def get_active_match_by_teams(team1: str, team2: str, caption: str | None = None
                                         # Open round + deadline not expired
                                         score += 500 + rn_bonus
                                 else:
-                                    # Closed/future round
+                                    # Closed round — незакрытая игра там уже долг
                                     score += 50 + rn_bonus
                             elif is_technical:
                                 # Case 2: Closed/open round where admin set TP/TN
