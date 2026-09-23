@@ -26,7 +26,14 @@ from handlers.base import (
     max_active_rounds_message,
     render_totw,
 )
-from handlers.cabinet import notify_match_confirmed, safe_send_notification, cb_report_choice_manual, safe_edit_or_reply
+from handlers.cabinet import (
+    notify_match_confirmed,
+    safe_send_notification,
+    cb_report_choice_manual,
+    safe_edit_or_reply,
+    clear_report_state,
+    remember_club_back,
+)
 import config
 from config import MAX_WARNS_LIMIT, GROUP_ID
 
@@ -3087,6 +3094,13 @@ async def admin_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE, m
     if not await _ensure_match_access(update, match):
         return
 
+    # «Отмена» ввода результата из админки возвращает сюда: прежний ввод закончен.
+    # Флаг ставим заново — кнопка «Внести результат вручную» ведёт прямо в
+    # cb_report_choice_manual, и её «Отмена»/«Назад» должны вернуть в эту карточку,
+    # даже если админ сам играет в этом матче.
+    clear_report_state(context)
+    context.user_data["is_admin_reporting"] = True
+
     # Дивизион берём из самого матча — карточка открывается и из списка тура,
     # и из просроченных, и из уведомлений, где контекста дивизиона нет.
     match_div_id = match.get("division_id")
@@ -5225,7 +5239,7 @@ async def admin_view_squad(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     div_id = context.user_data.get("admin_roster_div_id")
     if not div_id:
-        user = await asyncio.to_thread(database.get_user_by_team, club)
+        user = await asyncio.to_thread(database.find_user_by_team, club)
         if user and user.get("division_id"):
             div_id = user["division_id"]
 
@@ -5253,7 +5267,10 @@ async def admin_view_squad(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         [InlineKeyboardButton("🗑️ Очистить состав", callback_data=f"admin_squad_clear_{club}")],
         [InlineKeyboardButton("« Назад к клубам", callback_data=back_cb)]
     ]
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+    # «Назад» с карточки клуба возвращает в этот состав, а не в публичный каталог.
+    remember_club_back(context, club, f"admin_squad_view_{club}")
+    # Сюда возвращаются и с фото-карточки клуба — её текстом не отредактировать.
+    await safe_edit_or_reply(query, context, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 
 @admin_only

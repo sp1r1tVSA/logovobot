@@ -272,6 +272,8 @@ async def show_cabinet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if not user:
         return
 
+    clear_report_state(context)
+
     # Check if user has a club assigned
     team = await asyncio.to_thread(database.get_user_team, user.id)
 
@@ -394,7 +396,7 @@ async def show_club_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if not team:
         text = "⚠️ Вы не привязаны к клубу."
         if query:
-            await query.edit_message_text(text, reply_markup=markup)
+            await safe_edit_or_reply(query, context, text, reply_markup=markup, parse_mode=None)
         return
 
     scorers = await asyncio.to_thread(database.get_club_top_scorers, team)
@@ -428,6 +430,7 @@ async def show_club_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
     context.user_data["club_stats_team"] = team
     context.user_data["club_stats_players"] = all_players
+    context.user_data["club_stats_back_cb"] = "cabinet_club_stats"
 
     # Build inline keyboard: safe short callback_data (pcard_{idx}) to avoid Telegram 64-byte limit
     buttons: list[list[InlineKeyboardButton]] = []
@@ -510,7 +513,11 @@ async def show_player_card(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         else:
             team_name = "—"
 
-    back_cb = context.user_data.get("club_stats_back_cb") or (f"clsquad_{team_name}" if team_name and team_name != "—" else "cabinet_club_stats")
+    # pcard_N — индекс в списке последнего экрана («Топ клуба» или состав клуба),
+    # и «Назад» ведёт на тот же экран, откуда пришли.
+    back_cb = context.user_data.get("club_stats_back_cb") if data.startswith("pcard_") else None
+    if not back_cb:
+        back_cb = f"clsquad_{team_name}" if team_name and team_name != "—" else "cabinet_club_stats"
     keyboard = [[InlineKeyboardButton("« Назад", callback_data=back_cb)]]
     markup = InlineKeyboardMarkup(keyboard)
 
@@ -557,17 +564,27 @@ async def send_or_edit_club_schedule(update: Update, context: ContextTypes.DEFAU
     schedule_data = await asyncio.to_thread(database.get_club_schedule_and_results, canon, 12)
     buf = await asyncio.to_thread(club_schedule_generator.generate_club_schedule, schedule_data)
 
-    target_back = back_cb or f"view_club_{canon}"
-    keyboard = [
-        [
-            InlineKeyboardButton("🏛 Карточка", callback_data=f"view_club_{canon}"),
-            InlineKeyboardButton("👥 Состав", callback_data=f"clsquad_{canon}"),
-        ],
-        [
-            InlineKeyboardButton("🌍 Все клубы", callback_data="cb_clubs_catalog"),
-            InlineKeyboardButton("« В кабинет", callback_data="menu_cabinet"),
+    card_cb = f"view_club_{canon}"
+    target_back = back_cb or card_cb
+    if target_back == card_cb:
+        keyboard = [
+            [
+                InlineKeyboardButton("« К карточке клуба", callback_data=card_cb),
+                InlineKeyboardButton("👥 Состав", callback_data=f"clsquad_{canon}"),
+            ],
+            [InlineKeyboardButton("🌍 Все клубы", callback_data="cb_clubs_catalog")],
         ]
-    ]
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton("🏛 Карточка", callback_data=card_cb),
+                InlineKeyboardButton("👥 Состав", callback_data=f"clsquad_{canon}"),
+            ],
+            [
+                InlineKeyboardButton("🌍 Все клубы", callback_data="cb_clubs_catalog"),
+                InlineKeyboardButton("« Назад", callback_data=target_back),
+            ]
+        ]
     markup = InlineKeyboardMarkup(keyboard)
     caption = f"📅 <b>МАТЧИ И РАСПИСАНИЕ: {html.escape(canon.upper())}</b>"
 
@@ -661,6 +678,36 @@ async def get_cached_or_fetch_user_avatar(bot, user_id: int | None) -> str | Non
     return None
 
 
+_CLUB_BACK_KEY = "club_card_back"
+
+
+def remember_club_back(context: ContextTypes.DEFAULT_TYPE, team: str | None, back_cb: str) -> None:
+    """Record where the «Назад» of a club card should lead.
+
+    The card is reopened by `view_club_<name>` from its own sub-screens (squad,
+    schedule), and that callback cannot carry the origin: a Cyrillic club name
+    already eats most of the 64-byte limit. `team=None` means "whichever club the
+    user picks next", which is what a catalog list stores.
+    """
+    user_data = context.user_data
+    if isinstance(user_data, dict):
+        user_data[_CLUB_BACK_KEY] = {"team": team, "back": back_cb}
+
+
+def recall_club_back(context: ContextTypes.DEFAULT_TYPE, canon: str) -> str | None:
+    """The recorded back target for `canon`, or None if the record is for another club."""
+    user_data = context.user_data
+    if not isinstance(user_data, dict):
+        return None
+    nav = user_data.get(_CLUB_BACK_KEY)
+    if not isinstance(nav, dict) or not nav.get("back"):
+        return None
+    team = nav.get("team")
+    if team is not None and not database.teams_match(team, canon):
+        return None
+    return nav["back"]
+
+
 async def send_or_edit_club_card(update: Update, context: ContextTypes.DEFAULT_TYPE, team_name: str, back_cb: str = "cb_clubs_catalog") -> None:
     """Send or edit the high-res graphic club card with compact inline keyboard and no wall of text."""
     query = update.callback_query
@@ -668,6 +715,7 @@ async def send_or_edit_club_card(update: Update, context: ContextTypes.DEFAULT_T
     chat = update.effective_chat
 
     canon = database.resolve_team_name(team_name) or team_name
+    remember_club_back(context, canon, back_cb)
     card_data = await asyncio.to_thread(database.get_club_card_data, canon)
     
     # Fetch owner avatar if manager is assigned
@@ -749,7 +797,7 @@ async def show_my_club_card(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         text = "⚠️ Вы не привязаны ни к одному клубу лиги."
         keyboard = [[InlineKeyboardButton("« В кабинет", callback_data="menu_cabinet")]]
         if query and query.message:
-            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+            await safe_edit_or_reply(query, context, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=None)
         elif update.message:
             await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return
@@ -770,14 +818,13 @@ async def show_specific_club_card(update: Update, context: ContextTypes.DEFAULT_
 
     raw_team = query.data.replace("view_club_", "")
     canon = database.resolve_team_name(raw_team) or raw_team
-    div_id = None
-    with database.transaction() as conn:
-        c = conn.cursor()
-        c.execute("SELECT division_id FROM users WHERE LOWER(team_name) = LOWER(?) AND division_id IS NOT NULL LIMIT 1", (canon.strip(),))
-        row = c.fetchone()
-        if row:
-            div_id = row["division_id"]
-    back_cb = f"clubs_catalog_div:{div_id}" if div_id else "cb_clubs_catalog"
+    # Карточку открывают из каталога, из кабинета и из админского состава, а её
+    # «Состав»/«Матчи» возвращаются сюда же — «Назад» должен помнить исходный экран.
+    back_cb = recall_club_back(context, canon)
+    if not back_cb:
+        owner = await asyncio.to_thread(database.find_user_by_team, canon)
+        div_id = owner.get("division_id") if owner else None
+        back_cb = f"clubs_catalog_div:{div_id}" if div_id else "cb_clubs_catalog"
     await send_or_edit_club_card(update, context, canon, back_cb=back_cb)
 
 
@@ -828,6 +875,7 @@ async def show_club_squad(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     # Player card buttons
     context.user_data["club_stats_team"] = canon
     context.user_data["club_stats_players"] = [p["player_name"] for p in squad_stats]
+    context.user_data["club_stats_back_cb"] = f"clsquad_{canon}"
 
     buttons: list[list[InlineKeyboardButton]] = []
     row: list[InlineKeyboardButton] = []
@@ -924,7 +972,16 @@ async def show_clubs_catalog_divisions(update: Update, context: ContextTypes.DEF
     else:
         text = "🌍 <b>КАТАЛОГ КЛУБОВ</b>\n\n<i>В текущем сезоне пока нет активных дивизионов.</i>"
 
-    buttons.append([InlineKeyboardButton("« Назад в меню", callback_data="main_menu")])
+    # Каталог открывается кнопкой «Все клубы» из кабинета — туда и возвращаемся.
+    # У незарегистрированного кабинета нет, ему остаётся главное меню.
+    user = update.effective_user
+    has_cabinet = False
+    if user:
+        has_cabinet = is_admin(user.id) or bool(await asyncio.to_thread(database.get_user_team, user.id))
+    if has_cabinet:
+        buttons.append([InlineKeyboardButton("« В кабинет", callback_data="menu_cabinet")])
+    else:
+        buttons.append([InlineKeyboardButton("« Назад в меню", callback_data="main_menu")])
     markup = InlineKeyboardMarkup(buttons)
 
     target_chat_id = query.message.chat_id if query and query.message else (update.effective_chat.id if update.effective_chat else update.effective_user.id)
@@ -998,6 +1055,7 @@ async def show_clubs_catalog_for_division(update: Update, context: ContextTypes.
         buttons.append(row)
 
     buttons.append([InlineKeyboardButton("« Назад к дивизионам", callback_data="cb_clubs_catalog")])
+    remember_club_back(context, None, f"clubs_catalog_div:{div_id}")
     markup = InlineKeyboardMarkup(buttons)
 
     target_chat_id = query.message.chat_id if query and query.message else (update.effective_chat.id if update.effective_chat else update.effective_user.id)
@@ -1264,10 +1322,11 @@ async def _refuse_cup_results(query, context, match_id: int) -> bool:
     reason = await _cup_results_closed(match_id)
     if not reason:
         return False
+    back_cb = get_match_cancel_cb(context, query.from_user.id if query else 0, match_id)
     for key in ("reporting_match_id", "awaiting_report_photo", "ai_photos_list"):
         context.user_data.pop(key, None)
     if query:
-        back = InlineKeyboardMarkup([[InlineKeyboardButton("« К матчу", callback_data=f"cabinet_view_match_{match_id}")]])
+        back = InlineKeyboardMarkup([[InlineKeyboardButton("« К матчу", callback_data=back_cb)]])
         await safe_edit_or_reply(query, context, f"🔒 {html.escape(reason)}", parse_mode="HTML", reply_markup=back)
     return True
 
@@ -1282,6 +1341,7 @@ async def show_my_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer("⛔ Просмотр и управление карточками в общем чате доступны только администраторам. Откройте ЛС с ботом!", show_alert=True)
         return
 
+    clear_report_state(context)
     user_id = query.from_user.id
     matches = await asyncio.to_thread(database.get_pending_matches, user_id)
     
@@ -1307,14 +1367,19 @@ async def show_my_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     markup = InlineKeyboardMarkup(keyboard)
     await safe_edit_or_reply(query, context, text, parse_mode="Markdown", reply_markup=markup)
 
-async def cabinet_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+async def cabinet_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE, match_id: int | None = None) -> None:
     query = update.callback_query
     if not query:
         return
     await query.answer()
     
-    match_id = int(query.data.replace("cabinet_view_match_", ""))
+    # Экраны согласования времени перерисовывают карточку со своим callback_data
+    # (cb_accept_time_5, cb_quick_time_5_…), поэтому id матча передают явно.
+    if match_id is None:
+        match_id = int(query.data.replace("cabinet_view_match_", ""))
     user_id = query.from_user.id
+    # «Отмена» любого шага ввода результата ведёт сюда — ввод на этом заканчивается.
+    clear_report_state(context)
     
     m = await asyncio.to_thread(database.get_match, match_id)
     if not m:
@@ -1435,6 +1500,53 @@ async def cabinet_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     await safe_edit_or_reply(query, context, text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
 
+REPORT_STATE_KEYS = (
+    # session
+    "reporting_match_id",
+    "reporting_mode",
+    "reporter_id",
+    "is_admin_reporting",
+    "cup_confirm_callback",
+    # screenshots
+    "report_photo_id",
+    "awaiting_report_photo",
+    "ai_photos_list",
+    "processed_media_groups",
+    "is_single_timeline",
+    # manual entry: score, scorers, assists, MVP
+    "report_home_team",
+    "report_away_team",
+    "report_home_goals",
+    "report_away_goals",
+    "home_goals_count",
+    "away_goals_count",
+    "home_assists_count",
+    "away_assists_count",
+    "current_picking_phase",
+    "goals_to_pick",
+    "assists_to_pick",
+    "temp_active_squad_goals",
+    "temp_active_squad_assists",
+    "temp_mvp_candidates",
+    "temp_mvp_squad",
+    "report_mvp_player",
+)
+
+
+def clear_report_state(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Drop every key the result-entry flow may have written.
+
+    Leaving the flow through a menu button used to keep `awaiting_report_photo`
+    alive, so the next photo sent to the bot was taken for a match result.
+    Every cabinet screen that leaves the flow calls this.
+    """
+    user_data = getattr(context, "user_data", None)
+    if user_data is None:  # PTB gives None for updates without a user
+        return
+    for key in REPORT_STATE_KEYS:
+        user_data.pop(key, None)
+
+
 async def cancel_score_report_and_navigate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """FSM fallback: clears all score-reporting state and routes user to the appropriate screen.
 
@@ -1442,26 +1554,7 @@ async def cancel_score_report_and_navigate(update: Update, context: ContextTypes
     while a score-reporting ConversationHandler is active. Without this fallback the reporting
     keys survive in context.user_data and corrupt the next reporting session.
     """
-    # ── Wipe every key that the reporting flow may have written ──────────────────
-    for key in (
-        "reporting_match_id",
-        "report_photo_id",
-        "awaiting_report_photo",
-        "home_goals",
-        "away_goals",
-        "home_assists",
-        "away_assists",
-        "home_goal_players",
-        "away_goal_players",
-        "home_assist_players",
-        "away_assist_players",
-        "is_admin_reporting",
-        "ai_photos_list",
-        "processed_media_groups",
-        "report_mvp_player",
-        "cup_confirm_callback",
-    ):
-        context.user_data.pop(key, None)
+    clear_report_state(context)
 
     query = update.callback_query
     if query:
@@ -1474,6 +1567,8 @@ async def cancel_score_report_and_navigate(update: Update, context: ContextTypes
     if dest == "main_menu":
         from handlers.base import show_main_menu
         await show_main_menu(update, context)
+    elif dest == "menu_cabinet":
+        await show_cabinet(update, context)
     else:
         await show_my_matches(update, context)
 
@@ -1729,7 +1824,7 @@ async def cb_quick_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
             await safe_send_notification(context.bot, opp_id, pm_text, InlineKeyboardMarkup(kb))
 
     # Return user to match card view
-    await cabinet_view_match(update, context)
+    await cabinet_view_match(update, context, match_id)
 
 async def cb_accept_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Accept the proposed match time."""
@@ -1760,7 +1855,7 @@ async def cb_accept_time(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             kb = [[InlineKeyboardButton("🏟 Открыть карточку матча", callback_data=f"cabinet_view_match_{match_id}")]]
             await safe_send_notification(context.bot, proposer_id, pm_text, InlineKeyboardMarkup(kb))
 
-    await cabinet_view_match(update, context)
+    await cabinet_view_match(update, context, match_id)
 
 async def start_custom_time_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Prompt user to type custom time."""
@@ -1875,19 +1970,50 @@ async def show_game_history(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     keyboard = [[InlineKeyboardButton("« Назад в кабинет", callback_data="menu_cabinet")]]
     markup = InlineKeyboardMarkup(keyboard)
-    await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    await safe_edit_or_reply(query, context, text, parse_mode="HTML", reply_markup=markup)
 
 
 # ==========================================
 # ВВОД И ПОДТВЕРЖДЕНИЕ РЕЗУЛЬТАТОВ МАТЧА
 # ==========================================
 
+def _admin_non_participant(user_id: int, match) -> bool:
+    """An admin entering the result of a match they do not play in."""
+    if not match or not is_admin(user_id):
+        return False
+    return user_id not in (match.get("player1_id"), match.get("player2_id"))
+
+
+def reporting_as_admin(context: ContextTypes.DEFAULT_TYPE) -> bool:
+    """Whether the current result entry was opened from the admin match card.
+
+    Decides only where the flow's navigation leads (admin card or the cabinet),
+    never who may submit. The flag is raised by the admin entry points and settled
+    again by every cabinet entry, so an admin who also plays in the league goes
+    back to their own cabinet after reporting their own match.
+    """
+    return bool(context.user_data.get("is_admin_reporting"))
+
+
 def get_match_cancel_cb(context: ContextTypes.DEFAULT_TYPE, user_id: int, match_id: int) -> str:
-    """Return appropriate cancel callback data depending on whether user is admin or player."""
-    is_admin_user = is_admin(user_id) or context.user_data.get("is_admin_reporting", False)
-    if is_admin_user:
+    """Return the cancel callback: the admin match card or the player's own one."""
+    if reporting_as_admin(context):
         return f"admin_view_match_{match_id}"
     return f"cabinet_view_match_{match_id}"
+
+
+def match_done_back_buttons(context: ContextTypes.DEFAULT_TYPE, match, match_id: int) -> list:
+    """Back buttons under «result saved»: to the admin card and round, or to the cabinet."""
+    if not reporting_as_admin(context):
+        return [[InlineKeyboardButton("« К своим матчам", callback_data="cabinet_my_matches")]]
+    div_id = match.get("division_id") if match else None
+    round_number = match.get("round_number") if match else None
+    rows = [[InlineKeyboardButton("« Назад к матчу", callback_data=f"admin_view_match_{match_id}")]]
+    if div_id and round_number and round_number > 0:
+        rows.append([InlineKeyboardButton("« Назад к туру", callback_data=f"admin_div_round_matches:{div_id}:{round_number}")])
+    elif round_number and round_number > 0:
+        rows.append([InlineKeyboardButton("« Назад к туру", callback_data=f"admin_round_matches_{round_number}")])
+    return rows
 
 async def start_score_reporting(update: Update, context: ContextTypes.DEFAULT_TYPE, match_id: int | None = None) -> None:
     query = update.callback_query
@@ -1914,6 +2040,9 @@ async def start_score_reporting(update: Update, context: ContextTypes.DEFAULT_TY
         return
 
     user_id = query.from_user.id if query else update.effective_user.id
+    # Кабинетный вход («Ввести результат» из карточки или ЛС): флаг админского
+    # ввода, оставшийся от админ-карточки, здесь не действует.
+    context.user_data["is_admin_reporting"] = _admin_non_participant(user_id, match)
 
     home_team = match['player1_team'] or match['player1_nickname']
     away_team = match['player2_team'] or match['player2_nickname']
@@ -1921,7 +2050,6 @@ async def start_score_reporting(update: Update, context: ContextTypes.DEFAULT_TY
     context.user_data["report_home_team"] = home_team
     context.user_data["report_away_team"] = away_team
 
-    user_id = query.from_user.id if query else update.effective_user.id
     cancel_cb = get_match_cancel_cb(context, user_id, match_id)
 
     text = (
@@ -1972,7 +2100,7 @@ async def cb_report_choice_auto(update: Update, context: ContextTypes.DEFAULT_TY
         "Пожалуйста, отправьте <b>от 1 до 3 скриншотов</b> матча строго с статистикой(голы и ассисты).\n\n"
         "💡 <i>Вы можете отправить от 1 до 3 фото сразу альбомом.</i>"
     )
-    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data=f"cabinet_view_match_{match_id}")]]
+    keyboard = [[InlineKeyboardButton("❌ Отмена", callback_data=get_match_cancel_cb(context, user_id, match_id))]]
     await safe_edit_or_reply(query, context, text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
 
 async def cb_report_choice_manual(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2003,6 +2131,11 @@ async def cb_report_choice_manual(update: Update, context: ContextTypes.DEFAULT_
         return
 
     user_id = query.from_user.id
+    # Кнопка стоит и в админ-карточке матча, и в кабинетном потоке. Флаг ставят
+    # админские входы; без него (например, после перезапуска бота) к админ-карточке
+    # ведём только админа, который сам в этом матче не играет.
+    if not reporting_as_admin(context):
+        context.user_data["is_admin_reporting"] = _admin_non_participant(user_id, match)
     context.user_data["reporting_match_id"] = match_id
     context.user_data["reporting_mode"] = "manual"
     # К ручному вводу часто переходят как раз потому, что ИИ ошибся, — корону
@@ -2556,9 +2689,9 @@ async def _show_manual_confirmation(update: Update, context: ContextTypes.DEFAUL
         f"{photo_line}"
     )
 
-    is_admin_user = is_admin(update.effective_user.id) or context.user_data.get("is_admin_reporting", False)
-    cancel_cb = f"admin_view_match_{match_id}" if is_admin_user else f"cabinet_view_match_{match_id}"
-    confirm_text = "✅ Сохранить и занести результат" if is_admin_user else "✅ Подтвердить и занести результат"
+    as_admin = reporting_as_admin(context)
+    cancel_cb = get_match_cancel_cb(context, update.effective_user.id, match_id)
+    confirm_text = "✅ Сохранить и занести результат" if as_admin else "✅ Подтвердить и занести результат"
 
     keyboard = [
         [InlineKeyboardButton(confirm_text, callback_data=f"cb_submit_report_to_guest_{match_id}")],
@@ -2791,8 +2924,7 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 f"📸 <i>Скриншот(ы) прикреплены.</i>"
             )
 
-            is_admin_user = is_admin(user_id) or context.user_data.get("is_admin_reporting", False)
-            cancel_cb = f"admin_view_match_{match_id}" if is_admin_user else f"cabinet_view_match_{match_id}"
+            cancel_cb = get_match_cancel_cb(context, user_id, match_id)
             manual_cb = f"cb_report_choice_manual_{match_id}"
 
             keyboard = [
@@ -3255,13 +3387,7 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
         mvp_player=mvp_player
     ) + debt_note
 
-    if is_admin_user:
-        back_buttons = [
-            [InlineKeyboardButton("« Назад к матчу", callback_data=f"admin_view_match_{match_id}")],
-            [InlineKeyboardButton("« Назад к туру", callback_data=f"admin_round_matches_{match['round_number']}")]
-        ]
-    else:
-        back_buttons = [[InlineKeyboardButton("« К своим матчам", callback_data="cabinet_my_matches")]]
+    back_buttons = match_done_back_buttons(context, match, match_id)
 
     markup = InlineKeyboardMarkup(back_buttons)
     if photo_id and len(reporter_text) <= 1024:
@@ -3417,14 +3543,7 @@ async def submit_report_to_guest(update: Update, context: ContextTypes.DEFAULT_T
     await refresh_debts_summary(context)
     await refresh_league_table(context, division_id=match.get("division_id"))
 
-    is_admin_user = is_admin(submitter_id) or context.user_data.get("is_admin_reporting", False)
-    if is_admin_user:
-        back_buttons = [
-            [InlineKeyboardButton("« Назад к матчу", callback_data=f"admin_view_match_{match_id}")],
-            [InlineKeyboardButton("« Назад к туру", callback_data=f"admin_round_matches_{match['round_number']}")],
-        ]
-    else:
-        back_buttons = [[InlineKeyboardButton("« К своим матчам", callback_data="cabinet_my_matches")]]
+    back_buttons = match_done_back_buttons(context, match, match_id)
     markup = InlineKeyboardMarkup(back_buttons)
     done_text = f"✅ <b>Результат матча #{match_id} занесён в таблицу!</b>"
 
