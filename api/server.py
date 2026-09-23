@@ -8,7 +8,7 @@ Serves REST API and static single-page application assets.
 import os
 import asyncio
 import logging
-from aiohttp import web
+from aiohttp import hdrs, web
 
 from api.routes_wallet import (
     handle_bootstrap,
@@ -169,7 +169,48 @@ async def cors_middleware(request: web.Request, handler):
     # Static assets (JS/CSS) in Telegram WebView: must revalidate so updates land immediately
     if request.path.startswith(("/js/", "/css/", "/static/")):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    # Логотипы, аватары и фото игроков меняются редко: сутки берём из кэша WebView,
+    # не спрашивая сервер. Ошибки (404 ещё не залитого логотипа) не кэшируем.
+    elif request.path.startswith("/assets/") and response.status in (200, 304):
+        response.headers["Cache-Control"] = "public, max-age=86400"
 
+    return response
+
+
+# Сжимаем то, что сжимается: JS/CSS/HTML фронтенда и JSON API. PNG/JPEG уже сжаты.
+_COMPRESSIBLE_STATIC_EXT = (".js", ".css", ".html", ".json", ".svg", ".txt")
+_MIN_COMPRESS_BYTES = 1024
+
+
+def _should_compress(request: web.Request, response: web.StreamResponse) -> bool:
+    if response.status != 200 or request.method == "HEAD":
+        return False
+    if "gzip" not in request.headers.get(hdrs.ACCEPT_ENCODING, "").lower():
+        return False
+    # Сжатие и Range несовместимы; уже сжатый ответ второй раз не жмём.
+    if hdrs.RANGE in request.headers or hdrs.CONTENT_ENCODING in response.headers:
+        return False
+
+    path = request.path
+    if isinstance(response, web.FileResponse):
+        return path in ("/", "/app") or path.lower().endswith(_COMPRESSIBLE_STATIC_EXT)
+    if isinstance(response, web.Response):
+        body = response.body
+        return (
+            response.content_type == "application/json"
+            and isinstance(body, (bytes, bytearray))
+            and len(body) >= _MIN_COMPRESS_BYTES
+        )
+    return False
+
+
+@web.middleware
+async def compression_middleware(request: web.Request, handler):
+    """gzip для текстовых ответов: по мобильной сети JS/CSS Mini App грузятся в разы быстрее."""
+    response = await handler(request)
+    if _should_compress(request, response):
+        response.enable_compression(web.ContentCoding.gzip)
+        response.headers[hdrs.VARY] = hdrs.ACCEPT_ENCODING
     return response
 
 
@@ -299,7 +340,7 @@ async def handle_index(request: web.Request) -> web.FileResponse:
 def create_app() -> web.Application:
     """Construct and configure the aiohttp Application."""
     # cors остаётся снаружи, чтобы 429 и 401 тоже уходили с CORS-заголовками.
-    app = web.Application(middlewares=[cors_middleware, rate_limit_middleware, lockdown_middleware])
+    app = web.Application(middlewares=[cors_middleware, compression_middleware, rate_limit_middleware, lockdown_middleware])
 
     # 1. Wallet & Bootstrap
     app.router.add_get("/api/bootstrap", handle_bootstrap)

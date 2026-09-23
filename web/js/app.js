@@ -16,42 +16,85 @@ class AppController {
     this.currentLeaderTab = 'scorers';
     // Сортировка таблицы: по умолчанию как её отдаёт бэкенд — по очкам, вниз.
     this.standingsSort = { key: 'points', dir: 'desc' };
+    // Подписи входных данных уже нарисованных блоков: key -> JSON.
+    this._renderSigs = new Map();
     this.init();
   }
 
   async init() {
-    // 1. Subscribe UI renderer to reactive store changes
+    // 1. Subscribe UI renderer to reactive store changes.
+    // Рисуем только активный экран и только те блоки, чьи входные данные изменились:
+    // иначе каждое изменение купона перестраивало innerHTML всех вкладок разом.
     store.subscribe((state) => {
-      UIRenderer.renderHeader(state.user, state.progression, state.unclaimedAchievementsCount);
-      UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'lobby-division-tabs-container', state.lobbyMode);
-      UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'tournament-division-tabs-container');
-      UIRenderer.renderHotMatches(state.hotMatches);
-      UIRenderer.renderOddsMovers(state.oddsMovers);
-      UIRenderer.renderRecommendations(state.recommendations, state.searchQuery);
-      UIRenderer.renderMatches(state.tours, state.marketCategoryFilter, state.searchQuery, state.selectedDivisionId);
-      UIRenderer.renderLobbyMode(state.lobbyMode);
-      if (state.lobbyMode === 'cup') UIRenderer.renderCupView(state.cup, state.searchQuery);
-      UIRenderer.renderMatchCenter(state.matchDetail, state.matchStats, state.matchH2H, state.matchInsights, state.matchLive, state.matchMarkets, state.matchCenterSubTab);
-      UIRenderer.renderTournaments(state.standings, state.results, state.tournamentTopStats, this.currentTournamentTab, state.standingsForm, this.standingsSort, this.currentLeaderTab);
-      UIRenderer.renderPredictionsHistory(state.myBets, state.myBetsFilter);
-      UIRenderer.renderSavedCoupons(state.savedCoupons);
-      UIRenderer.renderProfile(state.user, state.progression, state.myStats, state.achievements);
-      UIRenderer.renderMyClubView(state.myClub.overview);
-      UIRenderer.updateNavClubIcon(state.myClub.overview);
-      if (!state.myClub.overview || state.myClub.overview.registered) {
-        UIRenderer.renderMyClubMatches(state.myClub.matches, state.myClubLoading);
-        UIRenderer.renderMyClubHistory(state.myClubRecent, state.myClubLoading);
-        UIRenderer.renderMyClubSquad(state.myClub.squad, state.myClubSquadMeta, state.myClubLoading);
-        UIRenderer.renderMyClubSubTab(state.myClubSubTab);
+      const view = state.activeView;
+      const myClub = state.myClub;
+
+      this.renderBlock('header', [state.user, state.progression, state.unclaimedAchievementsCount],
+        () => UIRenderer.renderHeader(state.user, state.progression, state.unclaimedAchievementsCount));
+      this.renderBlock('navClubIcon', [myClub.overview],
+        () => UIRenderer.updateNavClubIcon(myClub.overview));
+
+      if (view === 'lobby') {
+        this.renderBlock('lobbyDivTabs', [state.divisions, state.selectedDivisionId, state.lobbyMode],
+          () => UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'lobby-division-tabs-container', state.lobbyMode));
+        this.renderBlock('hotMatches', [state.hotMatches],
+          () => UIRenderer.renderHotMatches(state.hotMatches));
+        this.renderBlock('oddsMovers', [state.oddsMovers],
+          () => UIRenderer.renderOddsMovers(state.oddsMovers));
+        this.renderBlock('recommendations', [state.recommendations, state.searchQuery],
+          () => UIRenderer.renderRecommendations(state.recommendations, state.searchQuery));
+        this.renderBlock('matches', [state.tours, state.marketCategoryFilter, state.searchQuery, state.selectedDivisionId],
+          () => UIRenderer.renderMatches(state.tours, state.marketCategoryFilter, state.searchQuery, state.selectedDivisionId));
+        this.renderBlock('lobbyMode', [state.lobbyMode],
+          () => UIRenderer.renderLobbyMode(state.lobbyMode));
+        if (state.lobbyMode === 'cup') {
+          this.renderBlock('cup', [state.cup, state.searchQuery],
+            () => UIRenderer.renderCupView(state.cup, state.searchQuery));
+        }
+      } else if (view === 'match_center') {
+        this.renderBlock('matchCenter',
+          [state.matchDetail, state.matchStats, state.matchH2H, state.matchInsights, state.matchLive, state.matchMarkets, state.matchCenterSubTab],
+          () => UIRenderer.renderMatchCenter(state.matchDetail, state.matchStats, state.matchH2H, state.matchInsights, state.matchLive, state.matchMarkets, state.matchCenterSubTab));
+      } else if (view === 'tournaments') {
+        this.renderBlock('tournamentDivTabs', [state.divisions, state.selectedDivisionId],
+          () => UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'tournament-division-tabs-container'));
+        this.renderTournamentTab();
+      } else if (view === 'history') {
+        this.renderBlock('history', [state.myBets, state.myBetsFilter],
+          () => UIRenderer.renderPredictionsHistory(state.myBets, state.myBetsFilter));
+        this.renderBlock('savedCoupons', [state.savedCoupons],
+          () => UIRenderer.renderSavedCoupons(state.savedCoupons));
+      } else if (view === 'profile') {
+        this.renderBlock('profile', [state.user, state.progression, state.myStats, state.achievements],
+          () => UIRenderer.renderProfile(state.user, state.progression, state.myStats, state.achievements));
+      } else if (view === 'my_club') {
+        this.renderBlock('myClubHero', [myClub.overview],
+          () => UIRenderer.renderMyClubView(myClub.overview));
+        if (!myClub.overview || myClub.overview.registered) {
+          this.renderBlock('myClubMatches', [myClub.matches, state.myClubLoading],
+            () => UIRenderer.renderMyClubMatches(myClub.matches, state.myClubLoading));
+          this.renderBlock('myClubHistory', [state.myClubRecent, state.myClubLoading],
+            () => UIRenderer.renderMyClubHistory(state.myClubRecent, state.myClubLoading));
+          this.renderBlock('myClubSquad', [myClub.squad, state.myClubSquadMeta, state.myClubLoading],
+            () => UIRenderer.renderMyClubSquad(myClub.squad, state.myClubSquadMeta, state.myClubLoading));
+          this.renderBlock('myClubSubTab', [state.myClubSubTab],
+            () => UIRenderer.renderMyClubSubTab(state.myClubSubTab));
+        } else {
+          // Онбординг очистил панели — после регистрации их нужно нарисовать заново.
+          ['myClubMatches', 'myClubHistory', 'myClubSquad', 'myClubSubTab'].forEach(k => this.invalidateRender(k));
+        }
       }
+
+      // Купон перерисовывается инкрементально — сравнивать его входы дороже, чем обновить.
       UIRenderer.renderSlipDrawer(state.slip, state.stakeAmount);
       if (state.slip.length === 0 && this.isCouponOpen()) this.toggleSlipDrawer(false);
 
-      // Keep modal markets selection highlights in sync
-      document.querySelectorAll('#modal-markets-list .odd-btn').forEach(b => {
-        const bMId = parseInt(b.dataset.matchId);
-        const bOutcome = b.dataset.outcome;
-        b.classList.toggle('selected', store.isSelectionActive(bMId, bOutcome));
+      // Подсветку выбранных исходов обновляем классом, не перерисовывая списки:
+      // поэтому купон и не входит во входные данные блоков выше.
+      this.renderBlock('oddSelection', [state.slip.map(s => [s.match_id, s.outcome])], () => {
+        document.querySelectorAll('.odd-btn[data-match-id][data-outcome]').forEach(b => {
+          b.classList.toggle('selected', store.isSelectionActive(parseInt(b.dataset.matchId), b.dataset.outcome));
+        });
       });
     });
 
@@ -227,16 +270,45 @@ class AppController {
     }
   }
 
+  /**
+   * Рисует блок, только если его входные данные изменились с прошлого раза.
+   * Подпись запоминается после успешной отрисовки, так что упавший блок повторится.
+   */
+  renderBlock(key, deps, render) {
+    let sig;
+    try {
+      sig = JSON.stringify(deps);
+    } catch (e) {
+      sig = null;
+    }
+    if (sig !== null && this._renderSigs.get(key) === sig) return;
+    try {
+      render();
+      if (sig !== null) this._renderSigs.set(key, sig);
+    } catch (e) {
+      this._renderSigs.delete(key);
+      console.error(`Render error in ${key}:`, e);
+    }
+  }
+
+  /** Сбрасывает подпись блока: следующий notify нарисует его заново. */
+  invalidateRender(key) {
+    this._renderSigs.delete(key);
+  }
+
   renderTournamentTab(tab = null) {
-    UIRenderer.renderTournaments(
-      store.state.standings,
-      store.state.results,
-      store.state.tournamentTopStats,
-      tab || this.currentTournamentTab,
-      store.state.standingsForm,
+    if (tab) this.currentTournamentTab = tab;
+    const s = store.state;
+    const deps = [s.standings, s.results, s.tournamentTopStats, this.currentTournamentTab, s.standingsForm, this.standingsSort, this.currentLeaderTab];
+    this.renderBlock('tournaments', deps, () => UIRenderer.renderTournaments(
+      s.standings,
+      s.results,
+      s.tournamentTopStats,
+      this.currentTournamentTab,
+      s.standingsForm,
       this.standingsSort,
       this.currentLeaderTab
-    );
+    ));
   }
 
   async fetchTournamentData(divisionId = null) {
@@ -282,6 +354,8 @@ class AppController {
   }
 
   async fetchMyClubData() {
+    // Баннер мог показывать ошибку прошлой загрузки — ближайший notify нарисует его заново.
+    this.invalidateRender('myClubHero');
     store.setMyClubLoading(true);
     try {
       const overviewRes = await api.getMyClubOverview();
@@ -525,8 +599,12 @@ class AppController {
     // 5. Search Input
     const searchInput = document.getElementById('match-search-input');
     if (searchInput) {
+      // Фильтр перестраивает списки матчей — не на каждую букву, а после паузы в наборе.
+      let searchTimer = null;
       searchInput.addEventListener('input', (e) => {
-        store.setSearchQuery(e.target.value);
+        clearTimeout(searchTimer);
+        const value = e.target.value;
+        searchTimer = setTimeout(() => store.setSearchQuery(value), 150);
       });
     }
 

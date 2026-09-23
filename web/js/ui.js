@@ -322,7 +322,7 @@ export function renderTeamLogoWrapperHtml(teamName, extraClass = '') {
   const fbBaseStyle = "font-size:20px; line-height:1; align-items:center; justify-content:center; color:var(--text-muted);";
 
   if (url) {
-    return `<div class="team-logo-wrapper ${extraClass}" style="${wrapStyle}"><img src="${url}" alt="${teamName || 'Club'}" loading="lazy" style="${imgStyle}" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';" /><span class="team-logo-fallback" style="display:none; ${fbBaseStyle}">🛡️</span></div>`;
+    return `<div class="team-logo-wrapper ${extraClass}" style="${wrapStyle}"><img src="${url}" alt="${teamName || 'Club'}" loading="lazy" decoding="async" style="${imgStyle}" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';" /><span class="team-logo-fallback" style="display:none; ${fbBaseStyle}">🛡️</span></div>`;
   }
   return `<div class="team-logo-wrapper ${extraClass}" style="${wrapStyle}"><span class="team-logo-fallback" style="display:flex; ${fbBaseStyle}">🛡️</span></div>`;
 }
@@ -330,7 +330,7 @@ export function renderTeamLogoWrapperHtml(teamName, extraClass = '') {
 export function renderTeamLogoHtml(teamName, size = 28, extraClass = '') {
   const url = getTeamLogoUrl(teamName);
   if (url) {
-    return `<img src="${url}" alt="${teamName || 'Club'}" class="team-logo-img ${extraClass}" style="width:${size}px; height:${size}px; object-fit:contain; filter:drop-shadow(0 2px 6px rgba(0,0,0,0.4)); vertical-align:middle; display:inline-block; flex-shrink:0; background:transparent;" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='inline-block';" /><span class="team-logo-fallback ${extraClass}" style="display:none; font-size:${Math.round(size * 0.75)}px; vertical-align:middle;">🛡️</span>`;
+    return `<img src="${url}" alt="${teamName || 'Club'}" class="team-logo-img ${extraClass}" loading="lazy" decoding="async" style="width:${size}px; height:${size}px; object-fit:contain; filter:drop-shadow(0 2px 6px rgba(0,0,0,0.4)); vertical-align:middle; display:inline-block; flex-shrink:0; background:transparent;" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='inline-block';" /><span class="team-logo-fallback ${extraClass}" style="display:none; font-size:${Math.round(size * 0.75)}px; vertical-align:middle;">🛡️</span>`;
   }
   return `<span class="team-logo-fallback ${extraClass}" style="font-size:${Math.round(size * 0.75)}px; vertical-align:middle;">🛡️</span>`;
 }

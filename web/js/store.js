@@ -75,6 +75,7 @@ class StateStore {
       }
     };
     this.listeners = new Set();
+    this._notifyQueued = false;
   }
 
   subscribe(listener) {
@@ -82,7 +83,18 @@ class StateStore {
     return () => this.listeners.delete(listener);
   }
 
+  /**
+   * Несколько set*() подряд (например, Promise.all с пятью ответами) дают один
+   * проход подписчиков в конце текущей задачи, а не пять перерисовок подряд.
+   */
   notify() {
+    if (this._notifyQueued) return;
+    this._notifyQueued = true;
+    queueMicrotask(() => this._flush());
+  }
+
+  _flush() {
+    this._notifyQueued = false;
     for (const listener of this.listeners) {
       try {
         listener(this.state);
