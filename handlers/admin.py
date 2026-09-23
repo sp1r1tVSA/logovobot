@@ -3128,11 +3128,11 @@ async def admin_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE, m
         f" 🆚 <b>{p2_name}</b>{club2}\n\n"
         f"• <b>Текущий счет:</b> {score_str}\n"
         f"• <b>Статус:</b> {html.escape(status_map.get(match['status'], match['status']))}{extra_status}\n"
-        f"📜 <a href=\"https://t.me/fifulatyrniru/3405\">Правила турнира</a>"
+        f"📜 <a href=\"https://t.me/fifulatyrniru/3827\">Правила турнира</a>"
     )
     
     keyboard = [
-        [InlineKeyboardButton("📜 Правила турнира", url="https://t.me/fifulatyrniru/3405")],
+        [InlineKeyboardButton("📜 Правила турнира", url="https://t.me/fifulatyrniru/3827")],
         [InlineKeyboardButton("⚡ Внести результат по фото (ИИ)", callback_data=f"admin_report_score_auto_{match_id}")],
         [InlineKeyboardButton("✍️ Внести результат вручную", callback_data=f"cb_report_choice_manual_{match_id}")],
         [InlineKeyboardButton("🚫 ТП 1:0 (Хозяева)", callback_data=f"admin_tp_home_{match_id}"), InlineKeyboardButton("🚫 ТП 0:1 (Гости)", callback_data=f"admin_tp_away_{match_id}")],
