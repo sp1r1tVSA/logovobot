@@ -10976,9 +10976,9 @@ def get_bet_market_by_match_id(match_id: int) -> dict | None:
 # Phase 5: Bet limits (server-side, cannot be bypassed by client)
 _MAX_BET: int = 50_000
 _MAX_PAYOUT: int = 10_000
-# Длина экспресса: от 2 до 5 событий. Один исход — это ординар.
+# Длина экспресса: от 2 до 15 событий. Один исход — это ординар.
 MIN_EXPRESS_EVENTS: int = 2
-MAX_EXPRESS_EVENTS: int = 5
+MAX_EXPRESS_EVENTS: int = 15
 _MAX_EXPRESS_EVENTS: int = MAX_EXPRESS_EVENTS
 _bet_placement_lock = threading.RLock()
 
@@ -11135,8 +11135,8 @@ def place_user_bet(
 
     selections = normalized_selections
 
-    # Один исход — ординар; от двух до пяти — экспресс. Шестое событие
-    # в купон не принимается ни из Telegram, ни из Mini App, ни из REST API.
+    # Один исход — ординар; от двух до пятнадцати — экспресс. Шестнадцатое
+    # событие в купон не принимается ни из Telegram, ни из Mini App, ни из REST API.
     if len(selections) > _MAX_EXPRESS_EVENTS:
         return False, {
             "error": "MAX_EXPRESS_EVENTS_EXCEEDED",

@@ -322,7 +322,7 @@ async def cb_bet_add_outcome(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     slip = _get_slip(context)
 
-    # Экспресс — от 2 до 5 событий. Шестое событие в купон не добавляется;
+    # Экспресс — от 2 до 15 событий. Шестнадцатое событие в купон не добавляется;
     # замена исхода в уже выбранном матче ограничением не является.
     already_picked = any(s["match_id"] == match_id for s in slip)
     if not already_picked and len(slip) >= MAX_EXPRESS_EVENTS:
@@ -457,7 +457,7 @@ async def cb_bet_place_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❌ Купон пуст!", show_alert=True)
         return
 
-    # Один исход — ординар, от 2 до 5 — экспресс. Больше пяти событий
+    # Один исход — ординар, от 2 до 15 — экспресс. Больше пятнадцати событий
     # не принимается (дублирует серверную проверку place_user_bet).
     if len(slip) > MAX_EXPRESS_EVENTS:
         await query.answer(

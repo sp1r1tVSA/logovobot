@@ -5,8 +5,8 @@ tests/test_betting_system_v2.py
 
 1. test_top_4_matches_selection — тур из 8 матчей даёт ровно 4 рынка:
    в линию выставляются только центральные пары.
-2. test_express_length_limits — 1 событие = ординар, 2..5 = экспресс,
-   6-е событие отклоняется валидацией.
+2. test_express_length_limits — 1 событие = ординар, 2..15 = экспресс,
+   16-е событие отклоняется валидацией.
 3. test_two_by_two_round_lifecycle — парный цикл «два через два»:
    линия стоит на Турах 1-2, после их открытия для игры уезжает на 3-4, затем на 5-6.
 4. test_technical_result_voids_bets — ТП/ТН: 100% возврат по ординару,
@@ -36,7 +36,7 @@ LIFECYCLE_ROUNDS = (1, 2, 3, 4, 5, 6)
 ROUND_TABLE_A = 11       # сыгранный тур — формирует таблицу
 ROUND_TABLE_B = 12       # второй сыгранный тур
 ROUND_CENTRAL = 13       # 8 матчей, в линию должны уйти 4
-ROUND_EXPRESS = 21       # 6 матчей для проверки длины экспресса
+ROUND_EXPRESS = 21       # 16 матчей для проверки длины экспресса
 ROUND_TECH = 22          # технический результат
 ROUND_DEBT = 23          # долг
 
@@ -208,16 +208,19 @@ class TestBettingSystemV2(unittest.TestCase):
             for col in ("odd_p1", "odd_x", "odd_p2", "odd_tb25", "odd_tm25", "odd_btts_yes", "odd_btts_no"):
                 self.assertGreater(m[col], 1.0, f"Коэффициент {col} должен быть больше 1.00")
 
-    # ─── 2. Длина купона: ординар и экспресс 2..5 ────────────────────────
+    # ─── 2. Длина купона: ординар и экспресс 2..15 ───────────────────────
 
     def test_express_length_limits(self):
-        """1 событие — ординар, 2..5 — экспресс, 6-е событие не принимается."""
+        """1 событие — ординар, 2..15 — экспресс, 16-е событие не принимается."""
+        self.assertEqual(database.MAX_EXPRESS_EVENTS, 15)
         self._add_round(ROUND_EXPRESS, bets_open=1, deadline=FUTURE_DEADLINE)
-        match_ids = [MATCH_ID_MIN + 41 + i for i in range(6)]
+        # На одно событие больше потолка. Кэф 1.20: экспресс из 15 событий
+        # даёт ~15.4 и при ставке 100 укладывается в потолок выплаты 10 000.
+        match_ids = [MATCH_ID_MIN + 70 + i for i in range(database.MAX_EXPRESS_EVENTS + 1)]
         for n, m_id in enumerate(match_ids):
             t1, t2 = f"Логово Лимит {2 * n + 1}", f"Логово Лимит {2 * n + 2}"
             self._add_match(m_id, ROUND_EXPRESS, t1, t2)
-            self._add_market(m_id, ROUND_EXPRESS, t1, t2)
+            self._add_market(m_id, ROUND_EXPRESS, t1, t2, odd_p1=1.20)
 
         self._add_bettor()
 
@@ -229,18 +232,19 @@ class TestBettingSystemV2(unittest.TestCase):
         self.assertTrue(ok, f"Ординар должен приниматься, получено: {bet_id}")
         self.assertEqual(self._bet_status(bet_id)["bet_type"], "single")
 
-        # 2..5 событий — экспресс.
-        for size in range(database.MIN_EXPRESS_EVENTS, database.MAX_EXPRESS_EVENTS + 1):
+        # Границы экспресса — 2 и 15 событий. Все длины подряд не перебираем:
+        # 14 купонов упёрлись бы в лимит открытых купонов (12).
+        for size in (database.MIN_EXPRESS_EVENTS, database.MAX_EXPRESS_EVENTS):
             ok, bet_id = database.place_user_bet(BETTOR_ID, 100, coupon(size))
             self.assertTrue(ok, f"Экспресс из {size} событий должен приниматься, получено: {bet_id}")
             bet = self._bet_status(bet_id)
             self.assertEqual(bet["bet_type"], "express", f"Купон из {size} событий — это экспресс")
             self.assertEqual(len(self._bet_items(bet_id)), size)
 
-        # 6 событий — отказ валидации, монеты не списываются.
+        # 16 событий — отказ валидации, монеты не списываются.
         balance_before = database.get_wallet_balance(BETTOR_ID)
-        ok, err = database.place_user_bet(BETTOR_ID, 100, coupon(6))
-        self.assertFalse(ok, "Шестое событие в экспрессе принимать нельзя")
+        ok, err = database.place_user_bet(BETTOR_ID, 100, coupon(database.MAX_EXPRESS_EVENTS + 1))
+        self.assertFalse(ok, "Шестнадцатое событие в экспрессе принимать нельзя")
         self.assertIsInstance(err, dict)
         self.assertEqual(err["error"], "MAX_EXPRESS_EVENTS_EXCEEDED")
         self.assertEqual(err["max_events"], database.MAX_EXPRESS_EVENTS)
