@@ -10274,6 +10274,59 @@ def get_detailed_overdue_matches(division_id: int | None = None, season_id: int 
         return overdue_list
 
 
+def get_league_overview_rows(season_id: int | None = None) -> dict:
+    """Сырые данные для сводки по дивизионам (`/overview`): туры, прогресс, варны.
+
+    Возвращает `{"season_id", "rounds", "match_counts", "warned_users"}`:
+      • `rounds` — строки `rounds` сезона (по одной на (дивизион, тур), как в
+        `_load_round_states`);
+      • `match_counts` — матчи лиги по (дивизион, тур): `total` без отменённых и
+        `played` (confirmed / completed / finished);
+      • `warned_users` — тренеры с клубом и хотя бы одним варном.
+    Долги сюда не входят — их считает `get_detailed_overdue_matches`, чтобы сводка
+    и список долгов не расходились.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        target_season_id = _resolve_season_id(season_id)
+        rounds = list(_load_round_states(_fetch_round_rows(cursor, target_season_id)).values())
+
+        cursor.execute(
+            """
+            SELECT COALESCE(division_id, 1) AS division_id, round_number,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN status IN ('confirmed', 'completed', 'finished') THEN 1 ELSE 0 END) AS played
+            FROM matches
+            WHERE (tournament_type IS NULL OR tournament_type = 'league')
+              AND (season_id = ? OR season_id IS NULL)
+              AND status != 'cancelled'
+              AND round_number > 0
+            GROUP BY COALESCE(division_id, 1), round_number
+            """,
+            (target_season_id,)
+        )
+        match_counts = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute(
+            """
+            SELECT telegram_id, username, team_name, COALESCE(division_id, 1) AS division_id,
+                   COALESCE(warn_count, 0) AS warn_count
+            FROM users
+            WHERE COALESCE(warn_count, 0) > 0
+              AND team_name IS NOT NULL AND TRIM(team_name) != ''
+            ORDER BY warn_count DESC, team_name ASC
+            """
+        )
+        warned_users = [dict(r) for r in cursor.fetchall()]
+
+        return {
+            "season_id": target_season_id,
+            "rounds": rounds,
+            "match_counts": match_counts,
+            "warned_users": warned_users,
+        }
+
+
 def _match_round_row(cursor, match: dict) -> dict | None:
     """Строка тура матча — строго его (сезон, дивизион, номер)."""
     s_id = match.get("season_id")

@@ -263,6 +263,7 @@ from handlers.topic_management import (
     cb_bind_group,
 )
 from handlers.cup_management import register_cup_handlers
+from handlers.league_overview import register_league_overview_handlers
 from handlers.admin_bets import (
     cmd_admin_bets,
     cb_admin_bets_navigate,
@@ -718,6 +719,9 @@ def _register_admin_handlers(app: Application) -> None:
     # Общий кубок: панель этапов и тема вещания. До catch-all группы 0 — иначе
     # кнопки утонули бы в AI-чате (ловушка №4 из AGENTS.md).
     register_cup_handlers(app)
+
+    # /overview — сводка по всем дивизионам (туры, долги, варны).
+    register_league_overview_handlers(app)
 
     app.add_handler(CommandHandler("set_squad_topic", admin_set_squad_topic))
     app.add_handler(CommandHandler("set_drafts_topic", admin_set_drafts_topic))

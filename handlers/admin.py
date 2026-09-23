@@ -171,7 +171,10 @@ def _build_super_admin_keyboard() -> InlineKeyboardMarkup:
     mode_label = "Темшик 🍺" if chat_mode == "temshik" else "Булли 😈"
     ai_label = "🟢 ВКЛ" if database.is_ai_chat_enabled() else "🔴 ВЫКЛ"
     keyboard = [
-        [InlineKeyboardButton("🏆 Дивизионы", callback_data="admin_divs_hub")],
+        [
+            InlineKeyboardButton("🏆 Дивизионы", callback_data="admin_divs_hub"),
+            InlineKeyboardButton("📡 Обзор лиги", callback_data="ovw_home"),
+        ],
         [InlineKeyboardButton("👔 Админы дивизионов", callback_data="admin_div_admins_hub")],
         [InlineKeyboardButton("👥 Управление игроками", callback_data="admin_manage_players")],
         [InlineKeyboardButton("🔗 Привязка клубов", callback_data="admin_bind_hub")],
