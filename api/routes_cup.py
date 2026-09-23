@@ -92,6 +92,27 @@ def _stage_from_request(request: web.Request) -> tuple[dict | None, web.Response
     return stage, None
 
 
+def _attach_usernames(series: list[dict]) -> list[dict]:
+    """Ники тренеров под клубами — как в карточке матча лиги.
+
+    Серии хранят только названия клубов, поэтому ники подтягиваются одним
+    запросом на весь этап. Клуб без тренера или без ника получает None.
+    """
+    names = [s.get(k) for s in series for k in ("team1_name", "team2_name")]
+    usernames = database.get_usernames_by_teams(names)
+    for s in series:
+        for side in ("team1", "team2"):
+            key = (s.get(f"{side}_name") or "").strip().casefold()
+            s[f"{side}_username"] = usernames.get(key)
+    return series
+
+
+def _load_line(stage: dict) -> dict:
+    line = database.get_cup_stage_line(stage["stage"], stage["season_id"])
+    _attach_usernames(line.get("series") or [])
+    return line
+
+
 def _load_bracket(stage: dict) -> list[dict]:
     series = database.get_cup_bracket(stage["stage"], season_id=stage["season_id"])
     games_by_series: dict[int, list[dict]] = {}
@@ -104,7 +125,7 @@ def _load_bracket(stage: dict) -> list[dict]:
             "score2": g["player2_score"],
             "winner_team": g["cup_winner_team"],
         })
-    return [
+    return _attach_usernames([
         {
             "series_id": s["id"],
             "series_num": s["series_num"],
@@ -117,7 +138,7 @@ def _load_bracket(stage: dict) -> list[dict]:
             "games": games_by_series.get(s["id"], []),
         }
         for s in series
-    ]
+    ])
 
 
 async def handle_get_cup_bracket(request: web.Request) -> web.Response:
@@ -148,7 +169,7 @@ async def handle_get_cup_line(request: web.Request) -> web.Response:
     stage, error = await asyncio.to_thread(_stage_from_request, request)
     if error is not None:
         return error
-    line = await asyncio.to_thread(database.get_cup_stage_line, stage["stage"], stage["season_id"])
+    line = await asyncio.to_thread(_load_line, stage)
     bets_open = bool(stage.get("bets_open"))
     series = line.get("series") or []
     if not bets_open:

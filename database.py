@@ -10410,6 +10410,30 @@ def find_user_by_team(team_name: str | None, division_id: int | None = None) -> 
     return None
 
 
+def get_usernames_by_teams(team_names) -> dict[str, str]:
+    """Map each given club name (casefolded, trimmed) to its coach's username.
+
+    One read for a whole list — the cup line and bracket need a tag for every
+    series. Club names are unique league-wide, so an exact match is enough.
+    The comparison is done in Python: SQLite's LOWER() folds ASCII only, and
+    the club names are Cyrillic. Clubs without a coach or username are left out.
+    """
+    wanted = {(n or "").strip().casefold() for n in team_names} - {""}
+    if not wanted:
+        return {}
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT team_name, username FROM users "
+            "WHERE team_name IS NOT NULL AND username IS NOT NULL AND TRIM(username) != ''"
+        ).fetchall()
+    result = {}
+    for r in rows:
+        key = r["team_name"].strip().casefold()
+        if key in wanted:
+            result[key] = r["username"].strip()
+    return result
+
+
 def has_user_been_warned_recently(user_id: int, hours: float = 20.0) -> bool:
     """Check if user has received a warn within the last N hours."""
     with transaction() as conn:

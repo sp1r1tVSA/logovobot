@@ -711,22 +711,34 @@ export class UIRenderer {
       </div>`;
   }
 
-  static _cupTeamsRow(t1, t2, score1 = null, score2 = null, winner = null) {
-    const hasScore = score1 !== null && score2 !== null;
+  static _cupPlayerTag(username) {
+    const u = (username || '').trim();
+    if (!u) return '';
+    const tag = u.startsWith('@') ? u : `@${u}`;
+    return `<span class="team-player-tag" title="${escapeHtml(tag)}">${escapeHtml(tag)}</span>`;
+  }
+
+  static _cupTeamsRow(s, { withScore = false } = {}) {
+    const t1 = s.team1_name;
+    const t2 = s.team2_name;
+    const winner = withScore ? s.winner_name : null;
+    const hasScore = withScore && s.team1_wins != null && s.team2_wins != null;
     const cls = (name) => (winner ? (name === winner ? 'cup-team winner' : 'cup-team loser') : 'cup-team');
     return `
       <div class="match-teams-row">
         <div class="team-block-side left">
           <div class="team-meta-wrap left">
             <span class="team-name ${cls(t1)}" title="${escapeHtml(t1)}">${escapeHtml(t1)}</span>
+            ${UIRenderer._cupPlayerTag(s.team1_username)}
           </div>
           ${renderTeamLogoHtml(t1, 28)}
         </div>
-        <div class="match-vs-divider ${hasScore ? 'cup-series-score' : ''}">${hasScore ? `${score1} : ${score2}` : 'VS'}</div>
+        <div class="match-vs-divider ${hasScore ? 'cup-series-score' : ''}">${hasScore ? `${s.team1_wins} : ${s.team2_wins}` : 'VS'}</div>
         <div class="team-block-side right">
           ${renderTeamLogoHtml(t2, 28)}
           <div class="team-meta-wrap right">
             <span class="team-name ${cls(t2)}" title="${escapeHtml(t2)}">${escapeHtml(t2)}</span>
+            ${UIRenderer._cupPlayerTag(s.team2_username)}
           </div>
         </div>
       </div>`;
@@ -850,7 +862,7 @@ export class UIRenderer {
               <span class="cup-series-num">Серия ${s.series_num} · до 2 побед</span>
             </div>
           </div>
-          ${UIRenderer._cupTeamsRow(t1, t2)}
+          ${UIRenderer._cupTeamsRow(s)}
           ${headerBlock}
           ${games ? `<div class="cup-market-title">Игры серии</div>${games}` : ''}
           ${h && h.is_line !== false ? `
@@ -892,7 +904,7 @@ export class UIRenderer {
             <span class="cup-series-num">Серия ${s.series_num}</span>
             <span class="cup-series-status">${escapeHtml(STATUS[s.status] || s.status || '')}</span>
           </div>
-          ${UIRenderer._cupTeamsRow(s.team1_name, s.team2_name, s.team1_wins, s.team2_wins, s.winner_name)}
+          ${UIRenderer._cupTeamsRow(s, { withScore: true })}
           ${games ? `<div class="cup-bracket-games">${games}</div>` : ''}
           ${s.winner_name ? `<div class="cup-series-winner">Проходит: ${escapeHtml(s.winner_name)}</div>` : ''}
         </div>`;

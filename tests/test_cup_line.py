@@ -240,6 +240,30 @@ class CupLineTestCase(unittest.TestCase):
         self.assertNotIn(game, [r["match_id"] for r in
                                betting_engine.select_stage_matches(STAGE, season_id=self.season)])
 
+    # --- 8. ники тренеров под клубами ---------------------------------------
+
+    def test_12_series_carry_coach_usernames(self):
+        from api import routes_cup
+
+        with database.transaction() as conn:
+            cursor = conn.cursor()
+            # Регистр и пробелы в team_name не должны ломать сопоставление:
+            # LOWER() в SQLite кириллицу не складывает.
+            for tid, team, username in ((7101, " клуб а ", "coach_a"), (7102, "Клуб В", " ")):
+                cursor.execute(
+                    "INSERT INTO users (telegram_id, username, team_name, role, registered_at) "
+                    "VALUES (?, ?, ?, 'player', datetime('now', '+3 hours'))",
+                    (tid, username, team)
+                )
+        stage_id = self._seed_stage([("Клуб А", "Клуб Б"), ("Клуб В", "Клуб Г")])
+        stage = database.get_cup_stage_by_id(stage_id)
+
+        for series in (routes_cup._load_bracket(stage), routes_cup._load_line(stage)["series"]):
+            by_team = {s["team1_name"]: s for s in series}
+            self.assertEqual(by_team["Клуб А"]["team1_username"], "coach_a")
+            self.assertIsNone(by_team["Клуб А"]["team2_username"], "у клуба нет тренера")
+            self.assertIsNone(by_team["Клуб В"]["team1_username"], "пустой ник не выводится")
+
 
 if __name__ == "__main__":
     unittest.main()
