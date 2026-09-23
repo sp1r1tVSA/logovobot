@@ -15598,9 +15598,14 @@ def _shape_cabinet_match(row: sqlite3.Row | dict, team_name: str, telegram_id: i
 
     proposed_by = d.get("proposed_by")
     has_photo = bool(d.get("photo_id"))
+    # У кубковой игры round_number = -1: подписывать её надо этапом и номером игры.
+    is_cup = match_is_cup(d)
     return {
         "id": d.get("id"),
         "round_number": d.get("round_number"),
+        "is_cup": is_cup,
+        "cup_stage": d.get("cup_stage") if is_cup else None,
+        "game_num": d.get("game_num_in_series") if is_cup else None,
         "deadline": None,  # заполняется вызывающим из rounds
         "opponent_team": opponent_team,
         "opponent_user": opponent_user,
@@ -15623,7 +15628,8 @@ def _attach_round_deadlines(matches: list[dict], division_id: int | None) -> Non
     cache: dict[int, str | None] = {}
     for m in matches:
         r_num = m.get("round_number")
-        if r_num is None:
+        # Кубковой игре тур не принадлежит: round_number = -1 — не номер тура.
+        if r_num is None or m.get("is_cup"):
             continue
         if r_num not in cache:
             info = get_round_info(r_num, division_id=division_id)
@@ -15646,6 +15652,7 @@ def get_cabinet_matches(telegram_id: int, limit: int = 20) -> list[dict]:
             """
             SELECT
                 m.id, m.round_number, m.status, m.photo_id,
+                m.tournament_type, m.cup_stage, m.game_num_in_series,
                 m.player1_team, m.player2_team, m.player1_score, m.player2_score,
                 m.proposed_time, m.proposed_by, COALESCE(m.time_status, 'none') AS time_status,
                 u1.username AS player1_username, u2.username AS player2_username
@@ -15684,6 +15691,7 @@ def get_cabinet_recent_matches(telegram_id: int, limit: int = 5) -> list[dict]:
             """
             SELECT
                 m.id, m.round_number, m.status, m.photo_id,
+                m.tournament_type, m.cup_stage, m.game_num_in_series,
                 m.player1_team, m.player2_team, m.player1_score, m.player2_score,
                 m.proposed_time, m.proposed_by, COALESCE(m.time_status, 'none') AS time_status,
                 u1.username AS player1_username, u2.username AS player2_username

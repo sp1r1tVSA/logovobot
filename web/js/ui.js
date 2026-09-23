@@ -381,6 +381,21 @@ export function cupStageLabel(stage) {
   return stage === 'final' ? 'Финал' : `${stage} финала`;
 }
 
+/**
+ * «Тур 3» / «1/64 финала · игра 2» — подпись матча. У кубковой игры
+ * round_number = -1, это не номер тура. Кабинет отдаёт is_cup/game_num,
+ * /api/matches/{id} — сырые tournament_type/game_num_in_series.
+ */
+export function matchRoundLabel(m, fallback = 'Матч') {
+  if (m?.is_cup || m?.tournament_type === 'cup') {
+    const stage = cupStageLabel(m.cup_stage);
+    const game = m.game_num ?? m.game_num_in_series;
+    return game ? `${stage} · игра ${game}` : stage;
+  }
+  const round = Number(m?.round_number);
+  return round > 0 ? `Тур ${round}` : fallback;
+}
+
 /** Market title for a slip item added without one (Line-tab tiles, old drafts). */
 export function marketNameForOutcome(key) {
   const k = String(key || '').toLowerCase();
@@ -964,7 +979,7 @@ export class UIRenderer {
     const s1 = liveNow?.score1 ?? matchDetail.player1_score ?? '-';
     const s2 = liveNow?.score2 ?? matchDetail.player2_score ?? '-';
     const matchId = matchDetail.id || matchDetail.match_id;
-    const tourNum = matchDetail.round_number || 1;
+    const roundLabel = escapeHtml(matchRoundLabel(matchDetail, 'Тур 1'));
 
     const t1Form = stats?.team1?.stats?.form || ['W', 'D', 'W'];
     const t2Form = stats?.team2?.stats?.form || ['D', 'L', 'W'];
@@ -992,7 +1007,7 @@ export class UIRenderer {
           <div class="mc-score-col">
             <div class="score-center-badge">${s1} : ${s2}</div>
             <span class="mc-status">
-              ${matchDetail.status === 'live' ? '🔴 LIVE' : `Тур ${tourNum}`}
+              ${matchDetail.status === 'live' ? '🔴 LIVE' : roundLabel}
             </span>
             ${mvp ? `<span class="mc-mvp" title="Игрок матча">👑 ${escapeHtml(mvp)}</span>` : ''}
           </div>
@@ -2446,7 +2461,7 @@ export class UIRenderer {
     return `
       <div class="club-match-card ${!showActions ? 'clickable' : ''}" data-match-id="${match.id}">
         <div class="club-match-head">
-          <span class="club-match-round">${match.round_number ? `Тур ${match.round_number}` : 'Матч'} · ${sideLabel}</span>
+          <span class="club-match-round">${escapeHtml(matchRoundLabel(match))} · ${sideLabel}</span>
           <span class="club-badge ${badge.cls}">${badge.text}</span>
         </div>
         <div class="club-match-body">
@@ -2628,7 +2643,7 @@ export class UIRenderer {
       <div class="proto-card">
         <div class="proto-head">
           <span class="proto-round">
-            ${m.round_number ? `Тур ${m.round_number}` : 'Матч'} · Дивизион ${m.division_id || 1}
+            ${escapeHtml(matchRoundLabel(m))}${m.tournament_type === 'cup' ? '' : ` · Дивизион ${m.division_id || 1}`}
           </span>
           <span class="proto-status" style="color: ${isFinished ? 'var(--color-success)' : 'var(--text-muted)'};">
             ${isFinished ? '✅ Завершён' : (m.status || 'Ожидает')}

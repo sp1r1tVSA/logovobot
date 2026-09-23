@@ -69,3 +69,39 @@ def test_get_cabinet_matches_only_open_rounds(tmp_path, monkeypatch):
     assert 1 in round_numbers
     assert 2 not in round_numbers
     assert len(matches) == 1
+
+
+def test_cabinet_history_labels_cup_games(tmp_path, monkeypatch):
+    """Кубковая игра в истории «Мой клуб» — этап и номер игры, а не «Тур -1»."""
+    db_file = tmp_path / "test_league.db"
+    monkeypatch.setattr(database, "DB_PATH", str(db_file))
+    database.init_db()
+
+    with database.transaction() as conn:
+        c = conn.cursor()
+        c.execute("""
+            INSERT INTO users (telegram_id, username, team_name, division_id)
+            VALUES (1001, 'player1', 'Arsenal', 1)
+        """)
+        c.execute("INSERT INTO rounds (round_number, division_id, is_open, deadline) VALUES (1, 1, 1, '2026-09-30 23:59')")
+        c.execute("""
+            INSERT INTO matches (round_number, division_id, player1_team, player2_team,
+                                 player1_score, player2_score, status, played_at)
+            VALUES (1, 1, 'Arsenal', 'Chelsea', 2, 0, 'confirmed', '2026-09-20 20:00:00')
+        """)
+        c.execute("""
+            INSERT INTO matches (round_number, division_id, tournament_type, cup_stage, game_num_in_series,
+                                 player1_team, player2_team, player1_score, player2_score, status, played_at)
+            VALUES (-1, 0, 'cup', '1/64', 2, 'Chelsea', 'Arsenal', 2, 3, 'confirmed', '2026-09-23 20:00:00')
+        """)
+
+    cup, league = database.get_cabinet_recent_matches(1001)
+
+    assert cup["is_cup"] is True
+    assert (cup["cup_stage"], cup["game_num"]) == ("1/64", 2)
+    assert cup["deadline"] is None  # у кубка нет тура — нет и дедлайна тура
+    assert cup["score"] == "3 : 2" and cup["is_home"] is False
+
+    assert league["is_cup"] is False
+    assert league["cup_stage"] is None and league["game_num"] is None
+    assert league["deadline"] == "2026-09-30 23:59"
