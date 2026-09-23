@@ -79,5 +79,20 @@ class TestTotwImage(unittest.TestCase):
         fetch.assert_not_called()
 
 
+class TestTotwFont(unittest.TestCase):
+    def test_bundled_condensed_font_is_used(self):
+        # Шрифт карточек едет в репозитории: без него сервер без системных шрифтов
+        # откатывается на широкий DejaVu Sans Bold, и имена обрезаются.
+        font = totw_generator._display_font(40)
+        self.assertEqual(getattr(font, "path", None), totw_generator.DISPLAY_FONT_PATH)
+
+    def test_bundled_font_covers_cyrillic_and_diacritics(self):
+        # Глиф, которого в шрифте нет, рисуется «тофу» (.notdef) — сравниваем с ним.
+        font = totw_generator._display_font(40)
+        tofu = bytes(font.getmask("￿"))
+        for ch in "РУСЛАНЁЖЩÖØÇÉÍ":
+            self.assertNotEqual(bytes(font.getmask(ch)), tofu, ch)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -175,29 +175,22 @@ def card_tier(player: dict, ovr: int, theme) -> CardTier:
 
 # ─── Шрифты ───
 
+# Узкий жирный шрифт карточек лежит в репозитории: на сервере системных шрифтов
+# может не быть вовсе, а широкий DejaVu Sans Bold обрезает имена и выбивает
+# подписи из статов. Кириллица и латиница с диакритикой (Gyökeres, Ødegaard) есть.
+DISPLAY_FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "LiberationSansNarrow-Bold.ttf")
+
+
 @functools.lru_cache(maxsize=64)
 def _display_font(size: int):
-    """Спортивный гротеск: Bahnschrift (DIN 1451) Bold Condensed, иначе condensed-запасные."""
-    try:
-        font = ImageFont.truetype("bahnschrift.ttf", size)
-        try:
-            font.set_variation_by_name("Bold Condensed")
-        except Exception:
-            logger.debug("TOTW: bahnschrift variations unavailable", exc_info=True)
-        return font
-    except OSError:
-        pass
-    for name in ("DejaVuSansCondensed-Bold.ttf", "ariblk.ttf"):
+    """Узкий гротеск карточек: вшитый Liberation Sans Narrow Bold, иначе системные запасные."""
+    for name in (DISPLAY_FONT_PATH, "LiberationSansNarrow-Bold.ttf", "DejaVuSansCondensed-Bold.ttf"):
         try:
             return ImageFont.truetype(name, size)
         except OSError:
             continue
+    logger.warning("TOTW: condensed display font not found, falling back to load_font")
     return load_font(size, bold=True)
-
-
-@functools.lru_cache(maxsize=64)
-def _text_font(size: int, bold: bool = False):
-    return load_font(size, bold=bold)
 
 
 # ─── Данные карточки ───
@@ -701,27 +694,36 @@ def _draw_pos_chip(draw: ImageDraw.ImageDraw, layer: Image.Image, x: int, y: int
 
 
 def _draw_stat_chips(layer: Image.Image, g: _CardGeometry, player: dict, y: int) -> None:
-    """Ряд микро-чипов: иконка + число + подпись. Не влезают — без подписей, потом отбрасываются."""
+    """Ряд микро-чипов: иконка + число + подпись.
+
+    Не влезают — сначала ужимаются шрифт и поля, затем пропадают подписи,
+    и только потом отбрасываются последние чипы: подписи на постере не должны
+    то появляться, то исчезать от карточки к карточке без нужды.
+    """
     chips = _stat_chips(player)
     draw = ImageDraw.Draw(layer)
-    font = _display_font(g.v(14))
-    icon_sz, gap, pad_x, h = g.v(11), g.v(4), g.v(6), g.v(19)
+    h = g.v(19)
     avail = g.w - 2 * g.pad
 
-    def widths(with_label: bool) -> list[int]:
-        return [pad_x * 2 + icon_sz + g.v(3) + int(draw.textlength(f"{n}{lab if with_label else ''}", font=font))
-                for _icon_kind, n, lab in chips]
+    def layout(font_px: float, pad_px: float, with_label: bool):
+        font = _display_font(g.v(font_px))
+        icon_sz, gap, pad_x = g.v(font_px * 0.8), g.v(pad_px * 0.66), g.v(pad_px)
+        ws = [pad_x * 2 + icon_sz + g.v(3) + int(draw.textlength(f"{n}{lab if with_label else ''}", font=font))
+              for _icon_kind, n, lab in chips]
+        return font, icon_sz, gap, pad_x, ws
 
-    with_label = True
-    ws = widths(True)
-    if sum(ws) + gap * (len(ws) - 1) > avail:
-        with_label = False
-        ws = widths(False)
-    while chips and sum(ws) + gap * (len(ws) - 1) > avail:
+    def fits(ws: list[int], gap: int) -> bool:
+        return sum(ws) + gap * (len(ws) - 1) <= avail
+
+    for font_px, pad_px, with_label in ((14, 6, True), (12.5, 4.5, True), (14, 6, False)):
+        font, icon_sz, gap, pad_x, ws = layout(font_px, pad_px, with_label)
+        if fits(ws, gap):
+            break
+    while chips and not fits(ws, gap):
         chips, ws = chips[:-1], ws[:-1]
 
     if not chips:
-        draw.text((g.cx, y + h // 2), "—", font=font, fill=TEXT_HEADER, anchor="mm")
+        draw.text((g.cx, y + h // 2), "—", font=_display_font(g.v(14)), fill=TEXT_HEADER, anchor="mm")
         return
 
     total = sum(ws) + gap * (len(ws) - 1)
