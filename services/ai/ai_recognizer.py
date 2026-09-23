@@ -174,7 +174,10 @@ PROMPT_TEXT = """
    - `right_score` = Второе число (справа от дефиса).
    - ⚠️ **ПЛАШКИ И УВЕДОМЛЕНИЯ ПОВЕРХ СЧЁТА (iOS / Android / Игровой режим / Dynamic Island):**
      Если табло частично закрыто плашкой уведомления, ВНИМАТЕЛЬНО посмотри сквозь/под плашку — цифры счёта видны позади неё (например, `1 : 3`).
-   - **СЕРИЯ ПЕНАЛЬТИ**: Если рядом со счётом есть маленькие цифры в скобках (например, `(3) 2 - 2 (2)`), это означает, что была серия пенальти. В таком случае прибавь +1 гол к итоговому счёту той команды, которая победила по пенальти (у которой число в скобках больше). Например, для `(3) 2 - 2 (2)` итоговый счёт должен быть `left_score = 3`, `right_score = 2`.
+   - **СЕРИЯ ПЕНАЛЬТИ**: Если рядом со счётом есть маленькие цифры в скобках (например, `(5) 3 - 3 (4)`), это серия пенальти.
+     • `left_score` / `right_score` = КРУПНЫЕ цифры КАК ЕСТЬ (здесь 3 и 3). НИЧЕГО к ним НЕ ПРИБАВЛЯЙ.
+     • Цифры в скобках запиши отдельно: `left_pens` = число в скобках СЛЕВА (здесь 5), `right_pens` = СПРАВА (здесь 4).
+     • Скобок нет → `"left_pens": null`, `"right_pens": null`.
 
 ---
 
@@ -316,6 +319,8 @@ PROMPT_TEXT = """
       "team2": "НазваниеПравойКоманды",
       "left_score": 3,
       "right_score": 2,
+      "left_pens": null,
+      "right_pens": null,
       "is_single_timeline": false,
       "left_rows": [
         {"name": "ИмяИгрокаA", "digits": [0, 0]},
@@ -482,6 +487,32 @@ def rows_to_events(rows, side: str, score: int) -> tuple[list[str], list[str], b
         goals.extend([row[0]] * row[goal_idx])
         assists.extend([row[0]] * row[assist_idx])
     return goals, assists, needs_review
+
+
+def _parse_pens(value) -> int | None:
+    """One side's shootout total off the scoreboard brackets; None when unreadable."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        n = int(str(value).strip().strip("()"))
+    except (TypeError, ValueError):
+        return None
+    return n if 0 <= n <= 30 else None
+
+
+def detect_shootout(m: dict) -> dict | None:
+    """
+    The shootout the model copied off the scoreboard — `(5) 3 - 3 (4)` →
+    {"left": 5, "right": 4}; None when there was none.
+
+    Such a result is not taken from the screenshot at all: EA FC Mobile counts
+    shootout goals in the stats table's goal column, so the scorers cannot be
+    told apart, and the result is entered by hand instead.
+    """
+    left, right = _parse_pens(m.get("left_pens")), _parse_pens(m.get("right_pens"))
+    if left is None or right is None or (left == 0 and right == 0):
+        return None
+    return {"left": left, "right": right}
 
 
 def apply_table_rows(m: dict) -> None:
@@ -672,6 +703,9 @@ def recognize_match_screenshots_bytes(
                         m.setdefault("left_assists", [])
                         m.setdefault("right_assists", [])
                         m.setdefault("is_single_timeline", False)
+
+                        # Серия пенальти: такой результат вносится вручную
+                        m["shootout"] = detect_shootout(m)
 
                         # Stats table: build goals/assists from the transcribed rows
                         apply_table_rows(m)

@@ -2663,6 +2663,23 @@ async def save_report_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
     return await _show_manual_confirmation(update, context, photo_id=photo_id)
 
+
+SHOOTOUT_MANUAL_TEXT = (
+    "🥅 <b>На скриншоте серия пенальти.</b>\n\n"
+    "EA FC записывает голы серии в колонку «Г», поэтому такой результат вносится вручную:\n"
+    "• счёт — <b>основного времени</b> (для «(5) 3 - 3 (4)» это 3 : 3);\n"
+    "• авторы голов — только голы с игры, остальное «⏩ Пропустить остаток»;\n"
+    "• в кубке бот спросит, кто прошёл дальше, — победитель серии."
+)
+
+
+def has_shootout(ai_res: dict | None) -> bool:
+    """Есть ли в распознавании серия пенальти — у самой игры или у любой из списка."""
+    if not ai_res:
+        return False
+    return any(m.get("shootout") for m in [ai_res, *(ai_res.get("matches") or [])])
+
+
 async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Run AI recognition on all collected screenshots and show the result for confirmation."""
     query = update.callback_query
@@ -2702,7 +2719,18 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         context.user_data["report_home_team"] = home_team
         context.user_data["report_away_team"] = away_team
 
-        if ai_res and ("home_score" in ai_res) and ("away_score" in ai_res):
+        if has_shootout(ai_res):
+            # EA FC пишет голы серии пенальти в колонку «Г»: счёт и авторы со
+            # скриншота неверны, такой результат вносится вручную.
+            context.user_data["report_photo_id"] = photos_list[0] if photos_list else context.user_data.get("report_photo_id")
+            context.user_data.pop("report_mvp_player", None)
+            cancel_cb = get_match_cancel_cb(context, user_id, match_id)
+            keyboard = [
+                [InlineKeyboardButton("✍️ Ввести результат вручную", callback_data=f"cb_report_choice_manual_{match_id}")],
+                [InlineKeyboardButton("❌ Отмена", callback_data=cancel_cb)]
+            ]
+            await query.message.reply_text(SHOOTOUT_MANUAL_TEXT, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+        elif ai_res and ("home_score" in ai_res) and ("away_score" in ai_res):
             s1_goals = ai_res.get("side1_goals") or ai_res.get("home_goals") or []
             s2_goals = ai_res.get("side2_goals") or ai_res.get("away_goals") or []
             s1_assists = ai_res.get("side1_assists") or ai_res.get("home_assists") or []

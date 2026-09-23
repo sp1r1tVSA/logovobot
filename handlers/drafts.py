@@ -8,7 +8,7 @@ import database
 import config
 from services.topic_cache import topic_cache
 from services.ai.ai_recognizer import recognize_match_screenshots_bytes
-from handlers.cabinet import match_and_enrich_squad, build_formatted_match_post, resolve_mvp_player_name
+from handlers.cabinet import match_and_enrich_squad, build_formatted_match_post, resolve_mvp_player_name, has_shootout
 
 logger = logging.getLogger(__name__)
 
@@ -149,6 +149,15 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
         return
         
     matches_list = ai_res.get("matches") or [ai_res]
+
+    if has_shootout(ai_res):
+        # Голы серии пенальти EA FC пишет в колонку «Г» — черновик со скриншота
+        # вышел бы с неверными авторами. Такой результат вносится вручную в ЛС.
+        await status_msg.edit_text(
+            "🥅 На скриншоте серия пенальти. Такой результат занесите вручную через "
+            "личные сообщения бота: счёт основного времени и авторов голов с игры."
+        )
+        return
     
     # 1. Determine team names (by player names / squads first, then fallback to OCR / caption)
     s1_all_p = (matches_list[0].get("side1_goals") or matches_list[0].get("left_goals") or []) + \
