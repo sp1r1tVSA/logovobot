@@ -89,6 +89,12 @@ class TestPhase6Analytics(unittest.TestCase):
                 (99402, 1, 1, 8, 'ТестБенфика', 'Брага', 'live', 1, 0),
                 (99403, 1, 2, 8, 'ТестАякс', 'Фейеноорд', 'open', 0, 0)
             """)
+            # Recommendations and hot matches only offer matches of the open line
+            cursor.execute("""
+                INSERT INTO bet_markets (match_id, tour, team1_name, team2_name, odd_p1, odd_x, odd_p2, is_active)
+                SELECT id, round_number, player1_team, player2_team, 2.0, 3.2, 3.5, 1
+                FROM matches WHERE id IN (99401, 99402, 99403)
+            """)
 
             # Seed user 1 bets (6 settled bets: 4 won, 1 lost, 1 voided)
             # Won bets: 100 stake * 2.0 = 200 (profit +100 each, total +400)

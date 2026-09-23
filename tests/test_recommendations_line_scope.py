@@ -8,6 +8,7 @@ Verifies that:
 3. Matches from closed/unopened tours are strictly excluded.
 4. When the line advances to subsequent tours, recommendations follow the active line.
 5. Neutral bettors see central games of the open tours only.
+6. A match of an open tour that is not in the line (no active tile) is never offered.
 """
 
 import unittest
@@ -107,6 +108,14 @@ class TestRecommendationsLineScope(unittest.TestCase):
                 VALUES (99806, 10, ?, ?, ?, ?, ?, ?, 'pending')
             """, (DIV_ID, SEASON_ID, USER_OPP1, USER_PLAYER, TEAM_OPP1, TEAM_PLAYER))
 
+            # 4. Line tiles for every match: the round gate alone decides here;
+            # a match of an open round without a tile is covered separately.
+            for match_id, tour in ((99801, 1), (99802, 1), (99803, 2), (99804, 2), (99805, 3), (99806, 10)):
+                cursor.execute("""
+                    INSERT INTO bet_markets (match_id, tour, team1_name, team2_name, odd_p1, odd_x, odd_p2, is_active)
+                    SELECT id, ?, player1_team, player2_team, 2.0, 3.2, 3.5, 1 FROM matches WHERE id = ?
+                """, (tour, match_id))
+
     def tearDown(self) -> None:
         self._cleanup()
 
@@ -196,6 +205,23 @@ class TestRecommendationsLineScope(unittest.TestCase):
         self.assertEqual(match_ids, [99805])
         self.assertEqual(recs[0]["round_number"], 3)
         self.assertIn("Айнтрахт", recs[0]["reason"])
+
+    def test_open_round_match_outside_the_line_is_not_recommended(self) -> None:
+        """Only the central pairs of an open round are in the line; the rest are not offered."""
+        with database.transaction() as conn:
+            conn.execute("DELETE FROM bet_markets WHERE match_id IN (99801, 99802)")
+
+        neutral = [r["match_id"] for r in get_user_recommendations(
+            user_id=USER_BETTOR, limit=5, division_id=DIV_ID, season_id=SEASON_ID)]
+        self.assertEqual(neutral, [99803, 99804])
+
+        # The player's own tour-1 match is not in the line either: only tour 2 is left.
+        own = [r["match_id"] for r in get_user_recommendations(
+            user_id=USER_PLAYER, limit=5, division_id=DIV_ID, season_id=SEASON_ID)]
+        self.assertEqual(own, [99803])
+
+        hot = {m["id"] for m in get_hot_matches(division_id=DIV_ID, season_id=SEASON_ID, limit=10)}
+        self.assertEqual(hot, {99803, 99804})
 
     def test_hot_matches_scoped_to_open_line(self) -> None:
         """Hot matches also only pick from open line rounds."""

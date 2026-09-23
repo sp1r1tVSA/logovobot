@@ -67,6 +67,18 @@ def _club_matches(club: str, target: str) -> bool:
     return c_norm in t_norm or t_norm in c_norm
 
 
+def _line_match_ids(division_id: Optional[int], season_id: Optional[int]) -> list[int]:
+    """Матчи, которые сейчас стоят в линии Mini App.
+
+    Открытый тур — это ещё не линия: в неё попадают только центральные пары
+    (`CENTRAL_MATCHES_PER_ROUND`), и до дедлайна. Поэтому источник один —
+    тот же `get_active_bet_markets`, что рисует линию; иначе рекомендации
+    предлагают матчи, на которые нельзя поставить.
+    """
+    markets = database.get_active_bet_markets(division_id=division_id, season_id=season_id)
+    return sorted({bm["match_id"] for bm in markets})
+
+
 def get_hot_matches(
     division_id: Optional[int] = None,
     season_id: Optional[int] = None,
@@ -74,75 +86,21 @@ def get_hot_matches(
 ) -> list[dict[str, Any]]:
     """
     Retrieve top hot matches across the league or scoped to a division/season.
-    Matches are constrained to currently open line rounds (if configured) and ranked
-    by calculated composite hot score.
+    Matches are constrained to the open betting line and ranked by calculated
+    composite hot score.
     """
+    line_ids = _line_match_ids(division_id, season_id)
+    if not line_ids:
+        return []
+
     with database.transaction() as conn:
         cursor = conn.cursor()
-
-        if season_id is not None:
-            target_season_id = season_id
-        else:
-            act = database.get_active_season()
-            target_season_id = act if isinstance(act, int) else (act.get("id") if isinstance(act, dict) else 1)
-
-        # Check for open line rounds in the season (and division if provided)
-        round_sql = """
-            SELECT round_number FROM rounds
-            WHERE (is_open = 1 OR COALESCE(bets_open, 0) = 1)
-        """
-        round_params: list[Any] = []
-        if target_season_id is not None:
-            round_sql += " AND (season_id = ? OR season_id IS NULL)"
-            round_params.append(target_season_id)
-        if division_id is not None:
-            round_sql += " AND division_id = ?"
-            round_params.append(division_id)
-        round_sql += " ORDER BY round_number ASC"
-        cursor.execute(round_sql, round_params)
-        open_round_numbers = [r[0] for r in cursor.fetchall()]
-
-        # If season_id was not explicitly specified and no open rounds found for target_season_id,
-        # fallback to any open rounds for this division
-        if not open_round_numbers and season_id is None:
-            fallback_sql = "SELECT round_number FROM rounds WHERE (is_open = 1 OR COALESCE(bets_open, 0) = 1)"
-            fallback_params: list[Any] = []
-            if division_id is not None:
-                fallback_sql += " AND division_id = ?"
-                fallback_params.append(division_id)
-            fallback_sql += " ORDER BY round_number ASC"
-            cursor.execute(fallback_sql, fallback_params)
-            fallback_rounds = [r[0] for r in cursor.fetchall()]
-            if fallback_rounds:
-                open_round_numbers = fallback_rounds
-                target_season_id = None
-
-        count_sql = "SELECT COUNT(*) FROM rounds WHERE 1=1"
-        count_params: list[Any] = []
-        if target_season_id is not None:
-            count_sql += " AND (season_id = ? OR season_id IS NULL)"
-            count_params.append(target_season_id)
-        if division_id is not None:
-            count_sql += " AND division_id = ?"
-            count_params.append(division_id)
-        cursor.execute(count_sql, count_params)
-        total_rounds = cursor.fetchone()[0]
-
-        base_filter = "WHERE m.status IN ('open', 'scheduled', 'pending', 'live') AND m.status NOT IN ('confirmed', 'completed', 'finished', 'cancelled')"
-        params: list[Any] = []
-        if division_id is not None:
-            base_filter += " AND COALESCE(m.division_id, 1) = ?"
-            params.append(division_id)
-        if target_season_id is not None:
-            base_filter += " AND (m.season_id = ? OR m.season_id IS NULL)"
-            params.append(target_season_id)
-
-        if total_rounds > 0:
-            if not open_round_numbers:
-                return []
-            placeholders = ",".join("?" for _ in open_round_numbers)
-            base_filter += f" AND m.round_number IN ({placeholders})"
-            params.extend(open_round_numbers)
+        placeholders = ",".join("?" for _ in line_ids)
+        base_filter = (
+            f"WHERE m.id IN ({placeholders}) "
+            "AND m.status IN ('open', 'scheduled', 'pending', 'live')"
+        )
+        params: list[Any] = list(line_ids)
 
         # Query candidates in chronological round order
         cursor.execute(f"""
@@ -203,8 +161,8 @@ def get_user_recommendations(
 ) -> list[dict[str, Any]]:
     """
     Generate explainable personalized match/market recommendations for a bettor.
-    Matches are strictly selected from the currently open betting line / active rounds
-    (is_open = 1 OR bets_open = 1), preventing matches from future unopened tours from showing up.
+    Matches are strictly the ones in the open betting line (`get_active_bet_markets`):
+    the central pairs of open rounds before their deadline — not every match of the round.
     Based on:
     - User's division (or passed division_id)
     - User's favorite teams and personal club
@@ -225,12 +183,6 @@ def get_user_recommendations(
         user_div_id = user_row["division_id"] if user_row and user_row["division_id"] else 1
         user_team = user_row["team_name"] if user_row and user_row["team_name"] else ""
         target_div_id = division_id if division_id is not None else user_div_id
-
-        if season_id is not None:
-            target_season_id = season_id
-        else:
-            act = database.get_active_season()
-            target_season_id = act if isinstance(act, int) else (act.get("id") if isinstance(act, dict) else 1)
 
         # 2. Fetch user favorite clubs
         cursor.execute("SELECT target_id FROM favorites WHERE user_id = ? AND target_type = 'club'", (user_id,))
@@ -259,69 +211,20 @@ def get_user_recommendations(
         fav_market_row = cursor.fetchone()
         fav_market = fav_market_row["outcome_type"] if fav_market_row else "p1"
 
-        # 4. Check open rounds for line in this division and season
-        cursor.execute("""
-            SELECT round_number FROM rounds
-            WHERE division_id = ? AND (season_id = ? OR season_id IS NULL)
-              AND (is_open = 1 OR COALESCE(bets_open, 0) = 1)
-            ORDER BY round_number ASC
-        """, (target_div_id, target_season_id))
-        open_round_numbers = [r[0] for r in cursor.fetchall()]
-
-        # Fallback if season_id was not specified and no open rounds found for target_season_id
-        if not open_round_numbers and season_id is None:
-            cursor.execute("""
-                SELECT round_number FROM rounds
-                WHERE division_id = ?
-                  AND (is_open = 1 OR COALESCE(bets_open, 0) = 1)
-                ORDER BY round_number ASC
-            """, (target_div_id,))
-            fallback_rounds = [r[0] for r in cursor.fetchall()]
-            if fallback_rounds:
-                open_round_numbers = fallback_rounds
-                target_season_id = None
-
-        count_sql = "SELECT COUNT(*) FROM rounds WHERE division_id = ?"
-        count_params: list[Any] = [target_div_id]
-        if target_season_id is not None:
-            count_sql += " AND (season_id = ? OR season_id IS NULL)"
-            count_params.append(target_season_id)
-        cursor.execute(count_sql, count_params)
-        total_rounds = cursor.fetchone()[0]
-
-        # 5. Query candidate matches strictly within open line
-        where_season = "AND (m.season_id = ? OR m.season_id IS NULL)" if target_season_id is not None else ""
-        season_params = [target_season_id] if target_season_id is not None else []
-        if total_rounds > 0:
-            if not open_round_numbers:
-                return []
-            placeholders = ",".join("?" for _ in open_round_numbers)
-            cursor.execute(f"""
-                SELECT m.id, m.player1_team, m.player2_team, m.round_number, m.division_id, m.status,
-                       lms.status as live_status, lms.home_score, lms.away_score, lms.minute
-                FROM matches m
-                LEFT JOIN live_match_states lms ON m.id = lms.match_id
-                WHERE COALESCE(m.division_id, 1) = ?
-                  {where_season}
-                  AND m.round_number IN ({placeholders})
-                  AND m.status IN ('open', 'scheduled', 'pending', 'live')
-                  AND m.status NOT IN ('confirmed', 'completed', 'finished', 'cancelled')
-                ORDER BY m.round_number ASC, m.id ASC
-            """, [target_div_id] + season_params + open_round_numbers)
-        else:
-            # Fallback for test fixtures where rounds table is not seeded
-            cursor.execute(f"""
-                SELECT m.id, m.player1_team, m.player2_team, m.round_number, m.division_id, m.status,
-                       lms.status as live_status, lms.home_score, lms.away_score, lms.minute
-                FROM matches m
-                LEFT JOIN live_match_states lms ON m.id = lms.match_id
-                WHERE COALESCE(m.division_id, 1) = ?
-                  {where_season}
-                  AND m.status IN ('open', 'scheduled', 'pending', 'live')
-                  AND m.status NOT IN ('confirmed', 'completed', 'finished', 'cancelled')
-                ORDER BY m.round_number ASC, m.id ASC
-                LIMIT 20
-            """, [target_div_id] + season_params)
+        # 4. Candidates are exactly the matches of the open line
+        line_ids = _line_match_ids(target_div_id, season_id)
+        if not line_ids:
+            return []
+        placeholders = ",".join("?" for _ in line_ids)
+        cursor.execute(f"""
+            SELECT m.id, m.player1_team, m.player2_team, m.round_number, m.division_id, m.status,
+                   lms.status as live_status, lms.home_score, lms.away_score, lms.minute
+            FROM matches m
+            LEFT JOIN live_match_states lms ON m.id = lms.match_id
+            WHERE m.id IN ({placeholders})
+              AND m.status IN ('open', 'scheduled', 'pending', 'live')
+            ORDER BY m.round_number ASC, m.id ASC
+        """, line_ids)
 
         available_matches = [dict(r) for r in cursor.fetchall()]
 
