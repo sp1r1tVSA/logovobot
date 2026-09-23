@@ -100,22 +100,10 @@ async def resolve_division_target(
         chat = config.GROUP_ID or await asyncio.to_thread(database.get_group_id)
         return int(chat) if chat else None
 
-    try:
-        is_cup = division_id is not None and int(division_id) == CUP_DIVISION_SENTINEL
-    except (ValueError, TypeError):
-        is_cup = False
-
-    if is_cup:
-        c_type = "line" if "line" in topic_types else "reports"
-        try:
-            cup_topic = await asyncio.to_thread(database.get_cup_topic, c_type)
-            if cup_topic and cup_topic.get("group_chat_id") and cup_topic.get("message_thread_id"):
-                return int(cup_topic["group_chat_id"]), int(cup_topic["message_thread_id"])
-        except Exception:
-            logger.warning("resolve_division_target: cup_topic lookup failed", exc_info=True)
-        logger.warning(
-            f"resolve_division_target: cup has no binding for {c_type}; message skipped."
-        )
+    if _is_cup_division(division_id):
+        # Кубок вещает ответом под пост, а пара (чат, тред) этого не выражает.
+        # Пропуск, а не легаси-группа: иначе кубок спамил бы в тему лиги.
+        logger.warning("resolve_division_target: cup posts go through resolve_post_target; skipped.")
         return None, None
 
     if division_id:
@@ -177,6 +165,56 @@ async def resolve_division_target(
         if raw and str(raw).strip().isdigit():
             return legacy, int(str(raw).strip())
     return legacy, None
+
+
+def _is_cup_division(division_id) -> bool:
+    try:
+        return division_id is not None and int(division_id) == CUP_DIVISION_SENTINEL
+    except (ValueError, TypeError):
+        return False
+
+
+async def resolve_cup_target() -> dict | None:
+    """Аргументы `send_*` для кубковых результатов: ответ под пост из `/cup_topic`.
+
+    `allow_sending_without_reply` — чтобы удалённый пост-якорь не ронял
+    публикацию результата: сообщение тогда просто уйдёт в тот же чат.
+    """
+    try:
+        topic = await asyncio.to_thread(database.get_cup_topic, "reports")
+    except Exception:
+        logger.warning("resolve_cup_target: cup_topic lookup failed", exc_info=True)
+        return None
+    if not topic or not topic.get("group_chat_id") or not topic.get("anchor_message_id"):
+        logger.warning("resolve_cup_target: cup has no results post; message skipped.")
+        return None
+    return {
+        "chat_id": int(topic["group_chat_id"]),
+        "reply_to_message_id": int(topic["anchor_message_id"]),
+        "allow_sending_without_reply": True,
+    }
+
+
+async def resolve_post_target(
+    division_id: int | None,
+    *topic_types: str,
+    legacy_topic_keys: tuple[str, ...] = (),
+) -> dict | None:
+    """Аргументы `send_*` (чат + тред либо чат + ответ под пост) или None — пропустить.
+
+    Дивизион — то же, что `resolve_division_target`; кубок — ответ под пост-якорь.
+    """
+    if _is_cup_division(division_id):
+        return await resolve_cup_target()
+    chat_id, thread_id = await resolve_division_target(
+        division_id, *topic_types, legacy_topic_keys=legacy_topic_keys
+    )
+    if not chat_id:
+        return None
+    target = {"chat_id": chat_id}
+    if thread_id:
+        target["message_thread_id"] = int(thread_id)
+    return target
 
 
 def is_admin(telegram_id: int) -> bool:

@@ -6,7 +6,7 @@ from telegram.ext import ContextTypes, ConversationHandler
 import html
 import database
 from time_utils import now_msk
-from handlers.base import is_admin, resolve_division_target
+from handlers.base import is_admin, resolve_division_target, resolve_post_target
 from constants import CUP_DIVISION_SENTINEL
 
 import logging
@@ -1227,6 +1227,49 @@ async def safe_edit_or_reply(query: CallbackQuery, context: ContextTypes.DEFAULT
 
 # --- Placeholders ---
 
+def _is_cup_match(m: dict) -> bool:
+    """Кубковая игра: у неё нет тура — номер тура там служебный −1."""
+    return (
+        m.get("tournament_type") == "cup"
+        or m.get("division_id") == CUP_DIVISION_SENTINEL
+        or str(m.get("round_number")) in ("-1", "-1.0")
+    )
+
+
+def _match_round_label(m: dict) -> str:
+    """«Тур N» для лиги, «Кубок · 1/64 · игра 2» для кубка."""
+    if not _is_cup_match(m):
+        return f"Тур {m.get('round_number', '?')}"
+    parts = ["Кубок"]
+    if m.get("cup_stage"):
+        parts.append(str(m["cup_stage"]))
+    if m.get("game_num_in_series"):
+        parts.append(f"игра {m['game_num_in_series']}")
+    return " · ".join(parts)
+
+
+async def _cup_results_closed(match_id: int) -> str | None:
+    """Причина, по которой ввод результата кубковой игры закрыт, или None."""
+    return await asyncio.to_thread(database.cup_results_closed_reason, match_id)
+
+
+async def _refuse_cup_results(query, context, match_id: int) -> bool:
+    """Показать отказ, если этап игры ещё не начат. True — ввод остановлен.
+
+    Отказ приходит сообщением, а не алертом: на callback здесь уже ответили,
+    а второй `answer` Telegram отклоняет.
+    """
+    reason = await _cup_results_closed(match_id)
+    if not reason:
+        return False
+    for key in ("reporting_match_id", "awaiting_report_photo", "ai_photos_list"):
+        context.user_data.pop(key, None)
+    if query:
+        back = InlineKeyboardMarkup([[InlineKeyboardButton("« К матчу", callback_data=f"cabinet_view_match_{match_id}")]])
+        await safe_edit_or_reply(query, context, f"🔒 {html.escape(reason)}", parse_mode="HTML", reply_markup=back)
+    return True
+
+
 async def show_my_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     query = update.callback_query
     if not query:
@@ -1249,7 +1292,13 @@ async def show_my_matches(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         text += "Выберите матч для просмотра и ввода результата:"
         for m in matches:
             opp = m['opponent_team'] or m['opponent_username'] or "Соперник"
-            btn_text = f"⚽ Тур {m.get('round_number', '?')}: 🆚 {opp}"
+            if not _is_cup_match(m):
+                icon = "⚽"
+            elif await _cup_results_closed(m['id']):
+                icon = "🔒"  # этап не начат: игра видна, но результат не принимается
+            else:
+                icon = "🏆"
+            btn_text = f"{icon} {_match_round_label(m)}: 🆚 {opp}"
             keyboard.append([InlineKeyboardButton(btn_text, callback_data=f"cabinet_view_match_{m['id']}")])
             
     keyboard.append([InlineKeyboardButton("« Назад в кабинет", callback_data="menu_cabinet")])
@@ -1270,8 +1319,11 @@ async def cabinet_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await safe_edit_or_reply(query, context, "Матч не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Назад", callback_data="cabinet_my_matches")]]))
         return
         
-    round_info = await asyncio.to_thread(database.get_round_info, m['round_number'])
+    is_cup = _is_cup_match(m)
+    # У кубка нет тура: get_round_info(-1) вернул бы чужую строку или ничего.
+    round_info = None if is_cup else await asyncio.to_thread(database.get_round_info, m['round_number'])
     deadline_text = round_info.get("deadline") if round_info else None
+    cup_closed = await _cup_results_closed(match_id) if is_cup else None
     
     is_overdue = False
     if deadline_text:
@@ -1311,7 +1363,7 @@ async def cabinet_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE)
     else:
         time_info_text = "⏰ **Время матча:** не согласовано\n"
 
-    text = f"🏟 <b>МАТЧ #{m['id']} | Тур {m['round_number']}</b>\n"
+    text = f"🏟 <b>МАТЧ #{m['id']} | {html.escape(_match_round_label(m))}</b>\n"
     text += f"Статус: {status_text}\n"
     if deadline_text:
         text += f"⏳ Дедлайн: {html.escape(deadline_text)}\n"
@@ -1321,7 +1373,9 @@ async def cabinet_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE)
     text += "────────────────────────\n\n"
     
     if m['status'] == 'pending':
-        if is_overdue and not m.get('is_extended'):
+        if cup_closed:
+            text += f"🔒 <b>Ввод результата закрыт.</b>\n\n{html.escape(cup_closed)}"
+        elif is_overdue and not m.get('is_extended'):
             text += "⏳ <b>Дедлайн истек.</b> Результат принимает администратор.\n\nВы можете отправить запрос администратору — он внесёт результат за вас."
         else:
             if m['player1_id'] == user_id:
@@ -1334,7 +1388,8 @@ async def cabinet_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 "2. Выберите <b>⚡ Автоматический ввод (по фото)</b>.\n"
                 "3. Отправьте боту от 1 до 3 скриншотов статистики из игры.\n"
                 "4. ИИ автоматически распознает счёт, авторов голов и ассистов.\n"
-                "5. Проверьте данные и нажмите <b>✅ Всё верно</b> — результат сразу автоматически подтверждается и заносится в турнирную таблицу лиги!"
+                "5. Проверьте данные и нажмите <b>✅ Всё верно</b> — результат сразу автоматически подтверждается и "
+                + ("засчитывается в кубковую серию!" if is_cup else "заносится в турнирную таблицу лиги!")
             )
     elif m['status'] == 'disputed':
         text += "⚠️ <b>Матч оспорен.</b> Ожидайте решения администратора."
@@ -1366,11 +1421,11 @@ async def cabinet_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 InlineKeyboardButton("⏰ Предложить время матча", callback_data=f"cb_propose_time_prompt_{match_id}")
             ])
     
-    if m['status'] == 'pending' and user_id in (m['player1_id'], m['player2_id']) and (not is_overdue or m.get('is_extended')):
+    if m['status'] == 'pending' and not cup_closed and user_id in (m['player1_id'], m['player2_id']) and (not is_overdue or m.get('is_extended')):
         keyboard.append([InlineKeyboardButton("📝 Ввести результат", callback_data=f"cabinet_report_score_{match_id}")])
 
     # Overdue: show request to admin button
-    if m['status'] == 'pending' and is_overdue and not m.get('is_extended') and user_id in (m['player1_id'], m['player2_id']):
+    if m['status'] == 'pending' and not cup_closed and is_overdue and not m.get('is_extended') and user_id in (m['player1_id'], m['player2_id']):
         keyboard.append([InlineKeyboardButton("📨 Запросить ввод через админа", callback_data=f"cb_request_admin_result_{match_id}")])
         
     keyboard.append([InlineKeyboardButton("📜 Правила турнира", url="https://t.me/fifulatyrniru/3405")])
@@ -1853,6 +1908,9 @@ async def start_score_reporting(update: Update, context: ContextTypes.DEFAULT_TY
             await query.answer("⛔ Результат этого матча уже занесён в таблицу!", show_alert=True)
         return
 
+    if await _refuse_cup_results(query, context, match_id):
+        return
+
     user_id = query.from_user.id if query else update.effective_user.id
 
     home_team = match['player1_team'] or match['player1_nickname']
@@ -1897,6 +1955,9 @@ async def cb_report_choice_auto(update: Update, context: ContextTypes.DEFAULT_TY
         await query.answer("⛔ Результат этого матча уже занесён в таблицу!", show_alert=True)
         return
 
+    if await _refuse_cup_results(query, context, match_id):
+        return
+
     user_id = query.from_user.id
     context.user_data["reporting_match_id"] = match_id
     context.user_data["reporting_mode"] = "auto"
@@ -1934,6 +1995,9 @@ async def cb_report_choice_manual(update: Update, context: ContextTypes.DEFAULT_
 
     if match['status'] == 'confirmed':
         await query.answer("⛔ Результат этого матча уже занесён в таблицу!", show_alert=True)
+        return
+
+    if await _refuse_cup_results(query, context, match_id):
         return
 
     user_id = query.from_user.id
@@ -3065,6 +3129,13 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("⛔ Занести результат могут только участники матча или администраторы.", show_alert=True)
         return
 
+    # Последний рубеж перед записью (кнопку могли нажать из старой карточки);
+    # на callback тут ещё не отвечали, так что алерт дойдёт.
+    cup_closed = await _cup_results_closed(match_id)
+    if cup_closed:
+        await query.answer(f"🔒 {cup_closed}", show_alert=True)
+        return
+
     # Guard against bot restart / state wipe
     if "report_home_goals" not in context.user_data or "report_away_goals" not in context.user_data:
         await query.answer(
@@ -3210,14 +3281,14 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
     div_id = match.get("division_id")
     if match.get("tournament_type") == "cup" and (div_id is None or div_id == CUP_DIVISION_SENTINEL):
         div_id = CUP_DIVISION_SENTINEL
-    target_chat_id, target_topic_id = await resolve_division_target(
+    target = await resolve_post_target(
         div_id, "results", "reports",
         legacy_topic_keys=("results_topic_id", "reports_topic_id"),
     )
-    if not target_chat_id:
+    if not target:
         logger.warning(f"No results/reports topic configured for division {div_id}; skipping group result announcement.")
 
-    if target_chat_id:
+    if target:
         group_text = build_formatted_match_post(
             round_number=match['round_number'],
             home_team=home_team,
@@ -3236,20 +3307,14 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
             mvp_player=mvp_player
         ) + debt_note
         try:
-            kwargs = {"chat_id": target_chat_id, "parse_mode": "HTML"}
-            if target_topic_id:
-                kwargs["message_thread_id"] = int(target_topic_id)
+            kwargs = {**target, "parse_mode": "HTML"}
             if photo_id and len(group_text) <= 1024:
                 kwargs["caption"] = group_text
                 kwargs["photo"] = photo_id
                 await context.bot.send_photo(**kwargs)
             elif photo_id:
                 try:
-                    await context.bot.send_photo(
-                        chat_id=target_chat_id,
-                        photo=photo_id,
-                        message_thread_id=int(target_topic_id) if target_topic_id else None
-                    )
+                    await context.bot.send_photo(**target, photo=photo_id)
                 except Exception as ep:
                     logger.warning(f"Could not send match photo to group topic: {ep}")
                 kwargs["text"] = group_text
@@ -3302,6 +3367,9 @@ async def submit_report_to_guest(update: Update, context: ContextTypes.DEFAULT_T
 
     if match['status'] == 'confirmed':
         await query.answer("⛔ Результат этого матча уже занесён в таблицу!", show_alert=True)
+        return
+
+    if await _refuse_cup_results(query, context, match_id):
         return
 
     submitter_id = query.from_user.id
@@ -3565,14 +3633,14 @@ async def notify_match_confirmed(context: ContextTypes.DEFAULT_TYPE, match_id: i
     div_id = match.get("division_id")
     if match.get("tournament_type") == "cup" and (div_id is None or div_id == CUP_DIVISION_SENTINEL):
         div_id = CUP_DIVISION_SENTINEL
-    target_chat_id, target_topic_id = await resolve_division_target(
+    target = await resolve_post_target(
         div_id, "results", "reports",
         legacy_topic_keys=("results_topic_id", "reports_topic_id"),
     )
-    if not target_chat_id:
+    if not target:
         logger.warning(f"No results/reports topic configured for division {div_id}; skipping admin-approved group result announcement.")
 
-    if target_chat_id:
+    if target:
         group_text = build_formatted_match_post(
             round_number=match['round_number'],
             home_team=home_team,
@@ -3593,15 +3661,9 @@ async def notify_match_confirmed(context: ContextTypes.DEFAULT_TYPE, match_id: i
         photo_id = match.get("photo_id")
         try:
             if photo_id:
-                kwargs = {"chat_id": target_chat_id, "photo": photo_id, "caption": group_text, "parse_mode": "HTML"}
-                if target_topic_id:
-                    kwargs["message_thread_id"] = int(target_topic_id)
-                await context.bot.send_photo(**kwargs)
+                await context.bot.send_photo(**target, photo=photo_id, caption=group_text, parse_mode="HTML")
             else:
-                kwargs = {"chat_id": target_chat_id, "text": group_text, "parse_mode": "HTML"}
-                if target_topic_id:
-                    kwargs["message_thread_id"] = int(target_topic_id)
-                await context.bot.send_message(**kwargs)
+                await context.bot.send_message(**target, text=group_text, parse_mode="HTML")
         except Exception as e:
             logger.exception("Failed to post result to topic/group")
 

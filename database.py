@@ -817,6 +817,16 @@ def init_db() -> None:
             INSERT OR IGNORE INTO schema_migrations (version, description)
             VALUES (?, 'Общий кубок: таблица cup_topics (темы вещания этапа)')
         """, (MIGRATION_023_CUP_TOPICS,))
+        # Кубок вещает ответами под пост-якорь, а не в тему форума. Старая колонка
+        # message_thread_id остаётся (NOT NULL не снять без пересборки таблицы) и
+        # пишется нулём; адрес вещания — (group_chat_id, anchor_message_id).
+        try:
+            cursor.execute("ALTER TABLE cup_topics ADD COLUMN anchor_message_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        cursor.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cup_topics_anchor ON cup_topics(group_chat_id, anchor_message_id)"
+        )
 
         # Safely migration-add new columns to matches using predefined SAFE_COLUMNS tuple.
         # Note: String interpolation is safe here as column names/types are hardcoded internal constants, not user input.
@@ -3227,6 +3237,12 @@ def confirm_and_finalize_match(match_id: int, p1_score: int, p2_score: int, even
         cursor.execute("SELECT id FROM matches WHERE id = ?", (match_id,))
         if not cursor.fetchone():
             raise ValueError(f"Match {match_id} not found: nothing to confirm")
+        # Кубковая игра этапа, который ещё не стартовал: линия на неё открыта,
+        # и результат до старта — это ставка на известный исход. Проверка здесь,
+        # а не только в кнопках: сюда сходятся кабинет, черновики и админка.
+        closed = cup_results_closed_reason(match_id)
+        if closed:
+            raise ValueError(closed)
 
         cursor.execute("DELETE FROM match_events WHERE match_id = ?", (match_id,))
         aggregated = {}
@@ -4030,6 +4046,9 @@ def admin_set_match_score(match_id: int, player1_score: int, player2_score: int,
     """Manually set match score and confirm it by admin, clearing any previous match events."""
     if player1_score < 0 or player2_score < 0:
         raise ValueError("Scores must be non-negative integers")
+    closed = cup_results_closed_reason(match_id)
+    if closed:
+        raise ValueError(closed)
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT player1_score, player2_score, status, division_id, season_id, COALESCE(is_technical, 0) AS is_technical FROM matches WHERE id = ?", (match_id,))
@@ -7626,6 +7645,36 @@ def start_cup_stage(stage_id: int, actor_id: int | None = None) -> tuple[bool, s
     return True, f"Этап {stage_row['stage']} открыт для игры."
 
 
+def cup_results_closed_reason(match_id: int) -> str | None:
+    """Почему результат кубковой игры сейчас вносить нельзя — или None, если можно.
+
+    Этап живёт в две фазы, как тур лиги: пока открыта линия (`is_open = 0`),
+    игры закрыты для результатов, иначе ставку можно было бы сделать на уже
+    сыгранный матч. Ввод открывает только «▶ начать этап», тот же переход,
+    что закрывает линию.
+
+    Лиговый матч, заголовок серии и игра без `stage_id` сюда не относятся:
+    на игру без этапа не принимается ни одной ставки (гейт отвечает
+    STAGE_NOT_FOUND), так что и защищать в ней нечего.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT m.tournament_type, COALESCE(m.is_series_header, 0) AS is_series_header, "
+            "cs.stage, cs.is_open "
+            "FROM matches m JOIN cup_stages cs ON cs.id = m.stage_id "
+            "WHERE m.id = ?",
+            (match_id,)
+        )
+        row = cursor.fetchone()
+    if not row or not match_is_cup(row) or row["is_series_header"] or row["is_open"]:
+        return None
+    return (
+        f"Этап {row['stage']} ещё не начат: пока идёт приём прогнозов, результаты "
+        "не принимаются. Ввод откроется после старта этапа."
+    )
+
+
 def create_cup_series(stage: str, pairs: list[tuple[str, str]], season_id: int | None = None) -> list[int]:
     """Завести сетку этапа по готовым парам; порядок пар = номера серий.
 
@@ -8343,15 +8392,14 @@ def get_cup_stage_line(stage: str, season_id: int | None = None) -> dict:
 def bind_cup_topic(
     topic_type: str,
     group_chat_id: int,
-    message_thread_id: int,
+    anchor_message_id: int,
     season_id: int | None = None,
 ) -> dict:
-    """Привязать тему форума к кубковому вещанию сезона (идемпотентно).
+    """Привязать пост-якорь к кубковому вещанию сезона (идемпотентно).
 
-    Тема берётся из сообщения, под которым админ вызвал команду: `topic_type`
-    различает, что в этой теме публикуется — линию этапа или результаты. Одна
-    тема = одно назначение: две роли в одной теме означали бы, что отчёты
-    прилетают под линию, и наоборот.
+    Якорь — сообщение, на которое админ ответил командой; дальше Темшик публикует
+    ответами под ним. Форум-тема не нужна: так же работает обсуждение под постом
+    канала. Под пост уходят только результаты (`CUP_TOPIC_TYPES`).
     """
     from constants import CUP_TOPIC_TYPES
 
@@ -8359,45 +8407,39 @@ def bind_cup_topic(
     norm = (topic_type or "").strip().lower()
     if norm not in CUP_TOPIC_TYPES:
         return {"status": "error", "error": f"Неизвестный тип кубковой темы: {topic_type}"}
-    if not group_chat_id or message_thread_id is None:
-        return {"status": "error", "error": "Нет координат темы (группа/message_thread_id)."}
+    if not group_chat_id or not anchor_message_id:
+        return {"status": "error", "error": "Нет координат поста (чат/сообщение)."}
 
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, topic_type FROM cup_topics WHERE group_chat_id = ? AND message_thread_id = ?",
-            (group_chat_id, message_thread_id)
-        )
-        occupying = cursor.fetchone()
-        if occupying and occupying["topic_type"] != norm:
-            return {
-                "status": "conflict_topic",
-                "occupied_by": occupying["topic_type"],
-                "error": "Эта тема уже назначена для другого кубкового формата.",
-            }
-        cursor.execute(
-            "SELECT id, group_chat_id, message_thread_id FROM cup_topics WHERE season_id = ? AND topic_type = ?",
+            "SELECT id, group_chat_id, anchor_message_id FROM cup_topics WHERE season_id = ? AND topic_type = ?",
             (s_id, norm)
         )
         current = cursor.fetchone()
         if current:
-            if (current["group_chat_id"], current["message_thread_id"]) == (group_chat_id, message_thread_id):
+            if (current["group_chat_id"], current["anchor_message_id"]) == (group_chat_id, anchor_message_id):
                 return {"status": "already_bound", "topic_type": norm, "season_id": s_id,
-                        "group_chat_id": group_chat_id, "message_thread_id": message_thread_id}
-            # Переназначение: тема переезжает, старой записи больше нет — иначе
-            # `get_cup_topic` вернул бы тему, в которую никто не смотрит.
+                        "group_chat_id": group_chat_id, "anchor_message_id": anchor_message_id}
+            # Переназначение: пост меняется, старой записи больше нет — иначе
+            # `get_cup_topic` вернул бы пост, под который никто не смотрит.
             cursor.execute("DELETE FROM cup_topics WHERE id = ?", (current["id"],))
         cursor.execute(
-            "INSERT INTO cup_topics (season_id, topic_type, group_chat_id, message_thread_id, created_at) "
-            "VALUES (?, ?, ?, ?, datetime('now', '+3 hours'))",
-            (s_id, norm, group_chat_id, message_thread_id)
+            "INSERT INTO cup_topics "
+            "(season_id, topic_type, group_chat_id, message_thread_id, anchor_message_id, created_at) "
+            "VALUES (?, ?, ?, 0, ?, datetime('now', '+3 hours'))",
+            (s_id, norm, group_chat_id, anchor_message_id)
         )
     return {"status": "bound", "topic_type": norm, "season_id": s_id,
-            "group_chat_id": group_chat_id, "message_thread_id": message_thread_id}
+            "group_chat_id": group_chat_id, "anchor_message_id": anchor_message_id}
 
 
 def get_cup_topic(topic_type: str, season_id: int | None = None) -> dict | None:
-    """Тема кубкового вещания: {'group_chat_id', 'message_thread_id'} или None."""
+    """Пост кубкового вещания: {'group_chat_id', 'anchor_message_id'} или None.
+
+    Строка, привязанная старой механикой (тема форума, без якоря), привязкой не
+    считается: ответить в ней не на что.
+    """
     from constants import CUP_TOPIC_TYPES
 
     norm = (topic_type or "").strip().lower()
@@ -8406,23 +8448,29 @@ def get_cup_topic(topic_type: str, season_id: int | None = None) -> dict | None:
     s_id = _resolve_season_id(season_id)
     with transaction() as conn:
         row = conn.cursor().execute(
-            "SELECT season_id, topic_type, group_chat_id, message_thread_id "
-            "FROM cup_topics WHERE season_id = ? AND topic_type = ?",
+            "SELECT season_id, topic_type, group_chat_id, anchor_message_id "
+            "FROM cup_topics WHERE season_id = ? AND topic_type = ? AND anchor_message_id IS NOT NULL",
             (s_id, norm)
         ).fetchone()
     return dict(row) if row else None
 
 
 def list_cup_topics(season_id: int | None = None) -> list[dict]:
-    """Все назначенные кубковые темы сезона — для экрана управления."""
+    """Все назначенные кубковые посты сезона — для экрана управления.
+
+    Строки снятых форматов (прежний 'line') не показываются: под них больше
+    ничего не публикуется.
+    """
+    from constants import CUP_TOPIC_TYPES
+
     s_id = _resolve_season_id(season_id)
     with transaction() as conn:
         rows = conn.cursor().execute(
-            "SELECT topic_type, group_chat_id, message_thread_id FROM cup_topics "
-            "WHERE season_id = ? ORDER BY topic_type",
+            "SELECT topic_type, group_chat_id, anchor_message_id FROM cup_topics "
+            "WHERE season_id = ? AND anchor_message_id IS NOT NULL ORDER BY topic_type",
             (s_id,)
         ).fetchall()
-    return [dict(r) for r in rows]
+    return [dict(r) for r in rows if r["topic_type"] in CUP_TOPIC_TYPES]
 
 
 def _club_player_event_totals(cursor: sqlite3.Cursor, canon: str, roster: list[str], season_id: int) -> list[dict]:

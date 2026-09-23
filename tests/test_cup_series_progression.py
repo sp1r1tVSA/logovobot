@@ -78,7 +78,14 @@ class CupProgressionTestCase(unittest.TestCase):
 
     # --- helpers -----------------------------------------------------------
 
+    def _start_stage(self):
+        """Ставки → старт этапа → игры: до старта результат не принимается."""
+        if not database.get_cup_stage_by_id(self.stage_id)["is_open"]:
+            ok, message = database.start_cup_stage(self.stage_id, actor_id=1)
+            self.assertTrue(ok, message)
+
     def _confirm(self, match_id, h, a, winner=None, reporter=1):
+        self._start_stage()
         if winner:
             ok, message = database.set_cup_game_winner(match_id, winner, actor_id=reporter)
             self.assertTrue(ok, message)
@@ -105,6 +112,7 @@ class CupProgressionTestCase(unittest.TestCase):
     # --- 1. победитель при равном счёте ------------------------------------
 
     def test_01_equal_score_without_winner_does_not_confirm(self):
+        self._start_stage()
         before = self._row("SELECT status, player1_score FROM matches WHERE id = ?", (self.game[(1, 1)],))
         with self.assertRaises(ValueError):
             database.confirm_and_finalize_match(self.game[(1, 1)], 2, 2, [], reporter_id=1)

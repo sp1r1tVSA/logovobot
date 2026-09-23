@@ -13,6 +13,7 @@ from telegram.error import BadRequest, TelegramError, Forbidden
 from telegram.ext import ContextTypes, ConversationHandler
 import html
 import database
+from constants import CUP_DIVISION_SENTINEL
 from time_utils import now_msk
 from handlers.base import (
     is_admin,
@@ -20,6 +21,7 @@ from handlers.base import (
     admin_only,
     post_league_table_to_reports,
     resolve_division_target,
+    resolve_post_target,
     round_schedule_missing_message,
     max_active_rounds_message,
 )
@@ -3213,6 +3215,11 @@ async def admin_report_score_auto(update: Update, context: ContextTypes.DEFAULT_
     if not match:
         await query.edit_message_text("❌ Матч не найден.")
         return
+    cup_closed = await asyncio.to_thread(database.cup_results_closed_reason, match_id)
+    if cup_closed:
+        keyboard = [[InlineKeyboardButton("« Назад к карточке матча", callback_data=f"admin_view_match_{match_id}")]]
+        await query.edit_message_text(f"🔒 {html.escape(cup_closed)}", reply_markup=InlineKeyboardMarkup(keyboard))
+        return
 
     context.user_data["reporting_match_id"] = match_id
     context.user_data["report_home_team"] = match['player1_team'] or match['player1_nickname']
@@ -3258,17 +3265,17 @@ async def _notify_group_about_tp(
     if is_debt:
         text += "\n\n⚖️ <i>Матч был долгом — закрыт вердиктом администратора.</i>"
 
-    # Determine target chat and topic strictly by division
-    target_chat_id, target_topic_id = await resolve_division_target(
-        match.get("division_id"), "reports", "results",
+    div_id = match.get("division_id")
+    if tour_type == "cup" and (div_id is None or div_id == CUP_DIVISION_SENTINEL):
+        div_id = CUP_DIVISION_SENTINEL
+    target = await resolve_post_target(
+        div_id, "reports", "results",
         legacy_topic_keys=("reports_topic_id",),
     )
-    if not target_chat_id:
+    if not target:
         return
 
-    kwargs = {"chat_id": target_chat_id, "text": text, "parse_mode": "HTML"}
-    if target_topic_id:
-        kwargs["message_thread_id"] = int(target_topic_id)
+    kwargs = {**target, "text": text, "parse_mode": "HTML"}
         
     try:
         await context.bot.send_message(**kwargs)
@@ -3852,7 +3859,14 @@ async def admin_set_score_text(update: Update, context: ContextTypes.DEFAULT_TYP
     if not match:
         await update.message.reply_text("❌ Матч не найден. Сброс.")
         return ConversationHandler.END
-        
+    cup_closed = await asyncio.to_thread(database.cup_results_closed_reason, match_id)
+    if cup_closed:
+        await update.message.reply_text(
+            f"🔒 {html.escape(cup_closed)}",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« К матчу", callback_data=f"admin_view_match_{match_id}")]])
+        )
+        return ConversationHandler.END
+
     admin_id = update.effective_user.id if update.effective_user else None
     await asyncio.to_thread(database.admin_set_match_score, match_id, s1, s2, admin_id)
 

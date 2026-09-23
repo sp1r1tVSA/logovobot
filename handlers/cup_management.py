@@ -1,7 +1,7 @@
 """
 handlers/cup_management.py
 
-Управление общим кубком: тема вещания, подготовка этапа, публикация линии и
+Управление общим кубком: пост результатов, подготовка этапа, публикация
 результатов.
 
 Права — только глобальный админ. `is_admin` пропускает любого дивизионного
@@ -10,9 +10,10 @@ handlers/cup_management.py
 одновременно, и «свой дивизион» тут не защищает ничего.
 
 Порядок действий админа совпадает с порядком кнопок: сетку заводит скрипт,
-панель заводит игры и заголовки серий (`provision`), открывает приём прогнозов,
-потом — публикует линию в кубковую тему, и только затем стартует этап. Старт
-этапа закрывает линию тем же переходом, что и тур лиги, и вернуть её нельзя.
+панель заводит игры и заголовки серий (`provision`), открывает приём прогнозов
+(линия видна в Mini App), и только затем стартует этап. Старт этапа закрывает
+линию тем же переходом, что и тур лиги, и вернуть её нельзя. Под кубковый пост
+уходят только результаты.
 """
 
 import asyncio
@@ -23,16 +24,14 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 import database
-from constants import CUP_TOPIC_TYPES
-from handlers.base import is_global_admin
+from handlers.base import is_global_admin, resolve_cup_target
 
 logger = logging.getLogger(__name__)
 
 _ACTIONS = {
     "provision": "🧩 завести игры",
     "open": "🎟 открыть ставки",
-    "post_line": "📣 линию в тему",
-    "post_results": "🏆 результаты в тему",
+    "post_results": "🏆 результаты под пост",
     "start": "▶ начать этап",
     "refresh": "↻ обновить",
 }
@@ -47,11 +46,41 @@ def _denied(user) -> bool:
     return not (user and is_global_admin(user.id))
 
 
-async def cmd_cup_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """/cup_topic [line|reports] — привязать ТЕКУЩУЮ тему форума к кубковому вещанию.
+def _resolve_anchor(message) -> int | None:
+    """Пост, под которым кубок будет публиковаться.
 
-    Команда вызывается внутри темы: `message_thread_id` берётся из сообщения, под
-    которым её написали — тот же приём, что у `cmd_assign_topic` в дивизионах.
+    Порядок: ответ на пересланный из канала пост → корень ветки комментариев
+    (в обычной группе обсуждения `message_thread_id` — это id того же поста) →
+    любое сообщение, на которое ответили командой.
+    """
+    reply = getattr(message, "reply_to_message", None)
+    if reply is not None and getattr(reply, "is_automatic_forward", False):
+        return reply.message_id
+    chat = getattr(message, "chat", None)
+    thread_id = getattr(message, "message_thread_id", None)
+    if thread_id and not getattr(chat, "is_forum", False):
+        return int(thread_id)
+    if reply is not None:
+        return reply.message_id
+    return None
+
+
+def _post_link(chat_id: int, username: str | None, message_id: int) -> str | None:
+    if username:
+        return f"https://t.me/{username}/{message_id}"
+    raw = str(chat_id)
+    if raw.startswith("-100"):
+        return f"https://t.me/c/{raw[4:]}/{message_id}"
+    return None
+
+
+async def cmd_cup_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """/cup_topic — привязать пост, под который уходят результаты кубка.
+
+    Команду пишут ответом на пост (или комментарием под постом канала в его
+    группе обсуждения): бот запоминает чат и id поста, и дальше итоги матчей и
+    серий уходят ответами под него. Повторная команда под другим постом
+    переназначает его.
     """
     message = update.effective_message
     if message is None:
@@ -60,36 +89,26 @@ async def cmd_cup_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await message.reply_text("⛔ Команда доступна только глобальному админу.")
         return
 
-    args = list(context.args or [])
-    topic_type = (args[0] if args else "line").strip().lower()
-    if topic_type not in CUP_TOPIC_TYPES:
-        await message.reply_text(
-            "Формат кубковой темы: " + ", ".join(f"<code>{t}</code>" for t in CUP_TOPIC_TYPES),
-            parse_mode="HTML",
-        )
-        return
-
-    thread_id = getattr(message, "message_thread_id", None)
     chat_id = getattr(message, "chat_id", None)
-    if not thread_id or not chat_id:
+    anchor = _resolve_anchor(message)
+    if not chat_id or not anchor:
         await message.reply_text(
-            "Команду нужно писать ВНУТРИ темы форума: бот берёт идентификатор темы из "
-            "сообщения, под которым её вызвали."
+            "Команду нужно отправить ОТВЕТОМ на пост (или комментарием под постом "
+            "канала): бот запомнит этот пост и будет публиковать под ним результаты кубка."
         )
         return
 
-    result = await asyncio.to_thread(database.bind_cup_topic, topic_type, chat_id, int(thread_id))
+    result = await asyncio.to_thread(database.bind_cup_topic, "reports", chat_id, int(anchor))
     status = result.get("status")
     if status in ("bound", "already_bound"):
+        chat = getattr(message, "chat", None)
+        link = _post_link(chat_id, getattr(chat, "username", None), int(anchor))
+        where = f'<a href="{html.escape(link)}">пост {anchor}</a>' if link else f"пост <code>{anchor}</code>"
         await message.reply_text(
-            f"✅ Тема <code>{chat_id}</code>/<code>{thread_id}</code> — "
-            f"кубковый формат <b>{topic_type}</b>.",
+            f"✅ {where} — пост результатов кубка. "
+            "Итоги матчей и серий будут приходить ответами под него.",
             parse_mode="HTML",
-        )
-    elif status == "conflict_topic":
-        await message.reply_text(
-            f"⚠️ Эта тема уже назначена формату <b>{result.get('occupied_by')}</b>. "
-            "Одна тема — один формат.", parse_mode="HTML"
+            disable_web_page_preview=True,
         )
     else:
         await message.reply_text(f"❌ {result.get('error')}")
@@ -110,10 +129,7 @@ def _stage_keyboard(stage_id: int, decided: bool) -> list[list[InlineKeyboardBut
             InlineKeyboardButton(_ACTIONS["provision"], callback_data=f"cup_provision_{stage_id}"),
             InlineKeyboardButton(_ACTIONS["open"], callback_data=f"cup_open_{stage_id}"),
         ])
-        rows.append([
-            InlineKeyboardButton(_ACTIONS["post_line"], callback_data=f"cup_post_line_{stage_id}"),
-            InlineKeyboardButton(_ACTIONS["start"], callback_data=f"cup_start_{stage_id}"),
-        ])
+        rows.append([InlineKeyboardButton(_ACTIONS["start"], callback_data=f"cup_start_{stage_id}")])
     rows.append([
         InlineKeyboardButton(_ACTIONS["post_results"], callback_data=f"cup_post_results_{stage_id}"),
         InlineKeyboardButton(_ACTIONS["refresh"], callback_data="cup_refresh"),
@@ -140,11 +156,11 @@ async def _render_panel(target, context, stage_id: int | None = None, note: str 
             lines.append(f"↳ {html.escape(note)}")
     if not topics:
         lines.append("")
-        lines.append("⚠️ Кубковая тема не назначена: напиши <code>/cup_topic</code> внутри темы.")
+        lines.append("⚠️ Пост результатов не назначен: ответь на нужный пост командой <code>/cup_topic</code>.")
     else:
-        bound = ", ".join(f"{t['topic_type']}→<code>{t['message_thread_id']}</code>" for t in topics)
+        bound = ", ".join(f"<code>{t['group_chat_id']}/{t['anchor_message_id']}</code>" for t in topics)
         lines.append("")
-        lines.append(f"Темы вещания: {bound}")
+        lines.append(f"Пост результатов: {bound}")
     keyboard = [[InlineKeyboardButton(s["stage"], callback_data=f"cup_stage_{s['id']}")]
                 for s in stages]
     if stage_id:
@@ -188,8 +204,8 @@ async def cb_cup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _render_panel(query.message, context, stage_id=context.user_data.get("cup_stage_id"))
         return
 
-    # Номер этапа — последний сегмент: у `post_line` / `post_results` в самом
-    # действии есть «_», и split по первому разделителю терял их целиком.
+    # Номер этапа — последний сегмент: у `post_results` в самом действии есть
+    # «_», и split по первому разделителю терял его целиком.
     head, _, tail = query.data.rpartition("_")
     action = head.removeprefix("cup_")
     try:
@@ -220,8 +236,8 @@ async def cb_cup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action == "start":
         ok, message = await asyncio.to_thread(database.start_cup_stage, stage_id, query.from_user.id)
         note = message
-    elif action in ("post_line", "post_results"):
-        note = await _publish(stage, context.bot, line=action == "post_line")
+    elif action == "post_results":
+        note = await _publish(stage, context.bot)
     else:
         return
 
@@ -235,65 +251,32 @@ async def _generate_stage_markets(stage: str, season_id) -> int:
     return len(rows)
 
 
-async def _publish(stage: dict, bot, line: bool) -> str:
-    topic_type = "line" if line else "reports"
-    topic = await asyncio.to_thread(database.get_cup_topic, topic_type)
-    if not topic:
-        return f"Тема «{topic_type}» не назначена — вызови /cup_topic внутри темы."
+async def _publish(stage: dict, bot) -> str:
+    target = await resolve_cup_target()
+    if not target:
+        return "Пост результатов не назначен — ответь на нужный пост командой /cup_topic."
 
-    chunks = _format_stage_messages(stage, line=line)
+    chunks = _format_stage_messages(stage)
     if not chunks:
         return "Публиковать нечего: сетка этапа пуста."
     for chunk in chunks:
         await bot.send_message(
-            chat_id=topic["group_chat_id"],
-            message_thread_id=topic["message_thread_id"],
+            **target,
             text=chunk,
             parse_mode="HTML",
             disable_web_page_preview=True,
         )
-    return f"Опубликовано в теме «{topic_type}»: {len(chunks)} сообщ."
+    return f"Опубликовано под постом результатов: {len(chunks)} сообщ."
 
 
-def _format_stage_messages(stage: dict, line: bool) -> list[str]:
-    """Готовые к отправке куски текста этапа (линия или итоги серий)."""
+def _format_stage_messages(stage: dict) -> list[str]:
+    """Готовые к отправке куски текста с итогами серий этапа."""
     stage_name = stage["stage"]
-    if line:
-        data = database.get_cup_stage_line(stage_name)
-        messages = [f"🏆 <b>ОБЩИЙ КУБОК · {html.escape(stage_name)}</b> · приём прогнозов открыт"]
-        block: list[str] = []
-        for series in data["series"]:
-            head = series["header"] or {}
-            head_odds = head.get("odds") or {}
-            block.append(
-                f"\n<b>{html.escape(series['team1_name'])} — {html.escape(series['team2_name'])}</b>"
-            )
-            if head_odds:
-                block.append(
-                    f"проход: <b>{head_odds.get('p1', '—')}</b> / <b>{head_odds.get('p2', '—')}</b>"
-                    f" · третья игра: <b>{head_odds.get('tb25', '—')}</b>"
-                )
-            for game in series["games"]:
-                odds = game.get("odds") or {}
-                if not odds:
-                    continue
-                block.append(
-                    f"  игра {game['game_num_in_series']}: П1 <b>{odds.get('p1', '—')}</b> · "
-                    f"П2 <b>{odds.get('p2', '—')}</b> · ТБ2.5 <b>{odds.get('tb25', '—')}</b> · "
-                    f"ОЗ да <b>{odds.get('btts_yes', '—')}</b>"
-                )
-            if sum(len(x) for x in block) > 3200:
-                messages.append("\n".join(block))
-                block = []
-        if block:
-            messages.append("\n".join(block))
-        return messages
-
     bracket = database.get_cup_bracket(stage_name)
     if not bracket:
         return []
     messages = [f"🏆 <b>ОБЩИЙ КУБОК · {html.escape(stage_name)}</b> · результаты"]
-    block = []
+    block: list[str] = []
     for series in bracket:
         score = f"{series['team1_wins']}:{series['team2_wins']}"
         winner = series["winner_name"]
@@ -318,5 +301,5 @@ def register_cup_handlers(app) -> None:
     app.add_handler(CommandHandler("cup_topic", cmd_cup_topic))
     app.add_handler(CallbackQueryHandler(
         cb_cup,
-        pattern="^cup_(refresh|stage_\\d+|provision_\\d+|open_\\d+|start_\\d+|post_line_\\d+|post_results_\\d+)$",
+        pattern="^cup_(refresh|stage_\\d+|provision_\\d+|open_\\d+|start_\\d+|post_results_\\d+)$",
     ))

@@ -449,7 +449,7 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
 
 from telegram.ext import CallbackQueryHandler
 from handlers.admin import is_admin
-from handlers.base import is_global_admin, resolve_division_target
+from handlers.base import is_global_admin, resolve_post_target
 
 
 def _draft_division_ids(draft: dict) -> set[int]:
@@ -584,16 +584,14 @@ async def cb_draft_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         from constants import CUP_DIVISION_SENTINEL
         if (g.get("tournament_type") == "cup" or (_m_row and _m_row.get("tournament_type") == "cup")) and (div_id is None or div_id == CUP_DIVISION_SENTINEL):
             div_id = CUP_DIVISION_SENTINEL
-        target_chat_id, target_topic = await resolve_division_target(
+        target = await resolve_post_target(
             div_id, "results", "reports",
             legacy_topic_keys=("results_topic_id", "reports_topic_id"),
         )
 
-        if target_chat_id:
+        if target:
             try:
-                kwargs = {"chat_id": target_chat_id, "parse_mode": "HTML"}
-                if target_topic:
-                    kwargs["message_thread_id"] = int(target_topic)
+                kwargs = {**target, "parse_mode": "HTML"}
 
                 if g.get("photo_id") and len(official_text) <= 1024:
                     kwargs["photo"] = g["photo_id"]

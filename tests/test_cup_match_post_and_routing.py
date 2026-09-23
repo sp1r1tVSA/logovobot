@@ -3,8 +3,8 @@ tests/test_cup_match_post_and_routing.py
 
 Проверка двух предрелизных фиксов:
 1. `build_formatted_match_post` для кубковых матчей печатает этап и игру серии вместо «Тур -1».
-2. `resolve_division_target` для CUP_DIVISION_SENTINEL (0) направляет отчёты в кубковый топик `reports`
-   и не утекает в легаси results_topic_id регулярной лиги.
+2. `resolve_post_target` для CUP_DIVISION_SENTINEL (0) отправляет отчёты ответом под кубковый пост
+   `reports` и не утекает в легаси results_topic_id регулярной лиги.
 """
 
 import os
@@ -13,7 +13,7 @@ import unittest
 
 import database
 from constants import CUP_DIVISION_SENTINEL
-from handlers.base import resolve_division_target
+from handlers.base import resolve_division_target, resolve_post_target
 from handlers.cabinet import build_formatted_match_post
 
 
@@ -176,33 +176,49 @@ class CupMatchPostAndRoutingTestCase(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Тур 5", post)
         self.assertNotIn("Кубок", post)
 
-    async def test_05_cup_routing_resolves_to_cup_reports_topic(self):
-        """resolve_division_target с CUP_DIVISION_SENTINEL направляет в cup_topics(reports)."""
+    async def test_05_cup_routing_replies_under_the_cup_reports_post(self):
+        """resolve_post_target с CUP_DIVISION_SENTINEL отвечает под пост cup_topics(reports)."""
         database.bind_cup_topic("reports", -100777888, 999, season_id=self.season_id)
 
         # Конфигурируем также легаси результаты регулярной лиги
         database.set_config("group_id", "-100111222")
         database.set_config("results_topic_id", "123")
 
-        target = await resolve_division_target(
+        target = await resolve_post_target(
             CUP_DIVISION_SENTINEL,
             "results", "reports",
             legacy_topic_keys=("results_topic_id", "reports_topic_id")
         )
-        self.assertEqual(target, (-100777888, 999), "Кубковый результат обязан уходить в кубковую тему")
+        self.assertEqual(
+            target,
+            {"chat_id": -100777888, "reply_to_message_id": 999, "allow_sending_without_reply": True},
+            "Кубковый результат обязан уходить ответом под кубковый пост",
+        )
 
     async def test_06_cup_routing_does_not_leak_to_league_legacy_when_unbound(self):
-        """Если кубковый топик не настроен, результат НЕ отправляется в легаси тему лиги."""
+        """Если кубковый пост не назначен, результат НЕ отправляется в легаси тему лиги."""
         database.set_config("group_id", "-100111222")
         database.set_config("results_topic_id", "123")
 
-        target = await resolve_division_target(
-            CUP_DIVISION_SENTINEL,
-            "results", "reports",
+        kwargs = dict(legacy_topic_keys=("results_topic_id", "reports_topic_id"))
+        self.assertIsNone(
+            await resolve_post_target(CUP_DIVISION_SENTINEL, "results", "reports", **kwargs),
+            "Без кубкового поста публикация пропускается, а не спамит в лигу",
+        )
+        self.assertEqual(
+            await resolve_division_target(CUP_DIVISION_SENTINEL, "results", "reports", **kwargs),
+            (None, None),
+        )
+
+    async def test_07_league_target_keeps_the_forum_thread(self):
+        database.set_config("group_id", "-100111222")
+        database.set_config("results_topic_id", "123")
+
+        target = await resolve_post_target(
+            None, "results", "reports",
             legacy_topic_keys=("results_topic_id", "reports_topic_id")
         )
-        self.assertEqual(target, (None, None), "Без кубковой темы публикация пропускается, а не спамит в лигу")
-
+        self.assertEqual(target, {"chat_id": -100111222, "message_thread_id": 123})
 
 if __name__ == "__main__":
     unittest.main()

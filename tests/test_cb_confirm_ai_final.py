@@ -62,7 +62,7 @@ class TestCbConfirmAiFinal(unittest.IsolatedAsyncioTestCase):
              patch("handlers.cabinet.refresh_league_table", new=AsyncMock()), \
              patch("handlers.cabinet.handle_debt_played_rewards", new=AsyncMock()), \
              patch("handlers.cabinet.safe_send_notification", new=AsyncMock()) as mock_notify, \
-             patch("handlers.cabinet.resolve_division_target", new=AsyncMock(return_value=(-1001234567, 42))):
+             patch("handlers.cabinet.resolve_post_target", new=AsyncMock(return_value={"chat_id": -1001234567, "message_thread_id": 42})):
 
             await cabinet.cb_confirm_ai_final(update, context)
 
@@ -174,7 +174,7 @@ class TestCbConfirmAiFinal(unittest.IsolatedAsyncioTestCase):
              patch("handlers.cabinet.refresh_league_table", new=AsyncMock()), \
              patch("handlers.cabinet.handle_debt_played_rewards", new=AsyncMock()), \
              patch("handlers.cabinet.safe_send_notification", new=AsyncMock()), \
-             patch("handlers.cabinet.resolve_division_target", new=AsyncMock(return_value=(-1001234567, 42))):
+             patch("handlers.cabinet.resolve_post_target", new=AsyncMock(return_value={"chat_id": -1001234567, "message_thread_id": 42})):
 
             await cabinet.cb_confirm_ai_final(update, context)
 
@@ -207,7 +207,7 @@ class TestCbConfirmAiFinal(unittest.IsolatedAsyncioTestCase):
              patch("handlers.cabinet.refresh_league_table", new=AsyncMock()), \
              patch("handlers.cabinet.handle_debt_played_rewards", new=AsyncMock()), \
              patch("handlers.cabinet.safe_send_notification", new=AsyncMock()), \
-             patch("handlers.cabinet.resolve_division_target", new=AsyncMock(return_value=(-1001234567, 42))):
+             patch("handlers.cabinet.resolve_post_target", new=AsyncMock(return_value={"chat_id": -1001234567, "message_thread_id": 42})):
 
             await cabinet.cb_confirm_ai_final(update, context)
 
