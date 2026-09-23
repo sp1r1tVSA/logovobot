@@ -18,6 +18,8 @@ class AppController {
     this.standingsSort = { key: 'points', dir: 'desc' };
     // Подписи входных данных уже нарисованных блоков: key -> JSON.
     this._renderSigs = new Map();
+    // Матч, который Матч-Центр грузит или уже показал: ответ на более старый запрос отбрасывается.
+    this._matchCenterRequestedId = null;
     this.init();
   }
 
@@ -145,42 +147,45 @@ class AppController {
         const targetDivId = urlParams.get('division_id');
         const targetMatchId = urlParams.get('match_id');
 
-        // Fetch divisions
-        try {
-          const divData = await api.getDivisions();
-          if (divData.status === 'ok' && divData.divisions) {
-            store.setDivisions(divData.divisions);
-            if (targetDivId) {
-              store.setSelectedDivisionId(parseInt(targetDivId));
-            } else if (divData.divisions.length > 0 && !store.state.selectedDivisionId) {
-              store.setSelectedDivisionId(divData.divisions[0].id);
-            }
+        // Дивизионы приходят в bootstrap; отдельный запрос — только для старого сервера.
+        let divisions = Array.isArray(data.divisions) ? data.divisions : null;
+        if (!divisions) {
+          try {
+            const divData = await api.getDivisions();
+            if (divData.status === 'ok' && divData.divisions) divisions = divData.divisions;
+          } catch (err) {
+            console.warn("Could not load divisions:", err);
           }
-        } catch (err) {
-          console.warn("Could not load divisions:", err);
         }
-
-        // Fetch markets line with division
-        const toursData = await api.getTours(store.state.selectedDivisionId);
-        if (toursData.status === 'ok') {
-          store.setTours(toursData.tours);
-          if (targetMatchId) {
-            const mId = parseInt(targetMatchId);
-            this.loadMatchCenter(mId);
-            this.switchView('match_center');
-          } else {
-            // Предзагружаем Матч-Центр первым матчем открытой линии, а не первым
-            // матчем первого тура — тот может быть уже сыгран.
-            const [firstMatch] = UIRenderer.collectLineMatches(toursData.tours);
-            if (firstMatch) this.loadMatchCenter(firstMatch.match_id);
+        if (divisions) {
+          store.setDivisions(divisions);
+          if (targetDivId) {
+            store.setSelectedDivisionId(parseInt(targetDivId));
+          } else if (divisions.length > 0 && !store.state.selectedDivisionId) {
+            store.setSelectedDivisionId(divisions[0].id);
           }
         }
 
-        // Fetch progression, tournaments, user stats & intelligence hub
+        const divId = store.state.selectedDivisionId;
+
+        // Всё остальное грузится параллельно с линией, а не после неё.
         this.fetchProgressionData();
-        this.fetchTournamentData(store.state.selectedDivisionId);
+        this.fetchTournamentData(divId);
         this.fetchUserExtras();
         this.fetchIntelligenceHub();
+
+        if (targetMatchId) {
+          this.loadMatchCenter(parseInt(targetMatchId));
+          this.switchView('match_center');
+        }
+
+        const toursData = await api.getTours(divId);
+        if (toursData.status === 'ok') {
+          store.setTours(toursData.tours);
+          // Матч-Центр без выбранного матча грузится при первом открытии вкладки;
+          // если её открыли раньше, чем пришла линия, — догружаем сейчас.
+          if (store.state.activeView === 'match_center') this.ensureMatchCenterMatch();
+        }
       }
     } catch (err) {
       if (err.status === 403 || err.code === 'LOGOVO_LOCKDOWN' || (err.data && err.data.error === 'LOGOVO_LOCKDOWN')) {
@@ -493,7 +498,15 @@ class AppController {
     }
   }
 
+  /** Открывает в Матч-Центре первый матч линии, если никакой ещё не выбран и не грузится. */
+  ensureMatchCenterMatch() {
+    if (store.state.selectedMatchId || this._matchCenterRequestedId != null) return;
+    const [firstMatch] = UIRenderer.collectLineMatches(store.state.tours || []);
+    if (firstMatch) this.loadMatchCenter(firstMatch.match_id);
+  }
+
   async loadMatchCenter(matchId) {
+    this._matchCenterRequestedId = matchId;
     try {
       const [detailRes, statsRes, h2hRes, insRes, liveRes, mktsRes] = await Promise.all([
         api.getMatchDetail(matchId),
@@ -503,6 +516,8 @@ class AppController {
         api.getMatchLive(matchId),
         api.getMatchMarkets(matchId)
       ]);
+      // Пока шёл запрос, пользователь открыл другой матч — этот ответ уже не нужен.
+      if (this._matchCenterRequestedId !== matchId) return;
 
       store.setSelectedMatch(
         matchId,
@@ -515,6 +530,10 @@ class AppController {
       );
     } catch (e) {
       console.warn("Could not load match center:", e);
+      // Разрешаем повторную попытку при следующем открытии вкладки.
+      if (this._matchCenterRequestedId === matchId && !store.state.selectedMatchId) {
+        this._matchCenterRequestedId = null;
+      }
     }
   }
 
@@ -1439,6 +1458,8 @@ class AppController {
       this.fetchTournamentData();
     } else if (viewName === 'my_club') {
       this.fetchMyClubData();
+    } else if (viewName === 'match_center') {
+      this.ensureMatchCenterMatch();
     }
 
     tgBridge.hapticImpact('light');

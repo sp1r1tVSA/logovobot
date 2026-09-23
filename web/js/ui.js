@@ -457,7 +457,7 @@ export class UIRenderer {
     if (navIcon.dataset.currentTeam !== teamName) {
       navIcon.dataset.currentTeam = teamName;
       navIcon.style.cssText = 'display:inline-flex!important;align-items:center!important;justify-content:center!important;width:24px!important;height:24px!important;max-width:24px!important;max-height:24px!important;overflow:hidden!important;';
-      navIcon.innerHTML = `<img src="${logoUrl}" alt="${escapeHtml(teamName)}" class="nav-club-logo" width="22" height="22" style="width:22px!important;height:22px!important;min-width:22px!important;min-height:22px!important;max-width:22px!important;max-height:22px!important;object-fit:contain!important;display:block!important;margin:0 auto!important;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.45));" onerror="this.parentElement.textContent='🛡'; delete this.parentElement.dataset.currentTeam; this.parentElement.style.cssText='';" />`;
+      navIcon.innerHTML = `<img src="${logoUrl}" alt="${escapeHtml(teamName)}" class="nav-club-logo" width="22" height="22" style="width:22px!important;height:22px!important;min-width:22px!important;min-height:22px!important;max-width:22px!important;max-height:22px!important;object-fit:contain!important;display:block!important;margin:0 auto!important;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.45));" onerror="var p=this.parentElement; if(!p) return; p.textContent='🛡'; delete p.dataset.currentTeam; p.style.cssText='';" />`;
     }
   }
 

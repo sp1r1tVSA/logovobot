@@ -113,6 +113,22 @@ _CANONICAL_ADMIN_IDS = None
 
 
 @pytest.fixture(autouse=True)
+def _reset_line_refresh():
+    """
+    Сбросить троттлинг переоценки линии (`services/line_refresh`) между тестами.
+
+    Окно в минуту на тур хранится в памяти процесса: без сброса тест, который
+    меняет матчи тура и снова запрашивает /api/markets/tours, получал бы линию,
+    не пересчитанную после предыдущего теста.
+    """
+    from services import line_refresh
+
+    line_refresh.reset()
+    yield
+    line_refresh.reset()
+
+
+@pytest.fixture(autouse=True)
 def _stable_admin_ids():
     """
     Держать `config.ADMIN_IDS` одним и тем же объектом списка на весь процесс.

@@ -83,6 +83,14 @@ class TestMiniAppApi(AioHTTPTestCase):
         })
         self.assertTrue(0 < limits["min_bet"] <= limits["max_bet"])
         self.assertTrue(limits["min_bet"] <= limits["max_payout"] <= limits["max_open_exposure"])
+        # Дивизионы едут в bootstrap, чтобы Mini App не ходил за ними отдельным запросом.
+        if data["user"]["has_access"]:
+            self.assertEqual(
+                [d["id"] for d in data["divisions"]],
+                [d["id"] for d in database.get_divisions(only_active=True)],
+            )
+        else:
+            self.assertEqual(data["divisions"], [])
         self.assertEqual(limits["open_exposure"], 0)
         self.assertTrue(limits["max_open_bets"] > 0)
         self.assertEqual(limits["open_bets"], 0)

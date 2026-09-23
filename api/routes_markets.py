@@ -9,8 +9,8 @@ import logging
 from aiohttp import web
 import database
 from api.auth import get_authenticated_user, check_user_access
-from services.betting_engine import generate_round_markets
 import services.odds_engine as odds_engine
+from services import line_refresh
 
 logger = logging.getLogger(__name__)
 
@@ -18,29 +18,8 @@ logger = logging.getLogger(__name__)
 FINISHED_MATCH_STATUSES = ("confirmed", "completed", "finished", "cancelled")
 
 
-async def handle_get_tours(request: web.Request) -> web.Response:
-    """
-    GET /api/markets/tours
-    Returns all open tours with their matches and active odds.
-    """
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-    user_info = get_authenticated_user(init_data)
-
-    if not user_info or "id" not in user_info:
-        return web.json_response({"status": "error", "error": "unauthorized"}, status=401)
-
-    user_id = user_info["id"]
-    if not check_user_access(user_id):
-        return web.json_response({
-            "status": "error",
-            "error": "access_restricted",
-            "message": "Logovo.bet временно недоступен."
-        }, status=403)
-
-    division_id_param = request.query.get("division_id")
-    div_id = int(division_id_param) if division_id_param and division_id_param.isdigit() else None
-
-    # Получаем все туры сезона, которые либо открыты для игры (is_open = 1), либо открыты для ставок (bets_open = 1)
+def _load_season_tours(div_id):
+    """Туры активного сезона, открытые для игры (is_open) или для ставок (bets_open)."""
     with database.transaction() as conn:
         cursor = conn.cursor()
         act = database.get_active_season()
@@ -65,7 +44,32 @@ async def handle_get_tours(request: web.Request) -> web.Response:
             params.append(div_id)
         query += " GROUP BY r.round_number, r.deadline, r.division_id, r.season_id, r.is_open, r.bets_open ORDER BY r.round_number ASC"
         cursor.execute(query, params)
-        season_tours = [dict(r) for r in cursor.fetchall()]
+        return s_id, [dict(r) for r in cursor.fetchall()]
+
+
+async def handle_get_tours(request: web.Request) -> web.Response:
+    """
+    GET /api/markets/tours
+    Returns all open tours with their matches and active odds.
+    """
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    user_info = get_authenticated_user(init_data)
+
+    if not user_info or "id" not in user_info:
+        return web.json_response({"status": "error", "error": "unauthorized"}, status=401)
+
+    user_id = user_info["id"]
+    if not check_user_access(user_id):
+        return web.json_response({
+            "status": "error",
+            "error": "access_restricted",
+            "message": "Logovo.bet временно недоступен."
+        }, status=403)
+
+    division_id_param = request.query.get("division_id")
+    div_id = int(division_id_param) if division_id_param and division_id_param.isdigit() else None
+
+    s_id, season_tours = await asyncio.to_thread(_load_season_tours, div_id)
 
     for t in season_tours:
         t["is_early"] = (not t.get("is_open")) and bool(t.get("bets_open"))
@@ -80,11 +84,9 @@ async def handle_get_tours(request: web.Request) -> web.Response:
         r_num = t["round_number"]
         if t.get("total_matches") == 0:
             continue
-        # Ensure markets are generated
-        try:
-            generate_round_markets(r_num, division_id=div_id, season_id=s_id)
-        except Exception as e:
-            logger.debug(f"Could not generate round markets for tour #{r_num}: {e}")
+        # Линия переоценивается в потоке и не чаще раза в минуту на тур:
+        # раньше каждый запрос лобби пересчитывал её прямо в event loop бота.
+        await line_refresh.ensure_round_line(r_num, division_id=div_id, season_id=s_id)
 
         markets = await asyncio.to_thread(database.get_active_bet_markets, r_num, division_id=div_id, season_id=s_id)
         round_matches = await asyncio.to_thread(database.get_matches_by_round, r_num, division_id=div_id, season_id=s_id)
@@ -98,12 +100,6 @@ async def handle_get_tours(request: web.Request) -> web.Response:
             # Сыгранный матч в линии не нужен: его результат живёт в «Турнирах».
             if (m.get("match_status") or "pending") in FINISHED_MATCH_STATUSES:
                 continue
-            t1 = m["team1_name"]
-            t2 = m["team2_name"]
-            try:
-                odds_engine.generate_match_markets(m_id, t1, t2)
-            except Exception as e:
-                logger.debug(f"Could not generate relational markets for match #{m_id}: {e}")
 
             matches_list.append({
                 "match_id": m["match_id"],
@@ -169,6 +165,13 @@ async def handle_get_tours(request: web.Request) -> web.Response:
     })
 
 
+def _load_match_row(match_id):
+    with database.transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM matches WHERE id = ?", (match_id,))
+        return cursor.fetchone()
+
+
 async def handle_get_match_markets(request: web.Request) -> web.Response:
     """
     GET /api/matches/{id}/markets
@@ -189,11 +192,7 @@ async def handle_get_match_markets(request: web.Request) -> web.Response:
     except (KeyError, ValueError):
         return web.json_response({"status": "error", "message": "Некорректный ID матча."}, status=400)
 
-    # Get match info
-    with database.transaction() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM matches WHERE id = ?", (match_id,))
-        match_row = cursor.fetchone()
+    match_row = await asyncio.to_thread(_load_match_row, match_id)
 
     if not match_row:
         return web.json_response({"status": "error", "message": "Матч не найден."}, status=404)
@@ -207,11 +206,11 @@ async def handle_get_match_markets(request: web.Request) -> web.Response:
         if pair:
             t1, t2 = pair
 
-    markets = odds_engine.get_match_markets(match_id)
+    markets = await asyncio.to_thread(odds_engine.get_match_markets, match_id)
     if not markets and not is_cup:
         # Generate on the fly if not existing. Кубок сюда не идёт: его линию
         # выставляет панель этапа, а лиговая модель записала бы ему ничью.
-        markets = odds_engine.generate_match_markets(match_id, t1, t2)
+        markets = await asyncio.to_thread(odds_engine.generate_match_markets, match_id, t1, t2)
 
     # Normalize field name: alias odds_value -> current_odd for frontend consistency
     for mkt in markets:
@@ -254,7 +253,9 @@ async def handle_get_odds_history(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "message": "Некорректный ID рынка."}, status=400)
 
     selection_key = request.query.get("selection_key")
-    history = odds_engine.get_odds_history(market_id=market_id, selection_key=selection_key, limit=30)
+    history = await asyncio.to_thread(
+        odds_engine.get_odds_history, market_id=market_id, selection_key=selection_key, limit=30
+    )
 
     return web.json_response({
         "status": "ok",

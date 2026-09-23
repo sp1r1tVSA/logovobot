@@ -56,7 +56,8 @@ def _resolve_user_bet_limits(user_id: int) -> dict:
 async def handle_bootstrap(request: web.Request) -> web.Response:
     """
     GET /api/bootstrap
-    Returns current user info, balance, active tours count, and bonus cooldown.
+    Returns current user info, balance, active tours count, bonus cooldown
+    and the active divisions.
     """
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     user_info = get_authenticated_user(init_data)
@@ -96,6 +97,10 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
 
     bet_limits = await asyncio.to_thread(_resolve_user_bet_limits, user_id)
 
+    # Дивизионы отдаём здесь же: клиенту они нужны до запроса линии, и отдельный
+    # /api/divisions стоил лишнего сетевого круга на старте Mini App.
+    divisions = await asyncio.to_thread(database.get_divisions, only_active=True) if has_access else []
+
     return web.json_response({
         "status": "ok",
         "user": {
@@ -117,7 +122,8 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
             "cooldown_seconds": cooldown_sec,
             "reward_amount": 250
         },
-        "open_tours_count": len(open_tours)
+        "open_tours_count": len(open_tours),
+        "divisions": divisions
     })
 
 
