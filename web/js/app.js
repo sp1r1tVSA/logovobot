@@ -343,15 +343,13 @@ class AppController {
 
   async fetchUserExtras() {
     try {
-      const [statsRes, savedRes, tourStatsRes, overviewRes] = await Promise.all([
+      const [statsRes, savedRes, overviewRes] = await Promise.all([
         api.getMyStats(),
         api.getSavedCoupons(),
-        api.getTournamentStats().catch(() => null),
         api.getMyClubOverview().catch(() => null)
       ]);
       if (statsRes.status === 'ok') store.setMyStats(statsRes.stats);
       if (savedRes.status === 'ok') store.setSavedCoupons(savedRes.saved_coupons);
-      if (tourStatsRes && tourStatsRes.status === 'ok') store.setTournamentStats(tourStatsRes.tournament_stats);
       if (overviewRes && overviewRes.status === 'ok') store.setMyClubOverview(overviewRes);
     } catch (e) {
       console.warn("Could not load user extras:", e);

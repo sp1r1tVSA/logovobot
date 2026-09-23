@@ -289,10 +289,6 @@ class ApiClient {
     });
   }
 
-  getTournamentStats() {
-    return this.request('/api/profile/tournament-stats');
-  }
-
   getProfile(userId) {
     return this.request(`/api/profile/${userId}`);
   }

@@ -41,7 +41,6 @@ class StateStore {
       favorites: [],
       notifications: [],
       myStats: null,
-      tournamentStats: null,
       leaderboard: [],
       myRank: null,
       progression: { level: 1, current_xp: 0, total_xp_earned: 0, equipped_title: 'Новичок' },
@@ -211,11 +210,6 @@ class StateStore {
 
   setMyStats(stats) {
     this.state.myStats = stats;
-    this.notify();
-  }
-
-  setTournamentStats(stats) {
-    this.state.tournamentStats = stats;
     this.notify();
   }
 
