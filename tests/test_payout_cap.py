@@ -3,7 +3,7 @@ tests/test_payout_cap.py
 
 Payout cap for new bets: one coupon (single or the whole express) wins at most
 10,000 🪙, so the max stake is 10,000 / odd; a player's open (pending) bets may
-carry at most 20,000 🪙 of potential win. Bets already in user_bets when the cap
+carry at most 35,000 🪙 of potential win. Bets already in user_bets when the cap
 shipped (migration 014, legacy_limits = 1) keep the old rules: they settle in
 full and do not take up the open-exposure limit.
 """
@@ -98,7 +98,7 @@ class TestPayoutCap(unittest.TestCase):
     # ─── Defaults ────────────────────────────────────────────────────────────
     def test_defaults(self):
         self.assertEqual(DEFAULT_MAX_PAYOUT, 10_000)
-        self.assertEqual(DEFAULT_MAX_OPEN_EXPOSURE, 20_000)
+        self.assertEqual(DEFAULT_MAX_OPEN_EXPOSURE, 35_000)
         self.assertEqual(database._MAX_PAYOUT, 10_000)
 
     # ─── Per-bet cap ─────────────────────────────────────────────────────────
@@ -131,10 +131,12 @@ class TestPayoutCap(unittest.TestCase):
         self.assertTrue(ok, bet_id)
 
     # ─── Open-exposure limit ─────────────────────────────────────────────────
-    def test_two_max_bets_fill_the_open_limit(self):
-        self.assertTrue(database.place_user_bet(self.user_id, 5000, self._slip(self.match_ids[0]))[0])
-        self.assertTrue(database.place_user_bet(self.user_id, 5000, self._slip(self.match_ids[1]))[0])
-        self.assertEqual(database.get_user_open_exposure(self.user_id), 20_000)
+    def test_bets_fill_the_open_limit(self):
+        # Three max bets (3 × 10,000) plus one for the last 5,000 = 35,000.
+        for match_id in (self.match_ids[0], self.match_ids[1], self.match_ids[0]):
+            self.assertTrue(database.place_user_bet(self.user_id, 5000, self._slip(match_id))[0])
+        self.assertTrue(database.place_user_bet(self.user_id, 2500, self._slip(self.match_ids[1]))[0])
+        self.assertEqual(database.get_user_open_exposure(self.user_id), 35_000)
 
         ok, res = database.place_user_bet(self.user_id, 10, self._slip())
         self.assertFalse(ok)

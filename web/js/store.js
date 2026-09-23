@@ -419,7 +419,7 @@ class StateStore {
       min_bet: l.min_bet || 10,
       max_bet: l.max_bet || 50000,
       max_payout: l.max_payout || 10000,
-      max_open_exposure: l.max_open_exposure || 20000,
+      max_open_exposure: l.max_open_exposure || 35000,
       open_exposure: l.open_exposure || 0,
       max_open_bets: l.max_open_bets || 12,
       open_bets: l.open_bets || 0

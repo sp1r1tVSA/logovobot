@@ -24,7 +24,7 @@ DEFAULT_MAX_BET: int = 50_000
 DEFAULT_MAX_PAYOUT: int = 10_000
 DEFAULT_MAX_DAILY_STAKE: int = 100_000
 DEFAULT_MAX_DAILY_LOSS: int = 50_000
-DEFAULT_MAX_OPEN_EXPOSURE: int = 20_000
+DEFAULT_MAX_OPEN_EXPOSURE: int = 35_000
 # Сколько купонов игрок может держать открытыми одновременно. Экспресс из пяти
 # матчей — это один купон: ограничиваем число пари, а не число исходов.
 DEFAULT_MAX_OPEN_BETS: int = 12
