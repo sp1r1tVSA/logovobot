@@ -215,7 +215,70 @@ PLAYER_NAME_OVERRIDES = {
     "vini jr": "Vinicius Junior",
     "savinho": "Savio",
     "c ronaldo": "Cristiano Ronaldo",
+    "nacho fernandez": "Nacho",
+    "abner vinicius": "Abner",
+    "pedro goncalves": "Pote",
+    "desmet": "De Smet",
+    "gorrotxa": "Gorrotxategi",
+    "al juwair": "Al Juwayr",
+    "thekri": "Thakri",
+    "al shanqeeti": "Al Shanqiti",
+    "batagov": "Batahov",
+    "doechi": "Doekhi",
+    "boushal": "Bu Washl",
+    "balobaid": "Saad Yaslam",
+    "gamer": "Garner",
+    "urion": "Centurion",
 }
+
+# Игроки, перешедшие в другой клуб в базе FotMob (или отсутствующие в актуальном ростере клуба),
+# но играющие за этот клуб в турнире. Ключ: (название клуба в РФ, _norm(имя в БД)).
+# Прямая привязка исключает ошибки сопоставления и гарантирует загрузку проверенного фото.
+PINNED_PLAYERS: dict[tuple[str, str], dict] = {
+    ("Аталанта", "bakker"): {
+        "id": 891870, "name": "Mitchel Bakker", "dob": "2000-06-20", "positions": ["LB"],
+    },
+    ("Атлетик Бильбао", "boiro"): {
+        "id": 1331249, "name": "Adama Boiro", "dob": "2002-06-22", "positions": ["LB"],
+    },
+    ("Атлетик Бильбао", "gorosabel"): {
+        "id": 839893, "name": "Andoni Gorosabel", "dob": "1996-08-04", "positions": ["RB"],
+    },
+    ("Бешикташ", "hadziahmetovic"): {
+        "id": 639558, "name": "Amir Hadžiahmetović", "dob": "1997-03-08", "positions": ["CDM"],
+    },
+    ("Бурирам", "toku"): {
+        "id": 888720, "name": "Emmanuel Toku", "dob": "2000-07-10", "positions": ["CAM"],
+    },
+    ("Бурирам", "ko myeong seok"): {
+        "id": 828259, "name": "Myeong-Seok Ko", "dob": "1997-01-29", "positions": ["CB"],
+    },
+    ("Вулверхэмптон", "arias"): {
+        "id": 1023030, "name": "Jhon Arias", "dob": "1997-10-21", "positions": ["LW"],
+    },
+    ("Вулверхэмптон", "joao gomes"): {
+        "id": 1174672, "name": "João Gomes", "dob": "2001-02-12", "positions": ["CM"],
+    },
+    ("Интер Майами", "allen"): {
+        "id": 1340790, "name": "Noah Allen", "dob": "2004-04-28", "positions": ["CB"],
+    },
+    ("Майнц", "hong hyeon seok"): {
+        "id": 925345, "name": "Hyun-Seok Hong", "dob": "1999-06-16", "positions": ["ST"],
+    },
+    ("Ренн", "seidu"): {
+        "id": 1177779, "name": "Alidu Seidu", "dob": "2000-06-04", "positions": ["RB"],
+    },
+    ("Трабзонспор", "lundstram"): {
+        "id": 429955, "name": "John Lundstram", "dob": "1994-02-18", "positions": ["CDM"],
+    },
+    ("Хоффенхайм", "akpoguma"): {
+        "id": 353519, "name": "Kevin Akpoguma", "dob": "1995-04-19", "positions": ["LB"],
+    },
+    ("Эвертон", "patterson"): {
+        "id": 1112684, "name": "Nathan Patterson", "dob": "2001-10-16", "positions": ["RB"],
+    },
+}
+
 
 # Позиции из БД — из игры; у FotMob свой словарь. Сводим к группам: точное
 # совпадение кода весит больше, группа — меньше, и это разводит однофамильцев
@@ -813,11 +876,26 @@ def process_club(club_ru: str, players: list[tuple[str, str]], manifest: dict,
             entries.append({**previous, "club": club_ru, "db_name": db_name, "path": target})
             continue
 
-        identity, why = match_in_roster(db_name, position, roster)
-        if not identity:
-            fallback_identity, fallback_why = search_player_globally(db_name, club_en)
-            if fallback_identity:
-                identity, why = fallback_identity, fallback_why
+        pinned = PINNED_PLAYERS.get((club_ru, _norm(db_name)))
+        if pinned:
+            identity = {
+                "id": pinned["id"],
+                "name": pinned["name"],
+                "dob": pinned.get("dob", ""),
+                "positions": pinned.get("positions", [position] if position else []),
+                "number": None,
+                "rating": 7.0,
+                "value": 1000000,
+                "club_en": pinned.get("club_en", club_en),
+            }
+            why = f"зафиксирован (id={pinned['id']})"
+        else:
+            identity, why = match_in_roster(db_name, position, roster)
+            if not identity:
+                fallback_identity, fallback_why = search_player_globally(db_name, club_en)
+                if fallback_identity:
+                    identity, why = fallback_identity, fallback_why
+
 
         if not identity:
             logger.warning(f"  ✗ {db_name} ({position}): {why}")
