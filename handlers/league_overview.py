@@ -41,6 +41,11 @@ def _visible_divisions(user_id: int) -> list[dict]:
     ]
 
 
+def can_view_overview(user_id: int) -> bool:
+    """Есть ли у пользователя хоть один дивизион в сводке — то же правило, что `_visible_divisions`."""
+    return bool(is_global_admin(user_id) or database.get_admin_divisions(user_id))
+
+
 def _load_snapshots(divisions: list[dict]) -> list[league_overview.DivisionSnapshot]:
     rows = database.get_league_overview_rows()
     debts = database.get_detailed_overdue_matches(season_id=rows["season_id"])

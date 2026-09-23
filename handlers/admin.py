@@ -30,6 +30,7 @@ import config
 from config import MAX_WARNS_LIMIT, GROUP_ID
 
 from handlers.squad_ai import offer_recognized_squad
+from handlers.bot_menu import refresh_admin_menu
 from services.graphics import player_photos
 from services import debt_lifecycle, debt_policy
 from services.tournament_validator import RoundRobinValidator
@@ -1320,6 +1321,7 @@ async def admin_div_admin_remove(update: Update, context: ContextTypes.DEFAULT_T
 
     await asyncio.to_thread(database.remove_division_admin, div_id, target_id)
     logger.info(f"Division admin revoked: user={target_id} division={div_id} by={user.id}")
+    await refresh_admin_menu(context.bot, target_id)
     await admin_div_admins_view(update, context, div_id=div_id)
 
 
@@ -1381,6 +1383,7 @@ async def admin_div_admin_add_receive(update: Update, context: ContextTypes.DEFA
     target_id = target["telegram_id"]
     await asyncio.to_thread(database.add_division_admin, div_id, target_id)
     logger.info(f"Division admin granted: user={target_id} division={div_id} by={user.id}")
+    await refresh_admin_menu(context.bot, target_id)
 
     div = await asyncio.to_thread(database.get_division, div_id)
     div_name = div["name"] if div else f"#{div_id}"

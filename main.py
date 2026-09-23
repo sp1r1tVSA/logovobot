@@ -1,6 +1,5 @@
 import logging
 from telegram.ext import ApplicationBuilder, Application
-from telegram import BotCommand
 from config import TOKEN
 from database import init_db
 from handlers import register_all_handlers, job_check_deadlines_and_remind, job_post_debts_to_warns, job_debt_lifecycle_tracker
@@ -20,9 +19,15 @@ logging.getLogger("httpcore").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 async def post_init(application: Application) -> None:
-    await application.bot.set_my_commands([
-        BotCommand("start", "Открыть главное меню"),
-    ])
+    # Меню команд: общее для всех и личное для админов (с /overview).
+    # Сбой меню не должен мешать старту бота.
+    try:
+        from handlers.bot_menu import set_default_menu, sync_admin_menus
+        await set_default_menu(application.bot)
+        applied = await sync_admin_menus(application.bot)
+        logger.info(f"Admin command menu set for {applied} admin(s)")
+    except Exception as e:
+        logger.warning(f"Failed to set bot command menu: {e}")
 
     # 🎰 Start Logovo.bet Telegram Mini App API server
     try:

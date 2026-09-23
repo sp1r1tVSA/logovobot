@@ -13692,6 +13692,22 @@ def remove_division_admin(division_id: int, user_id: int) -> None:
         cursor.execute("DELETE FROM division_admins WHERE division_id = ? AND user_id = ?", (division_id, user_id))
 
 
+def get_admin_candidate_ids() -> list[int]:
+    """Все, кто в базе помечен админом: роль в `users` или строка `division_admins`.
+
+    Кандидаты, а не решение: права проверяет `handlers.base`, а список нужен
+    тому, кто должен обойти всех админов (меню команд бота).
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT telegram_id AS user_id FROM users WHERE role IN ('admin', 'division_admin')
+            UNION
+            SELECT user_id FROM division_admins
+        """)
+        return [int(r["user_id"]) for r in cursor.fetchall() if r["user_id"]]
+
+
 def get_division_admins(division_id: int) -> list[int]:
     """List all admin user_ids for a division."""
     with transaction() as conn:
