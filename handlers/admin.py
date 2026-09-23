@@ -2385,7 +2385,7 @@ async def admin_open_preseason_line(update: Update, context: ContextTypes.DEFAUL
 
 @admin_only
 async def admin_extend_match_execute(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Toggle deadline extension / freeze auto-warns for an overdue match."""
+    """Toggle deadline extension / freeze the debt clock for an overdue match."""
     query = update.callback_query
     if not query or not is_admin(query.from_user.id): return
     await query.answer()
@@ -2394,9 +2394,9 @@ async def admin_extend_match_execute(update: Update, context: ContextTypes.DEFAU
     new_val = await asyncio.to_thread(database.extend_match_deadline, match_id)
     
     if new_val == 1:
-        await query.answer("⏸ Дедлайн продлен (авто-варны заморожены)", show_alert=True)
+        await query.answer("⏸ Дедлайн продлен (сроки долга заморожены)", show_alert=True)
     else:
-        await query.answer("▶️ Продление снято (авто-варны возобновлены)", show_alert=True)
+        await query.answer("▶️ Продление снято (сроки долга снова идут)", show_alert=True)
 
     await admin_view_match(update, context, match_id=match_id)
 
@@ -6836,7 +6836,7 @@ async def admin_check_debts_command(update: Update, context: ContextTypes.DEFAUL
     lines = [
         f"🔍 <b>Диагностика системы долгов</b>\n",
         f"📅 Текущее время (МСК): <b>{now.strftime('%d.%m.%Y %H:%M:%S')}</b>",
-        f"⚙️ Статус авто-варнов: <b>🟢 АКТИВНЫ</b>",
+        f"⚙️ Трекер долгов: <b>🟢 АКТИВЕН</b> (напоминания и эскалация; варны — только вердиктом)",
         f"📊 Найдено матчей-долгов: <b>{len(overdue_matches)}</b>\n",
     ]
 
@@ -7559,7 +7559,7 @@ async def admin_reset_debts_command(update: Update, context: ContextTypes.DEFAUL
         f"• Сброшено варнов у игроков: <b>{count}</b>\n"
         f"• Все таймеры и стадии долгов очищены.\n\n"
         f"<i>Отсчёт долгов идёт от дедлайна тура: пока дедлайн не истёк, "
-        f"авто-варны не выписываются.</i>"
+        f"матч не считается долгом и напоминания не идут.</i>"
     )
     await update.message.reply_text(text, parse_mode="HTML")
     await _post_or_update_debts_in_warns(context)

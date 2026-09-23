@@ -639,9 +639,14 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
             return True
 
         from handlers.admin import job_debt_lifecycle_tracker
-        await msg.reply_text("⏳ <b>Запуск проверки долгов и начисления авто-варнов...</b>", parse_mode="HTML")
+        await msg.reply_text("⏳ <b>Запуск проверки долгов...</b>", parse_mode="HTML")
         await job_debt_lifecycle_tracker(context)
-        await msg.reply_text("✅ <b>Проверка долгов и авто-варнов успешно завершена!</b>", parse_mode="HTML")
+        await msg.reply_text(
+            "✅ <b>Проверка долгов завершена.</b>\n"
+            "<i>Напоминания и эскалации разосланы по регламенту. "
+            "Варны проверка не выдаёт — только вердикт ТП/ТН.</i>",
+            parse_mode="HTML",
+        )
         return True
 
     if (
