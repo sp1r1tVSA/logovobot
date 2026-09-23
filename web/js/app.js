@@ -196,10 +196,10 @@ class AppController {
       const matchesContainer = document.getElementById('matches-list-container');
       if (matchesContainer) {
         matchesContainer.innerHTML = `
-          <div style="text-align: center; padding: 40px 20px; color: var(--text-secondary);">
-            <div style="font-size: 2.5rem; margin-bottom: 12px;">📱</div>
-            <div style="font-weight: 800; font-size: 1.1rem; color: #fff; margin-bottom: 8px;">Откройте через Telegram</div>
-            <div style="font-size: 0.85rem; max-width: 320px; margin: 0 auto; line-height: 1.4; color: var(--text-muted);">
+          <div class="tg-required">
+            <div class="tg-required-icon">📱</div>
+            <div class="tg-required-title">Откройте через Telegram</div>
+            <div class="tg-required-text">
               Для работы Mini App требуется авторизация Telegram WebApp. Откройте приложение через меню бота или команду /start в Telegram.
             </div>
           </div>
@@ -487,13 +487,13 @@ class AppController {
       } else {
         const content = document.getElementById('match-protocol-content');
         if (content) {
-          content.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--color-danger);">Не удалось загрузить данные матча #${matchId}.</div>`;
+          content.innerHTML = `<div class="load-error">Не удалось загрузить данные матча #${matchId}.</div>`;
         }
       }
     } catch (err) {
       const content = document.getElementById('match-protocol-content');
       if (content) {
-        content.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--color-danger);">${escapeHtml(err.message || 'Ошибка сети при загрузке протокола')}</div>`;
+        content.innerHTML = `<div class="load-error">${escapeHtml(err.message || 'Ошибка сети при загрузке протокола')}</div>`;
       }
     }
   }
@@ -725,18 +725,18 @@ class AppController {
           const listEl = document.getElementById('modal-markets-list');
           if (titleEl) titleEl.textContent = 'Все рынки матча';
           if (listEl) {
-            listEl.innerHTML = '<div style="text-align: center; padding: 36px 16px; color: var(--text-muted);"><div style="font-size: 1.6rem; margin-bottom: 8px;">⏳</div>Загрузка доступных котировок...</div>';
+            listEl.innerHTML = '<div class="markets-loading"><div class="markets-loading-icon">⏳</div>Загрузка доступных котировок...</div>';
           }
           try {
             const data = await api.getMatchMarkets(mId);
             if (data.status === 'ok') {
               UIRenderer.renderMatchMarketsModal(mId, data.markets, `${data.team1_name} — ${data.team2_name}`);
             } else {
-              if (listEl) listEl.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--accent-red);">${escapeHtml(data.message || 'Рынки временно недоступны')}</div>`;
+              if (listEl) listEl.innerHTML = `<div class="markets-error">${escapeHtml(data.message || 'Рынки временно недоступны')}</div>`;
             }
           } catch (err) {
             console.error("Could not load markets:", err);
-            if (listEl) listEl.innerHTML = '<div style="text-align: center; padding: 24px; color: var(--accent-red);">Ошибка связи с сервером</div>';
+            if (listEl) listEl.innerHTML = '<div class="markets-error">Ошибка связи с сервером</div>';
           }
         }
       }
@@ -1419,7 +1419,7 @@ class AppController {
       detailsEl.innerHTML = `
         <div class="bet-accepted-stat"><span>Ставка</span><b>${fmt(stake)} 🪙</b></div>
         <div class="bet-accepted-stat"><span>${oddLabel}</span><b>${oddValue}</b></div>
-        <div class="bet-accepted-stat win" style="grid-column: 1 / -1;"><span>Возможный выигрыш</span><b>${fmt(win)} 🪙</b></div>`;
+        <div class="bet-accepted-stat win bet-accepted-stat-wide"><span>Возможный выигрыш</span><b>${fmt(win)} 🪙</b></div>`;
     }
 
     // Restart the check-mark drawing animation on every show.

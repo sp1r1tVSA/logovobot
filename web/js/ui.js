@@ -470,7 +470,6 @@ export class UIRenderer {
       if (navIcon.dataset.currentTeam) {
         delete navIcon.dataset.currentTeam;
         navIcon.textContent = '🛡';
-        navIcon.style.cssText = '';
       }
       return;
     }
@@ -480,15 +479,13 @@ export class UIRenderer {
       if (navIcon.dataset.currentTeam) {
         delete navIcon.dataset.currentTeam;
         navIcon.textContent = '🛡';
-        navIcon.style.cssText = '';
       }
       return;
     }
 
     if (navIcon.dataset.currentTeam !== teamName) {
       navIcon.dataset.currentTeam = teamName;
-      navIcon.style.cssText = 'display:inline-flex!important;align-items:center!important;justify-content:center!important;width:24px!important;height:24px!important;max-width:24px!important;max-height:24px!important;overflow:hidden!important;';
-      navIcon.innerHTML = `<img src="${logoUrl}" alt="${escapeHtml(teamName)}" class="nav-club-logo" width="22" height="22" style="width:22px!important;height:22px!important;min-width:22px!important;min-height:22px!important;max-width:22px!important;max-height:22px!important;object-fit:contain!important;display:block!important;margin:0 auto!important;filter:drop-shadow(0 2px 4px rgba(0,0,0,0.45));" onerror="var p=this.parentElement; if(!p) return; p.textContent='🛡'; delete p.dataset.currentTeam; p.style.cssText='';" />`;
+      navIcon.innerHTML = `<img src="${logoUrl}" alt="${escapeHtml(teamName)}" class="nav-club-logo" width="22" height="22" onerror="var p=this.parentElement; if(!p) return; p.textContent='🛡'; delete p.dataset.currentTeam;" />`;
     }
   }
 
@@ -567,10 +564,10 @@ export class UIRenderer {
 
     if (lineMatches.length === 0) {
       container.innerHTML = `
-        <div style="text-align: center; padding: 50px 20px; color: var(--text-muted);">
-          <div style="font-size: 2.5rem; margin-bottom: 10px;">🏆</div>
-          <div style="font-size: 1rem; font-weight: 700; color: #fff; margin-bottom: 4px;">Сейчас нет открытых матчей для ставок</div>
-          <div style="font-size: 0.85rem;">Ожидайте открытия линии</div>
+        <div class="line-empty">
+          <div class="line-empty-icon">🏆</div>
+          <div class="line-empty-title">Сейчас нет открытых матчей для ставок</div>
+          <div class="line-empty-hint">Ожидайте открытия линии</div>
         </div>
       `;
       return;
@@ -588,7 +585,7 @@ export class UIRenderer {
 
     if (filteredMatches.length === 0) {
       container.innerHTML = `
-        <div style="text-align: center; padding: 40px 20px; color: var(--text-muted);">
+        <div class="line-empty-search">
           В открытой линии нет матчей по запросу «${searchQuery}»
         </div>
       `;
@@ -608,8 +605,8 @@ export class UIRenderer {
         <div class="match-card" data-match-id="${m.match_id}">
           <!-- Match Card Header -->
           <div class="match-card-header">
-            <div style="display: flex; align-items: center; gap: 8px;">
-              <span class="match-division-tag" style="background: rgba(245,176,39,0.15); color: var(--accent-gold); font-size: 0.72rem; font-weight: 800; padding: 2px 6px; border-radius: 4px;">
+            <div class="match-card-tags">
+              <span class="match-division-tag division-tag-gold">
                 Дивизион ${divLabel}
               </span>
               <span class="match-tour-tag">Тур ${tourLabel}</span>
@@ -619,7 +616,7 @@ export class UIRenderer {
                 </span>
               ` : ''}
             </div>
-            <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 600;">Лига Фифарей</span>
+            <span class="match-league-label">Лига Фифарей</span>
           </div>
 
           <!-- Teams Row with Crest Logos (Horizontal Centered Layout) -->
@@ -888,7 +885,7 @@ export class UIRenderer {
       return `
         <div class="match-card cup-series-card" data-series-id="${s.series_id}">
           <div class="match-card-header">
-            <div style="display: flex; align-items: center; gap: 8px;">
+            <div class="match-card-tags">
               <span class="match-tour-tag">🏆 ${escapeHtml(label)}</span>
               <span class="cup-series-num">Серия ${s.series_num} · до 2 побед</span>
             </div>
@@ -948,10 +945,10 @@ export class UIRenderer {
 
     if (!matchDetail) {
       container.innerHTML = `
-        <div style="text-align: center; padding: 40px 20px; color: var(--text-muted);">
-          <div style="font-size: 2.2rem; margin-bottom: 8px;">⚽</div>
-          <div style="font-size: 0.95rem; font-weight: 700; color: #fff;">Матч не выбран</div>
-          <div style="font-size: 0.8rem; margin-top: 4px;">Выберите матч из линии для просмотра коэффициентов и статистики</div>
+        <div class="mc-empty">
+          <div class="mc-empty-icon">⚽</div>
+          <div class="mc-empty-title">Матч не выбран</div>
+          <div class="mc-empty-hint">Выберите матч из линии для просмотра коэффициентов и статистики</div>
         </div>
       `;
       return;
@@ -986,25 +983,25 @@ export class UIRenderer {
             <div class="team-crest-container">
               ${renderTeamLogoHtml(t1, 48, 'team-crest-img')}
             </div>
-            <div class="team-name-lg" style="margin-top: 6px;">${escapeHtml(t1)}</div>
-            ${tag1 ? `<div style="font-size: 0.72rem; color: var(--text-muted); font-weight: 600; margin-top: 2px;">${escapeHtml(tag1)}</div>` : ''}
+            <div class="team-name-lg mc-team-name">${escapeHtml(t1)}</div>
+            ${tag1 ? `<div class="mc-team-tag">${escapeHtml(tag1)}</div>` : ''}
             <div class="form-badges-row">
               ${t1Form.map(f => `<span class="form-dot ${f.toLowerCase()}">${f}</span>`).join('')}
             </div>
           </div>
-          <div style="display: flex; flex-direction: column; align-items: center; gap: 4px;">
+          <div class="mc-score-col">
             <div class="score-center-badge">${s1} : ${s2}</div>
-            <span style="font-size: 0.75rem; color: var(--text-muted); font-weight: 700;">
+            <span class="mc-status">
               ${matchDetail.status === 'live' ? '🔴 LIVE' : `Тур ${tourNum}`}
             </span>
-            ${mvp ? `<span style="font-size: 0.72rem; color: var(--accent-gold); font-weight: 700; text-align: center; max-width: 120px;" title="Игрок матча">👑 ${escapeHtml(mvp)}</span>` : ''}
+            ${mvp ? `<span class="mc-mvp" title="Игрок матча">👑 ${escapeHtml(mvp)}</span>` : ''}
           </div>
           <div class="team-block">
             <div class="team-crest-container">
               ${renderTeamLogoHtml(t2, 48, 'team-crest-img')}
             </div>
-            <div class="team-name-lg" style="margin-top: 6px;">${escapeHtml(t2)}</div>
-            ${tag2 ? `<div style="font-size: 0.72rem; color: var(--text-muted); font-weight: 600; margin-top: 2px;">${escapeHtml(tag2)}</div>` : ''}
+            <div class="team-name-lg mc-team-name">${escapeHtml(t2)}</div>
+            ${tag2 ? `<div class="mc-team-tag">${escapeHtml(tag2)}</div>` : ''}
             <div class="form-badges-row">
               ${t2Form.map(f => `<span class="form-dot ${f.toLowerCase()}">${f}</span>`).join('')}
             </div>
@@ -1067,7 +1064,7 @@ export class UIRenderer {
             const mktIT2 = findMkt('individual_total_2');
 
             const noMarketsNote = (!markets || markets.length === 0)
-              ? `<div style="text-align:center; padding:20px; color:var(--text-muted); font-size:0.85rem;">⏳ Рынки формируются...</div>`
+              ? `<div class="mc-markets-pending">⏳ Рынки формируются...</div>`
               : '';
 
             return `
@@ -1153,7 +1150,7 @@ export class UIRenderer {
           ${h2h?.summary ? `
             <div class="market-group-card">
               <div class="market-group-title">🤝 История Очных Встреч (H2H)</div>
-              <div style="display: flex; justify-content: space-between; font-size: 0.8rem; font-weight: 700; color: var(--text-secondary); margin-bottom: 6px;">
+              <div class="h2h-summary-head">
                 <span>Побед ${t1}: ${h2h.summary.team1_wins}</span>
                 <span>Ничьих: ${h2h.summary.draws}</span>
                 <span>Побед ${t2}: ${h2h.summary.team2_wins}</span>
@@ -1198,18 +1195,18 @@ export class UIRenderer {
             <div class="market-group-title">🧠 Аналитика «Темшик»</div>
 
             ${insights?.probabilities ? `
-              <div style="margin: 12px 0 8px 0;">
-                <div style="display:flex; justify-content:space-between; font-size:0.8rem; font-weight:700; margin-bottom:4px;">
-                  <span style="color:#60a5fa;">П1: ${Math.round(insights.probabilities.home * 100)}%</span>
-                  <span style="color:#9ca3af;">Х: ${Math.round(insights.probabilities.draw * 100)}%</span>
-                  <span style="color:#f87171;">П2: ${Math.round(insights.probabilities.away * 100)}%</span>
+              <div class="mc-probs">
+                <div class="mc-probs-labels">
+                  <span class="prob-home">П1: ${Math.round(insights.probabilities.home * 100)}%</span>
+                  <span class="prob-draw">Х: ${Math.round(insights.probabilities.draw * 100)}%</span>
+                  <span class="prob-away">П2: ${Math.round(insights.probabilities.away * 100)}%</span>
                 </div>
-                <div class="h2h-progress-bar" style="height:8px; border-radius:4px; overflow:hidden; display:flex;">
-                  <div style="background:#3b82f6; width:${insights.probabilities.home * 100}%;"></div>
-                  <div style="background:#6b7280; width:${insights.probabilities.draw * 100}%;"></div>
-                  <div style="background:#ef4444; width:${insights.probabilities.away * 100}%;"></div>
+                <div class="h2h-progress-bar mc-probs-bar">
+                  <div class="prob-bar-home" style="width:${insights.probabilities.home * 100}%;"></div>
+                  <div class="prob-bar-draw" style="width:${insights.probabilities.draw * 100}%;"></div>
+                  <div class="prob-bar-away" style="width:${insights.probabilities.away * 100}%;"></div>
                 </div>
-                <div style="display:flex; justify-content:space-between; font-size:0.75rem; color:var(--text-muted); margin-top:4px;">
+                <div class="mc-probs-foot">
                   <span>Уверенность: ${Math.round((insights.confidence || 0.6) * 100)}%</span>
                   ${insights.elo ? `<span>Elo: ${insights.elo.rating_t1} vs ${insights.elo.rating_t2}</span>` : ''}
                 </div>
@@ -1217,10 +1214,10 @@ export class UIRenderer {
             ` : ''}
 
             <!-- Key Factors -->
-            <div style="margin-top: 10px; border-top: 1px solid var(--border-subtle); padding-top: 10px;">
-              <div style="font-size:0.8rem; font-weight:700; color:var(--text-secondary); margin-bottom:6px;">💡 Ключевые факторы:</div>
+            <div class="mc-factors">
+              <div class="mc-factors-title">💡 Ключевые факторы:</div>
               ${((insights?.key_factors && insights.key_factors.length > 0) ? insights.key_factors : (insights?.insights || [])).map(txt => `
-                <div class="insight-card" style="padding:6px 10px; margin-bottom:6px; font-size:0.8rem; background:rgba(255,255,255,0.03); border-left:3px solid var(--primary-accent); border-radius:4px;">
+                <div class="insight-card mc-factor">
                   <span>${txt}</span>
                 </div>
               `).join('')}
@@ -1258,16 +1255,16 @@ export class UIRenderer {
    */
   static renderLeaderRows(rows, icon, valueOf) {
     return rows.map((row, idx) => `
-      <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 4px; border-bottom: 1px solid rgba(255,255,255,0.04);">
-        <div style="display: flex; align-items: center; gap: 10px;">
-          <span style="font-weight: 800; color: ${idx < 3 ? 'var(--accent-gold)' : 'var(--text-secondary)'}; width: 22px;">#${idx + 1}</span>
+      <div class="leaders-row">
+        <div class="leaders-row-main">
+          <span class="leaders-rank" style="color: ${idx < 3 ? 'var(--accent-gold)' : 'var(--text-secondary)'};">#${idx + 1}</span>
           ${renderTeamLogoHtml(row.team_name, 26)}
           <div>
-            <div style="font-weight: 700; color: #fff; font-size: 0.88rem;">${escapeHtml(row.player_name || '')}</div>
-            <div style="font-size: 0.75rem; color: var(--text-muted);">${escapeHtml(row.team_name || '—')}</div>
+            <div class="leaders-name">${escapeHtml(row.player_name || '')}</div>
+            <div class="leaders-team">${escapeHtml(row.team_name || '—')}</div>
           </div>
         </div>
-        <div style="font-family: 'Outfit', sans-serif; font-weight: 900; color: var(--accent-gold); font-size: 1.05rem;">
+        <div class="leaders-value">
           ${icon} ${valueOf(row)}
         </div>
       </div>
@@ -1280,7 +1277,7 @@ export class UIRenderer {
 
     if (activeTab === 'standings') {
       if (!standings || standings.length === 0) {
-        container.innerHTML = '<div style="text-align: center; padding: 40px; color: var(--text-muted);">Таблица пока пуста.</div>';
+        container.innerHTML = '<div class="list-empty">Таблица пока пуста.</div>';
         return;
       }
 
@@ -1315,7 +1312,7 @@ export class UIRenderer {
       const arrow = sortDir === 'asc' ? '▲' : '▼';
 
       container.innerHTML = `
-        <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 10px; overflow-x: auto;">
+        <div class="standings-card">
           <table class="standings-table">
             <thead>
               <tr>
@@ -1333,15 +1330,15 @@ export class UIRenderer {
                 const formList = (form && (form[r.team.toLowerCase()] || form[r.team])) || [];
                 const formHtml = formList.length
                   ? formList.map(o => `<span class="form-dot form-${String(o).toLowerCase()}">${o}</span>`).join('')
-                  : '<span style="color: var(--text-muted); font-size: 0.7rem;">—</span>';
+                  : '<span class="standings-dash">—</span>';
 
                 return `
                   <tr>
-                    <td style="text-align: left;">
-                      <div style="display: flex; align-items: center; gap: 8px;">
+                    <td class="standings-team-cell">
+                      <div class="standings-team">
                         <span class="standings-pos-pill ${isDefaultOrder && r.position <= 3 ? 'top' : 'mid'}">${r.position}</span>
                         ${renderTeamLogoHtml(r.team, 22)}
-                        <span style="font-weight: 700; color: #fff;">${r.team}</span>
+                        <span class="standings-team-name">${r.team}</span>
                       </div>
                     </td>
                     <td>${r.played}</td>
@@ -1350,8 +1347,8 @@ export class UIRenderer {
                     <td>${r.losses}</td>
                     <td>${r.gf}</td>
                     <td>${r.ga}</td>
-                    <td style="color: ${r.diff > 0 ? 'var(--color-success)' : r.diff < 0 ? 'var(--color-danger)' : 'var(--text-secondary)'}; font-weight: 700;">${diffStr}</td>
-                    <td style="font-weight: 900; color: var(--accent-gold); font-size: 0.95rem;">${r.points}</td>
+                    <td class="standings-diff" style="color: ${r.diff > 0 ? 'var(--color-success)' : r.diff < 0 ? 'var(--color-danger)' : 'var(--text-secondary)'};">${diffStr}</td>
+                    <td class="standings-points">${r.points}</td>
                     <td><div class="form-strip">${formHtml}</div></td>
                   </tr>
                 `;
@@ -1362,22 +1359,22 @@ export class UIRenderer {
       `;
     } else if (activeTab === 'results') {
       if (!results || results.length === 0) {
-        container.innerHTML = '<div style="text-align: center; padding: 40px; color: var(--text-muted);">Архив результатов пуст.</div>';
+        container.innerHTML = '<div class="list-empty">Архив результатов пуст.</div>';
         return;
       }
       renderPagedList(container, 'results', results, r => {
         const t1 = r.team1_name || r.player1_team || 'Хозяева';
         const t2 = r.team2_name || r.player2_team || 'Гости';
         return `
-          <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 12px 14px; margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
-            <div style="flex: 1; text-align: right; font-weight: 700; color: #fff; display: flex; align-items: center; justify-content: flex-end; gap: 6px;">
+          <div class="result-card">
+            <div class="result-team-home">
               <span>${t1}</span>
               ${renderTeamLogoHtml(t1, 22)}
             </div>
-            <div style="padding: 4px 14px; font-family: 'Outfit', sans-serif; font-weight: 900; font-size: 1.15rem; color: var(--accent-gold); background: rgba(0,0,0,0.3); border-radius: var(--radius-sm); margin: 0 10px;">
+            <div class="result-score">
               ${r.player1_score ?? 0} : ${r.player2_score ?? 0}
             </div>
-            <div style="flex: 1; text-align: left; font-weight: 700; color: #fff; display: flex; align-items: center; justify-content: flex-start; gap: 6px;">
+            <div class="result-team-away">
               ${renderTeamLogoHtml(t2, 22)}
               <span>${t2}</span>
             </div>
@@ -1421,8 +1418,8 @@ export class UIRenderer {
       `;
 
       const bodyHtml = view.rows.length === 0
-        ? `<div style="text-align: center; padding: 40px; color: var(--text-muted);">${view.empty}</div>`
-        : `<div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 10px;">
+        ? `<div class="list-empty">${view.empty}</div>`
+        : `<div class="leaders-card">
              ${UIRenderer.renderLeaderRows(view.rows, view.icon, view.valueOf)}
            </div>`;
 
@@ -1447,10 +1444,10 @@ export class UIRenderer {
 
     if (filtered.length === 0) {
       container.innerHTML = `
-        <div class="coupons-empty-state" style="text-align: center; padding: 48px 20px; background: rgba(14, 18, 27, 0.5); border-radius: 16px; border: 1px dashed rgba(255, 255, 255, 0.08);">
-          <div class="empty-icon" style="font-size: 2.2rem; margin-bottom: 10px;">📜</div>
-          <div class="empty-title" style="font-size: 0.95rem; font-weight: 700; color: #fff; margin-bottom: 4px;">Прогнозов в данной категории не найдено</div>
-          <div class="empty-subtitle" style="font-size: 0.78rem; color: var(--text-muted); max-width: 280px; margin: 0 auto; line-height: 1.4;">Делайте прогнозы на матчи лиги и отслеживайте их статус здесь</div>
+        <div class="coupons-empty-state history-empty">
+          <div class="empty-icon history-empty-icon">📜</div>
+          <div class="empty-title history-empty-title">Прогнозов в данной категории не найдено</div>
+          <div class="empty-subtitle history-empty-hint">Делайте прогнозы на матчи лиги и отслеживайте их статус здесь</div>
         </div>
       `;
       return;
@@ -1670,7 +1667,7 @@ export class UIRenderer {
     if (!modal) return;
 
     if (desc) {
-      desc.innerHTML = `Коэффициент одного из исходов изменился: <b style="color: var(--text-muted); text-decoration: line-through;">${Number(oldOdd).toFixed(2)}</b> → <b style="color: var(--accent-gold);">${Number(newOdd).toFixed(2)}</b>.<br>Принять новые условия?`;
+      desc.innerHTML = `Коэффициент одного из исходов изменился: <b class="odds-old">${Number(oldOdd).toFixed(2)}</b> → <b class="odds-new">${Number(newOdd).toFixed(2)}</b>.<br>Принять новые условия?`;
     }
 
     const cleanup = () => {
@@ -1713,20 +1710,20 @@ export class UIRenderer {
     }
 
     container.innerHTML = `
-      <div style="font-size: 0.95rem; font-weight: 800; color: #fff; margin-bottom: 8px;">
+      <div class="saved-title">
         💾 Сохраненные Черновики (${savedCoupons.length})
       </div>
       ${savedCoupons.map(sc => `
         <div class="saved-coupon-card">
           <div>
-            <div style="font-weight: 800; color: #fff; font-size: 0.88rem;">${escapeHtml(sc.name || 'Купон')}</div>
-            <div style="font-size: 0.75rem; color: var(--text-muted);">
+            <div class="saved-name">${escapeHtml(sc.name || 'Купон')}</div>
+            <div class="saved-meta">
               ${sc.selections?.length || 0} событий | Кэф: ${(sc.total_odd || 1.0).toFixed(2)}
             </div>
           </div>
-          <div style="display: flex; gap: 8px;">
+          <div class="saved-actions">
             <button class="btn-restore-coupon" data-saved-id="${sc.id}">Загрузить</button>
-            <button class="btn-delete-saved-coupon" data-saved-id="${sc.id}" style="background: transparent; border: none; color: var(--color-danger); font-size: 0.9rem; cursor: pointer;">✕</button>
+            <button class="btn-delete-saved-coupon saved-delete" data-saved-id="${sc.id}">✕</button>
           </div>
         </div>
       `).join('')}
@@ -1749,15 +1746,15 @@ export class UIRenderer {
         : `<div class="user-profile-avatar-fallback">${initial}</div>`;
 
       cardEl.innerHTML = `
-        <div style="display: flex; align-items: center; gap: 14px;">
+        <div class="profile-head">
           <div class="user-profile-avatar-container">
             ${avatarHtml}
           </div>
           <div>
-            <div style="font-family: 'Outfit', sans-serif; font-size: 1.25rem; font-weight: 900; color: #fff;">
+            <div class="profile-name">
               ${escapeHtml(uName)}
             </div>
-            <div style="font-size: 0.82rem; color: var(--accent-gold); font-weight: 700; margin-top: 2px;">
+            <div class="profile-level">
               ${progression?.equipped_title || 'Каппер Лиги'} • Уровень ${progression?.level || 1}
             </div>
           </div>
@@ -1796,18 +1793,18 @@ export class UIRenderer {
         const canClaim = a.is_unlocked && !a.is_claimed;
         return `
         <div class="achievement-card ${a.is_unlocked ? 'unlocked' : 'locked'}" data-ach-id="${a.id}">
-          <div class="ach-icon" style="font-size: 1.8rem;">${a.badge_icon || '🏆'}</div>
-          <div style="margin-top: 6px;">
-            <div class="ach-title" style="font-weight: 800; color: #fff; font-size: 0.85rem;">${a.name || 'Достижение'}</div>
-            <div class="ach-desc" style="font-size: 0.72rem; color: var(--text-secondary); margin-top: 2px;">${a.description || ''}</div>
+          <div class="ach-icon ach-icon-big">${a.badge_icon || '🏆'}</div>
+          <div class="ach-text">
+            <div class="ach-title ach-title-text">${a.name || 'Достижение'}</div>
+            <div class="ach-desc ach-about">${a.description || ''}</div>
           </div>
-          <div class="ach-reward" style="margin-top: 8px; font-size: 0.72rem; font-weight: 800; color: var(--accent-gold);">
-            +${this.formatNumber(coins)} 🪙${xp ? ` <span style="color: var(--text-secondary); font-weight: 700;">· +${xp} XP</span>` : ''}
+          <div class="ach-reward ach-reward-line">
+            +${this.formatNumber(coins)} 🪙${xp ? ` <span class="ach-xp">· +${xp} XP</span>` : ''}
           </div>
           ${canClaim ? `
-            <button class="btn-claim-achievement" data-claim-ach-id="${a.id}" style="width: 100%;">Забрать</button>
+            <button class="btn-claim-achievement ach-claim-btn" data-claim-ach-id="${a.id}">Забрать</button>
           ` : a.is_unlocked ? `
-            <div class="ach-status" style="margin-top: 8px; font-size: 0.7rem; font-weight: 800; color: var(--accent-gold); text-transform: uppercase; letter-spacing: 0.03em;">Получено</div>
+            <div class="ach-status ach-got">Получено</div>
           ` : ''}
         </div>
       `;
@@ -1820,13 +1817,13 @@ export class UIRenderer {
     if (!el) return;
 
     if (!ts) {
-      el.innerHTML = `<div style="text-align: center; padding: 24px; color: var(--text-muted);">Загрузка турнирной статистики...</div>`;
+      el.innerHTML = `<div class="ts-loading">Загрузка турнирной статистики...</div>`;
       return;
     }
 
     if (!ts.registered) {
       el.innerHTML = `
-        <div style="text-align: center; padding: 24px 16px; background: var(--bg-secondary); border: 1px dashed var(--border-subtle); border-radius: var(--radius-md); color: var(--text-muted); font-size: 0.85rem;">
+        <div class="ts-empty">
           Вы пока не заявлены ни за один клуб — турнирная статистика появится после регистрации в дивизионе.
         </div>
       `;
@@ -1836,7 +1833,7 @@ export class UIRenderer {
     const formHtml = (ts.form || []).map(r => {
       const color = r === 'W' ? 'var(--color-success)' : (r === 'D' ? 'var(--text-muted)' : 'var(--color-danger)');
       const label = r === 'W' ? 'В' : (r === 'D' ? 'Н' : 'П');
-      return `<span style="display: inline-flex; align-items: center; justify-content: center; width: 20px; height: 20px; border-radius: 50%; background: ${color}; color: #000; font-size: 0.68rem; font-weight: 900;">${label}</span>`;
+      return `<span class="ts-form-dot" style="background: ${color};">${label}</span>`;
     }).join('');
 
     const place = ts.position ? `${ts.position} место` : '—';
@@ -1844,15 +1841,15 @@ export class UIRenderer {
     const diff = ts.goal_diff > 0 ? `+${ts.goal_diff}` : `${ts.goal_diff}`;
 
     el.innerHTML = `
-      <div style="background: var(--bg-secondary); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 14px;">
-        <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px;">
-          <div style="min-width: 0;">
-            <div style="font-family: 'Outfit', sans-serif; font-size: 1.02rem; font-weight: 900; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${ts.team_name}</div>
-            <div style="font-size: 0.76rem; color: var(--text-secondary); margin-top: 2px;">${divLabel}</div>
+      <div class="ts-card">
+        <div class="ts-head">
+          <div class="ts-head-main">
+            <div class="ts-team">${ts.team_name}</div>
+            <div class="ts-division">${divLabel}</div>
           </div>
-          <div style="text-align: right; flex-shrink: 0;">
-            <div style="font-family: 'Outfit', sans-serif; font-size: 1.02rem; font-weight: 900; color: var(--accent-gold);">${place}</div>
-            <div style="font-size: 0.72rem; color: var(--text-muted);">из ${ts.total_teams || '—'}</div>
+          <div class="ts-place-col">
+            <div class="ts-place">${place}</div>
+            <div class="ts-place-of">из ${ts.total_teams || '—'}</div>
           </div>
         </div>
 
@@ -1871,14 +1868,14 @@ export class UIRenderer {
           </div>
           <div class="kpi-card">
             <span class="kpi-label">Голы (разница)</span>
-            <span class="kpi-value">${ts.goals_scored}:${ts.goals_conceded} <span style="color: var(--text-muted); font-size: 0.8em;">(${diff})</span></span>
+            <span class="kpi-value">${ts.goals_scored}:${ts.goals_conceded} <span class="ts-diff">(${diff})</span></span>
           </div>
         </div>
 
         ${formHtml ? `
-          <div style="display: flex; align-items: center; gap: 8px; margin-top: 12px;">
-            <span style="font-size: 0.76rem; color: var(--text-muted); font-weight: 600;">Форма:</span>
-            <div style="display: flex; gap: 4px;">${formHtml}</div>
+          <div class="ts-form">
+            <span class="ts-form-label">Форма:</span>
+            <div class="ts-form-dots">${formHtml}</div>
           </div>
         ` : ''}
       </div>
@@ -1943,7 +1940,7 @@ export class UIRenderer {
         itemsEl.dataset.key = structKey;
         itemsEl.classList.toggle('express', isExpress);
         itemsEl.innerHTML = count === 0
-          ? '<div style="text-align: center; padding: 24px 10px; color: var(--text-muted); font-size: 0.85rem;">Выберите исходы матчей для добавления в купон</div>'
+          ? '<div class="slip-empty">Выберите исходы матчей для добавления в купон</div>'
           : slip.map((s, i) => {
               const card = this._renderSlipCard(s, batchSingles);
               const link = isExpress && i < count - 1
@@ -2102,7 +2099,7 @@ export class UIRenderer {
     if (!listEl) return;
 
     if (!markets || markets.length === 0) {
-      listEl.innerHTML = '<div style="text-align: center; padding: 30px; color: var(--text-muted);">Котировки формируются...</div>';
+      listEl.innerHTML = '<div class="modal-loading">Котировки формируются...</div>';
       return;
     }
 
@@ -2122,11 +2119,11 @@ export class UIRenderer {
     };
 
     const marketsHtml = markets.map(m => `
-      <div style="background: var(--bg-tertiary); border-radius: var(--radius-sm); padding: 10px; margin-bottom: 10px;">
-        <div style="font-weight: 800; font-size: 0.85rem; color: #fff; margin-bottom: 8px;">
+      <div class="mm-group">
+        <div class="mm-group-title">
           ${getMarketIcon(m.market_key)}${escapeHtml(m.market_name || m.name || 'Рынок')}
         </div>
-        <div style="display: grid; grid-template-columns: repeat(${getCols(m)}, 1fr); gap: 6px;">
+        <div class="mm-grid" style="grid-template-columns: repeat(${getCols(m)}, 1fr);">
           ${(m.selections || []).map(sel => {
             const isSel = store.isSelectionActive(matchId, sel.selection_key);
             const sName = sel.selection_name || sel.name || sel.selection_key;
@@ -2150,8 +2147,8 @@ export class UIRenderer {
     `).join('');
 
     const actionHtml = `
-      <div style="margin-top: 14px; padding-top: 10px; border-top: 1px solid var(--border-subtle);">
-        <button class="btn-match-action btn-open-match-center" data-match-id="${matchId}" style="width: 100%; padding: 10px; font-weight: 800; font-size: 0.82rem; background: var(--bg-card); border: 1px solid var(--border-subtle); color: var(--accent-gold); border-radius: var(--radius-sm); cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;">
+      <div class="mm-footer">
+        <button class="btn-match-action btn-open-match-center mm-open-center" data-match-id="${matchId}">
           <span>📊</span> Открыть полную аналитику & H2H →
         </button>
       </div>
@@ -2165,7 +2162,7 @@ export class UIRenderer {
     const listEl = document.getElementById('leaderboard-list');
 
     if (!leaderboard || leaderboard.length === 0) {
-      if (listEl) listEl.innerHTML = '<div style="text-align: center; padding: 30px; color: var(--text-muted);">Зал славы формируется...</div>';
+      if (listEl) listEl.innerHTML = '<div class="modal-loading">Зал славы формируется...</div>';
       return;
     }
 
@@ -2174,22 +2171,22 @@ export class UIRenderer {
 
     if (podiumEl) {
       podiumEl.innerHTML = top3.map((p, idx) => `
-        <div class="podium-col rank-${idx + 1}" style="text-align: center; flex: 1;">
-          <div style="font-size: 1.8rem; margin-bottom: 4px;">${idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉'}</div>
-          <div style="font-weight: 800; font-size: 0.85rem; color: #fff;">${escapeHtml(p.username || 'Игрок')}</div>
-          <div style="font-size: 0.78rem; color: var(--accent-gold); font-weight: 800;">${this.formatNumber(p.balance)} 🪙</div>
+        <div class="podium-col rank-${idx + 1} lb-podium-col">
+          <div class="lb-medal">${idx === 0 ? '🥇' : idx === 1 ? '🥈' : '🥉'}</div>
+          <div class="lb-podium-name">${escapeHtml(p.username || 'Игрок')}</div>
+          <div class="lb-podium-balance">${this.formatNumber(p.balance)} 🪙</div>
         </div>
       `).join('');
     }
 
     if (listEl) {
       listEl.innerHTML = rest.map((p, idx) => `
-        <div style="display: flex; justify-content: space-between; align-items: center; padding: 8px 4px; border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem;">
-          <div style="display: flex; align-items: center; gap: 8px;">
-            <span style="font-weight: 800; color: var(--text-muted); width: 22px;">#${idx + 4}</span>
-            <span style="font-weight: 700; color: #fff;">${escapeHtml(p.username || 'Игрок')}</span>
+        <div class="lb-row">
+          <div class="lb-row-main">
+            <span class="lb-rank">#${idx + 4}</span>
+            <span class="lb-name">${escapeHtml(p.username || 'Игрок')}</span>
           </div>
-          <div style="font-weight: 800; color: var(--accent-gold);">${this.formatNumber(p.balance)} 🪙</div>
+          <div class="lb-balance">${this.formatNumber(p.balance)} 🪙</div>
         </div>
       `).join('');
     }
@@ -2208,25 +2205,25 @@ export class UIRenderer {
     }
 
     el.innerHTML = `
-      <div style="margin-bottom: 14px;">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-          <span style="font-size: 0.95rem; font-weight: 800; color: #fff; display: flex; align-items: center; gap: 6px;">
+      <div class="feed-section">
+        <div class="feed-head">
+          <span class="feed-title">
             🔥 Топ Горячих Матчей
           </span>
-          <span style="font-size: 0.75rem; color: var(--accent-gold); font-weight: 700;">Scoring Engine</span>
+          <span class="feed-tag-gold">Scoring Engine</span>
         </div>
-        <div style="display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; -webkit-overflow-scrolling: touch;">
+        <div class="hot-scroll">
           ${hotMatches.slice(0, 5).map(m => `
-            <div style="min-width: 220px; background: var(--bg-secondary); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 10px; flex-shrink: 0;">
-              <div style="display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--text-muted); margin-bottom: 6px;">
+            <div class="hot-card">
+              <div class="hot-meta">
                 <span>Тур ${m.round_number || 1}</span>
-                <span style="color: #ff4757; font-weight: 800;">🔥 ${m.hot_score} pts</span>
+                <span class="hot-score">🔥 ${m.hot_score} pts</span>
               </div>
-              <div style="font-size: 0.85rem; font-weight: 800; color: #fff; margin-bottom: 6px;">
+              <div class="hot-teams">
                 ${m.player1_team} — ${m.player2_team}
               </div>
-              <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.78rem;">
-                <span style="color: var(--text-secondary);">${m.reasons ? m.reasons[0] : 'Высокий интерес'}</span>
+              <div class="hot-foot">
+                <span class="hot-reason">${m.reasons ? m.reasons[0] : 'Высокий интерес'}</span>
               </div>
             </div>
           `).join('')}
@@ -2245,25 +2242,25 @@ export class UIRenderer {
     }
 
     el.innerHTML = `
-      <div style="margin-bottom: 14px;">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-          <span style="font-size: 0.95rem; font-weight: 800; color: #fff; display: flex; align-items: center; gap: 6px;">
+      <div class="feed-section">
+        <div class="feed-head">
+          <span class="feed-title">
             📈 Движение Коэффициентов
           </span>
-          <span style="font-size: 0.75rem; color: var(--accent-cyan); font-weight: 700;">Live Volatility</span>
+          <span class="feed-tag-cyan">Live Volatility</span>
         </div>
-        <div style="display: flex; gap: 8px; overflow-x: auto; padding-bottom: 6px; -webkit-overflow-scrolling: touch;">
+        <div class="movers-scroll">
           ${oddsMovers.slice(0, 6).map(mov => {
             const isDrop = mov.direction === 'down';
             const arrow = isDrop ? '▼' : '▲';
             const color = isDrop ? 'var(--color-success)' : 'var(--color-danger)';
             return `
-              <div style="min-width: 170px; background: var(--bg-secondary); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 10px; flex-shrink: 0;">
-                <div style="font-size: 0.72rem; color: var(--text-muted);">${mov.player1_team} - ${mov.player2_team}</div>
-                <div style="font-size: 0.8rem; font-weight: 800; color: #fff; margin: 3px 0;">${mov.selection_name || mov.outcome_type || 'Исход'}</div>
-                <div style="display: flex; align-items: center; gap: 6px; font-size: 0.78rem; font-weight: 800;">
-                  <span style="color: var(--text-muted); text-decoration: line-through;">${mov.previous_odds ? mov.previous_odds.toFixed(2) : ''}</span>
-                  <span style="color: #fff;">${mov.current_odds.toFixed(2)}</span>
+              <div class="mover-card">
+                <div class="mover-match">${mov.player1_team} - ${mov.player2_team}</div>
+                <div class="mover-selection">${mov.selection_name || mov.outcome_type || 'Исход'}</div>
+                <div class="mover-odds">
+                  <span class="odds-old">${mov.previous_odds ? mov.previous_odds.toFixed(2) : ''}</span>
+                  <span class="mover-current">${mov.current_odds.toFixed(2)}</span>
                   <span style="color: ${color};">${arrow} ${Math.abs(mov.pct_change).toFixed(1)}%</span>
                 </div>
               </div>
@@ -2283,7 +2280,7 @@ export class UIRenderer {
     const t1 = tag(rec.player1_username);
     const t2 = tag(rec.player2_username);
     if (!t1 && !t2) return '';
-    return `<div style="font-size: 0.72rem; font-weight: 600; color: var(--text-muted); margin-top: 1px;">${escapeHtml(t1 || '—')} — ${escapeHtml(t2 || '—')}</div>`;
+    return `<div class="rec-tags">${escapeHtml(t1 || '—')} — ${escapeHtml(t2 || '—')}</div>`;
   }
 
   static renderRecommendations(recommendations, searchQuery = '') {
@@ -2311,22 +2308,22 @@ export class UIRenderer {
     }
 
     el.innerHTML = `
-      <div style="margin-bottom: 14px;">
-        <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px;">
-          <span style="font-size: 0.95rem; font-weight: 800; color: #fff; display: flex; align-items: center; gap: 6px;">
+      <div class="feed-section">
+        <div class="feed-head">
+          <span class="feed-title">
             💡 Рекомендации для вас
           </span>
-          <span style="font-size: 0.75rem; color: var(--accent-gold); font-weight: 700;">Персонально</span>
+          <span class="feed-tag-gold">Персонально</span>
         </div>
-        <div style="display: flex; flex-direction: column; gap: 6px;">
+        <div class="rec-list">
           ${list.slice(0, 3).map(rec => `
-            <div style="background: var(--bg-secondary); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 10px 12px; display: flex; justify-content: space-between; align-items: center;">
+            <div class="rec-card">
               <div>
-                <div style="font-weight: 800; font-size: 0.85rem; color: #fff;">${escapeHtml(rec.player1_team)} — ${escapeHtml(rec.player2_team)}</div>
+                <div class="rec-teams">${escapeHtml(rec.player1_team)} — ${escapeHtml(rec.player2_team)}</div>
                 ${UIRenderer._recPlayerTags(rec)}
-                <div style="font-size: 0.75rem; color: var(--text-gold); margin-top: 2px;">${rec.reason || 'Высокий интерес'}</div>
+                <div class="rec-reason">${rec.reason || 'Высокий интерес'}</div>
               </div>
-              <button class="btn-open-match-center" data-match-id="${rec.match_id}" style="background: var(--bg-tertiary); border: 1px solid var(--border-subtle); color: var(--accent-gold); border-radius: var(--radius-sm); padding: 5px 10px; font-size: 0.75rem; font-weight: 800; cursor: pointer;">
+              <button class="btn-open-match-center rec-open-btn" data-match-id="${rec.match_id}">
                 Аналитика →
               </button>
             </div>
@@ -2363,11 +2360,11 @@ export class UIRenderer {
     const heroEl = document.getElementById('my-club-hero-container');
     if (!heroEl) return;
     heroEl.innerHTML = `
-      <div class="club-hero" style="text-align: center; padding: 24px 16px;">
-        <div style="font-size: 2rem; margin-bottom: 8px;">⚠️</div>
-        <div style="font-size: 0.95rem; font-weight: 700; color: #fff; margin-bottom: 6px;">Не удалось загрузить данные клуба</div>
-        <div style="font-size: 0.8rem; color: var(--text-muted); margin-bottom: 14px;">${escapeHtml(errorMessage || 'Сервер временно недоступен или перезагружается')}</div>
-        <button id="btn-retry-my-club" class="btn-club-secondary" style="margin: 0 auto; display: inline-flex;">🔄 Повторить</button>
+      <div class="club-hero club-error">
+        <div class="club-error-icon">⚠️</div>
+        <div class="club-error-title">Не удалось загрузить данные клуба</div>
+        <div class="club-error-text">${escapeHtml(errorMessage || 'Сервер временно недоступен или перезагружается')}</div>
+        <button id="btn-retry-my-club" class="btn-club-secondary club-retry-btn">🔄 Повторить</button>
       </div>
     `;
     const btn = document.getElementById('btn-retry-my-club');
@@ -2385,7 +2382,7 @@ export class UIRenderer {
     if (!overview) {
       heroEl.innerHTML = `
         <div class="club-hero club-hero-skeleton">
-          <div style="text-align: center; padding: 30px 16px; color: var(--text-muted);">Загрузка клуба...</div>
+          <div class="club-loading">Загрузка клуба...</div>
         </div>
       `;
       return;
@@ -2509,8 +2506,8 @@ export class UIRenderer {
     ` : '';
 
     const protocolBtnHtml = !showActions ? `
-      <div class="club-match-actions" style="margin-top: 10px;">
-        <button class="btn-club-secondary btn-view-match-protocol" data-match-id="${match.id}" style="width: 100%; justify-content: center; gap: 6px;">
+      <div class="club-match-actions club-protocol-actions">
+        <button class="btn-club-secondary btn-view-match-protocol club-protocol-btn" data-match-id="${match.id}">
           📋 Протокол & Скриншот
         </button>
       </div>
@@ -2675,7 +2672,7 @@ export class UIRenderer {
     if (!container) return;
 
     if (!detail) {
-      container.innerHTML = '<div style="text-align: center; padding: 30px; color: var(--text-muted);">Загрузка протокола...</div>';
+      container.innerHTML = '<div class="modal-loading">Загрузка протокола...</div>';
       return;
     }
 
@@ -2698,68 +2695,68 @@ export class UIRenderer {
     const mvp = (m.mvp_player || '').trim();
 
     container.innerHTML = `
-      <div style="background: var(--bg-card); border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 14px; margin-bottom: 14px;">
-        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-          <span style="font-size: 0.75rem; font-weight: 800; color: var(--accent-gold); background: rgba(245,176,39,0.1); padding: 2px 8px; border-radius: 4px;">
+      <div class="proto-card">
+        <div class="proto-head">
+          <span class="proto-round">
             ${m.round_number ? `Тур ${m.round_number}` : 'Матч'} · Дивизион ${m.division_id || 1}
           </span>
-          <span style="font-size: 0.75rem; font-weight: 700; color: ${isFinished ? 'var(--color-success)' : 'var(--text-muted)'};">
+          <span class="proto-status" style="color: ${isFinished ? 'var(--color-success)' : 'var(--text-muted)'};">
             ${isFinished ? '✅ Завершён' : (m.status || 'Ожидает')}
           </span>
         </div>
 
-        <div style="display: flex; justify-content: space-between; align-items: center; padding: 10px 0;">
-          <div style="flex: 1; text-align: center;">
+        <div class="proto-teams">
+          <div class="proto-team">
             ${renderTeamLogoHtml(t1, 38)}
-            <div style="font-weight: 800; color: #fff; font-size: 0.95rem; margin-top: 6px;">${escapeHtml(t1)}</div>
-            ${u1 ? `<div style="font-size: 0.75rem; color: var(--text-muted);">${escapeHtml(u1)}</div>` : ''}
+            <div class="proto-team-name">${escapeHtml(t1)}</div>
+            ${u1 ? `<div class="proto-team-user">${escapeHtml(u1)}</div>` : ''}
           </div>
 
-          <div style="padding: 6px 16px; background: rgba(0,0,0,0.4); border-radius: var(--radius-md); border: 1px solid rgba(255,255,255,0.06); text-align: center;">
-            <div style="font-family: 'Outfit', sans-serif; font-weight: 900; font-size: 1.6rem; color: var(--accent-gold); letter-spacing: 2px;">
+          <div class="proto-score-box">
+            <div class="proto-score">
               ${scoreStr}
             </div>
           </div>
 
-          <div style="flex: 1; text-align: center;">
+          <div class="proto-team">
             ${renderTeamLogoHtml(t2, 38)}
-            <div style="font-weight: 800; color: #fff; font-size: 0.95rem; margin-top: 6px;">${escapeHtml(t2)}</div>
-            ${u2 ? `<div style="font-size: 0.75rem; color: var(--text-muted);">${escapeHtml(u2)}</div>` : ''}
+            <div class="proto-team-name">${escapeHtml(t2)}</div>
+            ${u2 ? `<div class="proto-team-user">${escapeHtml(u2)}</div>` : ''}
           </div>
         </div>
       </div>
 
       ${mvp ? `
-        <div style="display: flex; align-items: center; gap: 8px; background: rgba(245,176,39,0.08); border: 1px solid rgba(245,176,39,0.25); border-radius: var(--radius-md); padding: 10px 12px; margin-bottom: 14px;">
-          <span style="font-size: 1.1rem;">👑</span>
+        <div class="proto-mvp">
+          <span class="proto-mvp-icon">👑</span>
           <div>
-            <div style="font-size: 0.7rem; font-weight: 800; color: var(--accent-gold); text-transform: uppercase; letter-spacing: 0.5px;">Игрок матча</div>
-            <div style="font-size: 0.9rem; font-weight: 800; color: #fff;">${escapeHtml(mvp)}</div>
+            <div class="proto-mvp-label">Игрок матча</div>
+            <div class="proto-mvp-name">${escapeHtml(mvp)}</div>
           </div>
         </div>
       ` : ''}
 
       <!-- Events List (Goals & Assists) -->
-      <div style="margin-bottom: 16px;">
-        <div style="font-size: 0.88rem; font-weight: 800; color: #fff; margin-bottom: 8px; display: flex; align-items: center; gap: 6px;">
+      <div class="proto-events">
+        <div class="proto-section-title">
           ⚽ События матча
         </div>
         ${events.length === 0 ? `
-          <div style="font-size: 0.8rem; color: var(--text-muted); padding: 10px; background: var(--bg-secondary); border-radius: var(--radius-sm); text-align: center;">
+          <div class="proto-events-empty">
             События (голы и ассисты) не зафиксированы
           </div>
         ` : `
-          <div style="background: var(--bg-secondary); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 8px 12px; display: flex; flex-direction: column; gap: 6px;">
+          <div class="proto-goals">
             ${goals.map(g => `
-              <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.82rem;">
-                <span style="color: #fff; font-weight: 700;">⚽ ${escapeHtml(g.player_name)} ${g.count > 1 ? `(x${g.count})` : ''}</span>
-                <span style="color: var(--text-muted); font-size: 0.75rem;">${escapeHtml(g.team_name)}</span>
+              <div class="proto-goal">
+                <span class="proto-goal-player">⚽ ${escapeHtml(g.player_name)} ${g.count > 1 ? `(x${g.count})` : ''}</span>
+                <span class="proto-goal-team">${escapeHtml(g.team_name)}</span>
               </div>
             `).join('')}
             ${assists.map(a => `
-              <div style="display: flex; justify-content: space-between; align-items: center; font-size: 0.82rem; border-top: 1px dashed rgba(255,255,255,0.06); padding-top: 4px;">
-                <span style="color: var(--text-secondary); font-weight: 600;">👟 ${escapeHtml(a.player_name)} ${a.count > 1 ? `(x${a.count})` : ''}</span>
-                <span style="color: var(--text-muted); font-size: 0.75rem;">${escapeHtml(a.team_name)}</span>
+              <div class="proto-assist">
+                <span class="proto-assist-player">👟 ${escapeHtml(a.player_name)} ${a.count > 1 ? `(x${a.count})` : ''}</span>
+                <span class="proto-goal-team">${escapeHtml(a.team_name)}</span>
               </div>
             `).join('')}
           </div>
@@ -2767,19 +2764,19 @@ export class UIRenderer {
       </div>
 
       <!-- Screenshot Section -->
-      <div style="margin-bottom: 12px;">
-        <div style="font-size: 0.88rem; font-weight: 800; color: #fff; margin-bottom: 8px; display: flex; align-items: center; justify-content: space-between;">
+      <div class="proto-shot">
+        <div class="proto-shot-title">
           <span>📸 Скриншот протокола</span>
-          ${photoUrl ? `<span style="font-size: 0.72rem; color: var(--accent-gold); font-weight: 600;">Нажмите для увеличения</span>` : ''}
+          ${photoUrl ? `<span class="proto-shot-hint">Нажмите для увеличения</span>` : ''}
         </div>
         ${photoUrl ? `
-          <div style="position: relative; border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border-subtle); background: #000; text-align: center;">
-            <a href="${photoUrl}" target="_blank" rel="noopener noreferrer" style="display: block;">
-              <img src="${photoUrl}" alt="Скриншот матча" style="width: 100%; display: block; max-height: 280px; object-fit: contain; cursor: pointer;">
+          <div class="proto-shot-frame">
+            <a href="${photoUrl}" target="_blank" rel="noopener noreferrer" class="proto-shot-link">
+              <img src="${photoUrl}" alt="Скриншот матча" class="proto-shot-img">
             </a>
           </div>
         ` : `
-          <div style="text-align: center; padding: 24px; color: var(--text-muted); font-size: 0.82rem; border: 1px dashed var(--border-subtle); border-radius: var(--radius-md); background: var(--bg-secondary);">
+          <div class="proto-shot-empty">
             Скриншот для этого матча не был прикреплен
           </div>
         `}

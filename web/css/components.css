@@ -3755,3 +3755,1002 @@ span.team-logo-fallback {
   border-color: rgba(245, 176, 39, 0.3);
   color: var(--accent-gold);
 }
+
+/* ═══ Бывшие inline-стили ui.js / app.js ═══
+   Разметка карточек и модалок раньше несла стили в каждом элементе. Динамические
+   значения (ширины баров, цвета по статусу) остались inline, остальное здесь.
+   У элементов со своим классом селектор составной, чтобы перекрывать их общие
+   правила так же, как это делал inline-стиль. */
+
+/* ─── Линия матчей ─── */
+.line-empty {
+  text-align: center;
+  padding: 50px 20px;
+  color: var(--text-muted);
+}
+.line-empty-icon {
+  font-size: 2.5rem;
+  margin-bottom: 10px;
+}
+.line-empty-title {
+  font-size: 1rem;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 4px;
+}
+.line-empty-hint {
+  font-size: 0.85rem;
+}
+.line-empty-search {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-muted);
+}
+.match-card-tags {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.match-division-tag.division-tag-gold {
+  background: rgba(245,176,39,0.15);
+  color: var(--accent-gold);
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+.match-league-label {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+
+/* ─── Матч-центр ─── */
+.mc-empty {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-muted);
+}
+.mc-empty-icon {
+  font-size: 2.2rem;
+  margin-bottom: 8px;
+}
+.mc-empty-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #fff;
+}
+.mc-empty-hint {
+  font-size: 0.8rem;
+  margin-top: 4px;
+}
+.team-name-lg.mc-team-name {
+  margin-top: 6px;
+}
+.mc-team-tag {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  margin-top: 2px;
+}
+.mc-score-col {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+.mc-status {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  font-weight: 700;
+}
+.mc-mvp {
+  font-size: 0.72rem;
+  color: var(--accent-gold);
+  font-weight: 700;
+  text-align: center;
+  max-width: 120px;
+}
+.mc-markets-pending {
+  text-align:center;
+  padding:20px;
+  color:var(--text-muted);
+  font-size:0.85rem;
+}
+.h2h-summary-head {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.mc-probs {
+  margin: 12px 0 8px 0;
+}
+.mc-probs-labels {
+  display:flex;
+  justify-content:space-between;
+  font-size:0.8rem;
+  font-weight:700;
+  margin-bottom:4px;
+}
+.prob-home {
+  color:#60a5fa;
+}
+.prob-draw {
+  color:#9ca3af;
+}
+.prob-away {
+  color:#f87171;
+}
+.h2h-progress-bar.mc-probs-bar {
+  height:8px;
+  border-radius:4px;
+  overflow:hidden;
+  display:flex;
+}
+.prob-bar-home {
+  background:#3b82f6;
+}
+.prob-bar-draw {
+  background:#6b7280;
+}
+.prob-bar-away {
+  background:#ef4444;
+}
+.mc-probs-foot {
+  display:flex;
+  justify-content:space-between;
+  font-size:0.75rem;
+  color:var(--text-muted);
+  margin-top:4px;
+}
+.mc-factors {
+  margin-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 10px;
+}
+.mc-factors-title {
+  font-size:0.8rem;
+  font-weight:700;
+  color:var(--text-secondary);
+  margin-bottom:6px;
+}
+.insight-card.mc-factor {
+  padding:6px 10px;
+  margin-bottom:6px;
+  font-size:0.8rem;
+  background:rgba(255,255,255,0.03);
+  border-left:3px solid var(--primary-accent);
+  border-radius:4px;
+}
+
+/* ─── Турниры: таблица, результаты, лидеры ─── */
+.leaders-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 4px;
+  border-bottom: 1px solid rgba(255,255,255,0.04);
+}
+.leaders-row-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.leaders-rank {
+  font-weight: 800;
+  width: 22px;
+}
+.leaders-name {
+  font-weight: 700;
+  color: #fff;
+  font-size: 0.88rem;
+}
+.leaders-team {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.leaders-value {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 900;
+  color: var(--accent-gold);
+  font-size: 1.05rem;
+}
+.list-empty {
+  text-align: center;
+  padding: 40px;
+  color: var(--text-muted);
+}
+.standings-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 10px;
+  overflow-x: auto;
+}
+.standings-dash {
+  color: var(--text-muted);
+  font-size: 0.7rem;
+}
+.standings-team-cell {
+  text-align: left;
+}
+.standings-team {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.standings-team-name {
+  font-weight: 700;
+  color: #fff;
+}
+.standings-diff {
+  font-weight: 700;
+}
+.standings-points {
+  font-weight: 900;
+  color: var(--accent-gold);
+  font-size: 0.95rem;
+}
+.result-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px 14px;
+  margin-bottom: 8px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.result-team-home {
+  flex: 1;
+  text-align: right;
+  font-weight: 700;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+}
+.result-score {
+  padding: 4px 14px;
+  font-family: 'Outfit', sans-serif;
+  font-weight: 900;
+  font-size: 1.15rem;
+  color: var(--accent-gold);
+  background: rgba(0,0,0,0.3);
+  border-radius: var(--radius-sm);
+  margin: 0 10px;
+}
+.result-team-away {
+  flex: 1;
+  text-align: left;
+  font-weight: 700;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 6px;
+}
+.leaders-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 10px;
+}
+
+/* ─── История прогнозов: пустое состояние ─── */
+.coupons-empty-state.history-empty {
+  text-align: center;
+  padding: 48px 20px;
+  background: rgba(14, 18, 27, 0.5);
+  border-radius: 16px;
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+}
+.empty-icon.history-empty-icon {
+  font-size: 2.2rem;
+  margin-bottom: 10px;
+}
+.empty-title.history-empty-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 4px;
+}
+.empty-subtitle.history-empty-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  max-width: 280px;
+  margin: 0 auto;
+  line-height: 1.4;
+}
+
+/* ─── Купон и черновики ─── */
+.odds-old {
+  color: var(--text-muted);
+  text-decoration: line-through;
+}
+.odds-new {
+  color: var(--accent-gold);
+}
+.saved-title {
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: #fff;
+  margin-bottom: 8px;
+}
+.saved-name {
+  font-weight: 800;
+  color: #fff;
+  font-size: 0.88rem;
+}
+.saved-meta {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.saved-actions {
+  display: flex;
+  gap: 8px;
+}
+.btn-delete-saved-coupon.saved-delete {
+  background: transparent;
+  border: none;
+  color: var(--color-danger);
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.slip-empty {
+  text-align: center;
+  padding: 24px 10px;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.bet-accepted-stat.win.bet-accepted-stat-wide {
+  grid-column: 1 / -1;
+}
+
+/* ─── Профиль и достижения ─── */
+.profile-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.profile-name {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.25rem;
+  font-weight: 900;
+  color: #fff;
+}
+.profile-level {
+  font-size: 0.82rem;
+  color: var(--accent-gold);
+  font-weight: 700;
+  margin-top: 2px;
+}
+.ach-icon.ach-icon-big {
+  font-size: 1.8rem;
+}
+.ach-text {
+  margin-top: 6px;
+}
+.ach-title.ach-title-text {
+  font-weight: 800;
+  color: #fff;
+  font-size: 0.85rem;
+}
+.ach-desc.ach-about {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+.ach-reward.ach-reward-line {
+  margin-top: 8px;
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: var(--accent-gold);
+}
+.ach-xp {
+  color: var(--text-secondary);
+  font-weight: 700;
+}
+.btn-claim-achievement.ach-claim-btn {
+  width: 100%;
+}
+.ach-status.ach-got {
+  margin-top: 8px;
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: var(--accent-gold);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+/* ─── Турнирная статистика в профиле ─── */
+.ts-loading {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+}
+.ts-empty {
+  text-align: center;
+  padding: 24px 16px;
+  background: var(--bg-secondary);
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-muted);
+  font-size: 0.85rem;
+}
+.ts-form-dot {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  color: #000;
+  font-size: 0.68rem;
+  font-weight: 900;
+}
+.ts-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px;
+}
+.ts-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.ts-head-main {
+  min-width: 0;
+}
+.ts-team {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.02rem;
+  font-weight: 900;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ts-division {
+  font-size: 0.76rem;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+.ts-place-col {
+  text-align: right;
+  flex-shrink: 0;
+}
+.ts-place {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.02rem;
+  font-weight: 900;
+  color: var(--accent-gold);
+}
+.ts-place-of {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.ts-diff {
+  color: var(--text-muted);
+  font-size: 0.8em;
+}
+.ts-form {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+.ts-form-label {
+  font-size: 0.76rem;
+  color: var(--text-muted);
+  font-weight: 600;
+}
+.ts-form-dots {
+  display: flex;
+  gap: 4px;
+}
+
+/* ─── Модалки: рынки матча и зал славы ─── */
+.modal-loading {
+  text-align: center;
+  padding: 30px;
+  color: var(--text-muted);
+}
+.mm-group {
+  background: var(--bg-tertiary);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  margin-bottom: 10px;
+}
+.mm-group-title {
+  font-weight: 800;
+  font-size: 0.85rem;
+  color: #fff;
+  margin-bottom: 8px;
+}
+.mm-grid {
+  display: grid;
+  gap: 6px;
+}
+.mm-footer {
+  margin-top: 14px;
+  padding-top: 10px;
+  border-top: 1px solid var(--border-subtle);
+}
+.btn-match-action.btn-open-match-center.mm-open-center {
+  width: 100%;
+  padding: 10px;
+  font-weight: 800;
+  font-size: 0.82rem;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  color: var(--accent-gold);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+}
+.podium-col.lb-podium-col {
+  text-align: center;
+  flex: 1;
+}
+.lb-medal {
+  font-size: 1.8rem;
+  margin-bottom: 4px;
+}
+.lb-podium-name {
+  font-weight: 800;
+  font-size: 0.85rem;
+  color: #fff;
+}
+.lb-podium-balance {
+  font-size: 0.78rem;
+  color: var(--accent-gold);
+  font-weight: 800;
+}
+.lb-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 4px;
+  border-bottom: 1px solid rgba(255,255,255,0.05);
+  font-size: 0.85rem;
+}
+.lb-row-main {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.lb-rank {
+  font-weight: 800;
+  color: var(--text-muted);
+  width: 22px;
+}
+.lb-name {
+  font-weight: 700;
+  color: #fff;
+}
+.lb-balance {
+  font-weight: 800;
+  color: var(--accent-gold);
+}
+.load-error {
+  text-align: center;
+  padding: 24px;
+  color: var(--color-danger);
+}
+.markets-loading {
+  text-align: center;
+  padding: 36px 16px;
+  color: var(--text-muted);
+}
+.markets-loading-icon {
+  font-size: 1.6rem;
+  margin-bottom: 8px;
+}
+.markets-error {
+  text-align: center;
+  padding: 24px;
+  color: var(--accent-red);
+}
+
+/* ─── Лента: горячие матчи, движение коэффициентов, рекомендации ─── */
+.feed-section {
+  margin-bottom: 14px;
+}
+.feed-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+}
+.feed-title {
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.feed-tag-gold {
+  font-size: 0.75rem;
+  color: var(--accent-gold);
+  font-weight: 700;
+}
+.hot-scroll {
+  display: flex;
+  gap: 10px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  -webkit-overflow-scrolling: touch;
+}
+.hot-card {
+  min-width: 220px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px;
+  flex-shrink: 0;
+}
+.hot-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.72rem;
+  color: var(--text-muted);
+  margin-bottom: 6px;
+}
+.hot-score {
+  color: #ff4757;
+  font-weight: 800;
+}
+.hot-teams {
+  font-size: 0.85rem;
+  font-weight: 800;
+  color: #fff;
+  margin-bottom: 6px;
+}
+.hot-foot {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.78rem;
+}
+.hot-reason {
+  color: var(--text-secondary);
+}
+.feed-tag-cyan {
+  font-size: 0.75rem;
+  color: var(--accent-cyan);
+  font-weight: 700;
+}
+.movers-scroll {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 6px;
+  -webkit-overflow-scrolling: touch;
+}
+.mover-card {
+  min-width: 170px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px 10px;
+  flex-shrink: 0;
+}
+.mover-match {
+  font-size: 0.72rem;
+  color: var(--text-muted);
+}
+.mover-selection {
+  font-size: 0.8rem;
+  font-weight: 800;
+  color: #fff;
+  margin: 3px 0;
+}
+.mover-odds {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+.mover-current {
+  color: #fff;
+}
+.rec-tags {
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--text-muted);
+  margin-top: 1px;
+}
+.rec-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.rec-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.rec-teams {
+  font-weight: 800;
+  font-size: 0.85rem;
+  color: #fff;
+}
+.rec-reason {
+  font-size: 0.75rem;
+  color: var(--text-gold);
+  margin-top: 2px;
+}
+.btn-open-match-center.rec-open-btn {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  color: var(--accent-gold);
+  border-radius: var(--radius-sm);
+  padding: 5px 10px;
+  font-size: 0.75rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+/* ─── Мой клуб ─── */
+.club-hero.club-error {
+  text-align: center;
+  padding: 24px 16px;
+}
+.club-error-icon {
+  font-size: 2rem;
+  margin-bottom: 8px;
+}
+.club-error-title {
+  font-size: 0.95rem;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 6px;
+}
+.club-error-text {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  margin-bottom: 14px;
+}
+.btn-club-secondary.club-retry-btn {
+  margin: 0 auto;
+  display: inline-flex;
+}
+.club-loading {
+  text-align: center;
+  padding: 30px 16px;
+  color: var(--text-muted);
+}
+.club-match-actions.club-protocol-actions {
+  margin-top: 10px;
+}
+.btn-club-secondary.btn-view-match-protocol.club-protocol-btn {
+  width: 100%;
+  justify-content: center;
+  gap: 6px;
+}
+
+/* ─── Протокол матча ─── */
+.proto-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px;
+  margin-bottom: 14px;
+}
+.proto-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.proto-round {
+  font-size: 0.75rem;
+  font-weight: 800;
+  color: var(--accent-gold);
+  background: rgba(245,176,39,0.1);
+  padding: 2px 8px;
+  border-radius: 4px;
+}
+.proto-status {
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+.proto-teams {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 10px 0;
+}
+.proto-team {
+  flex: 1;
+  text-align: center;
+}
+.proto-team-name {
+  font-weight: 800;
+  color: #fff;
+  font-size: 0.95rem;
+  margin-top: 6px;
+}
+.proto-team-user {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+}
+.proto-score-box {
+  padding: 6px 16px;
+  background: rgba(0,0,0,0.4);
+  border-radius: var(--radius-md);
+  border: 1px solid rgba(255,255,255,0.06);
+  text-align: center;
+}
+.proto-score {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 900;
+  font-size: 1.6rem;
+  color: var(--accent-gold);
+  letter-spacing: 2px;
+}
+.proto-mvp {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: rgba(245,176,39,0.08);
+  border: 1px solid rgba(245,176,39,0.25);
+  border-radius: var(--radius-md);
+  padding: 10px 12px;
+  margin-bottom: 14px;
+}
+.proto-mvp-icon {
+  font-size: 1.1rem;
+}
+.proto-mvp-label {
+  font-size: 0.7rem;
+  font-weight: 800;
+  color: var(--accent-gold);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.proto-mvp-name {
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #fff;
+}
+.proto-events {
+  margin-bottom: 16px;
+}
+.proto-section-title {
+  font-size: 0.88rem;
+  font-weight: 800;
+  color: #fff;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.proto-events-empty {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  padding: 10px;
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+  text-align: center;
+}
+.proto-goals {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 8px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.proto-goal {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.82rem;
+}
+.proto-goal-player {
+  color: #fff;
+  font-weight: 700;
+}
+.proto-goal-team {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+.proto-assist {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 0.82rem;
+  border-top: 1px dashed rgba(255,255,255,0.06);
+  padding-top: 4px;
+}
+.proto-assist-player {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+.proto-shot {
+  margin-bottom: 12px;
+}
+.proto-shot-title {
+  font-size: 0.88rem;
+  font-weight: 800;
+  color: #fff;
+  margin-bottom: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.proto-shot-hint {
+  font-size: 0.72rem;
+  color: var(--accent-gold);
+  font-weight: 600;
+}
+.proto-shot-frame {
+  position: relative;
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  border: 1px solid var(--border-subtle);
+  background: #000;
+  text-align: center;
+}
+.proto-shot-link {
+  display: block;
+}
+.proto-shot-img {
+  width: 100%;
+  display: block;
+  max-height: 280px;
+  object-fit: contain;
+  cursor: pointer;
+}
+.proto-shot-empty {
+  text-align: center;
+  padding: 24px;
+  color: var(--text-muted);
+  font-size: 0.82rem;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+/* ─── Экран «Откройте через Telegram» ─── */
+.tg-required {
+  text-align: center;
+  padding: 40px 20px;
+  color: var(--text-secondary);
+}
+.tg-required-icon {
+  font-size: 2.5rem;
+  margin-bottom: 12px;
+}
+.tg-required-title {
+  font-weight: 800;
+  font-size: 1.1rem;
+  color: #fff;
+  margin-bottom: 8px;
+}
+.tg-required-text {
+  font-size: 0.85rem;
+  max-width: 320px;
+  margin: 0 auto;
+  line-height: 1.4;
+  color: var(--text-muted);
+}
