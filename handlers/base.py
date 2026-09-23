@@ -217,6 +217,58 @@ async def resolve_post_target(
     return target
 
 
+# Лимиты Telegram: подпись к фото — 1024 символа, альбом — до 10 элементов.
+CAPTION_LIMIT = 1024
+MEDIA_GROUP_LIMIT = 10
+
+
+def unique_photo_ids(*sources) -> list[str]:
+    """Непустые file_id из списков и одиночных значений, без повторов, по порядку."""
+    seen: list[str] = []
+    for src in sources:
+        items = src if isinstance(src, (list, tuple)) else [src]
+        for p_id in items:
+            if p_id and p_id not in seen:
+                seen.append(p_id)
+    return seen
+
+
+async def send_result_post(bot, target: dict, text: str, photo_ids: list[str] | None = None) -> None:
+    """Пост результата со всеми скринами матча.
+
+    Один скрин — фото с подписью; несколько — альбом, подпись на первом кадре.
+    Текст длиннее лимита подписи уходит отдельным сообщением следом. Если
+    скрины отправить не удалось, текст всё равно публикуется: результат уже в
+    базе, и пост о нём не должен пропасть из-за картинки.
+    """
+    photos = unique_photo_ids(photo_ids or [])[:MEDIA_GROUP_LIMIT]
+    fits = len(text) <= CAPTION_LIMIT
+    text_sent = False
+    try:
+        if len(photos) == 1:
+            if fits:
+                await bot.send_photo(**target, photo=photos[0], caption=text, parse_mode="HTML")
+                text_sent = True
+            else:
+                await bot.send_photo(**target, photo=photos[0])
+        elif photos:
+            from telegram import InputMediaPhoto
+            media = [
+                InputMediaPhoto(
+                    media=p_id,
+                    caption=text if fits and i == 0 else None,
+                    parse_mode="HTML" if fits and i == 0 else None,
+                )
+                for i, p_id in enumerate(photos)
+            ]
+            await bot.send_media_group(**target, media=media)
+            text_sent = fits
+    except Exception as e:
+        logger.warning(f"send_result_post: screenshots not sent ({len(photos)}): {e}")
+    if not text_sent:
+        await bot.send_message(**target, text=text, parse_mode="HTML")
+
+
 def is_admin(telegram_id: int) -> bool:
     """Check if the user is in configured Admin IDs, has admin role, or is assigned as a division admin."""
     if not telegram_id:

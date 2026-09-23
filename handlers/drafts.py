@@ -314,8 +314,12 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
 
     import uuid
     draft_uuid = str(uuid.uuid4())[:8]
-    
+
     is_multi = len(prepared_games) > 1
+    # Одна игра — все присланные скрины её (счёт, голы, статистика), и в пост
+    # уходят все. В серии каждой игре достаётся её собственный скрин.
+    if not is_multi and prepared_games:
+        prepared_games[0]["photo_ids"] = list(dict.fromkeys(p for p in photo_file_ids if p))
     
     if not is_multi:
         g = prepared_games[0]
@@ -449,7 +453,7 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
 
 from telegram.ext import CallbackQueryHandler
 from handlers.admin import is_admin
-from handlers.base import is_global_admin, resolve_post_target
+from handlers.base import is_global_admin, resolve_post_target, send_result_post, unique_photo_ids
 
 
 def _draft_division_ids(draft: dict) -> set[int]:
@@ -591,15 +595,11 @@ async def cb_draft_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         if target:
             try:
-                kwargs = {**target, "parse_mode": "HTML"}
-
-                if g.get("photo_id") and len(official_text) <= 1024:
-                    kwargs["photo"] = g["photo_id"]
-                    kwargs["caption"] = official_text
-                    await context.bot.send_photo(**kwargs)
-                else:
-                    kwargs["text"] = official_text
-                    await context.bot.send_message(**kwargs)
+                # Черновики, сохранённые до появления `photo_ids`, несут один `photo_id`.
+                await send_result_post(
+                    context.bot, target, official_text,
+                    unique_photo_ids(g.get("photo_ids") or [], g.get("photo_id")),
+                )
             except Exception as e:
                 logger.error(f"Failed to send match post to group: {e}")
 

@@ -6,7 +6,9 @@ from telegram.ext import ContextTypes, ConversationHandler
 import html
 import database
 from time_utils import now_msk
-from handlers.base import is_admin, resolve_division_target, resolve_post_target
+from handlers.base import (
+    is_admin, resolve_division_target, resolve_post_target, send_result_post, unique_photo_ids,
+)
 from constants import CUP_DIVISION_SENTINEL
 
 import logging
@@ -2951,6 +2953,7 @@ def collect_report_payload(context: ContextTypes.DEFAULT_TYPE, match: dict) -> d
     photo_id = photos[0] if photos else ud.get("report_photo_id")
 
     return {
+        "photo_ids": unique_photo_ids(photos, ud.get("report_photo_id")),
         "h_score": ud.get("report_home_goals", 0) or 0,
         "a_score": ud.get("report_away_goals", 0) or 0,
         "scorers": scorers,
@@ -3158,6 +3161,8 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
     h_assists = context.user_data.get("home_assists_count", {}) or {}
     a_assists = context.user_data.get("away_assists_count", {}) or {}
     photo_id = context.user_data.get("report_photo_id")
+    # Все скрины отчёта (до 3), а не только первый — они уйдут в пост альбомом.
+    photo_ids = unique_photo_ids(context.user_data.get("ai_photos_list") or [], photo_id)
     is_single_tl = bool(context.user_data.get("is_single_timeline", False))
     mvp_player = context.user_data.get("report_mvp_player")
 
@@ -3307,21 +3312,7 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
             mvp_player=mvp_player
         ) + debt_note
         try:
-            kwargs = {**target, "parse_mode": "HTML"}
-            if photo_id and len(group_text) <= 1024:
-                kwargs["caption"] = group_text
-                kwargs["photo"] = photo_id
-                await context.bot.send_photo(**kwargs)
-            elif photo_id:
-                try:
-                    await context.bot.send_photo(**target, photo=photo_id)
-                except Exception as ep:
-                    logger.warning(f"Could not send match photo to group topic: {ep}")
-                kwargs["text"] = group_text
-                await context.bot.send_message(**kwargs)
-            else:
-                kwargs["text"] = group_text
-                await context.bot.send_message(**kwargs)
+            await send_result_post(context.bot, target, group_text, photo_ids)
         except Exception as e:
             logger.exception(f"Failed to post result to group: {e}")
 
@@ -3394,7 +3385,7 @@ async def submit_report_to_guest(update: Update, context: ContextTypes.DEFAULT_T
     # Clear any report parked by an older build before confirmation was dropped.
     await asyncio.to_thread(database.delete_pending_report, match_id)
 
-    await notify_match_confirmed(context, match_id)
+    await notify_match_confirmed(context, match_id, photo_ids=payload.get("photo_ids"))
     await refresh_debts_summary(context)
     await refresh_league_table(context, division_id=match.get("division_id"))
 
@@ -3580,7 +3571,10 @@ async def handle_debt_played_rewards(
             logger.warning(f"Failed to send unwarn summary to warns thread: {e}")
 
 
-async def notify_match_confirmed(context: ContextTypes.DEFAULT_TYPE, match_id: int) -> None:
+async def notify_match_confirmed(
+    context: ContextTypes.DEFAULT_TYPE, match_id: int, photo_ids: list[str] | None = None,
+) -> None:
+    """`photo_ids` — все скрины отчёта; без них в пост идёт один `matches.photo_id`."""
     match = await asyncio.to_thread(database.get_match, match_id)
     if not match:
         return
@@ -3658,12 +3652,10 @@ async def notify_match_confirmed(context: ContextTypes.DEFAULT_TYPE, match_id: i
             mvp_player=match.get("mvp_player")
         ) + debt_note
 
-        photo_id = match.get("photo_id")
         try:
-            if photo_id:
-                await context.bot.send_photo(**target, photo=photo_id, caption=group_text, parse_mode="HTML")
-            else:
-                await context.bot.send_message(**target, text=group_text, parse_mode="HTML")
+            await send_result_post(
+                context.bot, target, group_text, unique_photo_ids(photo_ids or [], match.get("photo_id"))
+            )
         except Exception as e:
             logger.exception("Failed to post result to topic/group")
 
