@@ -43,8 +43,6 @@ body.coupon-open {
     0 0 0 1px rgba(255, 159, 26, 0.08),
     0 0 22px rgba(245, 176, 39, 0.28),
     0 12px 32px rgba(0, 0, 0, 0.7);
-  backdrop-filter: blur(20px) saturate(140%);
-  -webkit-backdrop-filter: blur(20px) saturate(140%);
   cursor: pointer;
   transform: translateY(calc(100% + 90px));
   opacity: 0;
@@ -64,7 +62,7 @@ body.coupon-open {
 }
 @keyframes betbarBump {
   0% { transform: scale(1); }
-  35% { transform: scale(1.035); box-shadow: 0 0 34px rgba(245, 176, 39, 0.55), 0 12px 32px rgba(0, 0, 0, 0.7); }
+  35% { transform: scale(1.035); }
   100% { transform: scale(1); }
 }
 
@@ -145,8 +143,6 @@ body.coupon-open {
   inset: 0;
   z-index: 155;
   background: rgba(0, 0, 0, 0.62);
-  backdrop-filter: blur(4px);
-  -webkit-backdrop-filter: blur(4px);
   opacity: 0;
   pointer-events: none;
   transition: opacity 0.3s ease;
@@ -716,13 +712,15 @@ body.coupon-open {
   top: 0;
   bottom: 0;
   width: 40%;
-  left: -60%;
+  left: 0;
   background: linear-gradient(100deg, transparent 0%, rgba(255, 255, 255, 0.35) 50%, transparent 100%);
+  transform: translateX(-150%);
   animation: couponShine 3.2s ease-in-out infinite;
 }
 @keyframes couponShine {
-  0%, 60% { left: -60%; }
-  100% { left: 130%; }
+  /* translateX в % от ширины блика (40% кнопки): −150% ≙ left −60%, 325% ≙ left 130%. */
+  0%, 60% { transform: translateX(-150%); }
+  100% { transform: translateX(325%); }
 }
 .coupon-cta:active {
   transform: scale(0.98);

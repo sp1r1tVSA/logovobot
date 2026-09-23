@@ -96,8 +96,6 @@
   padding: 8px 16px 4px;
   background: var(--bg-app, #0b0f18);
   background: linear-gradient(180deg, var(--bg-app, #0b0f18) 82%, rgba(11, 15, 24, 0) 100%);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
 }
 
 /* Горизонтальная прокрутка с видимой, но тонкой полосой. */
@@ -210,8 +208,6 @@
   padding: 14px 16px;
   margin-bottom: 12px;
   box-shadow: var(--shadow-card);
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
   transition: transform 0.2s ease, border-color 0.2s ease;
 }
 
@@ -388,7 +384,7 @@
   justify-content: center;
   gap: 2px;
   cursor: pointer;
-  transition: all 0.18s ease;
+  transition: background-color 0.18s ease, border-color 0.18s ease, color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
   user-select: none;
   position: relative;
   overflow: hidden;
@@ -448,7 +444,7 @@
   justify-content: center;
   gap: 6px;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background-color 0.2s ease, border-color 0.2s ease, color 0.2s ease, transform 0.2s ease;
 }
 
 .btn-match-action:hover, .btn-match-action:active {
@@ -504,12 +500,14 @@
 }
 .podium-card.first .podium-medal {
   font-size: 2.5rem;
+  /* Свечение статичное: анимируется только transform, он не перерисовывает слой. */
+  filter: drop-shadow(0 0 14px rgba(245, 176, 39, 0.75));
   animation: crownGlow 2.5s infinite ease-in-out;
 }
 
 @keyframes crownGlow {
-  0%, 100% { transform: translateY(0); filter: drop-shadow(0 0 10px rgba(245, 176, 39, 0.6)); }
-  50% { transform: translateY(-3px); filter: drop-shadow(0 0 18px rgba(245, 176, 39, 0.9)); }
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-3px); }
 }
 
 .podium-name {
@@ -581,8 +579,6 @@
   inset: 0;
   z-index: 100;
   background: rgba(0, 0, 0, 0.85);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
   display: none;
   align-items: center;
   justify-content: center;
@@ -724,12 +720,13 @@
 
 .streak-flame-icon {
   font-size: 1.6rem;
+  filter: drop-shadow(0 0 12px rgba(245, 176, 39, 0.75));
   animation: flameFlicker 1.8s infinite alternate;
 }
 
 @keyframes flameFlicker {
-  0% { transform: scale(1) rotate(-3deg); filter: drop-shadow(0 0 8px rgba(245, 176, 39, 0.6)); }
-  100% { transform: scale(1.15) rotate(3deg); filter: drop-shadow(0 0 16px rgba(245, 176, 39, 0.9)); }
+  0% { transform: scale(1) rotate(-3deg); }
+  100% { transform: scale(1.15) rotate(3deg); }
 }
 
 .streak-days-grid {
@@ -853,7 +850,18 @@
   padding: 6px 14px;
   border-radius: var(--radius-sm);
   cursor: pointer;
-  box-shadow: var(--shadow-gold);
+  box-shadow: 0 0 8px rgba(245, 176, 39, 0.4);
+  position: relative;
+}
+/* Пульс свечения — через opacity псевдоэлемента: анимация box-shadow перерисовывает кадр целиком. */
+.btn-claim-quest::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  box-shadow: 0 0 18px rgba(245, 176, 39, 0.8);
+  opacity: 0;
+  pointer-events: none;
   animation: pulseGold 2s infinite alternate;
 }
 .btn-claim-quest:active {
@@ -861,8 +869,8 @@
 }
 
 @keyframes pulseGold {
-  0% { box-shadow: 0 0 8px rgba(245, 176, 39, 0.4); }
-  100% { box-shadow: 0 0 18px rgba(245, 176, 39, 0.8); }
+  0% { opacity: 0; }
+  100% { opacity: 1; }
 }
 
 /* ─── 10. Esports Gamer Profile Card ─── */
@@ -1671,8 +1679,6 @@ img.team-logo-img + .team-logo-fallback {
 /* ─── Coupon Card (Root Container) ─── */
 .coupon-card {
   background: rgba(14, 18, 27, 0.92);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.07);
   border-radius: 16px;
   padding: 14px 16px;
@@ -2227,8 +2233,6 @@ img.team-logo-img + .team-logo-fallback {
 .club-hero {
   background: linear-gradient(160deg, rgba(245, 176, 39, 0.10) 0%, rgba(14, 18, 27, 0.86) 45%),
               var(--bg-glass);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
   padding: 14px;
@@ -2527,8 +2531,6 @@ img.team-logo-img + .team-logo-fallback {
   padding: 26px 16px;
   border-radius: 14px;
   background: var(--bg-glass);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   border: 1px dashed rgba(255, 255, 255, 0.1);
   text-align: center;
   font-size: 0.82rem;
@@ -2539,8 +2541,6 @@ img.team-logo-img + .team-logo-fallback {
 /* --- Карточка матча --- */
 .club-match-card {
   background: var(--bg-glass);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
   padding: 12px;
@@ -2736,8 +2736,6 @@ img.team-logo-img + .team-logo-fallback {
   padding: 10px 12px;
   border-radius: 14px;
   background: linear-gradient(140deg, rgba(245, 176, 39, 0.12) 0%, rgba(14, 18, 27, 0.85) 60%);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.08);
   position: relative;
 }
@@ -2777,8 +2775,6 @@ img.team-logo-img + .team-logo-fallback {
   flex-direction: column;
   gap: 6px;
   background: var(--bg-glass);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
   padding: 8px;
@@ -2873,8 +2869,6 @@ img.team-logo-img + .team-logo-fallback {
 /* --- Пустое состояние (игрок не заявлен за клуб) --- */
 .club-empty-state {
   background: var(--bg-glass);
-  backdrop-filter: blur(14px);
-  -webkit-backdrop-filter: blur(14px);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 14px;
   padding: 26px 18px;

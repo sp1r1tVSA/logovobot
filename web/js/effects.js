@@ -15,9 +15,11 @@ export class ParticleEffects {
     document.body.appendChild(canvas);
 
     const ctx = canvas.getContext('2d');
-    canvas.width = window.innerWidth * window.devicePixelRatio;
-    canvas.height = window.innerHeight * window.devicePixelRatio;
-    ctx.scale(window.devicePixelRatio, window.devicePixelRatio);
+    // DPR 3 on a full-screen canvas is ~9x the pixels to clear per frame for no visible gain.
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    canvas.width = window.innerWidth * dpr;
+    canvas.height = window.innerHeight * dpr;
+    ctx.scale(dpr, dpr);
 
     const colors = ['#f5b027', '#ffd700', '#ffffff', '#00d2ff', '#10b981', '#f59e0b'];
     const particles = [];
