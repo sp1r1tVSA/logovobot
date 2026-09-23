@@ -203,16 +203,20 @@ def build_digest_payload(division_id: int, round_number: int, season_id: int | N
     # Обладатель золотой короны тура: больше всего наград «Игрок матча». При
     # равенстве корона одна на всех — в этом случае выделять некого, и поле
     # остаётся пустым, чтобы Темшик не назвал случайного из них лучшим.
+    # Счёт ведётся по ключу имени, чтобы «Kökçü» и «KOKCU» были одной короной.
     crown_counts: dict[str, int] = {}
+    crown_names: dict[str, str] = {}
     for r in results:
         if r["mvp_player"]:
-            crown_counts[r["mvp_player"]] = crown_counts.get(r["mvp_player"], 0) + 1
+            key = database.normalize_player_name_key(r["mvp_player"]) or r["mvp_player"].lower()
+            crown_names.setdefault(key, r["mvp_player"])
+            crown_counts[key] = crown_counts.get(key, 0) + 1
     mvp_of_the_round = None
     if crown_counts:
         best = max(crown_counts.values())
-        leaders = [name for name, cnt in crown_counts.items() if cnt == best]
+        leaders = [key for key, cnt in crown_counts.items() if cnt == best]
         if len(leaders) == 1:
-            mvp_of_the_round = {"player_name": leaders[0], "mvp_count": best}
+            mvp_of_the_round = {"player_name": crown_names[leaders[0]], "mvp_count": best}
 
     # Движение по таблице: срез до тура vs срез до предыдущего тура
     after = database.get_standings(division_id=division_id, season_id=season_id, up_to_round=round_number)

@@ -5959,10 +5959,15 @@ def get_missing_squad_players(team_name: str) -> list[str]:
         """, (team_name.strip(),))
         event_names = [row["player_name"] for row in cursor.fetchall()]
 
+        roster = _load_club_roster(cursor, team_name)
         missing = []
         for pname in event_names:
-            if not find_player_in_squad(pname, team_name, conn=conn):
-                missing.append(pname)
+            if find_player_in_squad(pname, team_name, conn=conn):
+                continue
+            # An OCR spelling of a squad player (Emegha for EMEGA) is not a new player.
+            if match_roster_name(pname, roster):
+                continue
+            missing.append(pname)
         return missing
 
 
@@ -5999,6 +6004,11 @@ def add_missing_squad_players(team_name: str | None = None) -> int:
                         (existing["player_name"], tname.strip(), pname)
                     )
                 continue
+            # A spelling only the fuzzy tier ties to a squad player is still that
+            # player: never insert it as a second one. Fuzzy stays read-side, so
+            # match_events keep the spelling and the aggregators fold it on read.
+            if match_roster_name(pname, _load_club_roster(cursor, tname)):
+                continue
 
             norm_key = normalize_player_name_key(pname)
             t_clean = tname.strip()
@@ -6027,9 +6037,12 @@ def get_club_top_scorers(team_name: str) -> list[dict]:
             JOIN matches m ON me.match_id = m.id
             WHERE LOWER(me.team_name) = LOWER(?) AND me.event_type = 'goal' AND m.status = 'confirmed'
             GROUP BY me.player_name
-            ORDER BY total DESC, me.player_name ASC
         """, (team_name.strip(),))
-        return [{"player_name": row["player_name"], "total": row["total"]} for row in cursor.fetchall()]
+        rows = [{"player_name": r["player_name"], "team_name": team_name, "total": r["total"]}
+                for r in cursor.fetchall()]
+        rows = _fold_player_rows(cursor, rows, ("total",))
+        rows.sort(key=lambda r: (-(r["total"] or 0), r["player_name"]))
+        return [{"player_name": r["player_name"], "total": r["total"]} for r in rows]
 
 
 def clear_all_matches(season_id: int | None = None) -> None:
@@ -7052,9 +7065,12 @@ def get_club_top_assisters(team_name: str) -> list[dict]:
             JOIN matches m ON me.match_id = m.id
             WHERE LOWER(me.team_name) = LOWER(?) AND me.event_type = 'assist' AND m.status = 'confirmed'
             GROUP BY me.player_name
-            ORDER BY total DESC, me.player_name ASC
         """, (team_name.strip(),))
-        return [{"player_name": row["player_name"], "total": row["total"]} for row in cursor.fetchall()]
+        rows = [{"player_name": r["player_name"], "team_name": team_name, "total": r["total"]}
+                for r in cursor.fetchall()]
+        rows = _fold_player_rows(cursor, rows, ("total",))
+        rows.sort(key=lambda r: (-(r["total"] or 0), r["player_name"]))
+        return [{"player_name": r["player_name"], "total": r["total"]} for r in rows]
 
 
 def get_unplayed_matches_in_round(round_number: int) -> list[dict]:
@@ -7098,12 +7114,11 @@ def get_top_scorers(limit: int = 20, division_id: int | None = None, season_id: 
             params.append(division_id)
         query += """
             GROUP BY me.player_name, me.team_name
-            ORDER BY total_goals DESC, me.player_name ASC
-            LIMIT ?
         """
-        params.append(limit)
         cursor.execute(query, tuple(params))
-        return [dict(row) for row in cursor.fetchall()]
+        rows = _fold_player_rows(cursor, cursor.fetchall(), ("total_goals",))
+        rows.sort(key=lambda r: (-(r["total_goals"] or 0), r["player_name"]))
+        return rows[:limit]
 
 def get_top_assists(limit: int = 20, division_id: int | None = None, season_id: int | None = None) -> list[dict]:
     """Get top assist providers in the league aggregated from match_events (strictly confirmed league matches, round_number > 0)."""
@@ -7130,12 +7145,11 @@ def get_top_assists(limit: int = 20, division_id: int | None = None, season_id: 
             params.append(division_id)
         query += """
             GROUP BY me.player_name, me.team_name
-            ORDER BY total_assists DESC, me.player_name ASC
-            LIMIT ?
         """
-        params.append(limit)
         cursor.execute(query, tuple(params))
-        return [dict(row) for row in cursor.fetchall()]
+        rows = _fold_player_rows(cursor, cursor.fetchall(), ("total_assists",))
+        rows.sort(key=lambda r: (-(r["total_assists"] or 0), r["player_name"]))
+        return rows[:limit]
 
 
 def get_top_mvps(division_id: int | None = None, season_id: int | None = None, limit: int = 15) -> list[dict]:
@@ -7149,10 +7163,14 @@ def get_top_mvps(division_id: int | None = None, season_id: int | None = None, l
     заявленному составу (`squad_players`). Не нашлось ни там, ни там — клуб
     отдаётся пустой строкой, но награда не теряется.
 
-    Группировка идёт по имени без учёта регистра, а не по паре (имя, клуб):
-    иначе один и тот же игрок с нераспознанным клубом в одном из матчей
-    разъехался бы на две строки. Имена клубов в лиге глобально уникальны, так
-    что имя игрока внутри дивизиона однозначно.
+    Если точного совпадения нет (корона на «Emegha», в составе «EMEGA»), имя
+    сверяется с составами обоих клубов матча через `match_roster_name`; клуб
+    берётся, только когда подошёл ровно один из них.
+
+    Написания одного игрока склеиваются по паре (клуб, игрок) через
+    `_fold_player_rows`, а награда с нераспознанным клубом присоединяется к
+    единственной строке с тем же ключом игрока — иначе один игрок разъехался бы
+    на две строки. Сортировка и LIMIT делаются уже после склейки.
     """
     limit = max(1, int(limit))
     with transaction() as conn:
@@ -7163,13 +7181,11 @@ def get_top_mvps(division_id: int | None = None, season_id: int | None = None, l
             target_season_id = act["id"] if act else 1
 
         query = """
-            SELECT
-                MIN(player_name) AS player_name,
-                COALESCE(MAX(NULLIF(team_name, '')), '') AS team_name,
-                COUNT(*) AS mvp_count
+            SELECT player_name, team_name, player1_team, player2_team
             FROM (
                 SELECT
                     TRIM(m.mvp_player) AS player_name,
+                    m.player1_team, m.player2_team,
                     COALESCE(
                         (SELECT me.team_name FROM match_events me
                           WHERE me.match_id = m.id
@@ -7192,13 +7208,42 @@ def get_top_mvps(division_id: int | None = None, season_id: int | None = None, l
             params.append(division_id)
         query += """
             )
-            GROUP BY LOWER(player_name)
-            ORDER BY mvp_count DESC, player_name ASC
-            LIMIT ?
         """
-        params.append(limit)
         cursor.execute(query, tuple(params))
-        return [dict(row) for row in cursor.fetchall()]
+        awards = []
+        for row in cursor.fetchall():
+            name, team = row["player_name"], row["team_name"] or ""
+            if not team:
+                hits = []
+                for side in (row["player1_team"], row["player2_team"]):
+                    hit = match_roster_name(name, _load_club_roster(cursor, side))
+                    if hit:
+                        hits.append((side, hit))
+                if len(hits) == 1:
+                    team, name = hits[0]
+            awards.append({"player_name": name, "team_name": team, "mvp_count": 1})
+
+        with_club = [a for a in awards if a["team_name"]]
+        rows = _fold_player_rows(cursor, with_club, ("mvp_count",))
+        by_player: dict[str, list[dict]] = {}
+        for r in rows:
+            key = normalize_player_name_key(r["player_name"]) or r["player_name"].lower()
+            by_player.setdefault(key, []).append(r)
+        clubless: dict[str, dict] = {}
+        for a in awards:
+            if a["team_name"]:
+                continue
+            key = normalize_player_name_key(a["player_name"]) or a["player_name"].lower()
+            owners = by_player.get(key, [])
+            if len(owners) == 1:
+                owners[0]["mvp_count"] += 1
+            elif key in clubless:
+                clubless[key]["mvp_count"] += 1
+            else:
+                clubless[key] = a
+                rows.append(a)
+        rows.sort(key=lambda r: (-r["mvp_count"], r["player_name"]))
+        return rows[:limit]
 
 
 def get_round_player_stats(round_number: int, division_id: int | None = None, season_id: int | None = None) -> list[dict]:
@@ -7233,10 +7278,11 @@ def get_round_player_stats(round_number: int, division_id: int | None = None, se
             params.append(division_id)
         query += """
             GROUP BY me.player_name, me.team_name
-            ORDER BY (goals + assists) DESC, goals DESC, me.player_name ASC
         """
         cursor.execute(query, tuple(params))
-        return [dict(row) for row in cursor.fetchall()]
+        rows = _fold_player_rows(cursor, cursor.fetchall(), ("goals", "assists"))
+        rows.sort(key=lambda r: (-((r["goals"] or 0) + (r["assists"] or 0)), -(r["goals"] or 0), r["player_name"]))
+        return rows
 
 
 def get_recent_confirmed_matches(
@@ -7416,6 +7462,21 @@ def get_player_card_stats(player_name: str, team_name: str) -> dict:
         p_name = player_name.strip()
         t_name = team_name.strip()
 
+        # Every spelling of this footballer in the club's events (EMEGA, Emegha):
+        # the card sums them all, the same way the club aggregators fold them.
+        fold = _player_folder(cursor)
+        target_key = fold(t_name, p_name)[1]
+        cursor.execute(
+            "SELECT DISTINCT player_name FROM match_events "
+            "WHERE LOWER(team_name) = LOWER(?) AND player_name IS NOT NULL AND player_name != ''",
+            (t_name,)
+        )
+        spellings = {r["player_name"].strip().lower() for r in cursor.fetchall()
+                     if fold(t_name, r["player_name"])[1] == target_key}
+        spellings.add(p_name.lower())
+        spellings = sorted(spellings)
+        name_in = ",".join("?" * len(spellings))
+
         # 1. Total overall goals & assists + breakdown by tournament
         cursor.execute("""
             SELECT 
@@ -7427,10 +7488,10 @@ def get_player_card_stats(player_name: str, team_name: str) -> dict:
                 COALESCE(SUM(CASE WHEN me.event_type = 'assist' AND (m.tournament_type = 'cup' OR m.round_number = -1 OR (m.cup_series_id IS NOT NULL AND m.cup_series_id > 0)) THEN me.count ELSE 0 END), 0) AS cup_assists
             FROM match_events me
             JOIN matches m ON me.match_id = m.id
-            WHERE LOWER(me.player_name) = LOWER(?)
+            WHERE LOWER(TRIM(me.player_name)) IN ({name_in})
               AND LOWER(me.team_name) = LOWER(?)
               AND m.status = 'confirmed'
-        """, (p_name, t_name))
+        """.format(name_in=name_in), (*spellings, t_name))
         summary_row = cursor.fetchone()
         summary_dict = dict(summary_row) if summary_row else {}
         
@@ -7456,7 +7517,7 @@ def get_player_card_stats(player_name: str, team_name: str) -> dict:
                 SUM(me.count) AS total
             FROM match_events me
             JOIN matches m ON me.match_id = m.id
-            WHERE LOWER(me.player_name) = LOWER(?)
+            WHERE LOWER(TRIM(me.player_name)) IN ({name_in})
               AND LOWER(me.team_name) = LOWER(?)
               AND m.status = 'confirmed'
             GROUP BY 
@@ -7470,7 +7531,7 @@ def get_player_card_stats(player_name: str, team_name: str) -> dict:
                     WHEN m.tournament_type = 'cup' OR m.round_number = -1 OR (m.cup_series_id IS NOT NULL AND m.cup_series_id > 0) THEN -1
                     ELSE m.round_number
                 END ASC
-        """, (t_name, p_name, t_name))
+        """.format(name_in=name_in), (t_name, *spellings, t_name))
 
         rows = cursor.fetchall()
         
@@ -8490,6 +8551,52 @@ def list_cup_topics(season_id: int | None = None) -> list[dict]:
     return [dict(r) for r in rows if r["topic_type"] in CUP_TOPIC_TYPES]
 
 
+def _player_folder(cursor: sqlite3.Cursor):
+    """Return fold(team_name, player_name) -> (club_key, player_key, display_name).
+
+    A footballer is one (club, player_key) pair however his name was recognized:
+    the spelling is folded onto the club's squad name via `match_roster_name`,
+    and a name outside the squad keeps its own normalized key. Rosters are loaded
+    once per club for the lifetime of the returned function.
+    """
+    rosters: dict[str, list[str]] = {}
+
+    def fold(team_name: str | None, player_name: str | None) -> tuple[str, str, str]:
+        raw = (player_name or "").strip()
+        team = (team_name or "").strip()
+        canon = (resolve_team_name(team) or team) if team else ""
+        if canon not in rosters:
+            rosters[canon] = _load_club_roster(cursor, canon)
+        name = match_roster_name(raw, rosters[canon]) or raw
+        club_key = normalize_team_name(canon) if canon else ""
+        return club_key, normalize_player_name_key(name) or name.lower(), name
+
+    return fold
+
+
+def _fold_player_rows(cursor: sqlite3.Cursor, rows, fields: tuple[str, ...]) -> list[dict]:
+    """Merge aggregate rows of one footballer recorded under several spellings.
+
+    `rows` carry `player_name`, `team_name` and the numeric `fields`, which are
+    summed. The first row of a player keeps its place and its other columns, and
+    its name becomes the squad spelling. Callers sort and limit afterwards: a
+    LIMIT in SQL would cut a player's second spelling before it was merged.
+    """
+    fold = _player_folder(cursor)
+    merged: dict[tuple[str, str], dict] = {}
+    for row in rows:
+        row = dict(row)
+        club_key, player_key, name = fold(row.get("team_name"), row.get("player_name"))
+        entry = merged.get((club_key, player_key))
+        if entry is None:
+            row["player_name"] = name
+            merged[(club_key, player_key)] = row
+        else:
+            for f in fields:
+                entry[f] = (entry.get(f) or 0) + (row.get(f) or 0)
+    return list(merged.values())
+
+
 def _club_player_event_totals(cursor: sqlite3.Cursor, canon: str, roster: list[str], season_id: int) -> list[dict]:
     """Season goals/assists of one club's players, each spelling folded onto its squad name.
 
@@ -8874,9 +8981,12 @@ def get_club_schedule_and_results(team_name: str, limit: int = 25) -> dict:
                 FROM match_events me
                 WHERE me.match_id IN ({placeholders}) AND LOWER(me.team_name) = LOWER(?) AND me.event_type = 'goal'
                 GROUP BY LOWER(me.player_name)
-                ORDER BY cnt DESC, me.player_name ASC
             """, (*m_ids, canon))
-            club_scorers = [f"{g['player_name']} ({g['cnt']})" if g['cnt'] > 1 else g['player_name'] for g in cursor.fetchall()]
+            goals = [{"player_name": g["player_name"], "team_name": canon, "cnt": g["cnt"]}
+                     for g in cursor.fetchall()]
+            goals = _fold_player_rows(cursor, goals, ("cnt",))
+            goals.sort(key=lambda g: (-g["cnt"], g["player_name"]))
+            club_scorers = [f"{g['player_name']} ({g['cnt']})" if g['cnt'] > 1 else g['player_name'] for g in goals]
 
             confirmed_matches = [m for m in r_matches if m["status"] == "confirmed" and m["player1_score"] is not None and m["player2_score"] is not None]
             has_played = len(confirmed_matches) > 0

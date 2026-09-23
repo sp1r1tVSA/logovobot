@@ -175,6 +175,73 @@ class TestClubCard(unittest.TestCase):
         self.assertEqual(stats["top_assistant"]["player_name"], "ROGERS")
         self.assertEqual(stats["top_mvp"], {"player_name": "EMEGA", "mvp_count": 1})
 
+    def _seed_split_spellings(self):
+        """EMEGA в составе Челси, а голы и короны записаны и как «EMEGA», и как «Emegha»."""
+        database.register_user(3103, "chelsea_boss", "manager", "Челси")
+        database.save_squad_players("Челси", ["EMEGA", "ROGERS"])
+        with database.transaction() as conn:
+            c = conn.cursor()
+            ids = []
+            for mvp in ("EMEGA", "Emegha"):
+                c.execute(
+                    "INSERT INTO matches (round_number, player1_team, player2_team, player1_score, player2_score, "
+                    "status, tournament_type, mvp_player) "
+                    "VALUES (1, 'Челси', 'Аль-Наср', 3, 0, 'confirmed', 'league', ?)", (mvp,)
+                )
+                ids.append(c.lastrowid)
+            events = [
+                (ids[0], "EMEGA", "goal", 1), (ids[0], "ROGERS", "assist", 1),
+                (ids[1], "Emegha", "goal", 2), (ids[1], "Emegha", "assist", 1),
+                (ids[1], "ROGERS", "goal", 2),
+            ]
+            for m_id, name, ev, cnt in events:
+                c.execute(
+                    "INSERT INTO match_events (match_id, player_name, team_name, event_type, count) "
+                    "VALUES (?, ?, 'Челси', ?, ?)", (m_id, name, ev, cnt)
+                )
+
+    def test_league_tops_fold_player_spellings(self):
+        """Топы бомбардиров, ассистентов, MVP и игрок тура не делят игрока на два написания."""
+        self._seed_split_spellings()
+
+        scorers = database.get_top_scorers(limit=1)
+        self.assertEqual([(r["player_name"], r["total_goals"]) for r in scorers], [("EMEGA", 3)])
+
+        assists = {r["player_name"]: r["total_assists"] for r in database.get_top_assists()}
+        self.assertEqual(assists, {"EMEGA": 1, "ROGERS": 1})
+
+        mvps = database.get_top_mvps()
+        self.assertEqual([(r["player_name"], r["team_name"], r["mvp_count"]) for r in mvps],
+                         [("EMEGA", "Челси", 2)])
+
+        round_stats = database.get_round_player_stats(1)
+        self.assertEqual([(r["player_name"], r["goals"], r["assists"]) for r in round_stats],
+                         [("EMEGA", 3, 1), ("ROGERS", 2, 1)])
+
+    def test_club_views_fold_player_spellings(self):
+        """Топы клуба, карточка игрока и голы в расписании считают все написания вместе."""
+        self._seed_split_spellings()
+
+        self.assertEqual(database.get_club_top_scorers("Челси"),
+                         [{"player_name": "EMEGA", "total": 3}, {"player_name": "ROGERS", "total": 2}])
+        self.assertEqual(database.get_club_top_assisters("Челси"),
+                         [{"player_name": "EMEGA", "total": 1}, {"player_name": "ROGERS", "total": 1}])
+
+        card = database.get_player_card_stats("EMEGA", "Челси")
+        self.assertEqual((card["total_goals"], card["total_assists"]), (3, 1))
+        self.assertEqual(card["rounds"][1], {"goals": 3, "assists": 1})
+
+    def test_ocr_spelling_is_not_a_missing_squad_player(self):
+        """«Emegha» — это EMEGA из состава: его нельзя добавить в состав вторым игроком."""
+        self._seed_split_spellings()
+
+        self.assertEqual(database.get_missing_squad_players("Челси"), [])
+        self.assertEqual(database.add_missing_squad_players("Челси"), 0)
+        with database.transaction() as conn:
+            c = conn.cursor()
+            c.execute("SELECT player_name FROM squad_players WHERE team_name = 'Челси' ORDER BY id")
+            self.assertEqual([r["player_name"] for r in c.fetchall()], ["EMEGA", "ROGERS"])
+
     def test_club_match_history_and_summary(self):
         """Test get_club_match_history and get_all_clubs_summary."""
         with database.transaction() as conn:
