@@ -5,12 +5,27 @@
 
 class TelegramBridge {
   constructor() {
-    this.tg = window.Telegram?.WebApp || null;
+    this._tg = null;
+    this._ready = false;
     this.init();
   }
 
+  // SDK подключён с defer и обычно уже исполнен к загрузке модулей, но если
+  // он запоздал (медленная сеть), берём WebApp при первом обращении, а не
+  // навсегда запоминаем null из конструктора.
+  get tg() {
+    if (!this._tg) {
+      this._tg = window.Telegram?.WebApp || null;
+      if (this._tg && !this._ready) this.init();
+    }
+    return this._tg;
+  }
+
   init() {
-    if (this.tg) {
+    const tg = this._tg || window.Telegram?.WebApp || null;
+    if (tg && !this._ready) {
+      this._tg = tg;
+      this._ready = true;
       this.tg.ready();
       this.tg.expand();
       // Apply header color

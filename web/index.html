@@ -12,9 +12,13 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=Outfit:wght@600;700;800;900&display=swap">
-  <!-- Telegram WebApp SDK -->
-  <script src="https://telegram.org/js/telegram-web-app.js"></script>
-  <!-- Styles with cache-busting -->
+  <!-- Telegram WebApp SDK. defer: не блокирует разбор и первый показ страницы;
+       отложенные скрипты и type="module" исполняются по порядку документа,
+       поэтому SDK всё равно готов раньше /js/app.js. -->
+  <script src="https://telegram.org/js/telegram-web-app.js" defer></script>
+  <!-- Styles. Сервер (api/server.py) переписывает /css/… и /js/app.js на
+       /v/<хэш содержимого>/…, так что ?v= ниже нужен только для локального
+       просмотра без API-сервера — бампать его вручную не нужно. -->
   <link rel="stylesheet" href="/css/main.css?v=3.4.4">
   <link rel="stylesheet" href="/css/components.css?v=3.4.4">
   <link rel="stylesheet" href="/css/coupon.css?v=3.4.4">

@@ -315,24 +315,26 @@ export function getTeamLogoUrl(teamName) {
   return file ? `/assets/logos/${file}` : null;
 }
 
+// Размеры и оформление — в components.css (.team-logo-wrapper, img.team-logo-img).
+// Не загрузившийся логотип удаляется: правило `img + .team-logo-fallback { display: none }`
+// перестаёт совпадать, и щит-заглушка показывается средствами CSS.
+const LOGO_ONERROR = 'onerror="this.remove()"';
+
 export function renderTeamLogoWrapperHtml(teamName, extraClass = '') {
   const url = getTeamLogoUrl(teamName);
-  const wrapStyle = "width:44px; height:44px; min-width:44px; min-height:44px; max-width:44px; max-height:44px; display:flex; align-items:center; justify-content:center; flex-shrink:0; border-radius:10px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.05); padding:4px; box-sizing:border-box;";
-  const imgStyle = "width:100%; height:100%; max-width:100%; max-height:100%; object-fit:contain; display:block; filter:drop-shadow(0 2px 5px rgba(0,0,0,0.45));";
-  const fbBaseStyle = "font-size:20px; line-height:1; align-items:center; justify-content:center; color:var(--text-muted);";
-
-  if (url) {
-    return `<div class="team-logo-wrapper ${extraClass}" style="${wrapStyle}"><img src="${url}" alt="${teamName || 'Club'}" loading="lazy" decoding="async" style="${imgStyle}" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='flex';" /><span class="team-logo-fallback" style="display:none; ${fbBaseStyle}">🛡️</span></div>`;
-  }
-  return `<div class="team-logo-wrapper ${extraClass}" style="${wrapStyle}"><span class="team-logo-fallback" style="display:flex; ${fbBaseStyle}">🛡️</span></div>`;
+  const img = url
+    ? `<img src="${url}" alt="${teamName || 'Club'}" loading="lazy" decoding="async" ${LOGO_ONERROR} />`
+    : '';
+  return `<div class="team-logo-wrapper ${extraClass}">${img}<span class="team-logo-fallback">🛡️</span></div>`;
 }
 
 export function renderTeamLogoHtml(teamName, size = 28, extraClass = '') {
   const url = getTeamLogoUrl(teamName);
+  const fallback = `<span class="team-logo-fallback ${extraClass}" style="font-size:${Math.round(size * 0.75)}px;">🛡️</span>`;
   if (url) {
-    return `<img src="${url}" alt="${teamName || 'Club'}" class="team-logo-img ${extraClass}" loading="lazy" decoding="async" style="width:${size}px; height:${size}px; object-fit:contain; filter:drop-shadow(0 2px 6px rgba(0,0,0,0.4)); vertical-align:middle; display:inline-block; flex-shrink:0; background:transparent;" onerror="this.style.display='none'; if(this.nextElementSibling) this.nextElementSibling.style.display='inline-block';" /><span class="team-logo-fallback ${extraClass}" style="display:none; font-size:${Math.round(size * 0.75)}px; vertical-align:middle;">🛡️</span>`;
+    return `<img src="${url}" alt="${teamName || 'Club'}" class="team-logo-img ${extraClass}" loading="lazy" decoding="async" style="width:${size}px; height:${size}px;" ${LOGO_ONERROR} />${fallback}`;
   }
-  return `<span class="team-logo-fallback ${extraClass}" style="font-size:${Math.round(size * 0.75)}px; vertical-align:middle;">🛡️</span>`;
+  return fallback;
 }
 
 const OUTCOME_NAMES = {
@@ -398,6 +400,35 @@ export function marketNameForOutcome(key) {
  * Имена игроков и ники соперников приходят из пользовательского ввода и OCR,
  * поэтому перед вставкой в innerHTML их обязательно экранировать.
  */
+// ─── Длинные списки ───
+// История прогнозов, архив результатов и достижения строятся порциями: сразу — первые
+// LIST_PAGE_SIZE карточек, остальные — по кнопке «Показать ещё». Раскрытое число
+// запоминается по ключу списка, чтобы фоновое обновление данных не сворачивало его обратно.
+const LIST_PAGE_SIZE = 20;
+const listShownCounts = new Map();
+
+export function renderPagedList(container, key, items, renderItem, pageSize = LIST_PAGE_SIZE) {
+  const total = items.length;
+  let shown = Math.min(total, Math.max(pageSize, listShownCounts.get(key) || 0));
+  container.innerHTML = items.slice(0, shown).map(renderItem).join('');
+  if (shown >= total) return;
+
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'list-more-btn';
+  const label = () => { btn.textContent = `Показать ещё (${total - shown})`; };
+  label();
+  btn.addEventListener('click', () => {
+    const next = Math.min(total, shown + pageSize);
+    btn.insertAdjacentHTML('beforebegin', items.slice(shown, next).map(renderItem).join(''));
+    shown = next;
+    listShownCounts.set(key, shown);
+    if (shown >= total) btn.remove();
+    else label();
+  });
+  container.appendChild(btn);
+}
+
 export function escapeHtml(value) {
   if (value === null || value === undefined) return '';
   return String(value)
@@ -1334,7 +1365,7 @@ export class UIRenderer {
         container.innerHTML = '<div style="text-align: center; padding: 40px; color: var(--text-muted);">Архив результатов пуст.</div>';
         return;
       }
-      container.innerHTML = results.map(r => {
+      renderPagedList(container, 'results', results, r => {
         const t1 = r.team1_name || r.player1_team || 'Хозяева';
         const t2 = r.team2_name || r.player2_team || 'Гости';
         return `
@@ -1352,7 +1383,7 @@ export class UIRenderer {
             </div>
           </div>
         `;
-      }).join('');
+      });
     } else if (activeTab === 'scorers') {
       const leaderViews = {
         scorers: {
@@ -1440,32 +1471,10 @@ export class UIRenderer {
       return String(dateStr).substring(0, 16);
     };
 
-    const badgeStyles = {
-      won: "background: rgba(16, 185, 129, 0.12); color: var(--color-success); border: 1px solid rgba(16, 185, 129, 0.25);",
-      lost: "background: rgba(239, 68, 68, 0.12); color: var(--color-danger); border: 1px solid rgba(239, 68, 68, 0.25);",
-      pending: "background: rgba(56, 189, 248, 0.12); color: #38bdf8; border: 1px solid rgba(56, 189, 248, 0.25);",
-      cashout: "background: rgba(0, 210, 255, 0.12); color: var(--accent-cyan); border: 1px solid rgba(0, 210, 255, 0.25);",
-      refunded: "background: rgba(245, 158, 11, 0.12); color: var(--color-warning); border: 1px solid rgba(245, 158, 11, 0.25);",
-      cancelled: "background: rgba(148, 163, 184, 0.12); color: var(--text-muted); border: 1px solid rgba(148, 163, 184, 0.25);"
-    };
 
-    const legPillStyles = {
-      won: "background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.3); color: var(--color-success);",
-      lost: "background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); color: var(--color-danger);",
-      pending: "background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.3); color: #38bdf8;",
-      refunded: "background: rgba(245, 158, 11, 0.12); border: 1px solid rgba(245, 158, 11, 0.3); color: var(--color-warning);"
-    };
 
-    const valStyles = {
-      'val-won': "color: var(--color-success); font-weight: 900;",
-      'val-lost': "color: var(--text-muted); font-weight: 700;",
-      'val-cashout': "color: #38bdf8; font-weight: 900;",
-      'val-refund': "color: var(--color-warning); font-weight: 800;",
-      'val-pending': "color: var(--accent-gold); font-weight: 800;",
-      'val-muted': "color: var(--text-muted);"
-    };
 
-    container.innerHTML = filtered.map(b => {
+    renderPagedList(container, `history:${filter}`, filtered, b => {
       const isWon = b.status === 'won';
       const isLost = b.status === 'lost';
       const isPending = b.status === 'pending';
@@ -1532,29 +1541,29 @@ export class UIRenderer {
       const showRepeat = true;
 
       return `
-        <div class="coupon-card bet-history-card status-${statusKey}" data-bet-id="${b.id}" style="background: rgba(14, 18, 27, 0.92); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 16px; padding: 14px 16px; margin-bottom: 14px; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4); position: relative; overflow: hidden; box-sizing: border-box;">
+        <div class="coupon-card bet-history-card status-${statusKey}" data-bet-id="${b.id}">
           <!-- LEVEL 1: HEADER -->
-          <div class="coupon-header" style="display: flex; justify-content: space-between; align-items: center; padding-bottom: 10px; border-bottom: 1px solid rgba(255, 255, 255, 0.05); margin-bottom: 10px;">
-            <div class="coupon-header-left" style="display: flex; align-items: center; gap: 6px; flex-wrap: wrap;">
-              ${isExpress ? '<span class="coupon-badge-express" style="font-family: \'Outfit\', sans-serif; font-size: 0.68rem; font-weight: 800; padding: 2px 7px; border-radius: 4px; background: rgba(245, 176, 39, 0.12); color: var(--accent-gold); border: 1px solid rgba(245, 176, 39, 0.28); letter-spacing: 0.03em; text-transform: uppercase;">⚡ ЭКСПРЕСС</span>' : ''}
-              <span class="coupon-id" style="font-family: \'Outfit\', sans-serif; font-size: 0.78rem; font-weight: 800; color: #fff;">#${b.id}</span>
-              <span class="coupon-meta-dot" style="color: var(--text-muted); font-size: 0.68rem;">•</span>
-              <span class="coupon-date" style="font-size: 0.74rem; color: var(--text-muted); font-weight: 500;">${formatDate(b.created_at)}</span>
+          <div class="coupon-header">
+            <div class="coupon-header-left">
+              ${isExpress ? '<span class="coupon-badge-express">⚡ ЭКСПРЕСС</span>' : ''}
+              <span class="coupon-id">#${b.id}</span>
+              <span class="coupon-meta-dot">•</span>
+              <span class="coupon-date">${formatDate(b.created_at)}</span>
               ${b.settled_at ? `
-                <span class="coupon-meta-dot" style="color: var(--text-muted); font-size: 0.68rem;">•</span>
-                <span class="coupon-settled-date" title="Рассчитано" style="font-size: 0.72rem; color: rgba(255, 255, 255, 0.45); font-weight: 500;">🏁 ${formatDate(b.settled_at)}</span>
+                <span class="coupon-meta-dot">•</span>
+                <span class="coupon-settled-date" title="Рассчитано">🏁 ${formatDate(b.settled_at)}</span>
               ` : ''}
             </div>
-            <div class="coupon-header-right" style="display: flex; align-items: center;">
-              <span class="coupon-status-badge badge-${statusKey}" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 6px; font-family: \'Outfit\', sans-serif; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.04em; text-transform: uppercase; ${badgeStyles[statusKey] || ''}">
-                <span class="status-indicator-dot" style="width: 6px; height: 6px; border-radius: 50%; flex-shrink: 0; background-color: ${statusDotColor};"></span>
+            <div class="coupon-header-right">
+              <span class="coupon-status-badge badge-${statusKey}">
+                <span class="status-indicator-dot" style="background-color: ${statusDotColor};"></span>
                 ${statusText}
               </span>
             </div>
           </div>
 
           <!-- LEVEL 2: MATCHES -->
-          <div class="coupon-matches-list" style="display: flex; flex-direction: column;">
+          <div class="coupon-matches-list">
             ${items.map((it, idx) => {
               const acceptedOdd = Number(it.odds_at_placement || it.odd || 1.0).toFixed(2);
               const legWon = it.status === 'won';
@@ -1570,46 +1579,45 @@ export class UIRenderer {
 
               const hasFinishedScore = ['confirmed', 'completed', 'finished'].includes(it.match_status) || (it.player1_score !== null && it.player1_score !== undefined && !isPending);
               const isMatchLive = it.match_status === 'live';
-              const isLast = idx === items.length - 1;
 
               return `
-                <div class="coupon-match-row" style="padding: 10px 0; ${isLast ? 'border-bottom: none; padding-bottom: 6px;' : 'border-bottom: 1px solid rgba(255, 255, 255, 0.05);'}">
-                  <div class="coupon-teams-layout" style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                <div class="coupon-match-row">
+                  <div class="coupon-teams-layout">
                     <!-- Home Team -->
-                    <div class="coupon-team home" style="display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; justify-content: flex-start; text-align: left;">
+                    <div class="coupon-team home">
                       ${renderTeamLogoWrapperHtml(it.team1_name)}
-                      <span class="coupon-team-name" title="${it.team1_name}" style="font-size: 0.88rem; font-weight: 700; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.25;">${it.team1_name}</span>
+                      <span class="coupon-team-name" title="${it.team1_name}">${it.team1_name}</span>
                     </div>
 
                     <!-- Center Score / VS -->
-                    <div class="coupon-match-center" style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 0 6px; min-width: 58px; flex-shrink: 0;">
+                    <div class="coupon-match-center">
                       ${hasFinishedScore ? `
-                        <div class="coupon-score" style="font-family: \'Outfit\', sans-serif; font-size: 1.05rem; font-weight: 900; color: #fff; letter-spacing: 0.02em; line-height: 1.1;">${it.player1_score ?? 0} : ${it.player2_score ?? 0}</div>
-                        <div class="coupon-match-sub" style="font-size: 0.68rem; color: var(--text-muted); font-weight: 500; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.02em; white-space: nowrap;">Завершён</div>
+                        <div class="coupon-score">${it.player1_score ?? 0} : ${it.player2_score ?? 0}</div>
+                        <div class="coupon-match-sub">Завершён</div>
                       ` : isMatchLive ? `
-                        <div class="coupon-score live" style="font-family: \'Outfit\', sans-serif; font-size: 1.05rem; font-weight: 900; color: #ff4757; letter-spacing: 0.02em; line-height: 1.1;">${it.player1_score ?? 0} : ${it.player2_score ?? 0}</div>
-                        <div class="coupon-match-sub live" style="font-size: 0.68rem; color: #ff4757; font-weight: 700; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.02em; white-space: nowrap;">LIVE ${it.live_minute ? it.live_minute + "'" : ''}</div>
+                        <div class="coupon-score live">${it.player1_score ?? 0} : ${it.player2_score ?? 0}</div>
+                        <div class="coupon-match-sub live">LIVE ${it.live_minute ? it.live_minute + "'" : ''}</div>
                       ` : `
-                        <div class="coupon-vs" style="font-family: \'Outfit\', sans-serif; font-size: 0.82rem; font-weight: 800; color: var(--text-muted); letter-spacing: 0.04em; line-height: 1.1;">VS</div>
-                        <div class="coupon-match-sub" style="font-size: 0.68rem; color: var(--text-muted); font-weight: 500; margin-top: 2px; text-transform: uppercase; letter-spacing: 0.02em; white-space: nowrap;">${it.tournament_type === 'cup' ? escapeHtml(cupStageLabel(it.cup_stage)) : (it.tour ? `Тур ${it.tour}` : 'Матч')}</div>
+                        <div class="coupon-vs">VS</div>
+                        <div class="coupon-match-sub">${it.tournament_type === 'cup' ? escapeHtml(cupStageLabel(it.cup_stage)) : (it.tour ? `Тур ${it.tour}` : 'Матч')}</div>
                       `}
                     </div>
 
                     <!-- Away Team -->
-                    <div class="coupon-team away" style="display: flex; align-items: center; gap: 10px; flex: 1; min-width: 0; justify-content: flex-end; text-align: right;">
-                      <span class="coupon-team-name" title="${it.team2_name}" style="font-size: 0.88rem; font-weight: 700; color: #fff; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; line-height: 1.25;">${it.team2_name}</span>
+                    <div class="coupon-team away">
+                      <span class="coupon-team-name" title="${it.team2_name}">${it.team2_name}</span>
                       ${renderTeamLogoWrapperHtml(it.team2_name)}
                     </div>
                   </div>
 
                   <!-- Prediction Subrow -->
-                  <div class="coupon-prediction-subrow" style="display: flex; align-items: center; justify-content: space-between; margin-top: 8px; padding: 0 2px;">
-                    <span class="coupon-market-label" style="font-size: 0.74rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.02em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 55%;">${it.market_name || (it.division_id ? `Д${it.division_id}` : 'Исход')}</span>
-                    <div class="coupon-prediction-pill ${legClass}" style="display: inline-flex; align-items: center; gap: 5px; padding: 3px 8px; border-radius: 6px; font-family: \'Outfit\', sans-serif; font-size: 0.8rem; font-weight: 700; white-space: nowrap; ${legPillStyles[legClass] || ''}">
-                      <span class="coupon-pred-outcome" style="font-weight: 800; color: #fff;">${outcomeName}</span>
-                      <span class="coupon-pred-at" style="color: var(--text-muted); font-size: 0.72rem; margin: 0 1px;">@</span>
-                      <span class="coupon-pred-odd" style="font-weight: 800;">${acceptedOdd}</span>
-                      <span class="coupon-pred-icon" style="font-size: 0.82rem; font-weight: 900; margin-left: 2px;">${legIcon}</span>
+                  <div class="coupon-prediction-subrow">
+                    <span class="coupon-market-label">${it.market_name || (it.division_id ? `Д${it.division_id}` : 'Исход')}</span>
+                    <div class="coupon-prediction-pill ${legClass}">
+                      <span class="coupon-pred-outcome">${outcomeName}</span>
+                      <span class="coupon-pred-at">@</span>
+                      <span class="coupon-pred-odd">${acceptedOdd}</span>
+                      <span class="coupon-pred-icon">${legIcon}</span>
                     </div>
                   </div>
                 </div>
@@ -1618,31 +1626,31 @@ export class UIRenderer {
           </div>
 
           <!-- LEVEL 3: SUMMARY -->
-          <div class="coupon-summary" style="display: grid; grid-template-columns: 1fr 1fr 1.2fr; gap: 8px; background: rgba(255, 255, 255, 0.02); border-radius: 10px; padding: 10px 12px; margin-top: 8px; border: 1px solid rgba(255, 255, 255, 0.04); box-sizing: border-box;">
-            <div class="coupon-summary-col" style="display: flex; flex-direction: column; gap: 3px; min-width: 0;">
-              <span class="coupon-summary-label" style="font-size: 0.7rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">Ставка</span>
-              <span class="coupon-summary-val" style="font-family: \'Outfit\', sans-serif; font-size: 0.98rem; font-weight: 800; color: #fff; letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${formatAmount(b.amount)} 🪙</span>
+          <div class="coupon-summary">
+            <div class="coupon-summary-col">
+              <span class="coupon-summary-label">Ставка</span>
+              <span class="coupon-summary-val">${formatAmount(b.amount)} 🪙</span>
             </div>
-            <div class="coupon-summary-col" style="display: flex; flex-direction: column; gap: 3px; min-width: 0;">
-              <span class="coupon-summary-label" style="font-size: 0.7rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${isExpress ? 'Общий коэф.' : 'Коэффициент'}</span>
-              <span class="coupon-summary-val gold" style="font-family: \'Outfit\', sans-serif; font-size: 0.98rem; font-weight: 800; color: var(--accent-gold); letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${Number(b.total_odd || 1.0).toFixed(2)}</span>
+            <div class="coupon-summary-col">
+              <span class="coupon-summary-label">${isExpress ? 'Общий коэф.' : 'Коэффициент'}</span>
+              <span class="coupon-summary-val gold">${Number(b.total_odd || 1.0).toFixed(2)}</span>
             </div>
-            <div class="coupon-summary-col" style="display: flex; flex-direction: column; gap: 3px; min-width: 0; text-align: right;">
-              <span class="coupon-summary-label" style="font-size: 0.7rem; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.03em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${payoutLabel}</span>
-              <span class="coupon-summary-val ${payoutClass}" style="font-family: \'Outfit\', sans-serif; font-size: 0.98rem; font-weight: 800; letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; ${valStyles[payoutClass] || ''}">${payoutVal} 🪙</span>
+            <div class="coupon-summary-col">
+              <span class="coupon-summary-label">${payoutLabel}</span>
+              <span class="coupon-summary-val ${payoutClass}">${payoutVal} 🪙</span>
             </div>
           </div>
 
           <!-- LEVEL 4: ACTIONS -->
           ${showCashout || showRepeat ? `
-            <div class="coupon-actions" style="display: flex; gap: 8px; margin-top: 10px;">
+            <div class="coupon-actions">
               ${showCashout ? `
-                <button class="btn-cashout coupon-btn-cashout" data-bet-id="${b.id}" style="flex: 1; display: flex; align-items: center; justify-content: center; gap: 6px; background: rgba(56, 189, 248, 0.12); border: 1px solid rgba(56, 189, 248, 0.3); color: #38bdf8; font-family: \'Outfit\', sans-serif; font-size: 0.8rem; font-weight: 800; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; transition: var(--transition-fast);">
+                <button class="btn-cashout coupon-btn-cashout" data-bet-id="${b.id}">
                   💰 Cashout
                 </button>
               ` : ''}
               ${showRepeat ? `
-                <button class="btn-repeat-bet coupon-btn-repeat" data-bet-id="${b.id}" style="flex: 1; width: 100%; display: flex; align-items: center; justify-content: center; gap: 6px; background: rgba(255, 255, 255, 0.04); border: 1px solid rgba(255, 255, 255, 0.08); color: var(--text-secondary); font-family: \'Outfit\', sans-serif; font-size: 0.8rem; font-weight: 700; padding: 9px 14px; border-radius: var(--radius-sm); cursor: pointer; transition: var(--transition-fast); text-align: center;">
+                <button class="btn-repeat-bet coupon-btn-repeat" data-bet-id="${b.id}">
                   ↻ Повторить прогноз
                 </button>
               ` : ''}
@@ -1650,7 +1658,7 @@ export class UIRenderer {
           ` : ''}
         </div>
       `;
-    }).join('');
+    });
   }
 
   static showOddsChangedModal(oldOdd, newOdd, onAccept, onReject) {
@@ -1782,7 +1790,7 @@ export class UIRenderer {
       // The catalog columns are `name` / `badge_icon` — не `title` / `icon`.
       // Награда показывается на каждой карточке, в том числе на закрытой:
       // это и есть ответ на вопрос «сколько дадут за квест».
-      achEl.innerHTML = achievements.map(a => {
+      renderPagedList(achEl, 'achievements', achievements, a => {
         const coins = Number(a.reward_coins) || 0;
         const xp = Number(a.reward_xp) || 0;
         const canClaim = a.is_unlocked && !a.is_claimed;
@@ -1803,7 +1811,7 @@ export class UIRenderer {
           ` : ''}
         </div>
       `;
-      }).join('');
+      });
     }
   }
 

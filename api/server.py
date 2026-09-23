@@ -6,7 +6,9 @@ Serves REST API and static single-page application assets.
 """
 
 import os
+import re
 import asyncio
+import hashlib
 import logging
 from aiohttp import hdrs, web
 
@@ -166,8 +168,16 @@ async def cors_middleware(request: web.Request, handler):
     response.headers["Access-Control-Allow-Headers"] = "Content-Type, X-Telegram-Init-Data, Authorization"
     response.headers["Access-Control-Max-Age"] = "86400"
 
-    # Static assets (JS/CSS) in Telegram WebView: must revalidate so updates land immediately
-    if request.path.startswith(("/js/", "/css/", "/static/")):
+    # JS/CSS под версионным префиксом /v/<хэш>/ неизменяемы: новый код получает новый
+    # хэш и новый URL, поэтому WebView год не спрашивает сервер (ни одного 304 на старте).
+    if request.path.startswith("/v/"):
+        current = response.headers.pop(_ASSET_CURRENT_HEADER, None) == "1"
+        if current and response.status == 200:
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache, must-revalidate"
+    # Прямые /js/ и /css/ — только с ревалидацией, чтобы обновления доходили сразу.
+    elif request.path.startswith(("/js/", "/css/", "/static/")):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     # Логотипы, аватары и фото игроков меняются редко: сутки берём из кэша WebView,
     # не спрашивая сервер. Ошибки (404 ещё не залитого логотипа) не кэшируем.
@@ -197,7 +207,7 @@ def _should_compress(request: web.Request, response: web.StreamResponse) -> bool
     if isinstance(response, web.Response):
         body = response.body
         return (
-            response.content_type == "application/json"
+            response.content_type in ("application/json", "text/html")
             and isinstance(body, (bytes, bytearray))
             and len(body) >= _MIN_COMPRESS_BYTES
         )
@@ -325,15 +335,84 @@ async def lockdown_middleware(request: web.Request, handler):
     return await handler(request)
 
 
-async def handle_index(request: web.Request) -> web.FileResponse:
-    """Serve SPA index.html with anti-caching headers."""
+# ── Версионирование фронтенда ────────────────────────────────────────────────
+# index.html ссылается на /css/*.css и /js/app.js; при отдаче сервер переписывает
+# их на /v/<хэш содержимого>/css|js/…. Относительные `import './api.js'` внутри
+# модулей резолвятся под тем же префиксом, так что версию получает каждый модуль,
+# и бампать `?v=` руками больше не нужно.
+_ASSET_DIRS = ("css", "js")
+_ASSET_REF_RE = re.compile(r'(["\'])/(css|js)/([A-Za-z0-9_.\-]+\.(?:css|js))(?:\?[^"\']*)?\1')
+_ASSET_CURRENT_HEADER = "X-Asset-Current"
+_asset_version_cache: dict = {"sig": None, "version": ""}
+_index_cache: dict = {"key": None, "html": ""}
+
+
+def _asset_files() -> list:
+    files = []
+    for sub in _ASSET_DIRS:
+        folder = os.path.join(WEB_DIR, sub)
+        if not os.path.isdir(folder):
+            continue
+        for name in sorted(os.listdir(folder)):
+            if name.endswith((".css", ".js")):
+                files.append((sub, name, os.path.join(folder, name)))
+    return files
+
+
+def get_asset_version() -> str:
+    """Короткий хэш содержимого web/css + web/js; пересчитывается, только когда файлы меняются."""
+    files = _asset_files()
+    sig = tuple((sub, name, os.stat(path).st_mtime_ns, os.stat(path).st_size) for sub, name, path in files)
+    if sig != _asset_version_cache["sig"]:
+        digest = hashlib.sha1()
+        for sub, name, path in files:
+            digest.update(f"{sub}/{name}\0".encode())
+            with open(path, "rb") as f:
+                digest.update(f.read())
+        _asset_version_cache["sig"] = sig
+        _asset_version_cache["version"] = digest.hexdigest()[:12]
+    return _asset_version_cache["version"]
+
+
+def render_index_html() -> str:
+    """index.html с версионными ссылками на CSS/JS (кэшируется до изменения файлов)."""
     index_path = os.path.join(WEB_DIR, "index.html")
+    version = get_asset_version()
+    key = (version, os.stat(index_path).st_mtime_ns)
+    if key != _index_cache["key"]:
+        with open(index_path, encoding="utf-8") as f:
+            html = f.read()
+        html = _ASSET_REF_RE.sub(
+            lambda m: f"{m.group(1)}/v/{version}/{m.group(2)}/{m.group(3)}{m.group(1)}", html
+        )
+        _index_cache["key"] = key
+        _index_cache["html"] = html
+    return _index_cache["html"]
+
+
+async def handle_index(request: web.Request) -> web.Response:
+    """Serve SPA index.html with anti-caching headers and versioned asset URLs."""
     headers = {
         "Cache-Control": "no-cache, no-store, must-revalidate, max-age=0",
         "Pragma": "no-cache",
         "Expires": "0",
     }
-    return web.FileResponse(index_path, headers=headers)
+    return web.Response(text=render_index_html(), content_type="text/html", headers=headers)
+
+
+async def handle_versioned_asset(request: web.Request) -> web.FileResponse:
+    """/v/<версия>/css|js/<файл> — тот же файл, что /css|js/<файл>, но кэшируемый навсегда.
+
+    Устаревший хэш (страница открыта до деплоя) тоже получает текущий файл, но без
+    immutable — иначе новый код навсегда застрял бы в кэше WebView под старым URL.
+    """
+    path = os.path.join(WEB_DIR, request.match_info["kind"], request.match_info["name"])
+    if not os.path.isfile(path):
+        raise web.HTTPNotFound()
+    headers = {}
+    if request.match_info["version"] == get_asset_version():
+        headers[_ASSET_CURRENT_HEADER] = "1"
+    return web.FileResponse(path, headers=headers)
 
 
 
@@ -497,6 +576,10 @@ def create_app() -> web.Application:
         app.router.add_static("/static/", WEB_DIR, show_index=True)
         app.router.add_static("/css/", os.path.join(WEB_DIR, "css"))
         app.router.add_static("/js/", os.path.join(WEB_DIR, "js"))
+        app.router.add_get(
+            r"/v/{version:[0-9a-f]{1,40}}/{kind:css|js}/{name:[A-Za-z0-9_.\-]+\.(?:css|js)}",
+            handle_versioned_asset,
+        )
     if os.path.exists(ASSETS_DIR):
         app.router.add_static("/assets/", ASSETS_DIR, show_index=True)
 

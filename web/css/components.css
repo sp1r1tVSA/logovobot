@@ -3325,3 +3325,433 @@ img.team-logo-img + .team-logo-fallback {
   font-weight: 700;
   color: var(--accent-gold);
 }
+
+/* ─── История прогнозов: карточка купона ───
+   Раньше каждый элемент карточки нёс эти стили inline (~6 КБ HTML на купон).
+   Селекторы привязаны к .bet-history-card, чтобы по специфичности перекрывать
+   общие правила .coupon-* выше так же, как их перекрывал inline-стиль. */
+.coupon-card.bet-history-card {
+  background: rgba(14, 18, 27, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.4);
+  position: relative;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.bet-history-card .coupon-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  margin-bottom: 10px;
+}
+.bet-history-card .coupon-header-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.bet-history-card .coupon-badge-express {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.68rem;
+  font-weight: 800;
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: rgba(245, 176, 39, 0.12);
+  color: var(--accent-gold);
+  border: 1px solid rgba(245, 176, 39, 0.28);
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.bet-history-card .coupon-id {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.78rem;
+  font-weight: 800;
+  color: #fff;
+}
+.bet-history-card .coupon-meta-dot {
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+.bet-history-card .coupon-date {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.bet-history-card .coupon-settled-date {
+  font-size: 0.72rem;
+  color: rgba(255, 255, 255, 0.45);
+  font-weight: 500;
+}
+.bet-history-card .coupon-header-right {
+  display: flex;
+  align-items: center;
+}
+.bet-history-card .coupon-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.bet-history-card .status-indicator-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+.bet-history-card .coupon-matches-list {
+  display: flex;
+  flex-direction: column;
+}
+.bet-history-card .coupon-teams-layout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.bet-history-card .coupon-team.home {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-start;
+  text-align: left;
+}
+.bet-history-card .coupon-team-name {
+  font-size: 0.88rem;
+  font-weight: 700;
+  color: #fff;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  line-height: 1.25;
+}
+.bet-history-card .coupon-match-center {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  min-width: 58px;
+  flex-shrink: 0;
+}
+.bet-history-card .coupon-score {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.05rem;
+  font-weight: 900;
+  color: #fff;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+}
+.bet-history-card .coupon-match-sub {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  margin-top: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.bet-history-card .coupon-score.live {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.05rem;
+  font-weight: 900;
+  color: #ff4757;
+  letter-spacing: 0.02em;
+  line-height: 1.1;
+}
+.bet-history-card .coupon-match-sub.live {
+  font-size: 0.68rem;
+  color: #ff4757;
+  font-weight: 700;
+  margin-top: 2px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.bet-history-card .coupon-vs {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 800;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+}
+.bet-history-card .coupon-team.away {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  justify-content: flex-end;
+  text-align: right;
+}
+.bet-history-card .coupon-prediction-subrow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  padding: 0 2px;
+}
+.bet-history-card .coupon-market-label {
+  font-size: 0.74rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 55%;
+}
+.bet-history-card .coupon-prediction-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.bet-history-card .coupon-pred-outcome {
+  font-weight: 800;
+  color: #fff;
+}
+.bet-history-card .coupon-pred-at {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  margin: 0 1px;
+}
+.bet-history-card .coupon-pred-odd {
+  font-weight: 800;
+}
+.bet-history-card .coupon-pred-icon {
+  font-size: 0.82rem;
+  font-weight: 900;
+  margin-left: 2px;
+}
+.bet-history-card .coupon-summary {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1.2fr;
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 10px;
+  padding: 10px 12px;
+  margin-top: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  box-sizing: border-box;
+}
+.bet-history-card .coupon-summary-col {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.bet-history-card .coupon-summary-label {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bet-history-card .coupon-summary-val {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.98rem;
+  font-weight: 800;
+  color: #fff;
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bet-history-card .coupon-summary-val.gold {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.98rem;
+  font-weight: 800;
+  color: var(--accent-gold);
+  letter-spacing: 0.01em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bet-history-card .coupon-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.bet-history-card .btn-cashout.coupon-btn-cashout {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 800;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+.bet-history-card .btn-repeat-bet.coupon-btn-repeat {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 9px 14px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+  transition: var(--transition-fast);
+  text-align: center;
+}
+.bet-history-card .coupon-match-row {
+  padding: 10px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+.bet-history-card .coupon-match-row:last-child {
+  border-bottom: none;
+  padding-bottom: 6px;
+}
+.bet-history-card .coupon-summary-col:last-child {
+  text-align: right;
+}
+.bet-history-card .coupon-status-badge.badge-won {
+  background: rgba(16, 185, 129, 0.12);
+  color: var(--color-success);
+  border: 1px solid rgba(16, 185, 129, 0.25);
+}
+.bet-history-card .coupon-status-badge.badge-lost {
+  background: rgba(239, 68, 68, 0.12);
+  color: var(--color-danger);
+  border: 1px solid rgba(239, 68, 68, 0.25);
+}
+.bet-history-card .coupon-status-badge.badge-pending {
+  background: rgba(56, 189, 248, 0.12);
+  color: #38bdf8;
+  border: 1px solid rgba(56, 189, 248, 0.25);
+}
+.bet-history-card .coupon-status-badge.badge-cashout {
+  background: rgba(0, 210, 255, 0.12);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(0, 210, 255, 0.25);
+}
+.bet-history-card .coupon-status-badge.badge-refunded {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--color-warning);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+}
+.bet-history-card .coupon-status-badge.badge-cancelled {
+  background: rgba(148, 163, 184, 0.12);
+  color: var(--text-muted);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+.bet-history-card .coupon-prediction-pill.won {
+  background: rgba(16, 185, 129, 0.12);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  color: var(--color-success);
+}
+.bet-history-card .coupon-prediction-pill.lost {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--color-danger);
+}
+.bet-history-card .coupon-prediction-pill.pending {
+  background: rgba(56, 189, 248, 0.12);
+  border: 1px solid rgba(56, 189, 248, 0.3);
+  color: #38bdf8;
+}
+.bet-history-card .coupon-prediction-pill.refunded {
+  background: rgba(245, 158, 11, 0.12);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  color: var(--color-warning);
+}
+.bet-history-card .coupon-summary-val.val-won {
+  color: var(--color-success);
+  font-weight: 900;
+}
+.bet-history-card .coupon-summary-val.val-lost {
+  color: var(--text-muted);
+  font-weight: 700;
+}
+.bet-history-card .coupon-summary-val.val-cashout {
+  color: #38bdf8;
+  font-weight: 900;
+}
+.bet-history-card .coupon-summary-val.val-refund {
+  color: var(--color-warning);
+  font-weight: 800;
+}
+.bet-history-card .coupon-summary-val.val-pending {
+  color: var(--accent-gold);
+  font-weight: 800;
+}
+.bet-history-card .coupon-summary-val.val-muted {
+  color: var(--text-muted);
+}
+
+/* ─── Логотип клуба без обёртки (renderTeamLogoHtml) ───
+   Размер задаётся inline (он у каждого места свой), остальное — здесь. */
+img.team-logo-img {
+  object-fit: contain;
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.4));
+  vertical-align: middle;
+  display: inline-block;
+  flex-shrink: 0;
+  background: transparent;
+}
+
+span.team-logo-fallback {
+  display: inline-block;
+  vertical-align: middle;
+}
+
+/* ─── «Показать ещё» для длинных списков (renderPagedList) ─── */
+.list-more-btn {
+  grid-column: 1 / -1;
+  display: block;
+  width: 100%;
+  margin: 4px 0 8px;
+  padding: 11px 14px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-secondary);
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: var(--transition-fast);
+}
+
+.list-more-btn:active {
+  background: rgba(245, 176, 39, 0.08);
+  border-color: rgba(245, 176, 39, 0.3);
+  color: var(--accent-gold);
+}
