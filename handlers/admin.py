@@ -3091,13 +3091,22 @@ async def admin_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE, m
     # и из просроченных, и из уведомлений, где контекста дивизиона нет.
     match_div_id = match.get("division_id")
     match_round = match.get("round_number")
-    back_cb = (
-        f"admin_div_round_matches:{match_div_id}:{match_round}"
-        if match_div_id and match_round
-        else "admin_main_menu"
-    )
-
-    header_title = f"⚽️ <b>Карточка матча #{match['id']} (Тур {match.get('round_number', '?')})</b>"
+    # Кубковая игра живёт в серии панели /cup, а не в туре дивизиона: её
+    # division_id — sentinel, round_number — -1.
+    is_cup_game = database.match_is_cup(match) and bool(match.get("cup_series_id"))
+    if is_cup_game:
+        back_cb = f"cup_ser_{match['cup_series_id']}"
+        header_title = (
+            f"⚽️ <b>Карточка матча #{match['id']} (Кубок {html.escape(str(match.get('cup_stage') or ''))}, "
+            f"игра {match.get('game_num_in_series') or '?'})</b>"
+        )
+    else:
+        back_cb = (
+            f"admin_div_round_matches:{match_div_id}:{match_round}"
+            if match_div_id and match_round
+            else "admin_main_menu"
+        )
+        header_title = f"⚽️ <b>Карточка матча #{match['id']} (Тур {match.get('round_number', '?')})</b>"
     back_button = InlineKeyboardButton("« Назад", callback_data=back_cb)
 
     status_map = {
@@ -3136,14 +3145,19 @@ async def admin_view_match(update: Update, context: ContextTypes.DEFAULT_TYPE, m
         [InlineKeyboardButton("📜 Правила турнира", url="https://t.me/fifulatyrniru/3827")],
         [InlineKeyboardButton("⚡ Внести результат по фото (ИИ)", callback_data=f"admin_report_score_auto_{match_id}")],
         [InlineKeyboardButton("✍️ Внести результат вручную", callback_data=f"cb_report_choice_manual_{match_id}")],
-        [InlineKeyboardButton("🚫 ТП 1:0 (Хозяева)", callback_data=f"admin_tp_home_{match_id}"), InlineKeyboardButton("🚫 ТП 0:1 (Гости)", callback_data=f"admin_tp_away_{match_id}")],
     ]
-    if match.get("status") == "pending":
-        if is_extended:
-            keyboard.append([InlineKeyboardButton("▶️ Снять продление и возобновить отсчёт", callback_data=f"admin_extend_match_{match_id}")])
-        else:
-            keyboard.append([InlineKeyboardButton("⏸ Продлить матч: +24ч / +48ч", callback_data=f"admin_extend_menu_{match_id}")])
-    keyboard.append([InlineKeyboardButton("🤝 ТН 0:0 (Ничья)", callback_data=f"admin_tp_draw_{match_id}"), InlineKeyboardButton("🔄 Сбросить результат", callback_data=f"admin_reset_match_execute_{match_id}")])
+    if is_cup_game:
+        # ТП/ТН и продление — дисциплина лиговых долгов: технический счёт не
+        # двигает серию, а ничьей в кубке нет. Итог игры вносится как счёт.
+        keyboard.append([InlineKeyboardButton("🔄 Сбросить результат", callback_data=f"admin_reset_match_execute_{match_id}")])
+    else:
+        keyboard.append([InlineKeyboardButton("🚫 ТП 1:0 (Хозяева)", callback_data=f"admin_tp_home_{match_id}"), InlineKeyboardButton("🚫 ТП 0:1 (Гости)", callback_data=f"admin_tp_away_{match_id}")])
+        if match.get("status") == "pending":
+            if is_extended:
+                keyboard.append([InlineKeyboardButton("▶️ Снять продление и возобновить отсчёт", callback_data=f"admin_extend_match_{match_id}")])
+            else:
+                keyboard.append([InlineKeyboardButton("⏸ Продлить матч: +24ч / +48ч", callback_data=f"admin_extend_menu_{match_id}")])
+        keyboard.append([InlineKeyboardButton("🤝 ТН 0:0 (Ничья)", callback_data=f"admin_tp_draw_{match_id}"), InlineKeyboardButton("🔄 Сбросить результат", callback_data=f"admin_reset_match_execute_{match_id}")])
     if match.get("photo_id"):
         keyboard.append([InlineKeyboardButton("📸 Просмотр скриншота матча", callback_data=f"admin_view_match_photo_{match_id}")])
     keyboard.append([back_button])
@@ -3439,9 +3453,14 @@ async def admin_reset_match_execute(update: Update, context: ContextTypes.DEFAUL
         return
 
     await asyncio.to_thread(database.reset_match, match_id)
-    
+
+    where = (
+        f"кубке ({html.escape(str(match.get('cup_stage') or ''))})"
+        if database.match_is_cup(match)
+        else f"Туре {match['round_number']}"
+    )
     player_text = (
-        f"🔄 <b>Результат вашего матча в Туре {match['round_number']} был сброшен администратором!</b>\n\n"
+        f"🔄 <b>Результат вашего матча в {where} был сброшен администратором!</b>\n\n"
         f"⚔️ <b>{html.escape(str(match['player1_nickname'] or '—'))}</b> vs "
         f"<b>{html.escape(str(match['player2_nickname'] or '—'))}</b>\n\n"
         f"Вы можете сыграть матч заново и ввести результаты через меню кабинета."

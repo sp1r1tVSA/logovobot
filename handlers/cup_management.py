@@ -13,6 +13,9 @@ handlers/cup_management.py
 (линия видна в Mini App), и только затем стартует этап. Старт этапа закрывает
 линию тем же переходом, что и тур лиги, и вернуть её нельзя.
 
+«⚔️ серии и матчи» — то же, что «Управление матчами» дивизиона: серии этапа →
+игры серии → админская карточка матча (ввод счёта, сброс, скриншот).
+
 Результаты кубка бот в группу не публикует: участники сами сдают их боту в ЛС
 и сами выкладывают под постом кубка.
 """
@@ -33,6 +36,7 @@ _ACTIONS = {
     "provision": "🧩 завести игры",
     "open": "🎟 открыть ставки",
     "start": "▶ начать этап",
+    "series": "⚔️ серии и матчи",
     "refresh": "↻ обновить",
 }
 
@@ -62,8 +66,98 @@ def _stage_keyboard(stage_id: int, decided: bool) -> list[list[InlineKeyboardBut
             InlineKeyboardButton(_ACTIONS["open"], callback_data=f"cup_open_{stage_id}"),
         ])
         rows.append([InlineKeyboardButton(_ACTIONS["start"], callback_data=f"cup_start_{stage_id}")])
+    rows.append([InlineKeyboardButton(_ACTIONS["series"], callback_data=f"cup_series_{stage_id}")])
     rows.append([InlineKeyboardButton(_ACTIONS["refresh"], callback_data="cup_refresh")])
     return rows
+
+
+def _series_icon(series: dict, disputed: bool) -> str:
+    if series.get("winner_name"):
+        return "✅"
+    if disputed:
+        return "⚠️"
+    if (series.get("team1_wins") or 0) + (series.get("team2_wins") or 0):
+        return "🟢"
+    return "⚪"
+
+
+def _game_label(game: dict) -> str:
+    """«Игра 2: 1:1, пен. → Бавария» — как статус матча в списке тура у админа."""
+    num = game.get("game_num_in_series") or "?"
+    status = game.get("status")
+    if status == "confirmed":
+        s1, s2 = game.get("player1_score"), game.get("player2_score")
+        label = f"{s1}:{s2}"
+        if s1 == s2 and game.get("cup_winner_team"):
+            label += f", пен. → {game['cup_winner_team']}"
+    elif status == "disputed":
+        label = "⚠️ спор"
+    elif status == "cancelled":
+        label = "снята"
+    else:
+        label = "⚔️"
+    return f"Игра {num}: {label}"
+
+
+async def _render_series_list(target, stage: dict) -> None:
+    """Серии этапа — как сетка туров в «Управлении матчами» дивизиона."""
+    stage_id = stage["id"]
+    bracket = await asyncio.to_thread(
+        database.get_cup_bracket, stage["stage"], season_id=stage.get("season_id")
+    )
+    games = await asyncio.to_thread(database.get_cup_stage_games, stage_id)
+    disputed = {g["series_id"] for g in games if g["status"] == "disputed"}
+
+    keyboard = []
+    for s in bracket:
+        icon = _series_icon(s, s["id"] in disputed)
+        label = (f"{icon} {s['series_num']}. {s['team1_name']} "
+                 f"{s['team1_wins'] or 0}:{s['team2_wins'] or 0} {s['team2_name']}")
+        keyboard.append([InlineKeyboardButton(label, callback_data=f"cup_ser_{s['id']}")])
+    keyboard.append([InlineKeyboardButton("« К этапу", callback_data=f"cup_stage_{stage_id}")])
+
+    title = f"⚔️ <b>Серии этапа {html.escape(stage['stage'])}</b>\n\n"
+    if bracket:
+        text = title + "⚪ не начата · 🟢 идёт · ⚠️ спор · ✅ решена\n\nВыберите серию:"
+    else:
+        text = title + "Серий нет — сетку заводит скрипт."
+    await _edit_or_reply(target, text, InlineKeyboardMarkup(keyboard))
+
+
+async def _render_series_card(target, series_id: int) -> None:
+    """Карточка серии: счёт и игры; игра открывает админскую карточку матча."""
+    series = await asyncio.to_thread(database.get_cup_series, series_id)
+    if not series:
+        await _edit_or_reply(target, "❌ Серия не найдена.", InlineKeyboardMarkup(
+            [[InlineKeyboardButton(_ACTIONS["refresh"], callback_data="cup_refresh")]]))
+        return
+    games = await asyncio.to_thread(database.get_cup_series_games, series_id)
+
+    t1, t2 = html.escape(series["team1_name"]), html.escape(series["team2_name"])
+    lines = [
+        f"🏆 <b>{html.escape(series['stage'])} · серия {series['series_num']}</b>",
+        "",
+        f"<b>{t1}</b> — <b>{t2}</b>",
+        f"Счёт серии: <code>{series['team1_wins'] or 0} : {series['team2_wins'] or 0}</code>",
+    ]
+    if series.get("winner_name"):
+        lines.append(f"Прошёл дальше: ✅ <b>{html.escape(series['winner_name'])}</b>")
+    lines.append("")
+    lines.append("Выберите игру для ввода счёта или сброса:" if games
+                 else "Игры не заведены — нажми «🧩 завести игры» на этапе.")
+
+    keyboard = [[InlineKeyboardButton(_game_label(g), callback_data=f"admin_view_match_{g['match_id']}")]
+                for g in games]
+    if series.get("stage_id"):
+        keyboard.append([InlineKeyboardButton("« К сериям", callback_data=f"cup_series_{series['stage_id']}")])
+    await _edit_or_reply(target, "\n".join(lines), InlineKeyboardMarkup(keyboard))
+
+
+async def _edit_or_reply(target, text: str, markup) -> None:
+    try:
+        await target.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    except Exception:
+        await target.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
 
 async def _render_panel(target, context, stage_id: int | None = None, note: str = "") -> None:
@@ -125,6 +219,15 @@ async def cb_cup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await _render_panel(query.message, context, stage_id=context.user_data.get("cup_stage_id"))
         return
 
+    # Карточка серии ключуется номером серии, а не этапа.
+    if query.data.startswith("cup_ser_"):
+        try:
+            series_id = int(query.data.removeprefix("cup_ser_"))
+        except ValueError:
+            return
+        await _render_series_card(query, series_id)
+        return
+
     # Номер этапа — последний сегмент: действие само может содержать «_».
     head, _, tail = query.data.rpartition("_")
     action = head.removeprefix("cup_")
@@ -141,6 +244,9 @@ async def cb_cup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     note = ""
     if action == "stage":
         await _render_panel(query.message, context, stage_id=stage_id)
+        return
+    if action == "series":
+        await _render_series_list(query, stage)
         return
 
     if action == "provision":
@@ -176,5 +282,5 @@ def register_cup_handlers(app) -> None:
     app.add_handler(CommandHandler("cup", cmd_cup))
     app.add_handler(CallbackQueryHandler(
         cb_cup,
-        pattern="^cup_(refresh|stage_\\d+|provision_\\d+|open_\\d+|start_\\d+)$",
+        pattern="^cup_(refresh|stage_\\d+|provision_\\d+|open_\\d+|start_\\d+|series_\\d+|ser_\\d+)$",
     ))

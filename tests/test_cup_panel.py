@@ -116,5 +116,99 @@ class CupPanelCallbackTest(unittest.TestCase):
         render.assert_not_awaited()
 
 
+
+SERIES = {"id": 11, "stage": "1/64", "series_num": 3, "team1_name": "Бавария",
+          "team2_name": "Манчестер Юнайтед", "team1_wins": 1, "team2_wins": 0,
+          "winner_name": None, "status": "active", "stage_id": 5}
+
+
+def _buttons(markup):
+    return [b for row in markup.inline_keyboard for b in row]
+
+
+class CupSeriesScreensTest(unittest.TestCase):
+    """Серии этапа и их игры — как туры и матчи тура в «Управлении матчами»."""
+
+    def _callback_pattern(self):
+        app = MagicMock()
+        cup_management.register_cup_handlers(app)
+        return next(c.args[0] for c in app.add_handler.call_args_list
+                    if not isinstance(c.args[0], CommandHandler)).pattern
+
+    def test_series_button_on_every_stage(self):
+        for decided in (False, True):
+            datas = [b.callback_data for row in cup_management._stage_keyboard(5, decided=decided) for b in row]
+            self.assertIn("cup_series_5", datas)
+
+    def test_series_list_links_every_series(self):
+        update, query = _update("cup_series_5")
+        query.edit_message_text = AsyncMock()
+        bracket = [dict(SERIES), dict(SERIES, id=12, series_num=4, winner_name="Реал Мадрид", team1_wins=2)]
+        games = [{"series_id": 11, "status": "disputed"}]
+        with patch.object(cup_management, "is_global_admin", return_value=True), \
+                patch.object(cup_management.database, "get_cup_stage_by_id", return_value=dict(STAGE)), \
+                patch.object(cup_management.database, "get_cup_bracket", return_value=bracket), \
+                patch.object(cup_management.database, "get_cup_stage_games", return_value=games):
+            asyncio.run(cup_management.cb_cup(update, _context()))
+        buttons = _buttons(query.edit_message_text.await_args.kwargs["reply_markup"])
+        self.assertEqual([b.callback_data for b in buttons], ["cup_ser_11", "cup_ser_12", "cup_stage_5"])
+        self.assertTrue(buttons[0].text.startswith("⚠️ 3. Бавария 1:0"))
+        self.assertTrue(buttons[1].text.startswith("✅ 4."))
+        pattern = self._callback_pattern()
+        for b in buttons:
+            self.assertTrue(pattern.match(b.callback_data), b.callback_data)
+
+    def test_series_card_opens_the_admin_match_card(self):
+        update, query = _update("cup_ser_11")
+        query.edit_message_text = AsyncMock()
+        games = [
+            {"match_id": 101, "game_num_in_series": 1, "status": "confirmed",
+             "player1_score": 3, "player2_score": 3, "cup_winner_team": "Бавария"},
+            {"match_id": 102, "game_num_in_series": 2, "status": "pending",
+             "player1_score": None, "player2_score": None, "cup_winner_team": None},
+        ]
+        with patch.object(cup_management, "is_global_admin", return_value=True), \
+                patch.object(cup_management.database, "get_cup_series", return_value=dict(SERIES)), \
+                patch.object(cup_management.database, "get_cup_series_games", return_value=games):
+            asyncio.run(cup_management.cb_cup(update, _context()))
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Счёт серии: <code>1 : 0</code>", text)
+        buttons = _buttons(query.edit_message_text.await_args.kwargs["reply_markup"])
+        self.assertEqual([b.callback_data for b in buttons],
+                         ["admin_view_match_101", "admin_view_match_102", "cup_series_5"])
+        self.assertEqual(buttons[0].text, "Игра 1: 3:3, пен. → Бавария")
+        self.assertEqual(buttons[1].text, "Игра 2: ⚔️")
+
+
+class CupMatchCardTest(unittest.IsolatedAsyncioTestCase):
+    """Карточка кубковой игры возвращает к серии и не предлагает ТП/ТН/продление."""
+
+    async def test_back_goes_to_the_series(self):
+        from handlers import admin
+
+        match = {"id": 101, "round_number": -1, "division_id": 0, "tournament_type": "cup",
+                 "cup_stage": "1/64", "cup_series_id": 11, "game_num_in_series": 2,
+                 "status": "pending", "player1_team": "Бавария", "player2_team": "Манчестер Юнайтед",
+                 "player1_nickname": "a", "player2_nickname": "b", "player1_score": None,
+                 "player2_score": None, "is_extended": 0, "photo_id": None}
+        query = MagicMock(data="admin_view_match_101", answer=AsyncMock(), edit_message_text=AsyncMock())
+        query.from_user.id = 1
+        query.message.photo = None
+        update = MagicMock(callback_query=query)
+        update.effective_user.id = 1
+        with patch("handlers.base.is_admin", return_value=True), \
+                patch.object(admin, "is_admin", return_value=True), \
+                patch.object(admin, "is_global_admin", return_value=True), \
+                patch.object(admin.database, "get_match", return_value=match), \
+                patch.object(admin.database, "is_match_overdue", return_value=False):
+            await admin.admin_view_match(update, MagicMock())
+        text = query.edit_message_text.await_args.args[0]
+        self.assertIn("Кубок 1/64, игра 2", text)
+        datas = [b.callback_data for b in _buttons(query.edit_message_text.await_args.kwargs["reply_markup"])]
+        self.assertIn("cup_ser_11", datas)
+        self.assertIn("admin_reset_match_execute_101", datas)
+        self.assertFalse(any(d and d.startswith(("admin_tp_", "admin_extend_")) for d in datas), datas)
+
+
 if __name__ == "__main__":
     unittest.main()

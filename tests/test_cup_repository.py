@@ -229,3 +229,20 @@ class TestCupSeriesMatches(CupRepositoryTestCase):
         self.assertEqual(database.count_cup_stage_matches(stage_id), 1)
         database.create_cup_series_match(series["id"], game_num=2)
         self.assertEqual(database.count_cup_stage_matches(stage_id), 2)
+
+
+class TestCupSeriesCard(CupRepositoryTestCase):
+    """Карточка серии в /cup: сама серия и её игры, без строки-заголовка."""
+
+    def test_series_and_its_games(self):
+        series_id = database.create_cup_series(STAGE, [("Бавария", "МЮ")], season_id=self.season)[0]
+        database.provision_cup_stage_line(STAGE, season_id=self.season, games_per_series=2)
+
+        series = database.get_cup_series(series_id)
+        self.assertEqual((series["team1_name"], series["team2_name"]), ("Бавария", "Манчестер Юнайтед"))
+        self.assertIsNotNone(series["stage_id"])
+
+        games = database.get_cup_series_games(series_id)
+        self.assertEqual([g["game_num_in_series"] for g in games], [1, 2])
+        self.assertTrue(all(g["status"] == "pending" for g in games))
+        self.assertIsNone(database.get_cup_series(series_id + 999))

@@ -8366,6 +8366,40 @@ def get_cup_series_pair(series_id: int | None) -> tuple[str, str] | None:
     return row["team1_name"], row["team2_name"]
 
 
+def get_cup_series(series_id: int) -> dict | None:
+    """Серия кубка по id — для карточки серии в панели /cup."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT cs.id, cs.stage, cs.series_num, cs.team1_name, cs.team2_name,
+                   cs.team1_wins, cs.team2_wins, cs.winner_name, cs.status, cs.stage_id
+            FROM cup_series cs
+            WHERE cs.id = ?
+            """,
+            (series_id,)
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_cup_series_games(series_id: int) -> list[dict]:
+    """Игры одной серии по порядку — без строки-заголовка, у неё нет своего счёта."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT id AS match_id, game_num_in_series, status,
+                   player1_score, player2_score, cup_winner_team
+            FROM matches
+            WHERE cup_series_id = ? AND COALESCE(is_series_header, 0) = 0
+            ORDER BY game_num_in_series ASC
+            """,
+            (series_id,)
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
 _CUP_SERIES_WRITE_SELECT = (
     "SELECT cs.id, cs.series_num, cs.stage, cs.stage_id, cs.team1_name, cs.team2_name, "
     "st.season_id "
