@@ -4814,14 +4814,19 @@ def _repoint_user_owned_rows(cursor, old_id: int, new_id: int) -> None:
             # Both sides hold a wallet, so the welcome bonus was granted twice.
             # Carry over only what the placeholder earned on top of it and drop the
             # duplicate grant: balance must stay equal to the sum of the ledger.
+            # Стартовый баланс настраивается в панели, поэтому вычитаем ровно
+            # ту сумму, что была начислена, а не нынешнюю настройку.
             cursor.execute(
-                "DELETE FROM coin_transactions WHERE id IN ("
-                "  SELECT id FROM coin_transactions"
-                "  WHERE user_id = ? AND transaction_type = 'welcome_bonus'"
-                "  ORDER BY id LIMIT 1)",
+                "SELECT id, amount FROM coin_transactions"
+                " WHERE user_id = ? AND transaction_type = 'welcome_bonus'"
+                " ORDER BY id LIMIT 1",
                 (old_id,)
             )
-            duplicate_bonus = INITIAL_WALLET_BALANCE if cursor.rowcount else 0
+            welcome = cursor.fetchone()
+            duplicate_bonus = 0
+            if welcome:
+                cursor.execute("DELETE FROM coin_transactions WHERE id = ?", (welcome["id"],))
+                duplicate_bonus = welcome["amount"]
             cursor.execute(
                 """
                 UPDATE user_wallets SET
@@ -11005,7 +11010,11 @@ def get_user_open_bets_count(user_id: int, cursor=None) -> int:
 
 
 def get_or_create_wallet(user_id: int) -> dict:
-    """Get user's betting wallet or initialize a new one with INITIAL_WALLET_BALANCE coins."""
+    """Get user's betting wallet or initialize a new one with the starting balance.
+
+    The starting balance is config.INITIAL_WALLET_BALANCE unless a global admin
+    changed it in the panel (see get_initial_wallet_balance).
+    """
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM user_wallets WHERE user_id = ?", (user_id,))
@@ -11013,21 +11022,22 @@ def get_or_create_wallet(user_id: int) -> dict:
         if row:
             return dict(row)
 
+        start_balance = get_initial_wallet_balance()
         cursor.execute(
             """
             INSERT INTO user_wallets (user_id, balance, total_wagered, total_won, bets_count, bets_won, updated_at)
             VALUES (?, ?, 0, 0, 0, 0, datetime('now', '+3 hours'))
             """,
-            (user_id, INITIAL_WALLET_BALANCE)
+            (user_id, start_balance)
         )
         cursor.execute(
             "INSERT INTO coin_transactions (user_id, amount, transaction_type, balance_after, created_at)"
             " VALUES (?, ?, 'welcome_bonus', ?, datetime('now', '+3 hours'))",
-            (user_id, INITIAL_WALLET_BALANCE, INITIAL_WALLET_BALANCE)
+            (user_id, start_balance, start_balance)
         )
         cursor.execute("SELECT * FROM user_wallets WHERE user_id = ?", (user_id,))
         new_row = cursor.fetchone()
-        return dict(new_row) if new_row else {"user_id": user_id, "balance": INITIAL_WALLET_BALANCE}
+        return dict(new_row) if new_row else {"user_id": user_id, "balance": start_balance}
 
 
 def get_wallet_balance(user_id: int) -> int:
@@ -11087,11 +11097,14 @@ def deduct_coins(user_id: int, amount: int, tx_type: str = "bet_placed", ref_id:
         return True
 
 
-def claim_daily_bonus(user_id: int, bonus_amount: int = 250) -> tuple[bool, int, str]:
+def claim_daily_bonus(user_id: int, bonus_amount: int | None = None) -> tuple[bool, int, str]:
     """
     Claim daily bonus once every 24 hours.
     Returns (success, new_balance_or_remaining_hours, message).
+    Without bonus_amount the amount set in the panel is paid (get_daily_bonus_amount).
     """
+    if bonus_amount is None:
+        bonus_amount = get_daily_bonus_amount()
     from config import is_global_lockdown_enabled
     if is_global_lockdown_enabled():
         from handlers.base import is_global_admin
@@ -11407,10 +11420,12 @@ def get_bet_market_by_match_id(match_id: int) -> dict | None:
 # Phase 5: Bet limits (server-side, cannot be bypassed by client)
 _MAX_BET: int = 50_000
 _MAX_PAYOUT: int = 10_000
-# Длина экспресса: от 2 до 15 событий. Один исход — это ординар.
+# Длина экспресса: от 2 до 15 событий. Один исход — это ординар. Потолок —
+# значение по умолчанию: главный админ меняет его в панели (get_max_express_events).
 MIN_EXPRESS_EVENTS: int = 2
 MAX_EXPRESS_EVENTS: int = 15
-_MAX_EXPRESS_EVENTS: int = MAX_EXPRESS_EVENTS
+# Ежедневный бонус, пока в панели не задан другой (get_daily_bonus_amount).
+DAILY_BONUS_AMOUNT: int = 250
 _bet_placement_lock = threading.RLock()
 
 # Canonical Outcome Aliases & Cross-Schema Mapping
@@ -11566,13 +11581,14 @@ def place_user_bet(
 
     selections = normalized_selections
 
-    # Один исход — ординар; от двух до пятнадцати — экспресс. Шестнадцатое
-    # событие в купон не принимается ни из Telegram, ни из Mini App, ни из REST API.
-    if len(selections) > _MAX_EXPRESS_EVENTS:
+    # Один исход — ординар; от двух до потолка (по умолчанию 15) — экспресс.
+    # Лишнее событие не принимается ни из Telegram, ни из Mini App, ни из REST API.
+    max_express_events = get_max_express_events()
+    if len(selections) > max_express_events:
         return False, {
             "error": "MAX_EXPRESS_EVENTS_EXCEEDED",
-            "max_events": _MAX_EXPRESS_EVENTS,
-            "message": f"⚠️ В экспрессе может быть максимум {_MAX_EXPRESS_EVENTS} событий!"
+            "max_events": max_express_events,
+            "message": f"⚠️ В экспрессе может быть максимум {max_express_events} событий!"
         }
 
     # Compute idempotency payload hash (Phase 5: strictly typed tuple (int, str) to avoid TypeError in sorted)
@@ -13184,6 +13200,59 @@ def get_risk_limit_overrides(scope_type: str, scope_id: int) -> dict[str, int]:
             (scope_type, scope_id),
         ).fetchall()
         return {r["limit_key"]: int(r["limit_value"]) for r in rows}
+
+
+def get_global_limit(limit_key: str, default: int) -> int:
+    """Глобальная настройка, заданная в панели, или default, если её не трогали.
+
+    Сбой чтения — тоже default: настройка не должна валить ставку или кошелёк.
+    """
+    try:
+        with transaction() as conn:
+            row = conn.execute(
+                "SELECT limit_value FROM risk_limits_config"
+                " WHERE scope_type = 'global' AND scope_id = 0 AND limit_key = ?",
+                (limit_key,),
+            ).fetchone()
+    except sqlite3.Error:
+        logger.warning("Could not read global limit %s, using the default", limit_key, exc_info=True)
+        return default
+    if row is None or row["limit_value"] is None:
+        return default
+    return int(row["limit_value"])
+
+
+def get_max_express_events() -> int:
+    return get_global_limit("max_express_events", MAX_EXPRESS_EVENTS)
+
+
+def get_daily_bonus_amount() -> int:
+    return get_global_limit("daily_bonus", DAILY_BONUS_AMOUNT)
+
+
+def get_initial_wallet_balance() -> int:
+    return get_global_limit("initial_balance", INITIAL_WALLET_BALANCE)
+
+
+def get_user_limit_overrides() -> list[dict]:
+    """Игроки с личными лимитами — для списка в панели."""
+    with transaction() as conn:
+        rows = conn.execute("""
+            SELECT rl.scope_id AS user_id, rl.limit_key, rl.limit_value,
+                   u.username, u.team_name
+            FROM risk_limits_config rl
+            LEFT JOIN users u ON u.telegram_id = rl.scope_id
+            WHERE rl.scope_type = 'user'
+            ORDER BY rl.scope_id, rl.limit_key
+        """).fetchall()
+    players: dict[int, dict] = {}
+    for r in rows:
+        entry = players.setdefault(r["user_id"], {
+            "user_id": r["user_id"], "username": r["username"],
+            "team_name": r["team_name"], "limits": {},
+        })
+        entry["limits"][r["limit_key"]] = int(r["limit_value"])
+    return list(players.values())
 
 
 def delete_risk_limit_override(scope_type: str, scope_id: int, limit_key: str) -> bool:

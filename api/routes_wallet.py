@@ -120,7 +120,7 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
         "bonus": {
             "can_claim": can_claim,
             "cooldown_seconds": cooldown_sec,
-            "reward_amount": 250
+            "reward_amount": await asyncio.to_thread(database.get_daily_bonus_amount)
         },
         "open_tours_count": len(open_tours),
         "divisions": divisions
@@ -130,7 +130,7 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
 async def handle_claim_bonus(request: web.Request) -> web.Response:
     """
     POST /api/bonus/claim
-    Claim daily +250 coins bonus.
+    Claim the daily coin bonus (amount set in the admin panel, 250 by default).
     """
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     user_info = get_authenticated_user(init_data)
@@ -145,7 +145,8 @@ async def handle_claim_bonus(request: web.Request) -> web.Response:
             status=403
         )
 
-    success, val, msg = await asyncio.to_thread(database.claim_daily_bonus, user_id, 250)
+    bonus_amount = await asyncio.to_thread(database.get_daily_bonus_amount)
+    success, val, msg = await asyncio.to_thread(database.claim_daily_bonus, user_id, bonus_amount)
     if not success:
         return web.json_response({
             "status": "error",
@@ -158,7 +159,7 @@ async def handle_claim_bonus(request: web.Request) -> web.Response:
         "status": "ok",
         "message": msg,
         "new_balance": val,
-        "claimed_amount": 250
+        "claimed_amount": bonus_amount
     })
 
 

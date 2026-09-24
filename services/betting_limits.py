@@ -31,10 +31,35 @@ DEFAULT_MAX_OPEN_BETS: int = 12
 DEFAULT_MARKET_EXPOSURE_LIMIT: int = 250_000
 DEFAULT_DIVISION_EXPOSURE_LIMIT: int = 1_000_000
 DEFAULT_GLOBAL_EXPOSURE_LIMIT: int = 5_000_000
+# Не лимиты риска, а настройки экономики и купона: хранятся в той же таблице и
+# меняются из той же панели, но читает их database (get_max_express_events,
+# get_daily_bonus_amount, get_initial_wallet_balance), а не RiskEngine.
+DEFAULT_MAX_EXPRESS_EVENTS: int = database.MAX_EXPRESS_EVENTS
+DEFAULT_DAILY_BONUS: int = database.DAILY_BONUS_AMOUNT
+DEFAULT_INITIAL_BALANCE: int = database.INITIAL_WALLET_BALANCE
 
 
 class BettingLimitsService:
     """Centralized limit resolution with hierarchical override support (User -> Division -> Global)."""
+
+    @staticmethod
+    def get_default_limits() -> dict[str, int]:
+        """Значения по умолчанию — то, к чему вернётся сброшенный глобальный лимит."""
+        return {
+            "min_bet": DEFAULT_MIN_BET,
+            "max_bet": DEFAULT_MAX_BET,
+            "max_payout": DEFAULT_MAX_PAYOUT,
+            "max_daily_stake": DEFAULT_MAX_DAILY_STAKE,
+            "max_daily_loss": DEFAULT_MAX_DAILY_LOSS,
+            "max_open_exposure": DEFAULT_MAX_OPEN_EXPOSURE,
+            "max_open_bets": DEFAULT_MAX_OPEN_BETS,
+            "market_exposure_limit": DEFAULT_MARKET_EXPOSURE_LIMIT,
+            "division_exposure_limit": DEFAULT_DIVISION_EXPOSURE_LIMIT,
+            "global_exposure_limit": DEFAULT_GLOBAL_EXPOSURE_LIMIT,
+            "max_express_events": DEFAULT_MAX_EXPRESS_EVENTS,
+            "daily_bonus": DEFAULT_DAILY_BONUS,
+            "initial_balance": DEFAULT_INITIAL_BALANCE,
+        }
 
     @classmethod
     def get_system_limits(cls) -> dict[str, int]:

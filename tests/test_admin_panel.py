@@ -81,6 +81,13 @@ def _seed() -> None:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM betting_bans")
         cursor.execute("DELETE FROM system_config WHERE key = 'betting_pause'")
+        # Лимиты и настройки из панели — у каждого теста с чистого листа.
+        cursor.execute("DELETE FROM risk_limits_config")
+        # Купоны прошлых тестов упёрлись бы в лимит открытых купонов (12).
+        cursor.execute(
+            "UPDATE user_bets SET status = 'cancelled' WHERE status = 'pending' AND user_id IN (?, ?)",
+            (PLAYER, OTHER_PLAYER),
+        )
         cursor.execute("UPDATE markets SET status = 'open' WHERE id IN (?, ?, ?)",
                        tuple(m[1] for m in MATCHES.values()))
         cursor.execute(
@@ -352,7 +359,7 @@ class TestPanelRoutes(AioHTTPTestCase):
         div1_market = MATCHES["div1"][1]
         nodiv_market = MATCHES["nodiv"][1]
         ok, bet_id = _place(PLAYER, "div1")
-        self.assertTrue(ok)
+        self.assertTrue(ok, bet_id)
         cases = [
             ("POST", f"/markets/{div1_market}/action", {"action": "suspend"}),
             ("POST", f"/markets/{nodiv_market}/action", {"action": "suspend"}),
@@ -430,7 +437,7 @@ class TestPanelRoutes(AioHTTPTestCase):
 
     async def test_global_admin_voids_a_bet_with_refund(self):
         ok, bet_id = _place(PLAYER, "div2", amount=700)
-        self.assertTrue(ok)
+        self.assertTrue(ok, bet_id)
         status, body = await self._call("POST", f"/bets/{bet_id}/void", GLOBAL_ADMIN, {"reason": "x"})
         self.assertEqual((status, body["error"]), (400, "confirmation_required"))
         status, body = await self._call("POST", f"/bets/{bet_id}/void", DIV2_ADMIN,
@@ -470,7 +477,7 @@ class TestPanelRoutes(AioHTTPTestCase):
     async def test_transition_to_voided_refunds_the_bets(self):
         market = MATCHES["div2"][1]
         ok, bet_id = _place(PLAYER, "div2", amount=500)
-        self.assertTrue(ok)
+        self.assertTrue(ok, bet_id)
         self.assertEqual(self._balance(), 99500)
 
         status, body = await self._legacy(f"/api/admin/markets/{market}/transition", DIV2_ADMIN,
@@ -546,3 +553,96 @@ class TestPanelRoutes(AioHTTPTestCase):
     async def test_missing_alert_is_not_found(self):
         status, body = await self._legacy("/api/admin/risk/alerts/987654321/ack", GLOBAL_ADMIN)
         self.assertEqual((status, body["error"]), (404, "not_found"))
+
+    # ─── Лимиты и настройки экономики ──────────────────────────────────────
+
+    async def _set_limit(self, key: str, value, scope_type: str = "global", scope_id: int = 0,
+                         user_id: int = GLOBAL_ADMIN):
+        return await self._call("POST", "/limits", user_id,
+                                {"scope_type": scope_type, "scope_id": scope_id, "limit_key": key, "value": value})
+
+    async def test_limits_report_settings_defaults_and_bounds(self):
+        status, body = await self._call("GET", "/limits", GLOBAL_ADMIN)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["system"]["max_express_events"], database.MAX_EXPRESS_EVENTS)
+        self.assertEqual(body["system"]["daily_bonus"], database.DAILY_BONUS_AMOUNT)
+        self.assertEqual(body["system"]["initial_balance"], database.INITIAL_WALLET_BALANCE)
+        self.assertEqual(body["defaults"]["max_open_bets"], 12)
+        self.assertEqual(body["bounds"]["max_express_events"], [database.MIN_EXPRESS_EVENTS, 50])
+
+        status, body = await self._set_limit("daily_bonus", 400)
+        self.assertEqual(status, 200, body)
+        status, body = await self._call("GET", "/limits", GLOBAL_ADMIN)
+        self.assertEqual(body["system"]["daily_bonus"], 400)
+        self.assertEqual(body["global_overrides"]["daily_bonus"], 400)
+        self.assertEqual(body["defaults"]["daily_bonus"], database.DAILY_BONUS_AMOUNT)
+
+        status, body = await self._set_limit("daily_bonus", None)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(database.get_daily_bonus_amount(), database.DAILY_BONUS_AMOUNT)
+
+    async def test_express_cap_follows_the_panel(self):
+        status, body = await self._set_limit("max_express_events", 2)
+        self.assertEqual(status, 200, body)
+        ok, payload = _place(PLAYER, "div1", "div2", "nodiv")
+        self.assertFalse(ok)
+        self.assertEqual(payload["error"], "MAX_EXPRESS_EVENTS_EXCEEDED")
+        self.assertEqual(payload["max_events"], 2)
+        ok, payload = _place(PLAYER, "div1", "div2")
+        self.assertTrue(ok, payload)
+
+        status, body = await self._set_limit("max_express_events", 3)
+        self.assertEqual(status, 200, body)
+        self.assertNotEqual(_error_code(_place(PLAYER, "div1", "div2", "nodiv")), "MAX_EXPRESS_EVENTS_EXCEEDED")
+
+    async def test_daily_bonus_and_starting_balance_follow_the_panel(self):
+        newcomer = 971005
+        with database.transaction() as conn:
+            conn.execute("INSERT OR IGNORE INTO users (telegram_id, username, role) VALUES (?, 'panel_new', 'user')",
+                         (newcomer,))
+            conn.execute("DELETE FROM user_wallets WHERE user_id = ?", (newcomer,))
+            conn.execute("DELETE FROM coin_transactions WHERE user_id = ?", (newcomer,))
+        self.assertEqual((await self._set_limit("initial_balance", 1000))[0], 200)
+        self.assertEqual((await self._set_limit("daily_bonus", 333))[0], 200)
+
+        self.assertEqual(database.get_or_create_wallet(newcomer)["balance"], 1000)
+        ok, new_balance, _ = database.claim_daily_bonus(newcomer)
+        self.assertTrue(ok)
+        self.assertEqual(new_balance, 1333)
+
+    async def test_limit_values_are_bounded(self):
+        cases = [("max_express_events", 1), ("max_express_events", 51), ("daily_bonus", 0),
+                 ("initial_balance", 1_000_001), ("max_open_bets", 1_001), ("max_bet", 0)]
+        for key, value in cases:
+            with self.subTest(key=key, value=value):
+                status, _ = await self._set_limit(key, value)
+                self.assertEqual(status, 400)
+        self.assertEqual(database.get_risk_limit_overrides("global", 0), {})
+
+    async def test_settings_are_global_only(self):
+        for key in ("max_express_events", "daily_bonus", "initial_balance"):
+            for scope_type, scope_id in (("division", 2), ("user", PLAYER)):
+                with self.subTest(key=key, scope=scope_type):
+                    status, body = await self._set_limit(key, 5, scope_type, scope_id)
+                    self.assertEqual((status, body["error"]), (400, "invalid_limit_key"))
+
+    async def test_min_bet_cannot_exceed_max_bet(self):
+        self.assertEqual((await self._set_limit("max_bet", 1000))[0], 200)
+        status, body = await self._set_limit("min_bet", 1500)
+        self.assertEqual((status, body["error"]), (400, "limits_conflict"))
+        self.assertEqual((await self._set_limit("min_bet", 200))[0], 200)
+        status, body = await self._set_limit("max_bet", 100)
+        self.assertEqual((status, body["error"]), (400, "limits_conflict"))
+
+    async def test_personal_limits_are_listed_for_global_admin_only(self):
+        status, body = await self._set_limit("max_open_bets", 3, "user", PLAYER)
+        self.assertEqual(status, 200, body)
+        status, body = await self._call("GET", "/limits", GLOBAL_ADMIN)
+        self.assertEqual(status, 200, body)
+        entry = next(u for u in body["user_overrides"] if u["user_id"] == PLAYER)
+        self.assertEqual(entry["username"], "panel_player")
+        self.assertEqual(entry["limits"], {"max_open_bets": 3})
+
+        status, body = await self._call("GET", "/limits", DIV2_ADMIN)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["user_overrides"], [])

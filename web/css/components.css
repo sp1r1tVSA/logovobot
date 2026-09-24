@@ -4843,6 +4843,8 @@ span.team-logo-fallback {
   white-space: nowrap;
 }
 .adm-row-side { font-weight: 700; white-space: nowrap; flex-shrink: 0; }
+/* Подсказка у лимита длиннее обычной подписи строки — переносим, а не обрезаем. */
+.adm-limit-row .adm-row-main small { white-space: normal; }
 .adm-bet-row,
 .adm-bet-row:last-child {
   background: var(--bg-card);

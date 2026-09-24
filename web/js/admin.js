@@ -18,6 +18,7 @@ const TABS = [
   { id: 'markets', label: 'Рынки' },
   { id: 'bets', label: 'Купоны' },
   { id: 'players', label: 'Игроки', globalOnly: true },
+  { id: 'limits', label: 'Лимиты' },
   { id: 'risk', label: 'Риски' },
 ];
 
@@ -62,7 +63,39 @@ const LIMIT_LABELS = {
   market_exposure_limit: 'Риск на рынок',
   division_exposure_limit: 'Риск на дивизион',
   global_exposure_limit: 'Риск всей лиги',
+  max_express_events: 'Событий в экспрессе',
+  initial_balance: 'Стартовый баланс',
+  daily_bonus: 'Ежедневный бонус',
 };
+
+const LIMIT_HINTS = {
+  min_bet: 'Меньше поставить нельзя',
+  max_bet: 'Потолок суммы одного купона',
+  max_payout: 'Больше купон не выплатит',
+  max_daily_stake: 'Сумма ставок игрока за сутки',
+  max_daily_loss: 'Сколько игрок может проиграть за сутки',
+  max_open_exposure: 'Сумма нерассчитанных ставок игрока',
+  max_open_bets: 'Купонов в игре одновременно; экспресс — один купон',
+  max_express_events: 'Сколько событий можно собрать в экспресс',
+  market_exposure_limit: 'Возможная выплата по одному рынку',
+  division_exposure_limit: 'Возможная выплата по дивизиону',
+  global_exposure_limit: 'Возможная выплата по всей лиге',
+  initial_balance: 'Кошелёк нового игрока; уже созданные не меняются',
+  daily_bonus: 'Сумма ежедневного бонуса (кнопка в Mini App сейчас скрыта)',
+};
+
+// Порядок и группы на вкладке «Лимиты». Ключ, которого нет в
+// me.limit_keys для уровня, в группе просто не показывается.
+const LIMIT_GROUPS = [
+  { title: 'Ставки и купон', keys: ['min_bet', 'max_bet', 'max_open_bets', 'max_express_events'] },
+  { title: 'Игрок', keys: ['max_payout', 'max_daily_stake', 'max_daily_loss', 'max_open_exposure'] },
+  { title: 'Риск лиги', keys: ['market_exposure_limit', 'division_exposure_limit', 'global_exposure_limit'] },
+  { title: 'Экономика', keys: ['initial_balance', 'daily_bonus'] },
+];
+
+// Сумма в монетах или просто число (события, купоны).
+const COUNT_LIMITS = new Set(['max_open_bets', 'max_express_events']);
+const limitValue = (key, v) => (v == null || v === '' ? '—' : COUNT_LIMITS.has(key) ? fmt(v) : coins(v));
 
 const TX_LABELS = {
   admin_credit: 'Начисление админом',
@@ -258,6 +291,7 @@ export class AdminPanel {
       markets: () => this.loadMarkets(true),
       bets: () => this.loadBets(true),
       players: () => this.loadPlayers(),
+      limits: () => this.loadLimits(),
       risk: () => this.loadRisk(),
     };
     (loaders[this.tab] || loaders.dashboard)().catch(e => {
@@ -667,8 +701,8 @@ export class AdminPanel {
       ${userKeys.map(k => `
         <button class="adm-row adm-limit-row" data-adm-limit="user" data-scope-id="${p.user_id}" data-key="${k}"
                 data-current="${overrides[k] ?? ''}" data-effective="${eff[k] ?? ''}" data-owner="${esc(playerName(p))}">
-          <div class="adm-row-main">${esc(LIMIT_LABELS[k] || k)}</div>
-          <div class="adm-row-side ${overrides[k] != null ? 'gold' : ''}">${eff[k] == null ? '—' : fmt(eff[k])}${overrides[k] != null ? ' ✎' : ''}</div>
+          <div class="adm-row-main">${esc(LIMIT_LABELS[k] || k)}<small>${esc(LIMIT_HINTS[k] || '')}</small></div>
+          <div class="adm-row-side ${overrides[k] != null ? 'gold' : ''}">${limitValue(k, eff[k])}${overrides[k] != null ? ' ✎' : ''}</div>
         </button>`).join('')}
 
       <div class="adm-section-label">Движение монет</div>
@@ -733,7 +767,65 @@ export class AdminPanel {
     }
   }
 
-  // ─── Риски: остановка приёма, алерты, лимиты, журнал ───────────────────
+  // ─── Лимиты: вся лига, дивизионы, личные ───────────────────────────────
+
+  async loadLimits() {
+    const limits = await this.get(`${PANEL}/limits`);
+    await this.refreshMe();
+    if (this.tab !== 'limits') return;
+    this._limitsMeta = { defaults: limits.defaults || {}, bounds: limits.bounds || {} };
+
+    const me = this.me;
+    const canEdit = limits.can_edit;
+    const globalKeys = new Set((me.limit_keys && me.limit_keys.global) || []);
+    const divisionKeys = (me.limit_keys && me.limit_keys.division) || [];
+    const defaults = limits.defaults || {};
+    const divisions = limits.divisions.filter(d => !this.divisionId || d.id === this.divisionId);
+    const showGlobal = me.is_global && !this.divisionId;
+
+    const globalCards = showGlobal ? LIMIT_GROUPS.map(g => {
+      const keys = g.keys.filter(k => globalKeys.has(k));
+      if (!keys.length) return '';
+      return `
+        <div class="adm-card">
+          <div class="adm-card-title">${esc(g.title)}</div>
+          ${keys.map(k => this.limitRow('global', 0, k, limits.global_overrides[k], limits.system[k], 'вся лига', canEdit,
+            `${LIMIT_HINTS[k] || ''} · по умолчанию ${limitValue(k, defaults[k])}`)).join('')}
+        </div>`;
+    }).join('') : '';
+
+    const divisionCards = divisions.map(d => `
+      <div class="adm-card">
+        <div class="adm-card-title">${esc(d.name)}</div>
+        <div class="adm-muted adm-mb">Строже лиги, если задано. Без своего значения действует лимит лиги.</div>
+        ${divisionKeys.map(k => this.limitRow('division', d.id, k, d.overrides[k], d.effective[k], d.name, canEdit,
+          `${LIMIT_HINTS[k] || ''} · лига: ${limitValue(k, limits.system[k])}`)).join('')}
+      </div>`).join('');
+
+    const users = limits.user_overrides || [];
+    const personal = me.is_global ? `
+      <div class="adm-card">
+        <div class="adm-card-title">Личные лимиты игроков</div>
+        <div class="adm-muted adm-mb">Задаются в карточке игрока на вкладке «Игроки».</div>
+        ${users.length ? users.map(u => `
+          <button class="adm-row" data-adm-player="${u.user_id}">
+            <div class="adm-row-main">${esc(playerName(u))}
+              <small>${Object.entries(u.limits).map(([k, v]) => `${esc(LIMIT_LABELS[k] || k)}: ${limitValue(k, v)}`).join(' · ')}</small></div>
+            <div class="adm-row-side gold">${Object.keys(u.limits).length} ✎</div>
+          </button>`).join('') : '<div class="adm-muted">Ни у кого нет личных лимитов</div>'}
+      </div>` : '';
+
+    this.body().innerHTML = `
+      ${canEdit
+        ? '<div class="adm-muted adm-mb">Нажмите на строку, чтобы изменить значение. ✎ — значение задано вручную.</div>'
+        : '<div class="adm-banner">Менять лимиты может только главный админ.</div>'}
+      ${globalCards}
+      ${divisionCards}
+      ${personal}
+    `;
+  }
+
+  // ─── Риски: остановка приёма, алерты, журнал ──────────────────────────
 
   async loadRisk() {
     const alertParams = { status: 'active', limit: 30 };
@@ -741,8 +833,7 @@ export class AdminPanel {
     const auditParams = { limit: 30 };
     if (this.divisionId) auditParams.division_id = this.divisionId;
 
-    const [limits, alerts, audit] = await Promise.all([
-      this.get(`${PANEL}/limits`),
+    const [alerts, audit] = await Promise.all([
       this.get('/api/admin/risk/alerts', alertParams).catch(() => ({ alerts: [] })),
       this.get('/api/admin/audit-log', auditParams).catch(() => ({ audit_log: [] })),
     ]);
@@ -751,7 +842,6 @@ export class AdminPanel {
 
     const me = this.me;
     const pause = me.pause || {};
-    const divisions = limits.divisions.filter(d => !this.divisionId || d.id === this.divisionId);
 
     const pauseRows = [];
     if (me.is_global && !this.divisionId) {
@@ -761,9 +851,6 @@ export class AdminPanel {
       .filter(d => !this.divisionId || d.id === this.divisionId)
       .forEach(d => pauseRows.push(this.pauseRow(d.id, d.name, (pause.divisions || {})[String(d.id)])));
 
-    const globalKeys = (me.limit_keys && me.limit_keys.global) || [];
-    const divisionKeys = (me.limit_keys && me.limit_keys.division) || [];
-    const canEdit = limits.can_edit;
     // Алерт без дивизиона — это дивизион 1, как и на сервере: чужие алерты
     // админ дивизиона видит, но принять или закрыть их не может.
     const ownDivs = new Set(me.divisions.map(d => d.id));
@@ -787,18 +874,6 @@ export class AdminPanel {
               <button class="adm-btn small" data-adm-alert="resolve" data-alert-id="${a.id}">Решено</button>
             </div>` : ''}
           </div>`).join('') : '<div class="adm-muted">Активных алертов нет</div>'}
-      </div>
-
-      <div class="adm-card">
-        <div class="adm-card-title">Лимиты ${canEdit ? '' : '<small class="adm-muted">(менять может главный админ)</small>'}</div>
-        ${me.is_global && !this.divisionId ? `
-          <div class="adm-section-label">Вся лига</div>
-          ${globalKeys.map(k => this.limitRow('global', 0, k, limits.global_overrides[k], limits.system[k], 'вся лига', canEdit)).join('')}
-        ` : ''}
-        ${divisions.map(d => `
-          <div class="adm-section-label">${esc(d.name)}</div>
-          ${divisionKeys.map(k => this.limitRow('division', d.id, k, d.overrides[k], d.effective[k], d.name, canEdit)).join('')}
-        `).join('')}
       </div>
 
       <div class="adm-card">
@@ -826,12 +901,12 @@ export class AdminPanel {
       </div>`;
   }
 
-  limitRow(scopeType, scopeId, key, override, effective, owner, canEdit) {
+  limitRow(scopeType, scopeId, key, override, effective, owner, canEdit, hint = '') {
     return `
       <button class="adm-row adm-limit-row" ${canEdit ? '' : 'disabled'} data-adm-limit="${scopeType}" data-scope-id="${scopeId}"
               data-key="${key}" data-current="${override ?? ''}" data-effective="${effective ?? ''}" data-owner="${esc(owner)}">
-        <div class="adm-row-main">${esc(LIMIT_LABELS[key] || key)}</div>
-        <div class="adm-row-side ${override != null ? 'gold' : ''}">${effective == null ? '—' : fmt(effective)}${override != null ? ' ✎' : ''}</div>
+        <div class="adm-row-main">${esc(LIMIT_LABELS[key] || key)}${hint ? `<small>${hint}</small>` : ''}</div>
+        <div class="adm-row-side ${override != null ? 'gold' : ''}">${limitValue(key, effective)}${override != null ? ' ✎' : ''}</div>
       </button>`;
   }
 
@@ -866,20 +941,41 @@ export class AdminPanel {
     });
   }
 
-  askLimit(scopeType, scopeId, key, current, effective, owner) {
+  async askLimit(scopeType, scopeId, key, current, effective, owner) {
+    if (!this._limitsMeta) {
+      // Карточка игрока открыта раньше вкладки «Лимиты»: границы и умолчания берём с сервера.
+      try {
+        const l = await this.get(`${PANEL}/limits`);
+        this._limitsMeta = { defaults: l.defaults || {}, bounds: l.bounds || {} };
+      } catch (e) { /* без подсказок: сервер всё равно проверит значение */ }
+    }
+    const meta = this._limitsMeta || {};
+    const [low, high] = (meta.bounds || {})[key] || [1, 100000000];
+    const def = (meta.defaults || {})[key];
+    // Сброс глобального — к значению по умолчанию, дивизиона и игрока — к уровню выше.
+    const resetTo = scopeType === 'global'
+      ? `значение по умолчанию${def != null ? ` (${limitValue(key, def)})` : ''}`
+      : scopeType === 'division' ? 'лимит лиги' : 'лимит дивизиона или лиги';
     this.openForm({
       title: LIMIT_LABELS[key] || key,
-      desc: `${owner} · действует ${effective === '' ? '—' : fmt(effective)}${current !== '' ? ' (переопределено)' : ''}. Пустое поле — вернуть значение по умолчанию.`,
-      fields: [{ name: 'value', label: 'Новое значение', type: 'number', step: '1', min: '1', value: current }],
+      desc: `${owner} · сейчас ${limitValue(key, effective)}${current !== '' ? ' (задано вручную)' : ''}.`
+        + `${LIMIT_HINTS[key] ? ` ${LIMIT_HINTS[key]}.` : ''} Допустимо ${fmt(low)}–${fmt(high)}. Пустое поле — вернуть ${resetTo}.`,
+      fields: [{ name: 'value', label: 'Новое значение', type: 'number', step: '1', min: String(low), value: current }],
       submitLabel: 'Сохранить',
       onSubmit: async ({ value }) => {
         const trimmed = String(value).trim();
         const parsed = trimmed === '' ? null : parseInt(trimmed, 10);
-        if (parsed !== null && !(parsed > 0)) throw new Error('Лимит — целое число больше нуля.');
+        if (parsed !== null && !(parsed >= low && parsed <= high)) {
+          throw new Error(`Значение — целое число от ${fmt(low)} до ${fmt(high)}.`);
+        }
         await this.post(`${PANEL}/limits`, { scope_type: scopeType, scope_id: Number(scopeId), limit_key: key, value: parsed });
-        this.toast(parsed === null ? 'Лимит сброшен' : 'Лимит сохранён');
-        if (scopeType === 'user') await this.openPlayer(Number(scopeId));
-        else await this.loadRisk();
+        this.toast(parsed === null ? 'Значение сброшено' : 'Значение сохранено');
+        if (scopeType === 'user') {
+          await this.openPlayer(Number(scopeId));
+          if (this.tab === 'limits') this.loadLimits().catch(() => {});
+        } else {
+          await this.loadLimits();
+        }
       },
     });
   }

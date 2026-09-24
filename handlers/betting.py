@@ -19,10 +19,10 @@ from services.betting_engine import generate_round_markets
 
 logger = logging.getLogger(__name__)
 
-# Длина экспресса: от 2 до 5 событий (одно событие — ординар).
+# Длина экспресса: от 2 событий (одно событие — ординар) до потолка, который
+# главный админ задаёт в панели (database.get_max_express_events, по умолчанию 15).
 # Серверная проверка живёт в database.place_user_bet; здесь — UI-зеркало.
 MIN_EXPRESS_EVENTS = database.MIN_EXPRESS_EVENTS
-MAX_EXPRESS_EVENTS = database.MAX_EXPRESS_EVENTS
 
 # Human-readable outcome names
 OUTCOME_TITLES = {
@@ -322,12 +322,13 @@ async def cb_bet_add_outcome(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     slip = _get_slip(context)
 
-    # Экспресс — от 2 до 15 событий. Шестнадцатое событие в купон не добавляется;
+    # Экспресс — от 2 событий до потолка. Лишнее событие в купон не добавляется;
     # замена исхода в уже выбранном матче ограничением не является.
+    max_events = database.get_max_express_events()
     already_picked = any(s["match_id"] == match_id for s in slip)
-    if not already_picked and len(slip) >= MAX_EXPRESS_EVENTS:
+    if not already_picked and len(slip) >= max_events:
         await query.answer(
-            f"⚠️ В экспрессе может быть максимум {MAX_EXPRESS_EVENTS} событий!",
+            f"⚠️ В экспрессе может быть максимум {max_events} событий!",
             show_alert=True
         )
         return
@@ -457,11 +458,12 @@ async def cb_bet_place_amount(update: Update, context: ContextTypes.DEFAULT_TYPE
         await query.answer("❌ Купон пуст!", show_alert=True)
         return
 
-    # Один исход — ординар, от 2 до 15 — экспресс. Больше пятнадцати событий
-    # не принимается (дублирует серверную проверку place_user_bet).
-    if len(slip) > MAX_EXPRESS_EVENTS:
+    # Один исход — ординар, от 2 до потолка — экспресс. Лишние события
+    # не принимаются (дублирует серверную проверку place_user_bet).
+    max_events = database.get_max_express_events()
+    if len(slip) > max_events:
         await query.answer(
-            f"⚠️ В экспрессе может быть максимум {MAX_EXPRESS_EVENTS} событий!",
+            f"⚠️ В экспрессе может быть максимум {max_events} событий!",
             show_alert=True
         )
         return

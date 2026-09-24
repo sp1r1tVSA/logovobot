@@ -16,7 +16,7 @@ api/routes_admin_panel.py
   POST /api/admin/panel/players/{id}/adjust     начислить / списать      (глобальный админ)
   POST /api/admin/panel/players/{id}/ban        запретить ставки         (глобальный админ)
   POST /api/admin/panel/players/{id}/unban      снять запрет             (глобальный админ)
-  GET  /api/admin/panel/limits                  лимиты и переопределения
+  GET  /api/admin/panel/limits                  лимиты, настройки купона и экономики
   POST /api/admin/panel/limits                  задать / сбросить лимит  (глобальный админ)
   POST /api/admin/panel/pause                   экстренная остановка приёма
 
@@ -47,13 +47,23 @@ LIMIT_KEYS = (
     "max_open_exposure", "max_open_bets", "market_exposure_limit",
     "division_exposure_limit", "global_exposure_limit",
 )
+# Настройки купона и экономики: только глобальные, читает их database.
+SETTING_KEYS = ("max_express_events", "daily_bonus", "initial_balance")
 # Какие ключи вообще читаются на каждом уровне (см. BettingLimitsService):
 # переопределение другого ключа легло бы в таблицу и ничего бы не изменило.
 LIMIT_KEYS_BY_SCOPE = {
-    "global": LIMIT_KEYS,
+    "global": LIMIT_KEYS + SETTING_KEYS,
     "division": ("max_bet", "max_payout", "max_open_bets", "market_exposure_limit", "division_exposure_limit"),
     "user": ("max_bet", "max_payout", "max_daily_stake", "max_daily_loss", "max_open_exposure", "max_open_bets"),
 }
+# Допустимый диапазон значения; ключа нет — 1..100 000 000.
+LIMIT_BOUNDS = {
+    "max_express_events": (database.MIN_EXPRESS_EVENTS, 50),
+    "max_open_bets": (1, 1_000),
+    "daily_bonus": (1, 100_000),
+    "initial_balance": (1, 1_000_000),
+}
+DEFAULT_LIMIT_BOUNDS = (1, 100_000_000)
 MARKET_ACTIONS = {"suspend": "suspended", "resume": "open", "close": "closed"}
 BET_STATUSES = ("all", "pending", "won", "lost", "refunded", "cashed_out")
 
@@ -419,9 +429,19 @@ async def handle_panel_limits(request: web.Request) -> web.Response:
         divisions = database.get_divisions()
         if not scope.is_global:
             divisions = [d for d in divisions if d["id"] in scope.division_ids]
+        system = {
+            **BettingLimitsService.get_system_limits(),
+            "max_express_events": database.get_max_express_events(),
+            "daily_bonus": database.get_daily_bonus_amount(),
+            "initial_balance": database.get_initial_wallet_balance(),
+        }
         return {
-            "system": BettingLimitsService.get_system_limits(),
+            "system": system,
+            "defaults": BettingLimitsService.get_default_limits(),
+            "bounds": {k: LIMIT_BOUNDS.get(k, DEFAULT_LIMIT_BOUNDS) for k in LIMIT_KEYS + SETTING_KEYS},
             "global_overrides": database.get_risk_limit_overrides("global", 0),
+            # Личные лимиты — кошельки игроков, а их видит только главный админ.
+            "user_overrides": database.get_user_limit_overrides() if scope.is_global else [],
             "divisions": [
                 {
                     "id": d["id"],
@@ -458,7 +478,18 @@ async def handle_panel_set_limit(request: web.Request) -> web.Response:
         return _error(400, "invalid_limit_key", "Этот лимит на этом уровне не настраивается.")
 
     reset = data.get("value") is None
-    value = None if reset else body_int(data, "value", minimum=1, maximum=100_000_000)
+    low, high = LIMIT_BOUNDS.get(limit_key, DEFAULT_LIMIT_BOUNDS)
+    value = None if reset else body_int(data, "value", minimum=low, maximum=high)
+
+    # Мин. ставка выше макс. закрыла бы приём ставок целиком.
+    if value is not None and limit_key in ("min_bet", "max_bet"):
+        system = await asyncio.to_thread(BettingLimitsService.get_system_limits)
+        if limit_key == "min_bet" and value > system["max_bet"]:
+            return _error(400, "limits_conflict",
+                          f"Минимальная ставка не может быть больше максимальной ({system['max_bet']}).")
+        if limit_key == "max_bet" and value < system["min_bet"]:
+            return _error(400, "limits_conflict",
+                          f"Максимальная ставка не может быть меньше минимальной ({system['min_bet']}).")
 
     def apply() -> dict:
         overrides = database.get_risk_limit_overrides(scope_type, scope_id)
