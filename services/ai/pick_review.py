@@ -136,6 +136,7 @@ def summarize(rows: list[dict]) -> dict:
         "selection_id": r["selection_id"],
         "match_id": r["match_id"],
         "division_name": r.get("division_name"),
+        "cup_label": r.get("cup_label"),
         "round_number": r.get("round_number"),
         "team1": r.get("team1"),
         "team2": r.get("team2"),

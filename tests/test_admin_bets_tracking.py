@@ -381,6 +381,26 @@ class TestAdminBetsTracking(unittest.IsolatedAsyncioTestCase):
         feed_items = next(b for b in feed if b["id"] == bet_id)["items"]
         self.assertEqual([_event_label(it) for it in feed_items], labels)
 
+        # Mini App пишет `cup_label` вместо дивизиона: у кубка он sentinel 0,
+        # и без метки панель показывала «Дивизион 1» на любом кубковом матче.
+        cup_labels = ["Кубок Д3", "Общий кубок"]
+        self.assertEqual([it["cup_label"] for it in database.get_bet_by_id(bet_id)["items"]], cup_labels)
+        self.assertEqual([it["cup_label"] for it in feed_items], cup_labels)
+        self.assertEqual(
+            database.get_match_cup_labels(match_ids + [self.match_id]),
+            dict(zip(match_ids, cup_labels)),
+        )
+        with database.transaction() as conn:
+            for mid in match_ids:
+                conn.execute(
+                    "INSERT INTO markets (match_id, market_key, market_name, status, created_at) "
+                    "VALUES (?, 'series_score', 'Счёт серии', 'open', ?)",
+                    (mid, "2026-09-25 01:20:00"),
+                )
+        board, _total = database.get_admin_market_board(None, "active", "", 100, 0)
+        on_board = {m["match_id"]: m["cup_label"] for m in board if m["match_id"] in match_ids}
+        self.assertEqual(on_board, dict(zip(match_ids, cup_labels)))
+
     async def test_notify_super_admins_new_bet(self):
         """Отправка нотификации подписанному супер-админу."""
         database.set_live_bet_alerts_enabled(self.super_id, True)

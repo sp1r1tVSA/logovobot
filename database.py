@@ -8572,6 +8572,60 @@ def get_match_cup_scope(match_id: int) -> dict | None:
     }
 
 
+def cup_label_of(stage_key=None, division_id=None, code=None, name=None) -> str:
+    """«Кубок Д3» / «Общий кубок» по уже выбранным полям этапа — без запроса.
+
+    `division_id` — `cup_stages.division_id`; если он пуст, дивизион берётся из
+    ключа этапа («1/8@D3»). Кубковые матчи лежат на sentinel-дивизионе 0, так
+    что `matches.division_id` для подписи не годится.
+    """
+    div = division_id or split_cup_stage_key(stage_key or "")[1]
+    if not div:
+        return "Общий кубок"
+    code = (code or "").strip().upper()
+    if code.startswith("DIV_") and code[4:].isdigit():
+        return f"Кубок Д{int(code[4:])}"
+    return f"Кубок {name or f'Д{div}'}"
+
+
+def get_match_cup_labels(match_ids) -> dict[int, str]:
+    """Подписи кубков для пачки матчей: {match_id: «Кубок Д3» | «Общий кубок»}.
+
+    В ответ попадают только кубковые матчи — у лиги подпись даёт дивизион.
+    """
+    ids = sorted({int(i) for i in match_ids or [] if i is not None})
+    if not ids:
+        return {}
+    labels: dict[int, str] = {}
+    with transaction() as conn:
+        cursor = conn.cursor()
+        for start in range(0, len(ids), 500):
+            chunk = ids[start:start + 500]
+            cursor.execute(
+                "SELECT m.id, m.tournament_type, m.cup_series_id, st.stage AS stage_key, "
+                "st.division_id, cd.code, cd.name "
+                "FROM matches m "
+                "LEFT JOIN cup_series cs ON cs.id = m.cup_series_id "
+                "LEFT JOIN cup_stages st ON st.id = COALESCE(m.stage_id, cs.stage_id) "
+                "LEFT JOIN divisions cd ON cd.id = st.division_id "
+                f"WHERE m.id IN ({','.join('?' * len(chunk))})",
+                chunk,
+            )
+            for row in cursor.fetchall():
+                if match_is_cup(row):
+                    labels[row["id"]] = cup_label_of(row["stage_key"], row["division_id"],
+                                                     row["code"], row["name"])
+    return labels
+
+
+def _attach_cup_labels(rows: list[dict], key: str = "match_id") -> list[dict]:
+    """Проставляет `cup_label` кубковым строкам (Mini App пишет его вместо дивизиона)."""
+    labels = get_match_cup_labels(r.get(key) for r in rows)
+    for r in rows:
+        r["cup_label"] = labels.get(r.get(key))
+    return rows
+
+
 # ─── Темы кубков: «Кубок» в форуме группы, закреплённая сетка ─────────────────
 # Живут в `cup_topics` (миграция 023): строка на (сезон, кубок). `topic_type` —
 # «cup» у общего кубка и «cup_div_<id>» у кубка дивизиона, `message_thread_id` —
@@ -12537,6 +12591,15 @@ def get_user_bets(user_id: int, status: str | None = None, limit: int = 20, offs
         return bets
 
 
+def _label_bet_items(items: list[dict]) -> list[dict]:
+    """`cup_label` для ног купона — из колонок этапа, что уже выбраны."""
+    for it in items:
+        it["cup_label"] = (cup_label_of(it.get("cup_stage_key"), it.get("cup_division_id"),
+                                        it.get("cup_division_code"), it.get("cup_division_name"))
+                           if it.get("tournament_type") == "cup" else None)
+    return items
+
+
 def get_all_bets(
     status: str | None = None,
     division_id: int | None = None,
@@ -12648,7 +12711,7 @@ def get_all_bets(
                 """,
                 (b["id"],)
             )
-            b["items"] = [dict(item) for item in cursor.fetchall()]
+            b["items"] = _label_bet_items([dict(item) for item in cursor.fetchall()])
 
         return bets, total_count
 
@@ -12768,7 +12831,7 @@ def get_bet_by_id(bet_id: int) -> dict | None:
                 """,
             (bet_id,)
         )
-        bet["items"] = [dict(item) for item in cursor.fetchall()]
+        bet["items"] = _label_bet_items([dict(item) for item in cursor.fetchall()])
         return bet
 
 
@@ -14006,6 +14069,7 @@ def get_admin_market_board(division_ids: list[int] | None = None, state: str = "
         mk["selections"] = selections_by_market.get(mk["id"], [])
         mk["open_bets"] = sum(s["open_bets"] for s in mk["selections"])
         markets_by_match.setdefault(mk["match_id"], []).append(mk)
+    _attach_cup_labels(page)
     for m in page:
         m["markets"] = markets_by_match.get(m["match_id"], [])
     return page, total
@@ -14129,7 +14193,7 @@ def get_ai_pick_log(division_ids: list[int] | None = None) -> tuple[list[dict], 
             WHERE m.status NOT IN (?, ?, 'cancelled'){scope_sql}
         """, list(_AI_LOG_PLAYED) + div_params)
         pending = cursor.fetchone()[0]
-    return played, pending
+    return _attach_cup_labels(played), pending
 
 
 def get_tournament_standings(division_id: int | None = None, season_id: int | None = None) -> list[dict]:

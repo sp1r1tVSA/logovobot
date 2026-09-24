@@ -223,6 +223,7 @@ def collect_candidates(
                 "match_id": m["match_id"],
                 "division_id": m.get("division_id"),
                 "division_name": m.get("division_name"),
+                "cup_label": m.get("cup_label"),
                 "round_number": m.get("round_number"),
                 "cup_series_id": m.get("cup_series_id"),
                 "tournament_type": m.get("tournament_type"),
@@ -502,6 +503,7 @@ def _pick_row(match: dict, option: dict, probability: float, reason: str) -> dic
         "match_id": match["match_id"],
         "division_id": match.get("division_id"),
         "division_name": match.get("division_name"),
+        "cup_label": match.get("cup_label"),
         "round_number": match.get("round_number"),
         # Для сборщика купона: исход ставится по market_id + selection_id, а игры
         # одной кубковой серии нельзя класть в один экспресс.

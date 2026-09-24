@@ -13,6 +13,15 @@ import { escapeHtml, matchRoundLabel } from './ui.js';
 
 const PANEL = '/api/admin/panel';
 
+// Где играется матч: у кубка — сам кубок («Кубок Д3», «Общий кубок»), а не
+// дивизион. Кубковые матчи лежат на sentinel-дивизионе 0, и division_name у них
+// пуст или случаен; `cup_label` сервер ставит по этапу кубка.
+function matchPlace(m) {
+  if (m.cup_label) return m.cup_label;
+  if (m.tournament_type === 'cup') return 'Кубок';
+  return m.division_name || 'Дивизион 1';
+}
+
 const TABS = [
   { id: 'dashboard', label: 'Сводка' },
   { id: 'markets', label: 'Рынки' },
@@ -473,7 +482,7 @@ export class AdminPanel {
         <div class="adm-match-head">
           <div>
             <div class="adm-match-teams">${esc(match.team1_name || '—')} — ${esc(match.team2_name || '—')} ${score}</div>
-            <small class="adm-muted">#${match.match_id} · ${esc(match.division_name || 'Дивизион 1')} · ${esc(matchRoundLabel(match))}${when ? ` · ${esc(when)}` : ''}${match.live_minute ? ` · ${esc(match.live_minute)}'` : ''}</small>
+            <small class="adm-muted">#${match.match_id} · ${esc(matchPlace(match))} · ${esc(matchRoundLabel(match))}${when ? ` · ${esc(when)}` : ''}${match.live_minute ? ` · ${esc(match.live_minute)}'` : ''}</small>
           </div>
           ${statusBadge(match.match_status)}
         </div>
@@ -627,7 +636,7 @@ export class AdminPanel {
           <b>${esc(it.team1_name)} — ${esc(it.team2_name)}</b>
           ${statusBadge(it.status)}
         </div>
-        <small class="adm-muted">${esc(it.division_name || 'Дивизион 1')} · ${esc(matchRoundLabel({ ...it, round_number: it.tour }))}
+        <small class="adm-muted">${esc(matchPlace(it))} · ${esc(matchRoundLabel({ ...it, round_number: it.tour }))}
           ${it.player1_score != null ? ` · счёт ${esc(it.player1_score)}:${esc(it.player2_score)}` : ''}</small>
         <div class="adm-leg-pick">${esc(it.market_name || 'Исход')}: <b>${esc(it.selection_name || it.outcome_type)}</b> <span class="adm-sel-odd">${odd(it.odd)}</span></div>
       </div>`).join('');
@@ -894,7 +903,7 @@ export class AdminPanel {
         <div class="adm-row-main">
           <b>${esc(p.selection_name)}</b> <span class="adm-muted">× ${odd(p.odds)}</span>
           ${p.value > 0 && f.res.source === 'ai' ? '<span class="adm-badge adm-st-open">ценный</span>' : ''}
-          <small>${esc(p.team1)} — ${esc(p.team2)} · ${esc(p.division_name || 'Дивизион 1')} · ${esc(matchRoundLabel(p))}</small>
+          <small>${esc(p.team1)} — ${esc(p.team2)} · ${esc(matchPlace(p))} · ${esc(matchRoundLabel(p))}</small>
           ${p.reason ? `<small class="adm-pick-reason">${esc(p.reason)}</small>` : ''}
         </div>
         <div class="adm-row-side adm-pick-prob ${probClass(p.probability)}">${Number(p.probability).toFixed(0)}%
@@ -976,7 +985,7 @@ export class AdminPanel {
         <div class="adm-row adm-pick-row">
           <div class="adm-row-main">
             <b>${esc(p.selection_name)}</b> <span class="adm-muted">× ${odd(p.odds)}</span>
-            <small>${esc(p.team1)} — ${esc(p.team2)} · ${esc(p.division_name || 'Дивизион 1')} · ${esc(matchRoundLabel(p))}</small>
+            <small>${esc(p.team1)} — ${esc(p.team2)} · ${esc(matchPlace(p))} · ${esc(matchRoundLabel(p))}</small>
           </div>
           <div class="adm-row-side adm-pick-prob">${Number(p.probability).toFixed(0)}%</div>
         </div>`).join('') : `<div class="adm-muted">${empty}</div>`}
@@ -1003,7 +1012,7 @@ export class AdminPanel {
       team1_name: p.team1,
       team2_name: p.team2,
       tour: p.round_number || 1,
-      meta: `${p.division_name || 'Дивизион 1'} · ${matchRoundLabel(p)}`,
+      meta: `${matchPlace(p)} · ${matchRoundLabel(p)}`,
     }));
     this.hooks.toCoupon(slip, mode);
   }
@@ -1149,7 +1158,7 @@ export class AdminPanel {
             <div class="adm-row-main">
               <b>${esc(p.selection_name)}</b> <span class="adm-muted">× ${odd(p.odds)}</span>
               <span class="adm-badge adm-st-${p.won ? 'won' : 'lost'}">${p.won ? 'зашёл' : 'не зашёл'}</span>
-              <small>${esc(p.team1)} ${esc(p.score)} ${esc(p.team2)} · ${esc(p.division_name || 'Дивизион 1')} · ${esc(matchRoundLabel(p))}</small>
+              <small>${esc(p.team1)} ${esc(p.score)} ${esc(p.team2)} · ${esc(matchPlace(p))} · ${esc(matchRoundLabel(p))}</small>
             </div>
             <div class="adm-row-side adm-pick-prob">${Number(p.probability).toFixed(0)}%
               <small>линия ${Number(p.line_probability).toFixed(0)}%</small></div>
