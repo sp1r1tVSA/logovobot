@@ -19,6 +19,8 @@ files), 59 SQLite tables, and ten completed development phases documented in the
 - Python 3.11+, `python-telegram-bot[job-queue]` v21 (fully async)
 - SQLite in WAL mode — single file, no ORM, hand-written SQL
 - Google Gemini via **raw REST over `aiohttp`** — there is no Google SDK dependency
+- OpenRouter (free `:free` models, OpenAI-style REST via stdlib `urllib`) — only for the
+  «ИИ-прогноз» tab of the Logovo.bet panel
 - Pillow + `pillow-heif` + `opencv-python-headless` + `numpy` for graphics and image prep
 - `aiohttp` also serves the Mini App API; deployed as a single `worker: python main.py`
 
@@ -103,7 +105,7 @@ never prevents the bot itself from starting. Preserve that isolation.
 | `club_registry.py` | Canonical club names, aliases, and the tiered name resolver. Imports `config` only |
 | `conftest.py` | Test bootstrap: per-module temp SQLite DB and the autouse fixtures (see Commands) |
 | `handlers/` (11 modules) | Telegram entrypoints — `admin`, `cabinet`, `drafts`, `betting`, `chat`, `topic_management`, `text_commands`, `squad_ai`, `tracker`, `base` |
-| `services/ai/` | `ai_recognizer.py` (match-result Gemini Vision OCR), `squad_recognizer.py` (lineup OCR), `ai_chat.py` («Темшик» persona), `persona_base.py` |
+| `services/ai/` | `ai_recognizer.py` (match-result Gemini Vision OCR), `squad_recognizer.py` (lineup OCR), `ai_chat.py` («Темшик» persona), `persona_base.py`, `bet_picks.py` (panel «ИИ-прогноз» via OpenRouter) |
 | `services/graphics/` (9 modules) | Pillow renderers: standings tables, club/player/FC cards, club schedules, round digests, top-stats, `division_theme.py`, `player_photos.py` |
 | `services/sports/` + `sports_provider.py` | External live-football provider adapters plus `cache`, `circuit`, `limiter`, `freshness`, `health`, `odds_sync` |
 | `services/` (root, ~39 modules) | Betting/market engines, ELO, Poisson, risk, settlement, gamification, seasons, `topic_cache.py` |
@@ -408,6 +410,20 @@ out `ACH_LOGIN_3` on day one — keep the two engines off each other's columns. 
 must clear `last_active_date` along with the login counters, or the first login of the new
 season continues the old streak.
 
+**AI picks** — the «ИИ-прогноз» tab of the Logovo.bet panel (`GET /api/admin/panel/picks`,
+`services/ai/bet_picks.py`) lists open selections ranked by estimated chance of winning, most
+confident first. Candidates are active selections of `open` markets on unplayed matches, odds
+≥ 1.15, at most 12 matches per request taken round-robin across divisions (nearest rounds
+first); each carries the line probability (1/odds with the match's 1X2 overround removed —
+the engine applies one margin to every market of a match) plus table, form and the ensemble
+prediction. A free OpenRouter model (`OPENROUTER_API_KEY`, `OPENROUTER_MODEL` — a
+comma-separated list tried in order, since `:free` models vanish and hit quotas) ranks them;
+every id it returns is checked against the candidates, probabilities are clamped to 1–99 and
+at most two picks per match are kept. No key, a failed call or an empty answer falls back to
+the line probability and says so (`source: "line"`). Results are cached 30 min (5 min for the
+fallback), a manual refresh recomputes at most every 2 min, and only one model call runs at a
+time — the free tier's daily quota is small. It is advisory only: nothing in betting reads it.
+
 ---
 
 ## Roles and access
@@ -458,7 +474,7 @@ any internal error must reject, never allow.
 ## Secrets
 
 `.env` is gitignored and must stay that way. `TELEGRAM_BOT_TOKEN`, `GEMINI_API_KEY`,
-`GEMINI_CHAT_API_KEY`, and `SPORTS_API_KEY` must never appear in code, logs, tests, or
+`GEMINI_CHAT_API_KEY`, `SPORTS_API_KEY` and `OPENROUTER_API_KEY` must never appear in code, logs, tests, or
 commits. `.env.example` documents the variable names only. `league.db` contains real user
 data and is likewise never committed.
 

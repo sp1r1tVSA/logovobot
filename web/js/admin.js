@@ -16,6 +16,7 @@ const PANEL = '/api/admin/panel';
 const TABS = [
   { id: 'dashboard', label: 'Сводка' },
   { id: 'markets', label: 'Рынки' },
+  { id: 'picks', label: 'ИИ-прогноз' },
   { id: 'bets', label: 'Купоны' },
   { id: 'players', label: 'Игроки', globalOnly: true },
   { id: 'limits', label: 'Лимиты' },
@@ -287,6 +288,7 @@ export class AdminPanel {
     const loaders = {
       dashboard: () => this.loadDashboard(),
       markets: () => this.loadMarkets(true),
+      picks: () => this.loadPicks(false),
       bets: () => this.loadBets(true),
       players: () => this.loadPlayers(),
       limits: () => this.loadLimits(),
@@ -765,6 +767,52 @@ export class AdminPanel {
     }
   }
 
+  // ─── ИИ-прогноз: исходы по шансу захода ─────────────────────────────────
+
+  async loadPicks(refresh = false) {
+    const body = this.body();
+    body.innerHTML = `<div class="adm-empty">${refresh ? 'Пересчитываем прогноз…' : 'ИИ анализирует линию…'}<br>
+      <small class="adm-muted">Бесплатной модели может понадобиться до минуты.</small></div>`;
+    const res = await this.get(`${PANEL}/picks`, { ...this.scopeParams(), ...(refresh ? { refresh: 1 } : {}) });
+    if (this.tab !== 'picks' || this.body() !== body) return;
+
+    const picks = res.picks || [];
+    const note = res.source === 'ai'
+      ? `Модель: <b>${esc(res.model || '')}</b>`
+      : res.error === 'no_key'
+        ? 'OPENROUTER_API_KEY не задан — показан расчёт по коэффициентам линии.'
+        : 'ИИ сейчас недоступен — показан расчёт по коэффициентам линии.';
+    const probClass = p => (p >= 75 ? 'green' : p >= 55 ? 'gold' : '');
+
+    body.innerHTML = `
+      <div class="adm-card">
+        <div class="adm-pause-row">
+          <div class="adm-row-main">
+            <b>От самого уверенного к самому неуверенному</b>
+            <small class="adm-picks-note ${res.source === 'ai' ? '' : 'gold'}">${note}<br>
+              ${fmt(res.matches_considered)} матчей · обновлено ${esc(shortTime(res.generated_at))}${res.cached ? ' · из кэша' : ''}</small>
+          </div>
+          <button class="adm-btn small" data-adm-picks-refresh>Пересчитать</button>
+        </div>
+      </div>
+      <div class="adm-card">
+        ${picks.length ? picks.map((p, i) => `
+          <div class="adm-row adm-pick-row">
+            <div class="adm-pick-rank">${i + 1}</div>
+            <div class="adm-row-main">
+              <b>${esc(p.selection_name)}</b> <span class="adm-muted">× ${odd(p.odds)}</span>
+              <small>${esc(p.team1)} — ${esc(p.team2)} · ${esc(p.division_name || 'Дивизион 1')} · ${esc(matchRoundLabel(p))}</small>
+              ${p.reason ? `<small class="adm-pick-reason">${esc(p.reason)}</small>` : ''}
+            </div>
+            <div class="adm-row-side adm-pick-prob ${probClass(p.probability)}">${Number(p.probability).toFixed(0)}%
+              <small title="Вероятность по линии, маржа снята">линия ${Number(p.line_probability).toFixed(0)}%</small></div>
+          </div>`).join('') : '<div class="adm-muted">Открытых рынков для прогноза нет</div>'}
+      </div>
+      <div class="adm-muted adm-mb">Прогноз — аналитическая оценка, а не гарантия. Исходы с кэфом ниже 1.15 не учитываются,
+        не больше двух исходов на матч.</div>
+    `;
+  }
+
   // ─── Лимиты: вся лига, дивизионы, личные ───────────────────────────────
 
   async loadLimits() {
@@ -1131,6 +1179,8 @@ export class AdminPanel {
       api.cache.clear();
       this.refreshMe();
       this.loadTab();
+    } else if (t('[data-adm-picks-refresh]')) {
+      this.loadPicks(true).catch(err => this.toast(err.message, true));
     } else if ((el = t('[data-adm-mstate]'))) {
       this.markets.state = el.dataset.admMstate;
       this.loadTab();

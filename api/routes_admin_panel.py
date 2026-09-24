@@ -19,6 +19,7 @@ api/routes_admin_panel.py
   GET  /api/admin/panel/limits                  лимиты, настройки купона и экономики
   POST /api/admin/panel/limits                  задать / сбросить лимит  (глобальный админ)
   POST /api/admin/panel/pause                   экстренная остановка приёма
+  GET  /api/admin/panel/picks                   ИИ-прогноз: исходы по шансу захода
 
 Права: панель открыта только тем, кто указан в ADMIN_IDS (is_super_admin), —
 ни роль admin в базе, ни назначение админом дивизиона доступа к ней не дают.
@@ -38,6 +39,7 @@ import database
 from api.auth import get_authenticated_user
 from api.params import body_int, path_int, query_int
 from handlers.base import is_super_admin
+from services.ai import bet_picks
 from services.betting_limits import BettingLimitsService
 
 logger = logging.getLogger(__name__)
@@ -537,6 +539,24 @@ async def handle_panel_pause(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "pause": state})
 
 
+async def handle_panel_picks(request: web.Request) -> web.Response:
+    """GET /api/admin/panel/picks?division_id=&refresh=1
+
+    Открытые исходы по оценке шанса захода, от самого уверенного. Считает
+    бесплатная модель OpenRouter, без неё — вероятность по линии. Ответ
+    кэшируется, refresh пересчитывает не чаще раза в пару минут.
+    """
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    division_ids = _narrow(scope, request)
+    if isinstance(division_ids, web.Response):
+        return division_ids
+    refresh = request.query.get("refresh") in ("1", "true")
+    picks = await asyncio.to_thread(bet_picks.get_picks, division_ids, refresh)
+    return web.json_response({"status": "ok", **picks})
+
+
 def register_admin_panel_routes(app: web.Application) -> None:
     r = app.router
     r.add_get("/api/admin/panel/me", handle_panel_me)
@@ -555,3 +575,4 @@ def register_admin_panel_routes(app: web.Application) -> None:
     r.add_get("/api/admin/panel/limits", handle_panel_limits)
     r.add_post("/api/admin/panel/limits", handle_panel_set_limit)
     r.add_post("/api/admin/panel/pause", handle_panel_pause)
+    r.add_get("/api/admin/panel/picks", handle_panel_picks)

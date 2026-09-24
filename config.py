@@ -35,6 +35,16 @@ def _get_gemini_chat_keys() -> list[str]:
 GEMINI_CHAT_API_KEYS = _get_gemini_chat_keys()
 GEMINI_CHAT_API_KEY = GEMINI_CHAT_API_KEYS[0] if GEMINI_CHAT_API_KEYS else ""
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
+# ─── OpenRouter: ИИ-прогноз во вкладке панели Logovo.bet ──────────────────────
+# Без ключа вкладка работает по вероятностям линии. OPENROUTER_MODEL — одна
+# модель или несколько через запятую: бесплатные (:free) пропадают и упираются
+# в квоту, тогда пробуется следующая.
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL = os.getenv(
+    "OPENROUTER_MODEL",
+    "deepseek/deepseek-chat-v3-0324:free,meta-llama/llama-3.3-70b-instruct:free",
+).strip()
+OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
 # ─── Phase 8: Real Sports Provider Configuration ──────────────────────────────
 SPORTS_PROVIDER = os.getenv("SPORTS_PROVIDER", "auto").strip()
 SPORTS_API_KEY = os.getenv("SPORTS_API_KEY", os.getenv("APISPORTS_KEY", "")).strip()

@@ -4759,6 +4759,18 @@ span.team-logo-fallback {
   white-space: nowrap;
 }
 .adm-row-side { font-weight: 700; white-space: nowrap; flex-shrink: 0; }
+/* ИИ-прогноз: место, шанс захода справа, пояснение модели переносится. */
+.adm-pick-row { cursor: default; align-items: flex-start; }
+.adm-pick-rank {
+  flex-shrink: 0;
+  width: 22px;
+  font-weight: 700;
+  color: var(--text-muted);
+}
+.adm-pick-prob { text-align: right; font-size: 1rem; }
+.adm-pick-prob small { display: block; font-size: 0.7rem; font-weight: 400; color: var(--text-muted); }
+.adm-row-main small.adm-pick-reason,
+.adm-row-main small.adm-picks-note { white-space: normal; }
 /* Подсказка у лимита длиннее обычной подписи строки — переносим, а не обрезаем. */
 .adm-limit-row .adm-row-main small { white-space: normal; }
 .adm-bet-row,
