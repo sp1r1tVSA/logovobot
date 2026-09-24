@@ -540,11 +540,12 @@ async def handle_panel_pause(request: web.Request) -> web.Response:
 
 
 async def handle_panel_picks(request: web.Request) -> web.Response:
-    """GET /api/admin/panel/picks?division_id=&refresh=1
+    """GET /api/admin/panel/picks?division_id=&markets=total,btts&odds_min=&odds_max=&refresh=1
 
     Открытые исходы по оценке шанса захода, от самого уверенного. Считает
     бесплатная модель OpenRouter, без неё — вероятность по линии. Ответ
-    кэшируется, refresh пересчитывает не чаще раза в пару минут.
+    кэшируется, refresh пересчитывает не чаще раза в пару минут. markets —
+    группы рынков (bet_picks.MARKET_GROUPS), odds_min / odds_max — диапазон кэфа.
     """
     scope = _resolve_scope(request)
     if isinstance(scope, web.Response):
@@ -552,8 +553,16 @@ async def handle_panel_picks(request: web.Request) -> web.Response:
     division_ids = _narrow(scope, request)
     if isinstance(division_ids, web.Response):
         return division_ids
+    try:
+        filters = bet_picks.normalize_filters(
+            request.query.get("markets"),
+            request.query.get("odds_min"),
+            request.query.get("odds_max"),
+        )
+    except ValueError:
+        return _error(400, "bad_filters", "Неверный фильтр: группа рынка или диапазон кэфа.")
     refresh = request.query.get("refresh") in ("1", "true")
-    picks = await asyncio.to_thread(bet_picks.get_picks, division_ids, refresh)
+    picks = await asyncio.to_thread(bet_picks.get_picks, division_ids, refresh, filters)
     return web.json_response({"status": "ok", **picks})
 
 

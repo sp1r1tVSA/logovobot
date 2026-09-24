@@ -30,6 +30,9 @@ const MARKET_STATES = [
   { id: 'all', label: 'Все' },
 ];
 
+// Мин. шанс во вкладке «ИИ-прогноз»: 0 — без ограничения.
+const PICK_CHANCES = [0, 50, 60, 70, 80];
+
 const BET_STATUSES = [
   { id: 'all', label: 'Все' },
   { id: 'pending', label: 'В игре' },
@@ -176,6 +179,8 @@ export class AdminPanel {
     this.markets = { state: 'active', q: '', offset: 0, items: [], total: 0 };
     this.bets = { status: 'pending', userId: null, offset: 0, items: [], total: 0 };
     this.players = { q: '', sort: 'balance', banned: false, items: [] };
+    // markets/oddsMin/oddsMax — применённые (уходят в запрос), draft — ещё не применённые.
+    this.picks = { markets: [], oddsMin: '', oddsMax: '', draft: null, minChance: 0, valueOnly: false, res: null };
 
     this._searchTimer = null;
     this._modalSubmit = null;
@@ -770,19 +775,28 @@ export class AdminPanel {
   // ─── ИИ-прогноз: исходы по шансу захода ─────────────────────────────────
 
   async loadPicks(refresh = false) {
+    const f = this.picks;
     const body = this.body();
     body.innerHTML = `<div class="adm-empty">${refresh ? 'Пересчитываем прогноз…' : 'ИИ анализирует линию…'}<br>
       <small class="adm-muted">Бесплатной модели может понадобиться до минуты.</small></div>`;
-    const res = await this.get(`${PANEL}/picks`, { ...this.scopeParams(), ...(refresh ? { refresh: 1 } : {}) });
+    const res = await this.get(`${PANEL}/picks`, {
+      ...this.scopeParams(),
+      markets: f.markets.join(','),
+      odds_min: f.oddsMin,
+      odds_max: f.oddsMax,
+      ...(refresh ? { refresh: 1 } : {}),
+    });
     if (this.tab !== 'picks' || this.body() !== body) return;
+    f.res = res;
+    f.draft = { markets: [...f.markets], oddsMin: f.oddsMin, oddsMax: f.oddsMax };
 
-    const picks = res.picks || [];
     const note = res.source === 'ai'
       ? `Модель: <b>${esc(res.model || '')}</b>`
       : res.error === 'no_key'
         ? 'OPENROUTER_API_KEY не задан — показан расчёт по коэффициентам линии.'
         : 'ИИ сейчас недоступен — показан расчёт по коэффициентам линии.';
-    const probClass = p => (p >= 75 ? 'green' : p >= 55 ? 'gold' : '');
+    const groups = res.market_groups || [];
+    const pill = (attr, active, label) => `<button class="category-pill ${active ? 'active' : ''}" ${attr}>${label}</button>`;
 
     body.innerHTML = `
       <div class="adm-card">
@@ -790,27 +804,95 @@ export class AdminPanel {
           <div class="adm-row-main">
             <b>От самого уверенного к самому неуверенному</b>
             <small class="adm-picks-note ${res.source === 'ai' ? '' : 'gold'}">${note}<br>
-              ${fmt(res.matches_considered)} матчей · обновлено ${esc(shortTime(res.generated_at))}${res.cached ? ' · из кэша' : ''}</small>
+              ${fmt(res.matches_considered)} матчей · ${fmt(res.options_considered)} исходов ·
+              обновлено ${esc(shortTime(res.generated_at))}${res.cached ? ' · из кэша' : ''}</small>
           </div>
           <button class="adm-btn small" data-adm-picks-refresh>Пересчитать</button>
         </div>
       </div>
       <div class="adm-card">
-        ${picks.length ? picks.map((p, i) => `
-          <div class="adm-row adm-pick-row">
-            <div class="adm-pick-rank">${i + 1}</div>
-            <div class="adm-row-main">
-              <b>${esc(p.selection_name)}</b> <span class="adm-muted">× ${odd(p.odds)}</span>
-              <small>${esc(p.team1)} — ${esc(p.team2)} · ${esc(p.division_name || 'Дивизион 1')} · ${esc(matchRoundLabel(p))}</small>
-              ${p.reason ? `<small class="adm-pick-reason">${esc(p.reason)}</small>` : ''}
-            </div>
-            <div class="adm-row-side adm-pick-prob ${probClass(p.probability)}">${Number(p.probability).toFixed(0)}%
-              <small title="Вероятность по линии, маржа снята">линия ${Number(p.line_probability).toFixed(0)}%</small></div>
-          </div>`).join('') : '<div class="adm-muted">Открытых рынков для прогноза нет</div>'}
+        <div class="adm-card-title">Что разбирает ИИ</div>
+        <div class="category-pills adm-picks-pills" id="adm-picks-markets">
+          ${pill('data-adm-pmarket=""', !f.draft.markets.length, 'Все рынки')}
+          ${groups.map(g => pill(`data-adm-pmarket="${esc(g.id)}"`, f.draft.markets.includes(g.id), esc(g.label))).join('')}
+        </div>
+        <div class="adm-picks-odds">
+          <span class="adm-muted">Кэф</span>
+          <input class="adm-input" id="adm-picks-odds-min" type="number" inputmode="decimal" step="0.05" min="1"
+                 placeholder="от" value="${esc(f.draft.oddsMin)}">
+          <span class="adm-muted">—</span>
+          <input class="adm-input" id="adm-picks-odds-max" type="number" inputmode="decimal" step="0.05" min="1"
+                 placeholder="до" value="${esc(f.draft.oddsMax)}">
+          <button class="adm-btn small primary" data-adm-picks-apply disabled>Применить</button>
+        </div>
+        <small class="adm-muted adm-picks-hint">Рынок и кэф меняют набор исходов для модели — это новый запрос к ИИ.</small>
+        <div class="adm-card-title adm-mt">Показывать</div>
+        <div class="category-pills adm-picks-pills" id="adm-picks-view">
+          ${PICK_CHANCES.map(c => pill(`data-adm-pchance="${c}"`, f.minChance === c, c ? `от ${c}%` : 'Любой шанс')).join('')}
+          ${pill('data-adm-pvalue', f.valueOnly, 'Только ценные')}
+        </div>
       </div>
+      <div class="adm-card" id="adm-picks-list"></div>
       <div class="adm-muted adm-mb">Прогноз — аналитическая оценка, а не гарантия. Исходы с кэфом ниже 1.15 не учитываются,
-        не больше двух исходов на матч.</div>
+        не больше двух исходов на матч. «Ценный» — шанс по оценке ИИ выше, чем заложено в кэф.</div>
     `;
+    this.renderPicksList();
+  }
+
+  renderPicksList() {
+    const list = this.root.querySelector('#adm-picks-list');
+    const f = this.picks;
+    if (!list || !f.res) return;
+    const all = f.res.picks || [];
+    const picks = all.filter(p => p.probability >= f.minChance && (!f.valueOnly || p.value > 0));
+    const probClass = p => (p >= 75 ? 'green' : p >= 55 ? 'gold' : '');
+    let empty = 'Открытых рынков для прогноза нет';
+    if (all.length) {
+      empty = f.valueOnly && f.res.source !== 'ai'
+        ? 'Ценные исходы ищет только ИИ: по линии шанс всегда равен заложенному в кэф.'
+        : 'Под фильтры ничего не подошло';
+    } else if (f.markets.length || f.oddsMin || f.oddsMax) {
+      empty = 'Под выбранные рынки и кэф открытых исходов нет';
+    }
+    list.innerHTML = picks.length ? picks.map((p, i) => `
+      <div class="adm-row adm-pick-row">
+        <div class="adm-pick-rank">${i + 1}</div>
+        <div class="adm-row-main">
+          <b>${esc(p.selection_name)}</b> <span class="adm-muted">× ${odd(p.odds)}</span>
+          ${p.value > 0 && f.res.source === 'ai' ? '<span class="adm-badge adm-st-open">ценный</span>' : ''}
+          <small>${esc(p.team1)} — ${esc(p.team2)} · ${esc(p.division_name || 'Дивизион 1')} · ${esc(matchRoundLabel(p))}</small>
+          ${p.reason ? `<small class="adm-pick-reason">${esc(p.reason)}</small>` : ''}
+        </div>
+        <div class="adm-row-side adm-pick-prob ${probClass(p.probability)}">${Number(p.probability).toFixed(0)}%
+          <small title="Вероятность по линии, маржа снята">линия ${Number(p.line_probability).toFixed(0)}%</small></div>
+      </div>`).join('') : `<div class="adm-muted">${empty}</div>`;
+  }
+
+  picksDraftChanged() {
+    const { draft, markets, oddsMin, oddsMax } = this.picks;
+    return draft.markets.slice().sort().join(',') !== markets.slice().sort().join(',')
+      || String(draft.oddsMin) !== String(oddsMin) || String(draft.oddsMax) !== String(oddsMax);
+  }
+
+  syncPicksApply() {
+    const btn = this.root.querySelector('[data-adm-picks-apply]');
+    if (btn) btn.disabled = !this.picksDraftChanged();
+  }
+
+  applyPicksFilters() {
+    const { draft } = this.picks;
+    const lo = draft.oddsMin === '' ? null : Number(draft.oddsMin);
+    const hi = draft.oddsMax === '' ? null : Number(draft.oddsMax);
+    if ((lo !== null && !(lo >= 1)) || (hi !== null && !(hi >= 1))) {
+      this.toast('Кэф — число от 1', true);
+      return;
+    }
+    if (lo !== null && hi !== null && lo > hi) {
+      this.toast('«От» больше, чем «до»', true);
+      return;
+    }
+    Object.assign(this.picks, { markets: [...draft.markets], oddsMin: draft.oddsMin, oddsMax: draft.oddsMax });
+    this.loadPicks(false).catch(err => this.toast(err.message, true));
   }
 
   // ─── Лимиты: вся лига, дивизионы, личные ───────────────────────────────
@@ -1141,6 +1223,10 @@ export class AdminPanel {
         this.debounce(() => { this.markets.q = e.target.value.trim(); this.reloadList('markets'); });
       } else if (e.target.id === 'adm-player-search') {
         this.debounce(() => { this.players.q = e.target.value.trim(); this.reloadList('players'); });
+      } else if (e.target.id === 'adm-picks-odds-min' || e.target.id === 'adm-picks-odds-max') {
+        const key = e.target.id === 'adm-picks-odds-min' ? 'oddsMin' : 'oddsMax';
+        this.picks.draft[key] = e.target.value.trim().replace(',', '.');
+        this.syncPicksApply();
       }
     });
   }
@@ -1181,6 +1267,27 @@ export class AdminPanel {
       this.loadTab();
     } else if (t('[data-adm-picks-refresh]')) {
       this.loadPicks(true).catch(err => this.toast(err.message, true));
+    } else if ((el = t('[data-adm-pmarket]'))) {
+      const draft = this.picks.draft;
+      const id = el.dataset.admPmarket;
+      if (!id) draft.markets = [];
+      else if (draft.markets.includes(id)) draft.markets = draft.markets.filter(x => x !== id);
+      else draft.markets = [...draft.markets, id];
+      this.root.querySelectorAll('[data-adm-pmarket]').forEach(b => {
+        const bid = b.dataset.admPmarket;
+        b.classList.toggle('active', bid ? draft.markets.includes(bid) : !draft.markets.length);
+      });
+      this.syncPicksApply();
+    } else if (t('[data-adm-picks-apply]')) {
+      this.applyPicksFilters();
+    } else if ((el = t('[data-adm-pchance]'))) {
+      this.picks.minChance = Number(el.dataset.admPchance);
+      this.root.querySelectorAll('[data-adm-pchance]').forEach(b => b.classList.toggle('active', b === el));
+      this.renderPicksList();
+    } else if ((el = t('[data-adm-pvalue]'))) {
+      this.picks.valueOnly = !this.picks.valueOnly;
+      el.classList.toggle('active', this.picks.valueOnly);
+      this.renderPicksList();
     } else if ((el = t('[data-adm-mstate]'))) {
       this.markets.state = el.dataset.admMstate;
       this.loadTab();

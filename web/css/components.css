@@ -4771,6 +4771,24 @@ span.team-logo-fallback {
 .adm-pick-prob small { display: block; font-size: 0.7rem; font-weight: 400; color: var(--text-muted); }
 .adm-row-main small.adm-pick-reason,
 .adm-row-main small.adm-picks-note { white-space: normal; }
+/* Фильтры прогноза: чипы переносятся, а не прокручиваются — их немного. */
+.adm-picks-pills { flex-wrap: wrap; overflow: visible; padding-bottom: 0; margin-bottom: 10px; }
+.adm-picks-odds { display: flex; align-items: center; gap: 8px; }
+.adm-picks-odds .adm-input {
+  flex: 1 1 0;
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 16px; /* меньше 16px — iOS увеличивает страницу при фокусе */
+  outline: none;
+  box-sizing: border-box;
+}
+.adm-picks-odds .adm-input:focus { border-color: var(--accent-gold); }
+.adm-picks-hint { display: block; margin-top: 6px; }
 /* Подсказка у лимита длиннее обычной подписи строки — переносим, а не обрезаем. */
 .adm-limit-row .adm-row-main small { white-space: normal; }
 .adm-bet-row,

@@ -413,13 +413,21 @@ season continues the old streak.
 **AI picks** — the «ИИ-прогноз» tab of the Logovo.bet panel (`GET /api/admin/panel/picks`,
 `services/ai/bet_picks.py`) lists open selections ranked by estimated chance of winning, most
 confident first. Candidates are active selections of `open` markets on unplayed matches, odds
-≥ 1.15, at most 12 matches per request taken round-robin across divisions (nearest rounds
-first); each carries the line probability (1/odds with the match's 1X2 overround removed —
+≥ 1.15, taken round-robin across divisions (nearest rounds first) up to 24 matches and a
+budget of 240 options per request — unfiltered that is about 12 matches; each carries the line probability (1/odds with the match's 1X2 overround removed —
 the engine applies one margin to every market of a match) plus table, form and the ensemble
 prediction. A free OpenRouter model (`OPENROUTER_API_KEY`, `OPENROUTER_MODEL` — a
 comma-separated list tried in order, since `:free` models vanish and hit quotas) ranks them;
 every id it returns is checked against the candidates, probabilities are clamped to 1–99 and
-at most two picks per match are kept. No key, a failed call or an empty answer falls back to
+at most two picks per match are kept, up to 30 picks. The default model list is
+`qwen/qwen3.8-27b:free,google/gemma-4-31b-it:free`; Qwen reasons, so the request asks for
+low, excluded reasoning with a large `max_tokens`, and `<think>` blocks are stripped anyway.
+Filters split by cost: market group (`markets=result,total,…`) and odds range
+(`odds_min`/`odds_max`, 1–100, else 400 `bad_filters`) change the candidate set, so each
+combination is its own cache entry and a new model call — the panel applies them with an
+explicit «Применить»; min chance and «только ценные» (AI probability above the line's) filter
+the returned list client-side. The market filter never changes the line probability: the
+overround still comes from the match's 1X2. No key, a failed call or an empty answer falls back to
 the line probability and says so (`source: "line"`). Results are cached 30 min (5 min for the
 fallback), a manual refresh recomputes at most every 2 min, and only one model call runs at a
 time — the free tier's daily quota is small. It is advisory only: nothing in betting reads it.

@@ -6,9 +6,10 @@ services/ai/bet_picks.py
 
 Как считается:
   1. Кандидаты — активные исходы открытых рынков у несыгранных матчей
-     (database.get_admin_market_board). Берётся не больше MAX_MATCHES матчей,
-     по кругу из дивизионов, ближайшие туры первыми, — бесплатной модели
-     нельзя отдать всю линию лиги разом.
+     (database.get_admin_market_board). Берётся не больше MAX_MATCHES матчей
+     и MAX_OPTIONS исходов, по кругу из дивизионов, ближайшие туры первыми, —
+     бесплатной модели нельзя отдать всю линию лиги разом. Фильтры по группе
+     рынка и диапазону кэфа (normalize_filters) сужают кандидатов ещё до модели.
   2. К каждому матчу — таблица, форма и прогноз ансамбля; к каждому исходу —
      вероятность по линии (1/кэф без маржи букмекера).
   3. Бесплатная модель OpenRouter (OPENROUTER_API_KEY / OPENROUTER_MODEL)
@@ -37,9 +38,12 @@ from time_utils import now_msk_str
 
 logger = logging.getLogger(__name__)
 
-MAX_MATCHES = 12          # матчей в одном запросе к модели
+MAX_MATCHES = 24          # матчей в одном запросе к модели
+MAX_OPTIONS = 240         # исходов в одном запросе: без фильтров это ~12 матчей,
+                          # с фильтром по рынку или кэфу в тот же объём влезает больше
 MIN_ODDS = 1.15           # исходы ниже — «заход» без смысла, в прогноз не идут
-PICKS_LIMIT = 20          # сколько исходов показывать
+MAX_FILTER_ODDS = 100.0
+PICKS_LIMIT = 30          # сколько исходов отдавать; мин. шанс и value фильтрует клиент
 MAX_PER_MATCH = 2         # не больше исходов одного матча — иначе список из одного матча
 CACHE_TTL_SECONDS = 30 * 60
 FALLBACK_TTL_SECONDS = 5 * 60   # фолбэк держим недолго — модель скоро спросим снова
@@ -54,8 +58,59 @@ _cache_lock = threading.Lock()
 _call_lock = threading.Lock()
 
 
-def _cache_key(division_ids: list[int] | None) -> tuple:
-    return tuple(sorted(division_ids)) if division_ids else ("all",)
+# Группы рынков для фильтра вкладки: id → (подпись, market_key движка).
+MARKET_GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "result": ("Исход", ("1x2",)),
+    "double": ("Двойной шанс", ("double_chance",)),
+    "total": ("Тотал", ("total_goals",)),
+    "itotal": ("Инд. тотал", ("individual_total_1", "individual_total_2")),
+    "handicap": ("Фора", ("handicap",)),
+    "btts": ("Обе забьют", ("btts",)),
+}
+_GROUP_BY_MARKET_KEY = {key: gid for gid, (_label, keys) in MARKET_GROUPS.items() for key in keys}
+
+
+def market_groups() -> list[dict]:
+    return [{"id": gid, "label": label} for gid, (label, _keys) in MARKET_GROUPS.items()]
+
+
+def normalize_filters(markets=None, odds_min=None, odds_max=None) -> dict:
+    """Фильтры, влияющие на то, что видит модель. ValueError — на мусор во вводе.
+
+    Мин. шанс и «только ценные» сюда не входят: они не меняют разбор модели
+    и фильтруются в клиенте по уже полученному списку, без нового запроса.
+    """
+    if isinstance(markets, str):
+        markets = markets.split(",")
+    groups = sorted({str(g).strip() for g in (markets or []) if str(g).strip()})
+    unknown = [g for g in groups if g not in MARKET_GROUPS]
+    if unknown:
+        raise ValueError(f"unknown market group: {', '.join(unknown)}")
+    if len(groups) == len(MARKET_GROUPS):
+        groups = []  # все группы — то же, что без фильтра, и тот же кэш
+
+    def _odds(value):
+        if value is None or str(value).strip() == "":
+            return None
+        num = float(str(value).replace(",", "."))
+        if not (1.0 <= num <= MAX_FILTER_ODDS):
+            raise ValueError("odds out of range")
+        return round(num, 2)
+
+    lo, hi = _odds(odds_min), _odds(odds_max)
+    if lo is not None and hi is not None and lo > hi:
+        raise ValueError("odds_min is greater than odds_max")
+    return {"markets": groups, "odds_min": lo, "odds_max": hi}
+
+
+def _cache_key(division_ids: list[int] | None, filters: dict | None = None) -> tuple:
+    f = filters or {}
+    return (
+        tuple(sorted(division_ids)) if division_ids else ("all",),
+        tuple(f.get("markets") or ()),
+        f.get("odds_min"),
+        f.get("odds_max"),
+    )
 
 
 def clear_cache() -> None:
@@ -82,25 +137,43 @@ def _match_overround(markets: list[dict]) -> float:
     return 1.0
 
 
-def _round_robin(matches: list[dict], limit: int) -> list[dict]:
-    """Ближайшие туры каждого дивизиона, по одному матчу из дивизиона за круг."""
+def _round_robin(matches: list[dict], limit: int, max_options: int | None = None) -> list[dict]:
+    """Ближайшие туры каждого дивизиона, по одному матчу из дивизиона за круг.
+
+    Останавливается и по числу матчей, и по суммарному числу исходов:
+    первый матч берётся всегда, следующий — только если влезает в бюджет.
+    """
     by_div: dict[int, list[dict]] = {}
     for m in sorted(matches, key=lambda x: (x.get("round_number") or 0, x["match_id"])):
         by_div.setdefault(m["division_id"], []).append(m)
     queues = [by_div[k] for k in sorted(by_div)]
     picked: list[dict] = []
+    options = 0
     while queues and len(picked) < limit:
         for q in list(queues):
             if len(picked) >= limit:
                 break
+            size = len(q[0]["options"])
+            if max_options is not None and picked and options + size > max_options:
+                return picked
             picked.append(q.pop(0))
+            options += size
             if not q:
                 queues.remove(q)
     return picked
 
 
-def collect_candidates(division_ids: list[int] | None, max_matches: int = MAX_MATCHES) -> list[dict]:
+def collect_candidates(
+    division_ids: list[int] | None,
+    max_matches: int = MAX_MATCHES,
+    filters: dict | None = None,
+    max_options: int | None = MAX_OPTIONS,
+) -> list[dict]:
     """Матчи с открытыми рынками и исходами, пригодными для прогноза."""
+    f = filters or {}
+    allowed_groups = set(f.get("markets") or ())
+    odds_lo = max(MIN_ODDS, f.get("odds_min") or 0)
+    odds_hi = f.get("odds_max")
     board, _total = database.get_admin_market_board(division_ids, "active", "", 1000, 0)
     matches = []
     for m in board:
@@ -110,13 +183,19 @@ def collect_candidates(division_ids: list[int] | None, max_matches: int = MAX_MA
         overround = _match_overround(markets)
         options = []
         for mk in markets:
+            group = _GROUP_BY_MARKET_KEY.get(mk.get("market_key"), "other")
+            if allowed_groups and group not in allowed_groups:
+                continue
             for s in mk.get("selections", []):
                 odds = s.get("odds_value")
-                if s.get("status") != "active" or not odds or odds < MIN_ODDS:
+                if s.get("status") != "active" or not odds or odds < odds_lo:
+                    continue
+                if odds_hi is not None and odds > odds_hi:
                     continue
                 options.append({
                     "selection_id": s["id"],
                     "market_key": mk.get("market_key"),
+                    "market_group": group,
                     "market_name": mk.get("market_name"),
                     "selection_key": s.get("selection_key"),
                     "selection_name": s.get("selection_name"),
@@ -133,7 +212,7 @@ def collect_candidates(division_ids: list[int] | None, max_matches: int = MAX_MA
                 "team2": m.get("team2_name"),
                 "options": options,
             })
-    return _round_robin(matches, max_matches)
+    return _round_robin(matches, max_matches, max_options)
 
 
 def _team_context(standings: list[dict], form_map: dict, team: str) -> dict:
@@ -301,6 +380,7 @@ def _pick_row(match: dict, option: dict, probability: float, reason: str) -> dic
         "team1": match["team1"],
         "team2": match["team2"],
         "market_name": option["market_name"],
+        "market_group": option.get("market_group"),
         "selection_name": option["selection_name"],
         "odds": option["odds"],
         "probability": round(probability, 1),
@@ -358,8 +438,9 @@ def rank_line_picks(matches: list[dict]) -> list[dict]:
 
 # ─── Точка входа ────────────────────────────────────────────────────────────
 
-def build_picks(division_ids: list[int] | None) -> dict:
-    matches = collect_candidates(division_ids)
+def build_picks(division_ids: list[int] | None, filters: dict | None = None) -> dict:
+    filters = filters or normalize_filters()
+    matches = collect_candidates(division_ids, filters=filters)
     result = {
         "source": "line",
         "model": None,
@@ -367,6 +448,9 @@ def build_picks(division_ids: list[int] | None) -> dict:
         "error": None,
         "generated_at": now_msk_str(),
         "matches_considered": len(matches),
+        "options_considered": sum(len(m["options"]) for m in matches),
+        "filters": filters,
+        "market_groups": market_groups(),
         "picks": [],
     }
     if not matches:
@@ -386,9 +470,13 @@ def build_picks(division_ids: list[int] | None) -> dict:
     return result
 
 
-def get_picks(division_ids: list[int] | None, refresh: bool = False) -> dict:
-    """Прогноз из кэша или свежий. Одновременно в модель идёт только один запрос."""
-    key = _cache_key(division_ids)
+def get_picks(division_ids: list[int] | None, refresh: bool = False, filters: dict | None = None) -> dict:
+    """Прогноз из кэша или свежий. Одновременно в модель идёт только один запрос.
+
+    Кэш свой у каждого сочетания дивизиона и фильтров (normalize_filters).
+    """
+    filters = filters or normalize_filters()
+    key = _cache_key(division_ids, filters)
     now = time.monotonic()
     with _cache_lock:
         cached = _cache.get(key)
@@ -405,7 +493,7 @@ def get_picks(division_ids: list[int] | None, refresh: bool = False) -> dict:
             cached = _cache.get(key)
         if cached and cached[0] > now:
             return {**cached[1], "cached": True, "refresh_in": REFRESH_MIN_SECONDS}
-        data = build_picks(division_ids)
+        data = build_picks(division_ids, filters)
         with _cache_lock:
             _cache[key] = (time.monotonic(), data)
     return {**data, "cached": False, "refresh_in": REFRESH_MIN_SECONDS}

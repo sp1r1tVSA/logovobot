@@ -126,6 +126,57 @@ class TestCandidates(PicksCase):
         self.assertEqual({m["division_id"] for m in matches}, {1, 2})
         self.assertIn(972101, [m["match_id"] for m in matches])  # ближайший тур дивизиона 1
 
+    def test_options_budget_limits_the_matches(self):
+        # 5 исходов на матч: бюджет 7 пускает только первый, 10 — два.
+        self.assertEqual(len(bet_picks.collect_candidates([1, 2], max_options=7)), 1)
+        self.assertEqual(len(bet_picks.collect_candidates([1, 2], max_options=10)), 2)
+        # Первый матч берётся, даже если он один больше бюджета.
+        self.assertEqual(len(bet_picks.collect_candidates([1, 2], max_options=1)), 1)
+
+
+class TestFilters(PicksCase):
+    def test_market_group_filter(self):
+        f = bet_picks.normalize_filters("total")
+        for m in bet_picks.collect_candidates([1, 2], filters=f):
+            self.assertEqual({o["market_group"] for o in m["options"]}, {"total"})
+
+    def test_odds_range_filter(self):
+        f = bet_picks.normalize_filters(None, "1.5", "3,5")
+        odds = [o["odds"] for m in bet_picks.collect_candidates([1, 2], filters=f) for o in m["options"]]
+        self.assertTrue(odds)
+        self.assertTrue(all(1.5 <= x <= 3.5 for x in odds))
+        self.assertIn(1.81, odds)
+        self.assertNotIn(4.48, odds)
+
+    def test_line_probability_ignores_the_market_filter(self):
+        # Маржа снимается по 1X2, даже если 1X2 отфильтрован.
+        full = {o["selection_id"]: o["line_probability"]
+                for m in bet_picks.collect_candidates([1]) for o in m["options"]}
+        for m in bet_picks.collect_candidates([1], filters=bet_picks.normalize_filters("total")):
+            for o in m["options"]:
+                self.assertEqual(o["line_probability"], full[o["selection_id"]])
+
+    def test_normalize_rejects_garbage(self):
+        for args in (("casino",), (None, "abc"), (None, "0.5"), (None, "nan"), (None, "3", "2")):
+            with self.assertRaises(ValueError, msg=args):
+                bet_picks.normalize_filters(*args)
+
+    def test_all_groups_equal_no_filter(self):
+        f = bet_picks.normalize_filters(",".join(bet_picks.MARKET_GROUPS))
+        self.assertEqual(f, bet_picks.normalize_filters())
+
+    def test_filters_are_cached_separately_and_echoed(self):
+        with patch.object(bet_picks, "build_picks", wraps=bet_picks.build_picks) as build:
+            plain = bet_picks.get_picks([1, 2])
+            totals = bet_picks.get_picks([1, 2], filters=bet_picks.normalize_filters("total"))
+            again = bet_picks.get_picks([1, 2], filters=bet_picks.normalize_filters(["total"]))
+        self.assertEqual(build.call_count, 2)
+        self.assertTrue(again["cached"])
+        self.assertEqual(plain["filters"]["markets"], [])
+        self.assertEqual(totals["filters"]["markets"], ["total"])
+        self.assertEqual({p["market_group"] for p in totals["picks"]}, {"total"})
+        self.assertEqual([g["id"] for g in totals["market_groups"]], list(bet_picks.MARKET_GROUPS))
+
 
 class TestRanking(PicksCase):
     def setUp(self):
@@ -337,6 +388,20 @@ class TestPicksRoute(AioHTTPTestCase):
         self.assertEqual({p["division_id"] for p in body["picks"]}, {1})
         probs = [p["probability"] for p in body["picks"]]
         self.assertEqual(probs, sorted(probs, reverse=True))
+
+    async def test_filters_reach_the_ranking(self):
+        status, body = await self._get("?markets=result&odds_min=2&odds_max=5", PICKS_ADMIN)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["picks"])
+        for p in body["picks"]:
+            self.assertEqual(p["market_group"], "result")
+            self.assertTrue(2 <= p["odds"] <= 5)
+
+    async def test_bad_filters_are_rejected(self):
+        for query in ("?markets=poker", "?odds_min=abc", "?odds_min=4&odds_max=2"):
+            status, body = await self._get(query, PICKS_ADMIN)
+            self.assertEqual(status, 400, query)
+            self.assertEqual(body["error"], "bad_filters")
 
 
 if __name__ == "__main__":
