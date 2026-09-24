@@ -19,7 +19,7 @@ files), 59 SQLite tables, and ten completed development phases documented in the
 - Python 3.11+, `python-telegram-bot[job-queue]` v21 (fully async)
 - SQLite in WAL mode — single file, no ORM, hand-written SQL
 - Google Gemini via **raw REST over `aiohttp`** — there is no Google SDK dependency
-- OpenRouter (free `:free` models, OpenAI-style REST via stdlib `urllib`) — only for the
+- OpenRouter (free models, OpenAI-style REST via stdlib `urllib`) — only for the
   «ИИ-прогноз» tab of the Logovo.bet panel
 - Pillow + `pillow-heif` + `opencv-python-headless` + `numpy` for graphics and image prep
 - `aiohttp` also serves the Mini App API; deployed as a single `worker: python main.py`
@@ -417,10 +417,12 @@ confident first. Candidates are active selections of `open` markets on unplayed 
 budget of 240 options per request — unfiltered that is about 12 matches; each carries the line probability (1/odds with the match's 1X2 overround removed —
 the engine applies one margin to every market of a match) plus table, form and the ensemble
 prediction. A free OpenRouter model (`OPENROUTER_API_KEY`, `OPENROUTER_MODEL` — a
-comma-separated list tried in order, since `:free` models vanish and hit quotas) ranks them;
+comma-separated list tried in order, since free models vanish and hit quotas) ranks them;
 every id it returns is checked against the candidates, probabilities are clamped to 1–99 and
 at most two picks per match are kept, up to 30 picks. The default model list is
-`qwen/qwen3.8-27b:free,google/gemma-4-31b-it:free`; Qwen reasons, so the request asks for
+`qwen/qwen3.8-27b:free,stealth/space-bunny-alpha,google/gemma-4-31b-it:free` — the middle
+one is an anonymous free "stealth" model with no `:free` suffix, likely to disappear once its
+alpha ends, and the fallback moves on when it does; Qwen reasons, so the request asks for
 low, excluded reasoning with a large `max_tokens`, and `<think>` blocks are stripped anyway.
 Filters split by cost: market group (`markets=result,total,…`) and odds range
 (`odds_min`/`odds_max`, 1–100, else 400 `bad_filters`) change the candidate set, so each
