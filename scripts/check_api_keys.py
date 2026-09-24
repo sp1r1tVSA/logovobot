@@ -33,16 +33,21 @@ def _mask_key(key: str) -> str:
 
 
 def check_gemini_key(api_key: str, model: str = "gemini-3.1-flash-lite") -> tuple[bool, str]:
+    from services.ai.ai_recognizer import _get_gemini_opener
+    opener = _get_gemini_opener()
     base_url = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
     url = f"{base_url}/v1beta/models/{model}:generateContent?key={api_key}"
     payload = json.dumps({"contents": [{"parts": [{"text": "Reply 1"}]}]}).encode("utf-8")
     req = urllib.request.Request(
         url,
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+        },
     )
     try:
-        with urllib.request.urlopen(req, timeout=10) as resp:
+        with opener.open(req, timeout=10) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             if data.get("candidates"):
                 return True, "200 OK (лимит доступен)"
