@@ -401,6 +401,15 @@ class DivisionCupSeedTest(_FreshDbCase):
         with self.assertRaises(ValueError):
             seeder.parse_pairs_file(bad)
 
+    def test_owner_draw_covers_every_division(self):
+        """Жеребьёвка 1/8 в DIVISION_PAIRS: 8 пар, все 16 клубов дивизиона, без правок резолвером."""
+        for code in ("DIV_1", "DIV_2", "DIV_3", "DIV_4", "DIV_5"):
+            with self.subTest(code=code):
+                raw = seeder.DIVISION_PAIRS[code]["1/8"]
+                canonical = seeder.validate_pairs("1/8", division_code=code)
+                self.assertEqual(canonical, raw)
+                self.assertEqual({c for p in canonical for c in p}, set(config.DIVISION_CLUBS[code]))
+
     def test_dry_run_then_apply_by_code(self):
         path = self._pairs_file(self._d3_lines())
         d3 = self.div["DIV_3"]
