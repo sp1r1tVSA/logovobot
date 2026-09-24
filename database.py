@@ -11097,58 +11097,6 @@ def deduct_coins(user_id: int, amount: int, tx_type: str = "bet_placed", ref_id:
         return True
 
 
-def claim_daily_bonus(user_id: int, bonus_amount: int | None = None) -> tuple[bool, int, str]:
-    """
-    Claim daily bonus once every 24 hours.
-    Returns (success, new_balance_or_remaining_hours, message).
-    Without bonus_amount the amount set in the panel is paid (get_daily_bonus_amount).
-    """
-    if bonus_amount is None:
-        bonus_amount = get_daily_bonus_amount()
-    from config import is_global_lockdown_enabled
-    if is_global_lockdown_enabled():
-        from handlers.base import is_global_admin
-        if not is_global_admin(user_id):
-            return False, 0, "Logovo.bet временно закрыт для пользователей."
-
-    with transaction() as conn:
-        cursor = conn.cursor()
-        wallet = get_or_create_wallet(user_id)
-        last_bonus = wallet.get("last_bonus_at")
-        now = now_msk()
-
-        if last_bonus:
-            try:
-                last_time = datetime.datetime.fromisoformat(last_bonus)
-                diff = now - last_time
-                if diff.total_seconds() < 86400:
-                    remaining_secs = 86400 - diff.total_seconds()
-                    rem_hours = int(remaining_secs // 3600)
-                    rem_mins = int((remaining_secs % 3600) // 60)
-                    return False, rem_hours, f"⏳ Бонус уже получен! Следующий через {rem_hours}ч {rem_mins}м."
-            except Exception:
-                pass
-
-        now_str = now.isoformat()
-        cursor.execute(
-            """
-            UPDATE user_wallets 
-            SET balance = balance + ?, last_bonus_at = ?, updated_at = datetime('now', '+3 hours') 
-            WHERE user_id = ?
-            """,
-            (bonus_amount, now_str, user_id)
-        )
-        cursor.execute(
-            "INSERT INTO coin_transactions (user_id, amount, transaction_type, balance_after, created_at)"
-            " VALUES (?, ?, 'daily_bonus', (SELECT balance FROM user_wallets WHERE user_id = ?), datetime('now', '+3 hours'))",
-            (user_id, bonus_amount, user_id)
-        )
-        cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
-        row = cursor.fetchone()
-        new_bal = row["balance"] if row else 0
-        return True, new_bal, f"🎁 Ежедневный бонус получен: <b>+{bonus_amount} 🪙</b>!"
-
-
 def get_top_bettors(limit: int = 10) -> list[dict]:
     """Leaderboard of top bettors by net coin balance and win rate."""
     with transaction() as conn:
@@ -11424,8 +11372,6 @@ _MAX_PAYOUT: int = 10_000
 # значение по умолчанию: главный админ меняет его в панели (get_max_express_events).
 MIN_EXPRESS_EVENTS: int = 2
 MAX_EXPRESS_EVENTS: int = 15
-# Ежедневный бонус, пока в панели не задан другой (get_daily_bonus_amount).
-DAILY_BONUS_AMOUNT: int = 250
 _bet_placement_lock = threading.RLock()
 
 # Canonical Outcome Aliases & Cross-Schema Mapping
@@ -13224,10 +13170,6 @@ def get_global_limit(limit_key: str, default: int) -> int:
 
 def get_max_express_events() -> int:
     return get_global_limit("max_express_events", MAX_EXPRESS_EVENTS)
-
-
-def get_daily_bonus_amount() -> int:
-    return get_global_limit("daily_bonus", DAILY_BONUS_AMOUNT)
 
 
 def get_initial_wallet_balance() -> int:

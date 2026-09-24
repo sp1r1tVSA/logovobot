@@ -390,7 +390,7 @@ reported per item. `tests/test_open_bets_limit.py` covers it.
 
 **Gamification** pays out of the same closed economy, so rewards are calibrated against it
 rather than against round numbers: the starting wallet is `INITIAL_WALLET_BALANCE` (677 🪙),
-the daily bonus 250 🪙, the payout ceiling 10 000 🪙. `seed_gamification_catalog` therefore
+the payout ceiling 10 000 🪙 — there is no daily bonus. `seed_gamification_catalog` therefore
 bands `reward_coins` by rarity — common ≈150–300, rare ≈500–1 000, epic ≈1 000–1 500,
 legendary ≈2 500–5 000, with `reward_xp` at roughly half, because each level gained already
 pays 500 🪙 via `add_user_xp`. `tests/test_gamification.py::TestAchievementsCatalog` enforces

@@ -147,10 +147,9 @@ class InFlightRegistry:
         self._active.clear()
 
 
-# Чувствительные мутации: деньги, бонусы, награды. Для них действует
+# Чувствительные мутации: деньги и награды. Для них действует
 # минимальный интервал и защита от параллельного дубля.
 SENSITIVE_PATH_MARKERS = (
-    "/api/bonus/claim",
     "/api/predictions",
     "/api/bets",
     "/api/achievements/claim",

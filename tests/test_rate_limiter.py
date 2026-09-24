@@ -223,10 +223,10 @@ class TestRateLimitMiddlewareOnRealApp(_RateLimitAppTestCase):
         config.API_SENSITIVE_MIN_INTERVAL = 30.0
         headers = {"X-Telegram-Init-Data": build_init_data(user_id=881005)}
 
-        first = await self.client.request("POST", "/api/bonus/claim", headers=headers)
+        first = await self.client.request("POST", "/api/achievements/claim", headers=headers)
         self.assertNotEqual(first.status, 429)
 
-        second = await self.client.request("POST", "/api/bonus/claim", headers=headers)
+        second = await self.client.request("POST", "/api/achievements/claim", headers=headers)
         self.assertEqual(second.status, 429)
         body = await second.json()
         self.assertEqual(body["error"], "too_fast")
@@ -238,7 +238,7 @@ class TestRateLimitMiddlewareOnRealApp(_RateLimitAppTestCase):
         config.API_RATE_LIMIT_READ_RPM = 30
         headers = {"X-Telegram-Init-Data": build_init_data(user_id=881006)}
 
-        await self.client.request("POST", "/api/bonus/claim", headers=headers)
+        await self.client.request("POST", "/api/achievements/claim", headers=headers)
         resp = await self.client.request("GET", "/api/wallet", headers=headers)
         self.assertNotEqual(resp.status, 429)
 
@@ -275,7 +275,7 @@ class TestDoubleClickProtection(_RateLimitAppTestCase):
             raise RuntimeError("handler exploded")
 
         app = web.Application(middlewares=[rate_limit_middleware])
-        app.router.add_post("/api/bonus/claim", slow_mutation)
+        app.router.add_post("/api/achievements/claim", slow_mutation)
         app.router.add_post("/api/predictions", exploding_mutation)
         return app
 
@@ -287,8 +287,8 @@ class TestDoubleClickProtection(_RateLimitAppTestCase):
 
     async def test_parallel_duplicate_mutation_is_rejected(self):
         first, second = await asyncio.gather(
-            self.client.request("POST", "/api/bonus/claim"),
-            self.client.request("POST", "/api/bonus/claim"),
+            self.client.request("POST", "/api/achievements/claim"),
+            self.client.request("POST", "/api/achievements/claim"),
         )
         statuses = sorted([first.status, second.status])
         self.assertEqual(statuses, [200, 429], "ровно один параллельный дубль должен пройти")
@@ -300,9 +300,9 @@ class TestDoubleClickProtection(_RateLimitAppTestCase):
 
     async def test_sequential_mutations_are_allowed(self):
         """Дедупликация не должна ломать нормальный последовательный сценарий."""
-        first = await self.client.request("POST", "/api/bonus/claim")
+        first = await self.client.request("POST", "/api/achievements/claim")
         self.assertEqual(first.status, 200)
-        second = await self.client.request("POST", "/api/bonus/claim")
+        second = await self.client.request("POST", "/api/achievements/claim")
         self.assertEqual(second.status, 200)
 
     async def test_in_flight_slot_released_after_handler_error(self):

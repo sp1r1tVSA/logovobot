@@ -65,7 +65,6 @@ const LIMIT_LABELS = {
   global_exposure_limit: 'Риск всей лиги',
   max_express_events: 'Событий в экспрессе',
   initial_balance: 'Стартовый баланс',
-  daily_bonus: 'Ежедневный бонус',
 };
 
 const LIMIT_HINTS = {
@@ -81,7 +80,6 @@ const LIMIT_HINTS = {
   division_exposure_limit: 'Возможная выплата по дивизиону',
   global_exposure_limit: 'Возможная выплата по всей лиге',
   initial_balance: 'Кошелёк нового игрока; уже созданные не меняются',
-  daily_bonus: 'Сумма ежедневного бонуса (кнопка в Mini App сейчас скрыта)',
 };
 
 // Порядок и группы на вкладке «Лимиты». Ключ, которого нет в
@@ -90,7 +88,7 @@ const LIMIT_GROUPS = [
   { title: 'Ставки и купон', keys: ['min_bet', 'max_bet', 'max_open_bets', 'max_express_events'] },
   { title: 'Игрок', keys: ['max_payout', 'max_daily_stake', 'max_daily_loss', 'max_open_exposure'] },
   { title: 'Риск лиги', keys: ['market_exposure_limit', 'division_exposure_limit', 'global_exposure_limit'] },
-  { title: 'Экономика', keys: ['initial_balance', 'daily_bonus'] },
+  { title: 'Экономика', keys: ['initial_balance'] },
 ];
 
 // Сумма в монетах или просто число (события, купоны).

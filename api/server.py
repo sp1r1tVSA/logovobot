@@ -14,7 +14,6 @@ from aiohttp import hdrs, web
 
 from api.routes_wallet import (
     handle_bootstrap,
-    handle_claim_bonus,
     handle_leaderboard,
     handle_get_division_leaderboard,
     handle_get_wallet,
@@ -425,7 +424,6 @@ def create_app() -> web.Application:
     # 1. Wallet & Bootstrap
     app.router.add_get("/api/bootstrap", handle_bootstrap)
     app.router.add_get("/api/wallet", handle_get_wallet)
-    app.router.add_post("/api/bonus/claim", handle_claim_bonus)
     app.router.add_get("/api/leaderboard/division/{division_id}", handle_get_division_leaderboard)
 
     # 2. Markets & Odds

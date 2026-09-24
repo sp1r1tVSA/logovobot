@@ -565,21 +565,24 @@ class TestPanelRoutes(AioHTTPTestCase):
         status, body = await self._call("GET", "/limits", GLOBAL_ADMIN)
         self.assertEqual(status, 200, body)
         self.assertEqual(body["system"]["max_express_events"], database.MAX_EXPRESS_EVENTS)
-        self.assertEqual(body["system"]["daily_bonus"], database.DAILY_BONUS_AMOUNT)
         self.assertEqual(body["system"]["initial_balance"], database.INITIAL_WALLET_BALANCE)
         self.assertEqual(body["defaults"]["max_open_bets"], 12)
         self.assertEqual(body["bounds"]["max_express_events"], [database.MIN_EXPRESS_EVENTS, 50])
 
+        self.assertNotIn("daily_bonus", body["system"])
         status, body = await self._set_limit("daily_bonus", 400)
+        self.assertEqual((status, body["error"]), (400, "invalid_limit_key"))
+
+        status, body = await self._set_limit("initial_balance", 900)
         self.assertEqual(status, 200, body)
         status, body = await self._call("GET", "/limits", GLOBAL_ADMIN)
-        self.assertEqual(body["system"]["daily_bonus"], 400)
-        self.assertEqual(body["global_overrides"]["daily_bonus"], 400)
-        self.assertEqual(body["defaults"]["daily_bonus"], database.DAILY_BONUS_AMOUNT)
+        self.assertEqual(body["system"]["initial_balance"], 900)
+        self.assertEqual(body["global_overrides"]["initial_balance"], 900)
+        self.assertEqual(body["defaults"]["initial_balance"], database.INITIAL_WALLET_BALANCE)
 
-        status, body = await self._set_limit("daily_bonus", None)
+        status, body = await self._set_limit("initial_balance", None)
         self.assertEqual(status, 200, body)
-        self.assertEqual(database.get_daily_bonus_amount(), database.DAILY_BONUS_AMOUNT)
+        self.assertEqual(database.get_initial_wallet_balance(), database.INITIAL_WALLET_BALANCE)
 
     async def test_express_cap_follows_the_panel(self):
         status, body = await self._set_limit("max_express_events", 2)
@@ -595,7 +598,7 @@ class TestPanelRoutes(AioHTTPTestCase):
         self.assertEqual(status, 200, body)
         self.assertNotEqual(_error_code(_place(PLAYER, "div1", "div2", "nodiv")), "MAX_EXPRESS_EVENTS_EXCEEDED")
 
-    async def test_daily_bonus_and_starting_balance_follow_the_panel(self):
+    async def test_starting_balance_follows_the_panel(self):
         newcomer = 971005
         with database.transaction() as conn:
             conn.execute("INSERT OR IGNORE INTO users (telegram_id, username, role) VALUES (?, 'panel_new', 'user')",
@@ -603,15 +606,11 @@ class TestPanelRoutes(AioHTTPTestCase):
             conn.execute("DELETE FROM user_wallets WHERE user_id = ?", (newcomer,))
             conn.execute("DELETE FROM coin_transactions WHERE user_id = ?", (newcomer,))
         self.assertEqual((await self._set_limit("initial_balance", 1000))[0], 200)
-        self.assertEqual((await self._set_limit("daily_bonus", 333))[0], 200)
 
         self.assertEqual(database.get_or_create_wallet(newcomer)["balance"], 1000)
-        ok, new_balance, _ = database.claim_daily_bonus(newcomer)
-        self.assertTrue(ok)
-        self.assertEqual(new_balance, 1333)
 
     async def test_limit_values_are_bounded(self):
-        cases = [("max_express_events", 1), ("max_express_events", 51), ("daily_bonus", 0),
+        cases = [("max_express_events", 1), ("max_express_events", 51), ("initial_balance", 0),
                  ("initial_balance", 1_000_001), ("max_open_bets", 1_001), ("max_bet", 0)]
         for key, value in cases:
             with self.subTest(key=key, value=value):
@@ -620,7 +619,7 @@ class TestPanelRoutes(AioHTTPTestCase):
         self.assertEqual(database.get_risk_limit_overrides("global", 0), {})
 
     async def test_settings_are_global_only(self):
-        for key in ("max_express_events", "daily_bonus", "initial_balance"):
+        for key in ("max_express_events", "initial_balance"):
             for scope_type, scope_id in (("division", 2), ("user", PLAYER)):
                 with self.subTest(key=key, scope=scope_type):
                     status, body = await self._set_limit(key, 5, scope_type, scope_id)

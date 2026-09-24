@@ -51,21 +51,6 @@ class TestBettingEngine(unittest.TestCase):
         self.assertFalse(fail_ok)
         self.assertEqual(database.get_wallet_balance(test_user), START + 200)
 
-    def test_daily_bonus_and_cooldown(self):
-        test_user = 999333444
-        with database.transaction() as conn:
-            conn.execute("DELETE FROM user_wallets WHERE user_id = ?", (test_user,))
-
-        # 1. First claim succeeds
-        ok, bal, msg = database.claim_daily_bonus(test_user, 250)
-        self.assertTrue(ok)
-        self.assertEqual(bal, START + 250)  # приветственный баланс + бонус
-
-        # 2. Immediate second claim fails due to 24h cooldown
-        ok2, rem_h, msg2 = database.claim_daily_bonus(test_user, 250)
-        self.assertFalse(ok2)
-        self.assertGreaterEqual(rem_h, 23)
-
     def test_place_single_and_express_bet(self):
         test_user = 999555666
         with database.transaction() as conn:

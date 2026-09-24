@@ -504,12 +504,6 @@ export class UIRenderer {
     }
   }
 
-  static renderBonusBanner(_bonus) {
-    // Daily Bonus removed — backend retained for compatibility, UI disabled.
-    const bannerEl = document.getElementById('bonus-banner-container');
-    if (bannerEl) bannerEl.innerHTML = '';
-  }
-
   static renderDivisionTabs(divisions, selectedDivisionId, containerId = 'lobby-division-tabs-container', lobbyMode = null) {
     const container = document.getElementById(containerId);
     if (!container) return;

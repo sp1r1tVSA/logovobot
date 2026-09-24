@@ -281,8 +281,7 @@ class TestAuditSprint3(unittest.TestCase):
         self.assertEqual(database.get_wallet_balance(self.user_id), balance_before)
 
     def test_wallet_ledger_records_balance_after_for_every_credit(self):
-        """Welcome, daily and level-up credits carry the balance they left, like bets do."""
-        database.claim_daily_bonus(self.user_id, bonus_amount=250)
+        """Welcome and admin credits carry the balance they left, like bets do."""
         database.add_coins(self.user_id, 70, tx_type="admin_grant")
         with database.transaction() as conn:
             rows = conn.execute(
@@ -292,7 +291,7 @@ class TestAuditSprint3(unittest.TestCase):
         start = database.INITIAL_WALLET_BALANCE
         self.assertEqual(
             [(r["transaction_type"], r["balance_after"]) for r in rows],
-            [("welcome_bonus", start), ("daily_bonus", start + 250), ("admin_grant", start + 320)],
+            [("welcome_bonus", start), ("admin_grant", start + 70)],
         )
 
     # ──────────────────────────────────────────────────────────────────────────

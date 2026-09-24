@@ -226,8 +226,8 @@ def test_07_cashout_blocked_before_db(monkeypatch):
     assert res.get("error") == "LOGOVO_LOCKDOWN"
 
 
-def test_08_bonus_and_reward_blocked_before_db(monkeypatch):
-    """Scenario 8: Daily bonus and achievement claiming blocked before DB mutation during lockdown."""
+def test_08_reward_blocked_before_db(monkeypatch):
+    """Scenario 8: Achievement claiming blocked before DB mutation during lockdown."""
     monkeypatch.setenv("LOGOVO_LOCKDOWN", "true")
     user_id = 999801
 
@@ -235,15 +235,6 @@ def test_08_bonus_and_reward_blocked_before_db(monkeypatch):
     with database.transaction() as conn:
         conn.execute("INSERT OR REPLACE INTO users (telegram_id, username, role) VALUES (?, 'bonus_user', 'player')", (user_id,))
         conn.execute("INSERT OR REPLACE INTO user_wallets (user_id, balance) VALUES (?, 500)", (user_id,))
-
-    # Claim bonus blocked
-    ok_b, val_b, msg_b = database.claim_daily_bonus(user_id, 250)
-    assert ok_b is False
-    assert "Logovo.bet временно закрыт" in msg_b
-
-    # Wallet balance remained unchanged
-    wallet = database.get_or_create_wallet(user_id)
-    assert wallet["balance"] == 500
 
     # Claim achievement reward blocked
     ok_a, msg_a, data_a = database.claim_achievement_reward(user_id, "ACH_FIRST_BET")
@@ -342,11 +333,11 @@ class TestLockdownApi(AioHTTPTestCase):
         data_pred = await resp_pred.json()
         self.assertEqual(data_pred.get("error"), "LOGOVO_LOCKDOWN")
 
-        # POST /api/bonus/claim
-        resp_bonus = await self.client.post("/api/bonus/claim", headers=self.reg_headers)
-        self.assertEqual(resp_bonus.status, 403)
-        data_bonus = await resp_bonus.json()
-        self.assertEqual(data_bonus.get("error"), "LOGOVO_LOCKDOWN")
+        # POST /api/achievements/claim
+        resp_ach = await self.client.post("/api/achievements/claim", headers=self.reg_headers)
+        self.assertEqual(resp_ach.status, 403)
+        data_ach = await resp_ach.json()
+        self.assertEqual(data_ach.get("error"), "LOGOVO_LOCKDOWN")
 
         # POST /api/predictions/1/cashout
         resp_cashout = await self.client.post("/api/predictions/1/cashout", headers=self.reg_headers)

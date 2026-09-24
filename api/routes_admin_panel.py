@@ -48,7 +48,7 @@ LIMIT_KEYS = (
     "division_exposure_limit", "global_exposure_limit",
 )
 # Настройки купона и экономики: только глобальные, читает их database.
-SETTING_KEYS = ("max_express_events", "daily_bonus", "initial_balance")
+SETTING_KEYS = ("max_express_events", "initial_balance")
 # Какие ключи вообще читаются на каждом уровне (см. BettingLimitsService):
 # переопределение другого ключа легло бы в таблицу и ничего бы не изменило.
 LIMIT_KEYS_BY_SCOPE = {
@@ -60,7 +60,6 @@ LIMIT_KEYS_BY_SCOPE = {
 LIMIT_BOUNDS = {
     "max_express_events": (database.MIN_EXPRESS_EVENTS, 50),
     "max_open_bets": (1, 1_000),
-    "daily_bonus": (1, 100_000),
     "initial_balance": (1, 1_000_000),
 }
 DEFAULT_LIMIT_BOUNDS = (1, 100_000_000)
@@ -432,7 +431,6 @@ async def handle_panel_limits(request: web.Request) -> web.Response:
         system = {
             **BettingLimitsService.get_system_limits(),
             "max_express_events": database.get_max_express_events(),
-            "daily_bonus": database.get_daily_bonus_amount(),
             "initial_balance": database.get_initial_wallet_balance(),
         }
         return {

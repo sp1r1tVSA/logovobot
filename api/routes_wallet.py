@@ -1,7 +1,7 @@
 """
 api/routes_wallet.py
 
-REST API handlers for bootstrap data, user wallet, daily bonus, and leaderboard.
+REST API handlers for bootstrap data, user wallet, and leaderboard.
 """
 
 import asyncio
@@ -10,7 +10,6 @@ import logging
 from aiohttp import web
 import database
 from config import INITIAL_WALLET_BALANCE
-from time_utils import now_msk, parse_msk
 from api.auth import get_authenticated_user, check_user_access
 from handlers.base import is_admin
 
@@ -78,20 +77,6 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
     # Fetch wallet
     wallet = await asyncio.to_thread(database.get_or_create_wallet, user_id)
 
-    # Check bonus availability
-    can_claim = True
-    cooldown_sec = 0
-    last_bonus = wallet.get("last_bonus_at")
-    if last_bonus:
-        try:
-            last_dt = parse_msk(last_bonus)
-            elapsed = (now_msk() - last_dt).total_seconds()
-            if elapsed < 86400:
-                can_claim = False
-                cooldown_sec = int(86400 - elapsed)
-        except Exception:
-            pass
-
     # Fetch open tours summary
     open_tours = await asyncio.to_thread(database.get_open_betting_tours)
 
@@ -117,49 +102,8 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
             "has_access": has_access,
             "bet_limits": bet_limits
         },
-        "bonus": {
-            "can_claim": can_claim,
-            "cooldown_seconds": cooldown_sec,
-            "reward_amount": await asyncio.to_thread(database.get_daily_bonus_amount)
-        },
         "open_tours_count": len(open_tours),
         "divisions": divisions
-    })
-
-
-async def handle_claim_bonus(request: web.Request) -> web.Response:
-    """
-    POST /api/bonus/claim
-    Claim the daily coin bonus (amount set in the admin panel, 250 by default).
-    """
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-    user_info = get_authenticated_user(init_data)
-
-    if not user_info or "id" not in user_info:
-        return web.json_response({"status": "error", "error": "unauthorized"}, status=401)
-
-    user_id = user_info["id"]
-    if not check_user_access(user_id):
-        return web.json_response(
-            {"status": "error", "error": "access_restricted", "message": "Logovo.bet временно недоступен."},
-            status=403
-        )
-
-    bonus_amount = await asyncio.to_thread(database.get_daily_bonus_amount)
-    success, val, msg = await asyncio.to_thread(database.claim_daily_bonus, user_id, bonus_amount)
-    if not success:
-        return web.json_response({
-            "status": "error",
-            "error": "cooldown",
-            "message": msg,
-            "remaining_hours": val
-        }, status=400)
-
-    return web.json_response({
-        "status": "ok",
-        "message": msg,
-        "new_balance": val,
-        "claimed_amount": bonus_amount
     })
 
 
@@ -256,7 +200,7 @@ async def handle_get_division_leaderboard(request: web.Request) -> web.Response:
 async def handle_get_wallet(request: web.Request) -> web.Response:
     """
     GET /api/wallet
-    Returns authenticated user's wallet info: balance, stats, and bonus cooldown.
+    Returns authenticated user's wallet info: balance and stats.
     """
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     user_info = get_authenticated_user(init_data)
@@ -270,19 +214,6 @@ async def handle_get_wallet(request: web.Request) -> web.Response:
     user_id = user_info["id"]
     wallet = await asyncio.to_thread(database.get_or_create_wallet, user_id)
 
-    can_claim = True
-    cooldown_sec = 0
-    last_bonus = wallet.get("last_bonus_at")
-    if last_bonus:
-        try:
-            last_dt = parse_msk(last_bonus)
-            elapsed = (now_msk() - last_dt).total_seconds()
-            if elapsed < 86400:
-                can_claim = False
-                cooldown_sec = int(86400 - elapsed)
-        except Exception:
-            pass
-
     return web.json_response({
         "status": "ok",
         "wallet": {
@@ -292,8 +223,6 @@ async def handle_get_wallet(request: web.Request) -> web.Response:
             "total_wagered": wallet.get("total_wagered", 0),
             "total_won": wallet.get("total_won", 0),
             "bets_count": wallet.get("bets_count", 0),
-            "bets_won": wallet.get("bets_won", 0),
-            "can_claim_bonus": can_claim,
-            "bonus_cooldown_seconds": cooldown_sec
+            "bets_won": wallet.get("bets_won", 0)
         }
     })
