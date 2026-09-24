@@ -234,6 +234,24 @@ class TestRanking(PicksCase):
         text = '<think>Берём {что-то} из данных…</think>\n{"picks": [{"id": 2, "probability": 61}]}'
         self.assertEqual(bet_picks._extract_json(text)["picks"][0]["id"], 2)
 
+    def test_extract_json_tolerates_trailing_commas_and_single_quotes(self):
+        text_commas = '{"picks": [{"id": 3, "probability": 80, "reason": "win",},],}'
+        self.assertEqual(bet_picks._extract_json(text_commas)["picks"][0]["id"], 3)
+        text_quotes = "{'picks': [{'id': 4, 'probability': 75, 'reason': 'form'}]}"
+        self.assertEqual(bet_picks._extract_json(text_quotes)["picks"][0]["id"], 4)
+
+    def test_extract_json_handles_unclosed_reasoning_and_prose(self):
+        text = '<think>Рассуждения о матче...\n{"picks": [{"id": 5, "probability": 66}]}'
+        self.assertEqual(bet_picks._extract_json(text)["picks"][0]["id"], 5)
+
+    def test_extract_json_salvages_truncated_picks(self):
+        # Оборванный на середине ответ модели спасает уже сгенерированные исходы
+        text = '{"picks": [{"id": 6, "probability": 70, "reason": "ok"}, {"id": 7, "prob'
+        res = bet_picks._extract_json(text)
+        self.assertIsNotNone(res)
+        self.assertEqual(len(res["picks"]), 1)
+        self.assertEqual(res["picks"][0]["id"], 6)
+
 
 class TestBuildPicks(PicksCase):
     def test_without_key_the_line_is_used(self):

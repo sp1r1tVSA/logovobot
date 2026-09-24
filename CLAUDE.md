@@ -420,9 +420,9 @@ prediction. A free OpenRouter model (`OPENROUTER_API_KEY`, `OPENROUTER_MODEL` �
 comma-separated list tried in order, since free models vanish and hit quotas) ranks them;
 every id it returns is checked against the candidates, probabilities are clamped to 1–99 and
 at most two picks per match are kept, up to 30 picks. The default model list is
-`qwen/qwen3.8-27b:free,stealth/space-bunny-alpha,google/gemma-4-31b-it:free` — the middle
+`qwen/qwen3.8-27b:free,stealth/space-bunny-alpha,google/gemma-4-31b-it:free,openrouter/free` — the second
 one is an anonymous free "stealth" model with no `:free` suffix, likely to disappear once its
-alpha ends, and the fallback moves on when it does; Qwen reasons, so the request asks for
+alpha ends, and openrouter/free acts as an automatic free fallback router; Qwen reasons, so the request asks for
 low, excluded reasoning with a large `max_tokens`, and `<think>` blocks are stripped anyway.
 Filters split by cost: market group (`markets=result,total,…`) and odds range
 (`odds_min`/`odds_max`, 1–100, else 400 `bad_filters`) change the candidate set, so each

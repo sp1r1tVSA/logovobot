@@ -26,6 +26,7 @@ REFRESH_MIN_SECONDS: у бесплатных моделей дневная кв�
 """
 from __future__ import annotations
 
+import ast
 import json
 import logging
 import re
@@ -309,20 +310,64 @@ def _models() -> list[str]:
 
 
 def _extract_json(text: str) -> dict | None:
-    """JSON из ответа модели: бесплатные модели любят обернуть его в ```json или добавить текст."""
+    """JSON из ответа модели: устойчив к markdown, рассуждениям, trailing commas и обрезке."""
     if not text:
         return None
-    # Рассуждающие модели (Qwen3) иногда пишут размышления прямо в content.
-    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
-    cleaned = re.sub(r"```(?:json)?", "", cleaned).strip()
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start < 0 or end <= start:
-        return None
-    try:
-        data = json.loads(cleaned[start:end + 1])
-    except ValueError:
-        return None
-    return data if isinstance(data, dict) else None
+    # Рассуждающие модели (Qwen3, Space Bunny) могут писать размышления в тегах.
+    # Очищаем как закрытые, так и незакрытые теги рассуждений.
+    cleaned = re.sub(r"<(?:think|thought|reasoning)>.*?</(?:think|thought|reasoning)>", "", text, flags=re.S | re.I)
+    cleaned = re.sub(r"<(?:think|thought|reasoning)>.*?(?=(?:```|\{))", "", cleaned, flags=re.S | re.I)
+    cleaned = re.sub(r"<(?:think|thought|reasoning)>.*$", "", cleaned, flags=re.S | re.I)
+
+    candidates = []
+    # 1. Сначала проверяем блок кода markdown: ```json ... ```
+    fence = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", cleaned, flags=re.S)
+    if fence:
+        candidates.append(fence.group(1).strip())
+
+    # 2. Внешние фигурные скобки
+    start = cleaned.find("{")
+    end = cleaned.rfind("}")
+    if start >= 0 and end > start:
+        candidates.append(cleaned[start:end + 1].strip())
+
+    for c in candidates:
+        for variant in (c, re.sub(r",\s*([\]}])", r"\1", c)):
+            try:
+                data = json.loads(variant)
+                if isinstance(data, dict):
+                    return data
+            except ValueError:
+                pass
+            try:
+                data = ast.literal_eval(variant)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+
+    # 3. Фолбэк: если JSON оборвался на полпути или окружён текстом со скобками,
+    # спасаем уже сгенерированные полные объекты исходов {"id": ...}
+    items = []
+    for m in re.finditer(r"\{[^{}]*\"id\"[^{}]*\}", cleaned):
+        clean_item = re.sub(r",\s*([\]}])", r"\1", m.group(0))
+        try:
+            obj = json.loads(clean_item)
+            if isinstance(obj, dict) and "id" in obj:
+                items.append(obj)
+                continue
+        except Exception:
+            pass
+        try:
+            obj = ast.literal_eval(clean_item)
+            if isinstance(obj, dict) and "id" in obj:
+                items.append(obj)
+        except Exception:
+            pass
+    if items:
+        return {"picks": items}
+
+    return None
 
 
 def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
@@ -342,7 +387,7 @@ def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
             "temperature": 0.2,
             # У рассуждающих моделей размышления входят в max_tokens: без запаса
             # и короткого reasoning ответ обрывается, не дойдя до JSON.
-            "max_tokens": 8000,
+            "max_tokens": 16000,
             "reasoning": {"effort": "low", "exclude": True},
         }).encode("utf-8")
         req = urllib.request.Request(
@@ -358,20 +403,32 @@ def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
             with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            logger.warning("AI picks: model '%s' HTTP %s, trying the next one.", model, e.code)
+            err_msg = ""
+            try:
+                err_msg = e.read().decode("utf-8", errors="replace")[:250].strip()
+            except Exception:
+                pass
+            logger.warning("AI picks: model '%s' HTTP %s (%s), trying the next one.", model, e.code, err_msg)
+            if e.code == 429:
+                time.sleep(0.5)
             continue
         except Exception as e:
             logger.warning("AI picks: model '%s' failed (%s), trying the next one.", model, type(e).__name__)
             continue
         try:
-            text = result["choices"][0]["message"]["content"]
+            msg = result["choices"][0]["message"]
+            text = msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or ""
         except (KeyError, IndexError, TypeError):
             logger.warning("AI picks: model '%s' returned no choices.", model)
             continue
         data = _extract_json(text if isinstance(text, str) else "")
         if data is not None:
             return data, model
-        logger.warning("AI picks: model '%s' returned no parsable JSON.", model)
+        snippet = (text[:250] if isinstance(text, str) else "")
+        logger.warning(
+            "AI picks: model '%s' returned no parsable JSON (len=%d, snippet=%r).",
+            model, len(text) if isinstance(text, str) else 0, snippet,
+        )
     return None, None
 
 
