@@ -180,6 +180,40 @@ def _leg_teams(item: dict) -> tuple[str, str]:
     return item.get("team1_name") or "Хозяева", item.get("team2_name") or "Гости"
 
 
+def _division_short(code, name, division_id) -> str:
+    """«Д3» по коду DIV_N, иначе имя дивизиона — как `database.cup_scope_short`,
+    но из уже выбранных колонок, без запроса на каждое событие ленты."""
+    code = (code or "").strip().upper()
+    if code.startswith("DIV_") and code[4:].isdigit():
+        return f"Д{int(code[4:])}"
+    return name or f"Д{division_id}"
+
+
+def _event_label(item: dict) -> str:
+    """Откуда матч: «🏟 Дивизион 1 · Тур 8», «🏆 Кубок Д3 · 1/8 · игра 2», «🏆 Общий кубок · 1/4»."""
+    kind = item.get("tournament_type") or "league"
+    if kind == "cup":
+        key_stage, key_div = database.split_cup_stage_key(item.get("cup_stage_key") or "")
+        div = item.get("cup_division_id") or key_div
+        parts = [
+            f"Кубок {_division_short(item.get('cup_division_code'), item.get('cup_division_name'), div)}"
+            if div else "Общий кубок"
+        ]
+        stage = item.get("cup_stage") or key_stage
+        if stage:
+            parts.append(stage)
+        if item.get("is_series_header"):
+            parts.append("исход серии")
+        elif item.get("game_num_in_series"):
+            parts.append(f"игра {item['game_num_in_series']}")
+        return "🏆 " + html.escape(" · ".join(parts))
+    if kind == "friendly":
+        return "🤝 Товарищеский матч"
+    division = item.get("division_name")
+    tour = f"Тур {item.get('tour') or 1}"
+    return "🏟 " + html.escape(f"{division} · {tour}" if division else tour)
+
+
 def _match_line(item: dict) -> str:
     """«Кельн 1:3 Айнтрахт», «Кельн — Айнтрахт · не сыгран», «🔴 67' Кельн 1:0 Айнтрахт»."""
     t1, t2 = (html.escape(t) for t in _leg_teams(item))
@@ -228,6 +262,7 @@ def _format_bet_snippet(bet: dict) -> str:
         item_emoji = ITEM_STATUS_EMOJI.get(item.get("status"), "•")
         item_odd = float(item.get("odd") or 1.0)
         lines.append(f"  ⚽ {_match_line(item)}")
+        lines.append(f"     {_event_label(item)}")
         lines.append(f"     {item_emoji} {_selection_text(item)} · <b>@{item_odd:.2f}</b>")
     if len(items) > 3:
         lines.append(f"     <i>…и ещё {len(items) - 3} событ. — в карточке 🔍</i>")
@@ -556,11 +591,10 @@ def _format_bet_card(bet: dict, player_stats: dict) -> str:
         it_status = it.get("status", "pending")
         it_emoji = ITEM_STATUS_EMOJI.get(it_status, "•")
         it_odd = float(it.get("odd") or 1.0)
-        div_name = it.get("division_name") or "Дивизион не указан"
 
         leg = [
             f"{idx}. {it_emoji} {_match_line(it)}",
-            f"   🏆 {html.escape(div_name)} · Тур {it.get('tour', 1)}",
+            f"   {_event_label(it)}",
             f"   🎯 Выбор: <b>{_selection_text(it)}</b> · @<b>{it_odd:.2f}</b>",
         ]
         reason = explain_result(
@@ -731,7 +765,7 @@ async def notify_super_admins_new_bet(bot=None, bet_id: int = 0) -> None:
         for it in bet.get("items", [])[:3]:
             t1, t2 = (html.escape(t) for t in _leg_teams(it))
             it_odd = float(it.get("odd") or 1.0)
-            lines.append(f"• <b>{t1} — {t2}</b>\n   {_selection_text(it)} · @{it_odd:.2f}")
+            lines.append(f"• <b>{t1} — {t2}</b>\n   {_event_label(it)}\n   {_selection_text(it)} · @{it_odd:.2f}")
 
         text = "\n".join(lines)
         kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔍 Открыть карточку", callback_data=f"admin_bet_view:{bet_id}")]])

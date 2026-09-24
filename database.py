@@ -12621,6 +12621,11 @@ def get_all_bets(
                        COALESCE(m.is_series_header, 0) AS is_series_header,
                        m.division_id,
                        d.name as division_name,
+                       d.code as division_code,
+                       st.stage AS cup_stage_key,
+                       st.division_id AS cup_division_id,
+                       cd.code AS cup_division_code,
+                       cd.name AS cup_division_name,
                        m.status as match_status,
                        m.player1_score,
                        m.player2_score,
@@ -12634,6 +12639,8 @@ def get_all_bets(
                 LEFT JOIN matches m ON bi.match_id = m.id
                 LEFT JOIN cup_series cs ON cs.id = m.cup_series_id
                 LEFT JOIN divisions d ON m.division_id = d.id
+                LEFT JOIN cup_stages st ON st.id = COALESCE(m.stage_id, cs.stage_id)
+                LEFT JOIN divisions cd ON cd.id = st.division_id
                 LEFT JOIN bet_markets bm ON bi.match_id = bm.match_id
                 LEFT JOIN markets mkt ON bi.market_id = mkt.id
                 LEFT JOIN market_selections ms ON bi.selection_id = ms.id
@@ -12734,6 +12741,11 @@ def get_bet_by_id(bet_id: int) -> dict | None:
                        COALESCE(m.is_series_header, 0) AS is_series_header,
                        m.division_id,
                        d.name as division_name,
+                       d.code as division_code,
+                       st.stage AS cup_stage_key,
+                       st.division_id AS cup_division_id,
+                       cd.code AS cup_division_code,
+                       cd.name AS cup_division_name,
                        m.status as match_status,
                        m.player1_score,
                        m.player2_score,
@@ -12747,6 +12759,8 @@ def get_bet_by_id(bet_id: int) -> dict | None:
                 LEFT JOIN matches m ON bi.match_id = m.id
                 LEFT JOIN cup_series cs ON cs.id = m.cup_series_id
                 LEFT JOIN divisions d ON m.division_id = d.id
+                LEFT JOIN cup_stages st ON st.id = COALESCE(m.stage_id, cs.stage_id)
+                LEFT JOIN divisions cd ON cd.id = st.division_id
                 LEFT JOIN bet_markets bm ON bi.match_id = bm.match_id
                 LEFT JOIN markets mkt ON bi.market_id = mkt.id
                 LEFT JOIN market_selections ms ON bi.selection_id = ms.id

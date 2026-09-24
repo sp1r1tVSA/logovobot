@@ -334,6 +334,53 @@ class TestAdminBetsTracking(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(database.is_live_bet_alerts_enabled(self.super_id))
         self.assertNotIn(self.super_id, database.get_live_bet_alert_subscribers())
 
+    async def test_bet_legs_carry_the_cup_they_belong_to(self):
+        """Карточка отличает кубок дивизиона от общего: этап и кубок — из cup_stages."""
+        from handlers.admin_bets import _event_label
+
+        with database.transaction() as conn:
+            cur = conn.cursor()
+            div3 = cur.execute("SELECT id FROM divisions WHERE code = 'DIV_3'").fetchone()["id"]
+            cur.execute(
+                "INSERT INTO cup_stages (season_id, stage, stage_order, division_id) VALUES (1, ?, 3, ?)",
+                (database.cup_stage_key("1/8", div3), div3),
+            )
+            div_stage = cur.lastrowid
+            cur.execute("INSERT INTO cup_stages (season_id, stage, stage_order) VALUES (1, '1/4', 4)")
+            general_stage = cur.lastrowid
+            match_ids = []
+            for stage_id, game in ((div_stage, 2), (general_stage, 1)):
+                cur.execute(
+                    "INSERT INTO cup_series (stage, series_num, team1_name, team2_name, stage_id) "
+                    "VALUES (?, 1, 'Реал Мадрид', 'Барселона', ?)",
+                    ("1/8" if stage_id == div_stage else "1/4", stage_id),
+                )
+                series_id = cur.lastrowid
+                cur.execute(
+                    "INSERT INTO matches (tournament_id, round_number, division_id, player1_team, player2_team, "
+                    "status, tournament_type, cup_series_id, stage_id, game_num_in_series) "
+                    "VALUES (1, 1, 0, 'Реал Мадрид', 'Барселона', 'scheduled', 'cup', ?, ?, ?)",
+                    (series_id, stage_id, game),
+                )
+                match_ids.append(cur.lastrowid)
+            cur.execute(
+                "INSERT INTO user_bets (user_id, bet_type, amount, total_odd, potential_win, status, created_at) "
+                "VALUES (?, 'express', 100, 4.0, 400, 'pending', '2026-09-25 01:20:00')",
+                (self.bettor1_id,),
+            )
+            bet_id = cur.lastrowid
+            for mid in match_ids:
+                cur.execute(
+                    "INSERT INTO bet_items (bet_id, match_id, outcome_type, odd, status) VALUES (?, ?, 'p1', 2.0, 'pending')",
+                    (bet_id, mid),
+                )
+
+        labels = [_event_label(it) for it in database.get_bet_by_id(bet_id)["items"]]
+        self.assertEqual(labels, ["🏆 Кубок Д3 · 1/8 · игра 2", "🏆 Общий кубок · 1/4 · игра 1"])
+        feed, _total = database.get_all_bets(limit=5, offset=0)
+        feed_items = next(b for b in feed if b["id"] == bet_id)["items"]
+        self.assertEqual([_event_label(it) for it in feed_items], labels)
+
     async def test_notify_super_admins_new_bet(self):
         """Отправка нотификации подписанному супер-админу."""
         database.set_live_bet_alerts_enabled(self.super_id, True)
@@ -354,6 +401,7 @@ class TestAdminBetsTracking(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs.get("chat_id"), self.super_id)
         self.assertIn(f"Новая ставка #{bet_id}!", kwargs.get("text"))
         self.assertIn("bettor_one", kwargs.get("text"))
+        self.assertIn("🏟 Премьер-Лига · Тур 1", kwargs.get("text"))
 
         # Время ставки — по Москве, а не сырое UTC из CURRENT_TIMESTAMP
         from handlers.admin_bets import _fmt_dt

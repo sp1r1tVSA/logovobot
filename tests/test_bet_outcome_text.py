@@ -7,7 +7,7 @@ odds_engine, должен превращаться в понятный текс�
 
 import pytest
 
-from handlers.admin_bets import _fmt_dt, _format_bet_card, _format_bet_snippet, _player_net
+from handlers.admin_bets import _event_label, _fmt_dt, _format_bet_card, _format_bet_snippet, _player_net
 from services.bet_outcome_text import describe_selection, explain_result, goals_word
 
 T1, T2 = "Кельн", "Айнтрахт"
@@ -137,3 +137,38 @@ def test_card_contains_breakdown_player_stats_and_cashout():
 ])
 def test_fmt_dt_shows_stored_moscow_time(raw, expected):
     assert _fmt_dt(raw) == expected
+
+
+# ─── Откуда матч: тур лиги, кубок дивизиона, общий кубок ─────────────────────
+@pytest.mark.parametrize("item, expected", [
+    ({"tournament_type": "league", "division_name": "Дивизион 2", "tour": 5}, "🏟 Дивизион 2 · Тур 5"),
+    ({"tour": 3}, "🏟 Тур 3"),
+    ({"tournament_type": "cup", "cup_stage": "1/8", "cup_stage_key": "1/8@D3", "cup_division_id": 3,
+      "cup_division_code": "DIV_3", "cup_division_name": "Дивизион 3", "game_num_in_series": 2},
+     "🏆 Кубок Д3 · 1/8 · игра 2"),
+    ({"tournament_type": "cup", "cup_stage": "1/4", "cup_stage_key": "1/4", "game_num_in_series": 1},
+     "🏆 Общий кубок · 1/4 · игра 1"),
+    ({"tournament_type": "cup", "cup_stage_key": "1/8@D4", "is_series_header": 1, "game_num_in_series": 1},
+     "🏆 Кубок Д4 · 1/8 · исход серии"),
+    ({"tournament_type": "cup", "cup_stage": "Финал", "cup_division_id": 7,
+      "cup_division_code": "DIV_XK2", "cup_division_name": "Дивизион 6"},
+     "🏆 Кубок Дивизион 6 · Финал"),
+    ({"tournament_type": "friendly"}, "🤝 Товарищеский матч"),
+])
+def test_event_label_names_the_competition(item, expected):
+    assert _event_label(item) == expected
+
+
+NO_BETS = {k: 0 for k in (
+    "total_bets", "count_pending", "count_won", "count_lost", "count_refunded",
+    "count_cashed_out", "total_wagered", "pending_amount", "total_paid_out", "net_profit",
+)}
+
+
+def test_snippet_and_card_say_where_the_match_is_played():
+    cup_leg = dict(_bet()["items"][0], tournament_type="cup", cup_stage="1/8",
+                   cup_stage_key="1/8", game_num_in_series=3)
+    bet = _bet(items=[_bet()["items"][0], cup_leg])
+    for text in (_format_bet_snippet(bet), _format_bet_card(bet, NO_BETS)):
+        assert "Дивизион 2 · Тур 5" in text
+        assert "Общий кубок · 1/8 · игра 3" in text
