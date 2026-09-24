@@ -1483,7 +1483,19 @@ class AppController {
       const root = document.getElementById('admin-root');
       const modal = document.getElementById('admin-modal');
       if (!root || !modal) return;
-      this.adminPanel = new AdminPanel(root, modal);
+      this.adminPanel = new AdminPanel(root, modal, {
+        // Сборщик купона из «ИИ-прогноза»: события — в купон, ставку админ подтверждает сам.
+        toCoupon: (items, mode) => {
+          const apply = () => {
+            store.loadCouponSelections(items);
+            store.setSlipMode(mode);
+            this.toggleSlipDrawer(true);
+          };
+          const current = store.state.slip.length;
+          if (!current) return apply();
+          tgBridge.showConfirm(`Заменить текущий купон (событий: ${current}) собранным?`, ok => { if (ok) apply(); });
+        },
+      });
     }
     this.adminPanel.open();
   }

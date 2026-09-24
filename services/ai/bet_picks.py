@@ -196,6 +196,7 @@ def collect_candidates(
                     continue
                 options.append({
                     "selection_id": s["id"],
+                    "market_id": mk.get("id"),
                     "market_key": mk.get("market_key"),
                     "market_group": group,
                     "market_name": mk.get("market_name"),
@@ -210,6 +211,10 @@ def collect_candidates(
                 "division_id": m.get("division_id"),
                 "division_name": m.get("division_name"),
                 "round_number": m.get("round_number"),
+                "cup_series_id": m.get("cup_series_id"),
+                "tournament_type": m.get("tournament_type"),
+                "cup_stage": m.get("cup_stage"),
+                "game_num_in_series": m.get("game_num_in_series"),
                 "team1": m.get("team1_name"),
                 "team2": m.get("team2_name"),
                 "options": options,
@@ -379,8 +384,16 @@ def _pick_row(match: dict, option: dict, probability: float, reason: str) -> dic
         "division_id": match.get("division_id"),
         "division_name": match.get("division_name"),
         "round_number": match.get("round_number"),
+        # Для сборщика купона: исход ставится по market_id + selection_id, а игры
+        # одной кубковой серии нельзя класть в один экспресс.
+        "cup_series_id": match.get("cup_series_id"),
+        # Подпись матча в Mini App (matchRoundLabel): стадия и номер игры кубка.
+        "tournament_type": match.get("tournament_type"),
+        "cup_stage": match.get("cup_stage"),
+        "game_num_in_series": match.get("game_num_in_series"),
         "team1": match["team1"],
         "team2": match["team2"],
+        "market_id": option.get("market_id"),
         "market_key": option.get("market_key"),
         "market_name": option["market_name"],
         "market_group": option.get("market_group"),

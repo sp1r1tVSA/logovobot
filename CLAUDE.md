@@ -451,6 +451,17 @@ calibration buckets, a per-model split and a split by the tab's market groups
 the same `MIN_SAMPLE`. A failed log write is logged and never breaks the
 picks response.
 
+The tab's «Собрать купон» block (`assembleCoupon` in `web/js/admin.js`) builds a coupon from
+the picks currently shown, after the chance and «только ценные» filters: express or singles,
+2–8 events, «надёжные» (by AI probability) or «ценные» (value > 0, by value). It takes at most one
+pick per match and, in an express, one per cup series, because the server rejects correlated
+series games. «Перенести в купон» hands the items to `app.js` through the panel's
+`hooks.toCoupon`, which replaces the Mini App slip (after a confirm if the slip is not empty) and
+opens it. **It never places a bet**: the admin enters the stake and confirms, and the normal
+`place_user_bet` path applies, including `ODDS_CHANGED` when cached picks carry stale odds. Picks
+carry `market_id` and `cup_series_id` for this, plus `tournament_type` / `cup_stage` /
+`game_num_in_series` so `matchRoundLabel` can label cup games.
+
 ---
 
 ## Roles and access

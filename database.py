@@ -13578,6 +13578,7 @@ def get_admin_market_board(division_ids: list[int] | None = None, state: str = "
                    m.tournament_type,
                    cs.stage AS cup_stage,
                    m.game_num_in_series,
+                   m.cup_series_id,
                    COALESCE(m.is_series_header, 0) AS is_series_header,
                    COALESCE(m.player1_team, cs.team1_name, 'Хозяева') AS team1_name,
                    COALESCE(m.player2_team, cs.team2_name, 'Гости') AS team2_name,

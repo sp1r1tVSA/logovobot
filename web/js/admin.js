@@ -33,6 +33,33 @@ const MARKET_STATES = [
 // Мин. шанс во вкладке «ИИ-прогноз»: 0 — без ограничения.
 const PICK_CHANCES = [0, 50, 60, 70, 80];
 
+// Сборщик купона во вкладке «ИИ-прогноз»: сколько событий брать.
+const BUILDER_COUNTS = [2, 3, 4, 5, 6, 8];
+
+/**
+ * Сборщик купона: лучшие исходы из показанного прогноза, по одному на матч.
+ * «safe» — от самого вероятного, «value» — только ценные, от самого ценного.
+ * В экспресс не идут две игры одной кубковой серии — сервер такой купон отклонит.
+ */
+function assembleCoupon(picks, { mode, count, strategy }) {
+  const pool = picks.filter(p => p.market_id && p.selection_id && p.selection_key);
+  const ranked = strategy === 'value'
+    ? pool.filter(p => p.value > 0).sort((a, b) => b.value - a.value || b.probability - a.probability)
+    : pool.sort((a, b) => b.probability - a.probability || a.odds - b.odds);
+  const matches = new Set();
+  const series = new Set();
+  const out = [];
+  for (const p of ranked) {
+    if (out.length >= count) break;
+    const seriesId = mode === 'express' ? p.cup_series_id : null;
+    if (matches.has(p.match_id) || (seriesId && series.has(seriesId))) continue;
+    matches.add(p.match_id);
+    if (seriesId) series.add(seriesId);
+    out.push(p);
+  }
+  return out;
+}
+
 const BET_STATUSES = [
   { id: 'all', label: 'Все' },
   { id: 'pending', label: 'В игре' },
@@ -167,9 +194,11 @@ function shortTime(value) {
 }
 
 export class AdminPanel {
-  constructor(root, modal) {
+  // hooks.toCoupon(items, mode) — переложить события в купон Mini App (app.js).
+  constructor(root, modal, hooks = {}) {
     this.root = root;
     this.modal = modal;
+    this.hooks = hooks;
     this.me = null;
     this.tab = 'dashboard';
     this.divisionId = null;
@@ -182,6 +211,8 @@ export class AdminPanel {
     // markets/oddsMin/oddsMax — применённые (уходят в запрос), draft — ещё не применённые.
     // view: 'list' — прогноз по открытой линии, 'review' — сверка с сыгранными матчами.
     this.picks = { view: 'list', markets: [], oddsMin: '', oddsMax: '', draft: null, minChance: 0, valueOnly: false, res: null };
+    // Сборщик купона: собирает из показанного прогноза, ставку подтверждает сам админ.
+    this.builder = { mode: 'express', count: 3, strategy: 'safe', items: [] };
 
     this._searchTimer = null;
     this._modalSubmit = null;
@@ -834,6 +865,7 @@ export class AdminPanel {
           ${pill('data-adm-pvalue', f.valueOnly, 'Только ценные')}
         </div>
       </div>
+      <div class="adm-card" id="adm-picks-builder"></div>
       <div class="adm-card" id="adm-picks-list"></div>
       <div class="adm-muted adm-mb">Прогноз — аналитическая оценка, а не гарантия. Исходы с кэфом ниже 1.15 не учитываются,
         не больше двух исходов на матч. «Ценный» — шанс по оценке ИИ выше, чем заложено в кэф.</div>
@@ -846,7 +878,7 @@ export class AdminPanel {
     const f = this.picks;
     if (!list || !f.res) return;
     const all = f.res.picks || [];
-    const picks = all.filter(p => p.probability >= f.minChance && (!f.valueOnly || p.value > 0));
+    const picks = this.visiblePicks();
     const probClass = p => (p >= 75 ? 'green' : p >= 55 ? 'gold' : '');
     let empty = 'Открытых рынков для прогноза нет';
     if (all.length) {
@@ -868,6 +900,112 @@ export class AdminPanel {
         <div class="adm-row-side adm-pick-prob ${probClass(p.probability)}">${Number(p.probability).toFixed(0)}%
           <small title="Вероятность по линии, маржа снята">линия ${Number(p.line_probability).toFixed(0)}%</small></div>
       </div>`).join('') : `<div class="adm-muted">${empty}</div>`;
+    this.renderPicksBuilder();
+  }
+
+  visiblePicks() {
+    const f = this.picks;
+    return (f.res?.picks || []).filter(p => p.probability >= f.minChance && (!f.valueOnly || p.value > 0));
+  }
+
+  renderPicksBuilder() {
+    const card = this.root.querySelector('#adm-picks-builder');
+    const f = this.picks;
+    const b = this.builder;
+    if (!card || !f.res) return;
+    const items = assembleCoupon(this.visiblePicks(), b);
+    b.items = items;
+    const pill = (attr, active, label) => `<button class="category-pill ${active ? 'active' : ''}" ${attr}>${label}</button>`;
+    const pct = v => `${(v * 100).toFixed(v < 0.1 ? 1 : 0)}%`;
+    const signedPct = v => `${v >= 0 ? '+' : '−'}${Math.abs(v * 100).toFixed(1)}%`;
+    const evClass = v => (v >= 0 ? 'green' : 'red');
+
+    let summary = '';
+    if (items.length > 1 && b.mode === 'express') {
+      const total = items.reduce((acc, p) => acc * p.odds, 1);
+      const ai = items.reduce((acc, p) => acc * p.probability / 100, 1);
+      const line = items.reduce((acc, p) => acc * p.line_probability / 100, 1);
+      const ev = ai * total - 1;
+      summary = `
+        <div class="adm-builder-sum">
+          <span>Кэф <b>${odd(total)}</b></span>
+          <span>Шанс ИИ <b>${pct(ai)}</b></span>
+          <span>Линия <b>${pct(line)}</b></span>
+          <span>EV <b class="${evClass(ev)}">${signedPct(ev)}</b></span>
+        </div>
+        <small class="adm-muted adm-picks-hint">Шансы перемножены, как у независимых событий. EV — сколько в среднем
+          принесёт каждая 🪙 ставки, если оценка ИИ верна.</small>`;
+    } else if (items.length) {
+      const hits = items.reduce((acc, p) => acc + p.probability / 100, 0);
+      const ev = items.reduce((acc, p) => acc + p.probability / 100 * p.odds - 1, 0) / items.length;
+      summary = `
+        <div class="adm-builder-sum">
+          <span>${items.length === 1 ? 'Ординар' : `Ординаров <b>${items.length}</b>`}</span>
+          <span>Зайдёт в среднем <b>${hits.toFixed(1)}</b></span>
+          <span>EV <b class="${evClass(ev)}">${signedPct(ev)}</b></span>
+        </div>
+        <small class="adm-muted adm-picks-hint">EV — средний доход на 🪙 ставки по оценке ИИ, каждый ординар отдельно.</small>`;
+    }
+
+    let empty = 'Под фильтры прогноза собирать нечего';
+    if (b.strategy === 'value') {
+      empty = f.res.source === 'ai'
+        ? 'Ценных исходов под фильтры нет'
+        : 'Ценные исходы ищет только ИИ — сейчас прогноз построен по линии.';
+    }
+    const short = items.length && items.length < b.count
+      ? `<small class="adm-muted adm-picks-hint">Подошло ${items.length} из ${b.count}: не больше одного исхода на матч${
+        b.mode === 'express' ? ' и на кубковую серию' : ''}.</small>`
+      : '';
+
+    card.innerHTML = `
+      <div class="adm-card-title">Собрать купон</div>
+      <div class="category-pills adm-picks-pills">
+        ${pill('data-adm-bmode="express"', b.mode === 'express', 'Экспресс')}
+        ${pill('data-adm-bmode="single"', b.mode === 'single', 'Ординары')}
+      </div>
+      <div class="category-pills adm-picks-pills">
+        ${pill('data-adm-bstrat="safe"', b.strategy === 'safe', 'Надёжные')}
+        ${pill('data-adm-bstrat="value"', b.strategy === 'value', 'Ценные')}
+      </div>
+      <div class="category-pills adm-picks-pills adm-builder-counts">
+        <span class="adm-muted">Событий</span>
+        ${BUILDER_COUNTS.map(n => pill(`data-adm-bcount="${n}"`, b.count === n, n)).join('')}
+      </div>
+      ${items.length ? items.map(p => `
+        <div class="adm-row adm-pick-row">
+          <div class="adm-row-main">
+            <b>${esc(p.selection_name)}</b> <span class="adm-muted">× ${odd(p.odds)}</span>
+            <small>${esc(p.team1)} — ${esc(p.team2)} · ${esc(p.division_name || 'Дивизион 1')} · ${esc(matchRoundLabel(p))}</small>
+          </div>
+          <div class="adm-row-side adm-pick-prob">${Number(p.probability).toFixed(0)}%</div>
+        </div>`).join('') : `<div class="adm-muted">${empty}</div>`}
+      ${short}
+      ${summary}
+      ${items.length && this.hooks.toCoupon ? `
+        <button class="adm-btn primary adm-builder-go" data-adm-build-go>Перенести в купон</button>
+        <small class="adm-muted adm-picks-hint">Текущий купон заменится. Сумму вводите и ставку подтверждаете вы сами.</small>` : ''}
+    `;
+  }
+
+  sendCouponToSlip() {
+    const { items, mode } = this.builder;
+    if (!items.length || !this.hooks.toCoupon) return;
+    // Формат — как у store._buildSlipItem; кэф сверяется при ставке (ODDS_CHANGED).
+    const slip = items.map(p => ({
+      match_id: p.match_id,
+      outcome: p.selection_key,
+      odd: Number(p.odds),
+      market_id: p.market_id,
+      selection_id: p.selection_id,
+      selection_name: p.selection_name,
+      market_name: p.market_name,
+      team1_name: p.team1,
+      team2_name: p.team2,
+      tour: p.round_number || 1,
+      meta: `${p.division_name || 'Дивизион 1'} · ${matchRoundLabel(p)}`,
+    }));
+    this.hooks.toCoupon(slip, mode);
   }
 
   picksDraftChanged() {
@@ -1421,6 +1559,17 @@ export class AdminPanel {
       this.picks.valueOnly = !this.picks.valueOnly;
       el.classList.toggle('active', this.picks.valueOnly);
       this.renderPicksList();
+    } else if ((el = t('[data-adm-bmode]'))) {
+      this.builder.mode = el.dataset.admBmode;
+      this.renderPicksBuilder();
+    } else if ((el = t('[data-adm-bstrat]'))) {
+      this.builder.strategy = el.dataset.admBstrat;
+      this.renderPicksBuilder();
+    } else if ((el = t('[data-adm-bcount]'))) {
+      this.builder.count = Number(el.dataset.admBcount);
+      this.renderPicksBuilder();
+    } else if (t('[data-adm-build-go]')) {
+      this.sendCouponToSlip();
     } else if ((el = t('[data-adm-mstate]'))) {
       this.markets.state = el.dataset.admMstate;
       this.loadTab();

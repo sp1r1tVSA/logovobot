@@ -207,6 +207,17 @@ class TestRanking(PicksCase):
         rows = bet_picks.rank_ai_picks(self.matches, data)
         self.assertEqual(len(rows), bet_picks.MAX_PER_MATCH)
 
+    def test_pick_carries_what_the_coupon_needs(self):
+        # Сборщик купона ставит исход по market_id + selection_id + selection_key.
+        rows = bet_picks.rank_line_picks(self.matches)
+        with database.transaction() as conn:
+            owner = {r["id"]: (r["market_id"], r["selection_key"]) for r in conn.execute(
+                "SELECT id, market_id, selection_key FROM market_selections "
+                "WHERE market_id BETWEEN 972000 AND 972999")}
+        for r in rows:
+            self.assertEqual((r["market_id"], r["selection_key"]), owner[r["selection_id"]])
+            self.assertIn("cup_series_id", r)
+
     def test_line_ranking_goes_from_most_to_least_likely(self):
         rows = bet_picks.rank_line_picks(self.matches)
         probs = [r["probability"] for r in rows]

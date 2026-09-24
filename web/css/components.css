@@ -4794,6 +4794,11 @@ span.team-logo-fallback {
 .adm-verdict.red { color: var(--color-danger); }
 .adm-verdict.gold { color: var(--text-gold); }
 .adm-picks-hint { display: block; margin-top: 6px; }
+/* Сборщик купона: подпись «Событий» в ряду чипов, итог купона строкой. */
+.adm-builder-counts { align-items: center; }
+.adm-builder-counts > span { margin-right: 2px; font-size: 0.8rem; }
+.adm-builder-sum { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-top: 10px; font-size: 0.85rem; }
+.adm-builder-go { width: 100%; margin-top: 12px; }
 /* Подсказка у лимита длиннее обычной подписи строки — переносим, а не обрезаем. */
 .adm-limit-row .adm-row-main small { white-space: normal; }
 .adm-bet-row,
