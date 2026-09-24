@@ -2214,6 +2214,9 @@ def init_db() -> None:
         # ─── 024: запрет ставок для отдельного игрока (панель Logovo.bet) ─────
         _ensure_betting_bans(cursor)
 
+        # ─── 025: ежедневный бонус убран — его настройка из панели не читается ─
+        _drop_daily_bonus_setting(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -12893,6 +12896,28 @@ def _ensure_betting_bans(cursor: sqlite3.Cursor) -> None:
     cursor.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
         (MIGRATION_024_BETTING_BANS, "betting_bans: per-player betting ban set from the admin panel"),
+    )
+
+
+MIGRATION_025_DROP_DAILY_BONUS = "025_drop_daily_bonus_setting"
+
+
+def _drop_daily_bonus_setting(cursor: sqlite3.Cursor) -> None:
+    """Миграция 025: удалить сумму ежедневного бонуса, заданную в панели.
+
+    Бонус убран целиком, и строку `daily_bonus` в `risk_limits_config` больше
+    никто не читает — она только висела бы в `global_overrides`. История
+    начислений (`coin_transactions` с типом `daily_bonus`) не трогается.
+    """
+    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (MIGRATION_025_DROP_DAILY_BONUS,))
+    if cursor.fetchone():
+        return
+    cursor.execute("DELETE FROM risk_limits_config WHERE limit_key = 'daily_bonus'")
+    if cursor.rowcount:
+        logger.info("Migration 025: removed %s daily_bonus setting row(s)", cursor.rowcount)
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_025_DROP_DAILY_BONUS, "Drop the daily_bonus panel setting after the bonus was removed"),
     )
 
 

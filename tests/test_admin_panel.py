@@ -645,3 +645,14 @@ class TestPanelRoutes(AioHTTPTestCase):
         status, body = await self._call("GET", "/limits", DIV2_ADMIN)
         self.assertEqual(status, 200, body)
         self.assertEqual(body["user_overrides"], [])
+
+    def test_migration_drops_the_daily_bonus_setting(self):
+        with database.transaction() as conn:
+            conn.execute("DELETE FROM schema_migrations WHERE version = ?",
+                         (database.MIGRATION_025_DROP_DAILY_BONUS,))
+            conn.execute("INSERT INTO risk_limits_config (scope_type, scope_id, limit_key, limit_value, updated_at)"
+                         " VALUES ('global', 0, 'daily_bonus', 400, datetime('now', '+3 hours'))")
+            conn.execute("INSERT INTO risk_limits_config (scope_type, scope_id, limit_key, limit_value, updated_at)"
+                         " VALUES ('global', 0, 'max_express_events', 7, datetime('now', '+3 hours'))")
+        database.init_db()
+        self.assertEqual(database.get_risk_limit_overrides("global", 0), {"max_express_events": 7})
