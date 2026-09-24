@@ -44,7 +44,7 @@ MAX_PER_MATCH = 2         # не больше исходов одного мат
 CACHE_TTL_SECONDS = 30 * 60
 FALLBACK_TTL_SECONDS = 5 * 60   # фолбэк держим недолго — модель скоро спросим снова
 REFRESH_MIN_SECONDS = 2 * 60
-REQUEST_TIMEOUT_SECONDS = 60
+REQUEST_TIMEOUT_SECONDS = 90
 REASON_MAX_CHARS = 220
 
 _FINISHED_MATCH_STATUSES = {"confirmed", "completed", "cancelled"}
@@ -226,7 +226,9 @@ def _extract_json(text: str) -> dict | None:
     """JSON из ответа модели: бесплатные модели любят обернуть его в ```json или добавить текст."""
     if not text:
         return None
-    cleaned = re.sub(r"```(?:json)?", "", text).strip()
+    # Рассуждающие модели (Qwen3) иногда пишут размышления прямо в content.
+    cleaned = re.sub(r"<think>.*?</think>", "", text, flags=re.S)
+    cleaned = re.sub(r"```(?:json)?", "", cleaned).strip()
     start, end = cleaned.find("{"), cleaned.rfind("}")
     if start < 0 or end <= start:
         return None
@@ -252,7 +254,10 @@ def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
             "messages": [{"role": "system", "content": system},
                          {"role": "user", "content": user}],
             "temperature": 0.2,
-            "max_tokens": 2500,
+            # У рассуждающих моделей размышления входят в max_tokens: без запаса
+            # и короткого reasoning ответ обрывается, не дойдя до JSON.
+            "max_tokens": 8000,
+            "reasoning": {"effort": "low", "exclude": True},
         }).encode("utf-8")
         req = urllib.request.Request(
             f"{base_url}/chat/completions",

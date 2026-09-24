@@ -137,7 +137,7 @@ GEMINI_CHAT_API_KEY=AIzaSy_chat_key1
 
 # OpenRouter — «ИИ-прогноз» в панели Logovo.bet. Модели :free, несколько через запятую.
 OPENROUTER_API_KEY=sk-or-v1-your_key_here
-OPENROUTER_MODEL=deepseek/deepseek-chat-v3-0324:free,meta-llama/llama-3.3-70b-instruct:free
+OPENROUTER_MODEL=qwen/qwen3.8-27b:free,google/gemma-4-31b-it:free
 
 # Mini App (Logovo.bet)
 WEBAPP_URL=https://your-domain.example

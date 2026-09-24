@@ -168,6 +168,10 @@ class TestRanking(PicksCase):
         self.assertIsNone(bet_picks._extract_json("no json here"))
         self.assertIsNone(bet_picks._extract_json("{broken"))
 
+    def test_extract_json_skips_inline_reasoning(self):
+        text = '<think>Берём {что-то} из данных…</think>\n{"picks": [{"id": 2, "probability": 61}]}'
+        self.assertEqual(bet_picks._extract_json(text)["picks"][0]["id"], 2)
+
 
 class TestBuildPicks(PicksCase):
     def test_without_key_the_line_is_used(self):
@@ -242,6 +246,9 @@ class TestOpenRouterCall(PicksCase):
         self.assertEqual(requests[0].get_header("Authorization"), f"Bearer {FAKE_KEY}")
         sent = json.loads(requests[1].data.decode("utf-8"))
         self.assertEqual(sent["model"], "second/model:free")
+        # Рассуждения моделей вроде Qwen3 — коротко и вне content, с запасом токенов.
+        self.assertEqual(sent["reasoning"], {"effort": "low", "exclude": True})
+        self.assertGreaterEqual(sent["max_tokens"], 8000)
         self.assertNotIn(FAKE_KEY, "\n".join(logs.output))
 
     def test_no_key_means_no_request(self):
