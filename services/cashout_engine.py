@@ -25,7 +25,8 @@ def calculate_cashout_offer(
     stake: int,
     potential_win: int,
     items: list[dict[str, Any]],
-    margin: float = DEFAULT_CASHOUT_MARGIN
+    margin: float = DEFAULT_CASHOUT_MARGIN,
+    express_margin_pct: Optional[int] = None
 ) -> tuple[bool, int, Optional[str]]:
     """
     Calculate fair cashout offer based on current market odds vs initial odds.
@@ -58,8 +59,12 @@ def calculate_cashout_offer(
         leg_ratio = orig_odd / curr_odd
         ratio_product *= leg_ratio
 
-    # Fair value before margin
-    fair_value = stake * ratio_product
+    # Fair value before margin. Надбавка на экспресс, заложенная в купон,
+    # остаётся и в выкупе: иначе выкуп платил бы больше, чем стоит сам купон.
+    live_legs = sum(1 for it in items if it.get("status", "pending") != "refunded")
+    pct = max(0, min(100, int(express_margin_pct or 0)))
+    express_factor = (1.0 - pct / 100.0) ** max(0, live_legs - 1)
+    fair_value = stake * ratio_product * express_factor
     offer = int(round(fair_value * (1.0 - margin)))
 
     # Bound offer: minimum 1 coin, maximum potential_win
@@ -143,7 +148,8 @@ def quote_cashout(user_id: int, bet_id: int) -> dict[str, Any]:
         available, offer, reason = calculate_cashout_offer(
             stake=bet["amount"],
             potential_win=bet["potential_win"],
-            items=items
+            items=items,
+            express_margin_pct=bet["express_margin_pct"] if "express_margin_pct" in bet.keys() else None
         )
 
         return {

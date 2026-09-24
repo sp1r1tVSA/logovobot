@@ -104,6 +104,7 @@ const LIMIT_LABELS = {
   division_exposure_limit: 'Риск на дивизион',
   global_exposure_limit: 'Риск всей лиги',
   max_express_events: 'Событий в экспрессе',
+  express_margin_pct: 'Надбавка на экспресс',
   initial_balance: 'Стартовый баланс',
 };
 
@@ -116,6 +117,7 @@ const LIMIT_HINTS = {
   max_open_exposure: 'Сумма нерассчитанных ставок игрока',
   max_open_bets: 'Купонов в игре одновременно; экспресс — один купон',
   max_express_events: 'Сколько событий можно собрать в экспресс',
+  express_margin_pct: 'Минус столько % к кэфу экспресса за каждое событие после первого; 0 — выключить',
   market_exposure_limit: 'Возможная выплата по одному рынку',
   division_exposure_limit: 'Возможная выплата по дивизиону',
   global_exposure_limit: 'Возможная выплата по всей лиге',
@@ -125,7 +127,7 @@ const LIMIT_HINTS = {
 // Порядок и группы на вкладке «Лимиты». Ключ, которого нет в
 // me.limit_keys для уровня, в группе просто не показывается.
 const LIMIT_GROUPS = [
-  { title: 'Ставки и купон', keys: ['min_bet', 'max_bet', 'max_open_bets', 'max_express_events'] },
+  { title: 'Ставки и купон', keys: ['min_bet', 'max_bet', 'max_open_bets', 'max_express_events', 'express_margin_pct'] },
   { title: 'Игрок', keys: ['max_payout', 'max_daily_stake', 'max_daily_loss', 'max_open_exposure'] },
   { title: 'Риск лиги', keys: ['market_exposure_limit', 'division_exposure_limit', 'global_exposure_limit'] },
   { title: 'Экономика', keys: ['initial_balance'] },
@@ -133,7 +135,9 @@ const LIMIT_GROUPS = [
 
 // Сумма в монетах или просто число (события, купоны).
 const COUNT_LIMITS = new Set(['max_open_bets', 'max_express_events']);
-const limitValue = (key, v) => (v == null || v === '' ? '—' : COUNT_LIMITS.has(key) ? fmt(v) : coins(v));
+const PERCENT_LIMITS = new Set(['express_margin_pct']);
+const limitValue = (key, v) => (v == null || v === '' ? '—'
+  : PERCENT_LIMITS.has(key) ? `${fmt(v)}%` : COUNT_LIMITS.has(key) ? fmt(v) : coins(v));
 
 const TX_LABELS = {
   admin_credit: 'Начисление админом',

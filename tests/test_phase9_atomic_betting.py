@@ -116,7 +116,8 @@ class TestPhase9AtomicBetting(unittest.TestCase):
             cursor.execute("SELECT * FROM user_bets WHERE id = ?", (bet_id,))
             bet = cursor.fetchone()
             self.assertEqual(bet["bet_type"], "express")
-            self.assertAlmostEqual(bet["total_odd"], 3.60)
+            # 1.80 × 2.00 × 0.97 — надбавка на экспресс за вторую ногу
+            self.assertAlmostEqual(bet["total_odd"], 3.49)
 
     def test_p9_atom_03_express_with_invalid_leg_rejected(self):
         """P9-ATOM-03: Express bet with one suspended leg is rejected with zero debit."""

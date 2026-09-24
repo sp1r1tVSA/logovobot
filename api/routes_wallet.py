@@ -38,6 +38,8 @@ def _resolve_user_bet_limits(user_id: int) -> dict:
             "open_exposure": database.get_user_open_exposure(user_id),
             "max_open_bets": int(limits["max_open_bets"]),
             "open_bets": database.get_user_open_bets_count(user_id),
+            # Надбавка на экспресс: купон в Mini App показывает тот же кэф, что примет сервер.
+            "express_margin_pct": database.get_express_margin_pct(),
         }
     except Exception as e:
         logger.warning(f"Could not resolve bet limits for user #{user_id}: {e}")
@@ -49,6 +51,7 @@ def _resolve_user_bet_limits(user_id: int) -> dict:
             "open_exposure": 0,
             "max_open_bets": DEFAULT_MAX_OPEN_BETS,
             "open_bets": 0,
+            "express_margin_pct": database.EXPRESS_MARGIN_PCT,
         }
 
 

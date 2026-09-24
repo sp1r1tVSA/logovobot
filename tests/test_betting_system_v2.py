@@ -339,7 +339,8 @@ class TestBettingSystemV2(unittest.TestCase):
             {"match_id": partner_id, "outcome": "p1"},
         ])
         self.assertTrue(ok, f"Экспресс не принят: {express_id}")
-        self.assertEqual(self._bet_status(express_id)["total_odd"], 3.00)
+        # 2.00 × 1.50 × 0.97 — надбавка на экспресс за вторую ногу
+        self.assertEqual(self._bet_status(express_id)["total_odd"], 2.91)
 
         balance_after_bets = database.get_wallet_balance(BETTOR_ID)
 

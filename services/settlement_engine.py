@@ -58,6 +58,12 @@ def _cup_winner_side(match_row, score1: Optional[int] = None, score2: Optional[i
     return None
 
 
+def _bet_margin_pct(bet) -> Optional[int]:
+    """Надбавка на экспресс, записанная в купон; у старых купонов её нет."""
+    keys = bet.keys() if hasattr(bet, "keys") else ()
+    return bet["express_margin_pct"] if "express_margin_pct" in keys else None
+
+
 def _coins(amount: int) -> str:
     return f"{int(amount):,}".replace(",", " ")
 
@@ -424,10 +430,9 @@ def settle_match_predictions(
 
             # All legs are settled and 0 lost -> Bet is WON!
             # Calculate combined odds of winning legs (voided legs count as 1.00)
-            effective_odd = 1.0
-            for i in all_items:
-                if i["status"] == "won":
-                    effective_odd *= float(i["odd"])
+            # Надбавка на экспресс — та, что действовала при приёме купона.
+            effective_odd = database.express_odd(
+                [i["odd"] for i in all_items if i["status"] == "won"], _bet_margin_pct(bet))
 
             effective_odd_rounded = round(effective_odd, 2)
             payout = int(round(stake * effective_odd_rounded))
@@ -782,10 +787,8 @@ def resettle_match_predictions(
                 continue
 
             # Won
-            effective_odd = 1.0
-            for i in all_items:
-                if i["status"] == "won":
-                    effective_odd *= float(i["odd"])
+            effective_odd = database.express_odd(
+                [i["odd"] for i in all_items if i["status"] == "won"], _bet_margin_pct(bet))
             effective_odd_rounded = round(effective_odd, 2)
             payout = int(round(stake * effective_odd_rounded))
 

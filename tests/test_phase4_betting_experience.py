@@ -392,7 +392,7 @@ class TestPhase4BettingExperience(unittest.TestCase):
     # -------------------------------------------------------------
     def test_13_total_odds_calculation_correctness(self):
         # Match 99501 p1 = 1.90, Match 99502 p1 = 2.00
-        # Expected: 1.90 * 2.00 = 3.80
+        # Expected: 1.90 * 2.00 * 0.97 (express margin for the second leg)
         success, bet_id = database.place_user_bet(
             user_id=self.user1_id,
             amount=100,
@@ -403,7 +403,9 @@ class TestPhase4BettingExperience(unittest.TestCase):
         )
         self.assertTrue(success)
         bet = database.get_user_bet_by_id(bet_id, self.user1_id)
-        expected_odd = round(bet["items"][0]["odd"] * bet["items"][1]["odd"], 2)
+        expected_odd = database.express_odd(
+            [bet["items"][0]["odd"], bet["items"][1]["odd"]], bet["express_margin_pct"])
+        self.assertEqual(bet["express_margin_pct"], database.EXPRESS_MARGIN_PCT)
         self.assertAlmostEqual(bet["total_odd"], expected_odd, places=2)
 
     # -------------------------------------------------------------

@@ -383,22 +383,23 @@ async def cb_bet_view_slip(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
         return
 
-    # Calculate total odd
-    total_odd = 1.0
     lines = ["🎫 <b>Ваш Купон Ставок:</b>\n"]
     for i, s in enumerate(slip, 1):
         t1 = html.escape(s['team1'])
         t2 = html.escape(s['team2'])
         out_title = OUTCOME_TITLES.get(s['outcome'], s['outcome'])
         odd_v = s['odd']
-        total_odd *= odd_v
         lines.append(f"{i}. <b>{t1} vs {t2}</b>\n   👉 <code>{out_title}</code> • Кэф: <b>{odd_v:.2f}</b>")
 
-    total_odd = round(total_odd, 2)
+    # Та же формула, что при приёме ставки: экспресс получает надбавку.
+    margin_pct = database.get_express_margin_pct() if len(slip) > 1 else 0
+    total_odd = database.express_odd([s['odd'] for s in slip], margin_pct)
     bet_type = "Ординар" if len(slip) == 1 else f"Экспресс ({len(slip)} события)"
     
     lines.append(f"\n🏷️ <b>Тип:</b> {bet_type}")
     lines.append(f"🔥 <b>Итоговый Коэффициент:</b> <code>{total_odd:.2f}</code>")
+    if margin_pct:
+        lines.append(f"<i>Надбавка экспресса: −{margin_pct}% за каждое событие после первого</i>")
     lines.append(f"🪙 <b>Ваш баланс:</b> <code>{bal:,} 🪙</code>")
 
     # Счётчик слотов виден всегда, как и в Mini App: уже открытые купоны

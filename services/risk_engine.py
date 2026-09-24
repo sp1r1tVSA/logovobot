@@ -226,7 +226,6 @@ class RiskEngine:
                 )
 
             # 7. Selections Validation (Market State, Selection State, Odds Validity & Freshness)
-            total_odd = 1.0
             resolved_selections = []
             for s in selections:
                 m_id = s.get("match_id")
@@ -425,9 +424,11 @@ class RiskEngine:
                     "outcome": out_type
                 })
 
-                total_odd *= max(1.01, odd_float)
 
             # 8. Maximum Payout Cap Check
+            # Тот же расчёт, что при записи купона: с надбавкой на экспресс.
+            margin_pct = database.get_express_margin_pct() if len(resolved_selections) > 1 else None
+            total_odd = database.express_odd([round(r["odd"], 2) for r in resolved_selections], margin_pct)
             potential_win = int(round(amount * total_odd))
             if potential_win > limits["max_payout"]:
                 max_allowed = int(limits["max_payout"] / max(1.01, total_odd))
@@ -446,6 +447,38 @@ class RiskEngine:
                     message=f"Потенциальный выигрыш превышает лимит {limits['max_payout']:,} 🪙. Максимальная ставка: {max_allowed:,} 🪙.",
                     max_allowed_stake=max_allowed,
                     details={"potential_win": potential_win, "max_payout": limits["max_payout"], "max_allowed_stake": max_allowed}
+                )
+
+            # 8a. Потолок выплаты на набор исходов, а не на купон: такой же купон,
+            # поставленный ещё раз, делит потолок с первым (купоны #692/#693).
+            identical_payout = database.get_identical_open_payout(
+                cursor, user_id,
+                [database.selection_identity(r["match_id"], r["outcome"], r["selection_id"])
+                 for r in resolved_selections],
+            )
+            if identical_payout and identical_payout + potential_win > limits["max_payout"]:
+                remaining_payout = max(0, limits["max_payout"] - identical_payout)
+                max_allowed = int(remaining_payout / max(1.01, total_odd))
+                details = {"potential_win": potential_win, "max_payout": limits["max_payout"],
+                           "identical_payout": identical_payout}
+                if max_allowed < limits["min_bet"]:
+                    return RiskDecision(
+                        decision="REJECT",
+                        allowed=False,
+                        reason="MAX_PAYOUT",
+                        message=(f"Такой же купон уже в игре. Вместе они не могут выплатить "
+                                 f"больше {limits['max_payout']:,} 🪙."),
+                        details=details
+                    )
+                details["max_allowed_stake"] = max_allowed
+                return RiskDecision(
+                    decision="LIMITED",
+                    allowed=False,
+                    reason="MAX_PAYOUT",
+                    message=(f"Такой же купон уже в игре. Вместе они не могут выплатить "
+                             f"больше {limits['max_payout']:,} 🪙. Максимальная ставка: {max_allowed:,} 🪙."),
+                    max_allowed_stake=max_allowed,
+                    details=details
                 )
 
             # 8b. User Open Exposure Limit Check (LB-03)

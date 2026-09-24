@@ -1889,7 +1889,8 @@ export class UIRenderer {
     // ─── Event cards: rebuilt only when the structure changes ───
     const itemsEl = document.getElementById('slip-items-container');
     if (itemsEl) {
-      const structKey = `${mode}|${batchSingles}|` + slip.map(s => `${s.match_id}:${s.outcome}:${s.odd}`).join(',');
+      const marginPct = store.getExpressMarginPct();
+      const structKey = `${mode}|${batchSingles}|${marginPct}|` + slip.map(s => `${s.match_id}:${s.outcome}:${s.odd}`).join(',');
       if (itemsEl.dataset.key !== structKey) {
         itemsEl.dataset.key = structKey;
         itemsEl.classList.toggle('express', isExpress);
@@ -1902,7 +1903,8 @@ export class UIRenderer {
                 : '';
               return card + link;
             }).join('') + (isExpress
-              ? `<div class="coupon-chain-total"><span>Экспресс из ${count} событий</span><b>${totalOdd.toFixed(2)}</b></div>`
+              ? `<div class="coupon-chain-total"><span>Экспресс из ${count} событий${marginPct > 0
+                  ? `<small>надбавка −${marginPct}% за каждое событие после первого</small>` : ''}</span><b>${totalOdd.toFixed(2)}</b></div>`
               : '');
       }
 

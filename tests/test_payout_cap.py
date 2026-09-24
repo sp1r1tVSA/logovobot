@@ -42,7 +42,7 @@ class TestPayoutCap(unittest.TestCase):
                 (self.division_id, season_id)
             )
             self.match_ids = []
-            for t1, t2 in (("Лидс", "Ренн"), ("Брест", "Монако")):
+            for t1, t2 in (("Лидс", "Ренн"), ("Брест", "Монако"), ("Лион", "Ницца"), ("Ланс", "Лилль")):
                 cursor.execute("""
                     INSERT INTO matches (division_id, season_id, round_number, player1_team, player2_team, status)
                     VALUES (?, ?, 1, ?, ?, 'pending')
@@ -118,27 +118,29 @@ class TestPayoutCap(unittest.TestCase):
         self.assertEqual(row["legacy_limits"], 0)
 
     def test_express_cap_applies_to_the_whole_coupon(self):
-        # Express 2.00 × 2.00 = 4.00: the cap is 10,000 for the coupon, not per leg.
+        # Express 2.00 × 2.00 × 0.97 = 3.88: the cap is 10,000 for the coupon, not per leg.
         decision = RiskEngine.evaluate_bet(
-            user_id=self.user_id, amount=2600, selections=self._slip(*self.match_ids),
+            user_id=self.user_id, amount=2600, selections=self._slip(*self.match_ids[:2]),
             division_id=self.division_id,
         )
         self.assertFalse(decision.allowed)
         self.assertEqual(decision.reason, "MAX_PAYOUT")
-        self.assertEqual(decision.max_allowed_stake, 2500)
+        self.assertEqual(decision.max_allowed_stake, 2577)
 
-        ok, bet_id = database.place_user_bet(self.user_id, 2500, self._slip(*self.match_ids))
+        ok, bet_id = database.place_user_bet(self.user_id, 2577, self._slip(*self.match_ids[:2]))
         self.assertTrue(ok, bet_id)
 
     # ─── Open-exposure limit ─────────────────────────────────────────────────
     def test_bets_fill_the_open_limit(self):
-        # Three max bets (3 × 10,000) plus one for the last 5,000 = 35,000.
-        for match_id in (self.match_ids[0], self.match_ids[1], self.match_ids[0]):
+        # Four different coupons: 10,000 + 10,000 + 10,000 + 5,000 = 35,000.
+        # (Repeating a coupon would hit the identical-coupon cap instead.)
+        for match_id in self.match_ids[:3]:
             self.assertTrue(database.place_user_bet(self.user_id, 5000, self._slip(match_id))[0])
-        self.assertTrue(database.place_user_bet(self.user_id, 2500, self._slip(self.match_ids[1]))[0])
+        self.assertTrue(database.place_user_bet(self.user_id, 2500, self._slip(self.match_ids[3]))[0])
         self.assertEqual(database.get_user_open_exposure(self.user_id), 35_000)
 
-        ok, res = database.place_user_bet(self.user_id, 10, self._slip())
+        # A new set of selections, so only the open limit can stop it.
+        ok, res = database.place_user_bet(self.user_id, 10, self._slip(*self.match_ids[:2]))
         self.assertFalse(ok)
         self.assertEqual(res["error"], "EXPOSURE_LIMIT")
 

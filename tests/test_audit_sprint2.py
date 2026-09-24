@@ -97,7 +97,7 @@ class TestAuditSprint2(unittest.TestCase):
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO user_bets (user_id, amount, total_odd, potential_win, actual_payout, status, created_at, settled_at)
-                VALUES (?, 10000, 2.0, 20000, 0, 'lost', datetime('now'), datetime('now'))
+                VALUES (?, 10000, 2.0, 20000, 0, 'lost', datetime('now', '+3 hours'), datetime('now', '+3 hours'))
             """, (self.user_id,))
 
         # Placing a new bet must be rejected due to daily loss limit
@@ -116,7 +116,7 @@ class TestAuditSprint2(unittest.TestCase):
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO user_bets (user_id, amount, total_odd, potential_win, actual_payout, status, created_at, settled_at)
-                VALUES (?, 8000, 2.0, 16000, 0, 'lost', datetime('now'), datetime('now'))
+                VALUES (?, 8000, 2.0, 16000, 0, 'lost', datetime('now', '+3 hours'), datetime('now', '+3 hours'))
             """, (self.user_id,))
 
         slip = [{"match_id": self.match_id, "outcome": "p1", "market_id": self.market_1x2_id, "selection_id": self.sel_p1_id}]
@@ -142,7 +142,7 @@ class TestAuditSprint2(unittest.TestCase):
             cursor = conn.cursor()
             cursor.execute("""
                 INSERT INTO user_bets (user_id, amount, total_odd, potential_win, status, created_at)
-                VALUES (?, 22500, 2.0, 45000, 'pending', datetime('now'))
+                VALUES (?, 22500, 2.0, 45000, 'pending', datetime('now', '+3 hours'))
             """, (self.user_id,))
 
         # New bet with potential win 10,000 (stake 5,000 * odd 2.0 = 10,000) -> 45,000 + 10,000 = 55,000 > 50,000

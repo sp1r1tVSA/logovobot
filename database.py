@@ -1561,6 +1561,13 @@ def init_db() -> None:
                 VALUES ('014_payout_cap_legacy_bets', 'Bets placed before the 10k payout cap keep the old limits')
             """)
 
+        # Надбавка на экспресс, действовавшая при приёме купона (см. express_odd).
+        # NULL — купон принят до её введения и рассчитывается по чистому кэфу.
+        try:
+            cursor.execute("ALTER TABLE user_bets ADD COLUMN express_margin_pct INTEGER")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS saved_coupons (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -11773,7 +11780,64 @@ _MAX_PAYOUT: int = 10_000
 # значение по умолчанию: главный админ меняет его в панели (get_max_express_events).
 MIN_EXPRESS_EVENTS: int = 2
 MAX_EXPRESS_EVENTS: int = 15
+# Надбавка на экспресс: итоговый коэффициент умножается на (1 − p/100) за каждое
+# событие после первого. Ошибка линии в экспрессе перемножается, и длинные
+# купоны были главной утечкой монет. Процент меняется в панели
+# (get_express_margin_pct); купон запоминает его в user_bets.express_margin_pct,
+# поэтому расчёт всегда идёт по правилу, действовавшему при приёме.
+EXPRESS_MARGIN_PCT: int = 3
+MAX_EXPRESS_MARGIN_PCT: int = 20
 _bet_placement_lock = threading.RLock()
+
+
+def express_odd(leg_odds, margin_pct) -> float:
+    """Итоговый коэффициент купона: произведение ног с надбавкой на экспресс.
+
+    Надбавка берётся за каждую ногу после первой, поэтому ординар и экспресс, в
+    котором выиграла одна нога (остальные возвращены), идут по чистому кэфу.
+    `margin_pct` = None или 0 — купон без надбавки (принят до её введения).
+    Не опускается ниже 1.01: выигравший купон не выплачивает меньше ставки.
+    """
+    odds = [max(1.01, float(o)) for o in leg_odds]
+    raw = 1.0
+    for o in odds:
+        raw *= o
+    pct = max(0, min(MAX_EXPRESS_MARGIN_PCT, int(margin_pct or 0)))
+    if len(odds) < 2 or pct == 0:
+        return round(raw, 2)
+    factor = (1.0 - pct / 100.0) ** (len(odds) - 1)
+    return round(max(1.01, raw * factor), 2)
+
+
+def selection_identity(match_id, outcome, selection_id=None) -> tuple:
+    """Ключ исхода для сравнения купонов: исход линии, а без него — матч и исход."""
+    if selection_id:
+        return ("s", int(selection_id))
+    key = str(outcome or "").strip().lower()
+    return ("o", int(match_id), OUTCOME_KEY_ALIASES.get(key, key))
+
+
+def get_identical_open_payout(cursor, user_id: int, identities) -> int:
+    """Возможная выплата по открытым купонам игрока с тем же набором исходов.
+
+    Потолок выплаты считается на набор, а не на купон: второй такой же экспресс
+    иначе удваивал выигрыш (купоны #692/#693). Купоны до потолка
+    (legacy_limits = 1) идут по старым правилам и не учитываются.
+    """
+    wanted = frozenset(identities)
+    if not wanted:
+        return 0
+    cursor.execute("""
+        SELECT ub.id, ub.potential_win, bi.match_id, bi.outcome_type, bi.selection_id
+        FROM user_bets ub
+        JOIN bet_items bi ON bi.bet_id = ub.id
+        WHERE ub.user_id = ? AND ub.status = 'pending' AND COALESCE(ub.legacy_limits, 0) = 0
+    """, (user_id,))
+    bets: dict[int, dict] = {}
+    for r in cursor.fetchall():
+        b = bets.setdefault(r["id"], {"payout": int(r["potential_win"] or 0), "keys": set()})
+        b["keys"].add(selection_identity(r["match_id"], r["outcome_type"], r["selection_id"]))
+    return sum(b["payout"] for b in bets.values() if b["keys"] == wanted)
 
 # Canonical Outcome Aliases & Cross-Schema Mapping
 OUTCOME_KEY_ALIASES: dict[str, str] = {
@@ -12120,7 +12184,6 @@ def place_user_bet(
             return False, f"Недостаточно монет на балансе (Баланс: {wallet['balance']} 🪙)."
 
         # Validate selections
-        total_odd = 1.0
         validated_items = []
         seen_matches = set()
         seen_cup_series = set()
@@ -12241,7 +12304,6 @@ def place_user_bet(
                         "message": f"Коэффициент изменился: {client_odd_rounded} → {odd_val}"
                     }
 
-            total_odd *= max(1.01, odd_val)
             validated_items.append({
                 "match_id": m_id,
                 "outcome_type": out_type,
@@ -12250,9 +12312,11 @@ def place_user_bet(
                 "selection_id": resolved_sel_id
             })
 
-        total_odd = round(total_odd, 2)
-        potential_win = int(round(amount * total_odd))
         bet_type = "single" if len(validated_items) == 1 else "express"
+        # Надбавку купон запоминает: расчёт пойдёт по ней, даже если её потом поменяют.
+        margin_pct = get_express_margin_pct() if bet_type == "express" else None
+        total_odd = express_odd([it["odd"] for it in validated_items], margin_pct)
+        potential_win = int(round(amount * total_odd))
 
         # Phase 5: MAX_PAYOUT check
         if potential_win > _MAX_PAYOUT:
@@ -12266,9 +12330,9 @@ def place_user_bet(
         # 1. Insert user_bet with idempotency check (Phase 5: includes idempotency_payload_hash)
         try:
             cursor.execute("""
-                INSERT INTO user_bets (user_id, bet_type, amount, total_odd, potential_win, status, idempotency_key, idempotency_payload_hash, created_at)
-                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, datetime('now', '+3 hours'))
-            """, (user_id, bet_type, amount, total_odd, potential_win, idempotency_key, _payload_hash))
+                INSERT INTO user_bets (user_id, bet_type, amount, total_odd, potential_win, status, idempotency_key, idempotency_payload_hash, express_margin_pct, created_at)
+                VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?, datetime('now', '+3 hours'))
+            """, (user_id, bet_type, amount, total_odd, potential_win, idempotency_key, _payload_hash, margin_pct))
             bet_id = cursor.lastrowid
         except sqlite3.IntegrityError:
             if idempotency_key:
@@ -12410,7 +12474,8 @@ def execute_cashout(
         available, offer, reason = calculate_cashout_offer(
             stake=bet["amount"],
             potential_win=bet["potential_win"],
-            items=items
+            items=items,
+            express_margin_pct=bet["express_margin_pct"] if "express_margin_pct" in bet.keys() else None
         )
 
         if not available or offer <= 0:
@@ -13616,6 +13681,11 @@ def get_global_limit(limit_key: str, default: int) -> int:
 
 def get_max_express_events() -> int:
     return get_global_limit("max_express_events", MAX_EXPRESS_EVENTS)
+
+
+def get_express_margin_pct() -> int:
+    pct = get_global_limit("express_margin_pct", EXPRESS_MARGIN_PCT)
+    return max(0, min(MAX_EXPRESS_MARGIN_PCT, pct))
 
 
 def get_initial_wallet_balance() -> int:

@@ -33,8 +33,9 @@ DEFAULT_DIVISION_EXPOSURE_LIMIT: int = 1_000_000
 DEFAULT_GLOBAL_EXPOSURE_LIMIT: int = 5_000_000
 # Не лимиты риска, а настройки экономики и купона: хранятся в той же таблице и
 # меняются из той же панели, но читает их database (get_max_express_events,
-# get_initial_wallet_balance), а не RiskEngine.
+# get_express_margin_pct, get_initial_wallet_balance), а не RiskEngine.
 DEFAULT_MAX_EXPRESS_EVENTS: int = database.MAX_EXPRESS_EVENTS
+DEFAULT_EXPRESS_MARGIN_PCT: int = database.EXPRESS_MARGIN_PCT
 DEFAULT_INITIAL_BALANCE: int = database.INITIAL_WALLET_BALANCE
 
 
@@ -56,6 +57,7 @@ class BettingLimitsService:
             "division_exposure_limit": DEFAULT_DIVISION_EXPOSURE_LIMIT,
             "global_exposure_limit": DEFAULT_GLOBAL_EXPOSURE_LIMIT,
             "max_express_events": DEFAULT_MAX_EXPRESS_EVENTS,
+            "express_margin_pct": DEFAULT_EXPRESS_MARGIN_PCT,
             "initial_balance": DEFAULT_INITIAL_BALANCE,
         }
 

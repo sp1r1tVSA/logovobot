@@ -516,6 +516,13 @@ body.coupon-open {
   font-weight: 700;
   color: var(--text-secondary);
 }
+.coupon-chain-total small {
+  display: block;
+  margin-top: 2px;
+  font-size: 0.68rem;
+  font-weight: 600;
+  opacity: 0.75;
+}
 .coupon-chain-total b {
   font-family: 'Outfit', sans-serif;
   font-size: 1.15rem;

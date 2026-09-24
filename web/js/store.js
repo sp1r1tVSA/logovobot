@@ -400,10 +400,21 @@ class StateStore {
     this.notify();
   }
 
+  /** Надбавка на экспресс из bootstrap: минус столько % за каждое событие после первого. */
+  getExpressMarginPct() {
+    const pct = Number(this.state.user?.bet_limits?.express_margin_pct);
+    return Number.isFinite(pct) ? Math.max(0, pct) : 3;
+  }
+
+  /** Same formula as the server (database.express_odd). */
   getTotalOdd() {
-    if (this.state.slip.length === 0) return 1.0;
-    const rawOdd = this.state.slip.reduce((acc, item) => acc * item.odd, 1.0);
-    return Math.round(rawOdd * 100) / 100;
+    const slip = this.state.slip;
+    if (slip.length === 0) return 1.0;
+    const rawOdd = slip.reduce((acc, item) => acc * Math.max(1.01, item.odd), 1.0);
+    const pct = this.getExpressMarginPct();
+    if (slip.length < 2 || pct === 0) return Math.round(rawOdd * 100) / 100;
+    const odd = Math.max(1.01, rawOdd * Math.pow(1 - pct / 100, slip.length - 1));
+    return Math.round(odd * 100) / 100;
   }
 
   getTotalStake() {

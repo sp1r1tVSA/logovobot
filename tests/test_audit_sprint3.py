@@ -391,8 +391,8 @@ class TestAuditSprint3(unittest.TestCase):
     # ──────────────────────────────────────────────────────────────────────────
     def test_lb19_rounding_discrepancy_unification(self):
         """LB-19: Settlement payout formula matches placement potential_win calculation."""
-        # 100 coins on odds 1.33 and 1.50 -> total_odd = round(1.33 * 1.50, 2) = 2.00
-        # Placement potential_win = int(round(100 * 2.00)) = 200
+        # 100 coins on odds 1.33 and 1.50 with the 3% express margin ->
+        # total_odd = round(1.33 * 1.50 * 0.97, 2) = 1.94, potential_win = 194
         match_id_2 = 889902
         with database.transaction() as conn:
             conn.execute("""
@@ -414,7 +414,7 @@ class TestAuditSprint3(unittest.TestCase):
         )
         self.assertTrue(ok, f"Failed placing express: {b_id}")
         bet = database.get_user_bet_by_id(self.user_id, b_id)
-        self.assertEqual(bet["potential_win"], 200)
+        self.assertEqual(bet["potential_win"], 194)
 
         # Settle both matches
         settlement_engine.settle_match_predictions(self.match_id, score1=2, score2=0)
@@ -422,8 +422,8 @@ class TestAuditSprint3(unittest.TestCase):
 
         settled_bet = database.get_user_bet_by_id(self.user_id, b_id)
         self.assertEqual(settled_bet["status"], "won")
-        # Actual payout must be exactly 200 (not truncated to 199!)
-        self.assertEqual(settled_bet["actual_payout"], 200)
+        # Actual payout must be exactly 194 (not truncated to 193!)
+        self.assertEqual(settled_bet["actual_payout"], 194)
         self.assertEqual(settled_bet["actual_payout"], bet["potential_win"])
 
     # ──────────────────────────────────────────────────────────────────────────

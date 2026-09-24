@@ -409,6 +409,16 @@ coupon at all times, can resync without waiting for the next bootstrap. A batch 
 is N separate placements, so it is accepted up to the remaining slots and the rest are
 reported per item. `tests/test_open_bets_limit.py` covers it.
 
+An **express** pays its odds product minus `express_margin_pct` (default 3%, panel «Надбавка на
+экспресс», 0–20, 0 = off) for every leg after the first — `database.express_odd` is the one
+formula, used by placement, settlement, cashout, the Telegram coupon and `store.getTotalOdd` in
+the Mini App. The rate is stored on the bet (`user_bets.express_margin_pct`), because settlement
+recomputes the payout from the won legs: a later setting change never touches an accepted
+coupon, bets from before the margin (NULL) keep the pure product, and a refunded leg drops out
+of the count. Separately, pending coupons with the **same set of selections** share one
+`max_payout` (`get_identical_open_payout`, legacy bets excluded) — repeating a max-payout
+coupon used to multiply it. `tests/test_express_margin.py` covers both.
+
 **Gamification** pays out of the same closed economy, so rewards are calibrated against it
 rather than against round numbers: the starting wallet is `INITIAL_WALLET_BALANCE` (677 🪙),
 the payout ceiling 10 000 🪙 — there is no daily bonus. `seed_gamification_catalog` therefore
