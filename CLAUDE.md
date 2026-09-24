@@ -432,7 +432,7 @@ the returned list client-side. The market filter never changes the line probabil
 overround still comes from the match's 1X2. No key, a failed call or an empty answer falls back to
 the line probability and says so (`source: "line"`). Results are cached 30 min (5 min for the
 fallback), a manual refresh recomputes at most every 2 min, and only one model call runs at a
-time — the free tier's daily quota is small. It is advisory only: nothing in betting reads it.
+time — the free tier's daily quota is small. The whole model chain must finish within `CHAIN_BUDGET_SECONDS = 75` (the Cloudflare tunnel cuts a request at 100 s), each model capped at 60 s; a model that answers 429 (for its `Retry-After` / `X-RateLimit-Reset`, else 10 min), times out (10 min) or 404s (1 h) is skipped until its cooldown ends, so a request does not wait on models known to be busy. An answer left in `message.reasoning` with an empty `content` is still parsed. It is advisory only: nothing in betting reads it.
 
 The tab's «Сверка с матчами» view (`GET /api/admin/panel/picks/review`,
 `services/ai/pick_review.py`) checks those picks against played matches. Every AI answer —

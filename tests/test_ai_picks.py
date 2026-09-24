@@ -11,6 +11,7 @@ import hmac
 import io
 import json
 import time
+import types
 import unittest
 import urllib.error
 import urllib.parse
@@ -330,6 +331,60 @@ class TestOpenRouterCall(PicksCase):
         self.assertEqual(sent["reasoning"], {"effort": "low", "exclude": True})
         self.assertGreaterEqual(sent["max_tokens"], 8000)
         self.assertNotIn(FAKE_KEY, "\n".join(logs.output))
+
+    def test_rate_limited_model_is_skipped_until_its_cooldown_ends(self):
+        config.OPENROUTER_API_KEY = FAKE_KEY
+        matches = bet_picks.collect_candidates([1], max_matches=50)
+        answer = {"choices": [{"message": {"content": '{"picks": []}'}}]}
+        asked = []
+
+        def fake_urlopen(req, timeout):
+            model = json.loads(req.data.decode("utf-8"))["model"]
+            asked.append(model)
+            if model == "first/model:free":
+                raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {"Retry-After": "120"}, None)
+            return _FakeResponse(json.dumps(answer).encode("utf-8"))
+
+        with patch.object(bet_picks.urllib.request, "urlopen", side_effect=fake_urlopen), \
+             self.assertLogs("services.ai.bet_picks", level="INFO"):
+            bet_picks._call_openrouter(matches)
+            data, model = bet_picks._call_openrouter(matches)
+        # Второй раз занятую модель уже не ждём.
+        self.assertEqual(asked, ["first/model:free", "second/model:free", "second/model:free"])
+        self.assertEqual(model, "second/model:free")
+
+    def test_the_whole_chain_fits_the_time_budget(self):
+        config.OPENROUTER_API_KEY = FAKE_KEY
+        config.OPENROUTER_MODEL = "a/m:free,b/m:free,c/m:free"
+        matches = bet_picks.collect_candidates([1], max_matches=50)
+        clock = [1000.0]
+        fake_time = types.SimpleNamespace(monotonic=lambda: clock[0], time=lambda: clock[0])
+        timeouts = []
+
+        def fake_urlopen(req, timeout):
+            timeouts.append(timeout)
+            clock[0] += timeout
+            raise TimeoutError()
+
+        with patch.object(bet_picks, "time", fake_time), \
+             patch.object(bet_picks.urllib.request, "urlopen", side_effect=fake_urlopen), \
+             self.assertLogs("services.ai.bet_picks", level="WARNING"):
+            self.assertEqual(bet_picks._call_openrouter(matches), (None, None))
+        # 60 с первой модели + остаток бюджета второй; третью уже не трогаем.
+        self.assertEqual(timeouts, [bet_picks.REQUEST_TIMEOUT_SECONDS,
+                                    bet_picks.CHAIN_BUDGET_SECONDS - bet_picks.REQUEST_TIMEOUT_SECONDS])
+        self.assertLessEqual(sum(timeouts), bet_picks.CHAIN_BUDGET_SECONDS)
+
+    def test_answer_left_in_reasoning_is_still_read(self):
+        config.OPENROUTER_API_KEY = FAKE_KEY
+        matches = bet_picks.collect_candidates([1], max_matches=50)
+        answer = {"choices": [{"finish_reason": "stop",
+                               "message": {"content": "", "reasoning": 'Итог: {"picks": [{"id": 1}]}'}}]}
+        with patch.object(bet_picks.urllib.request, "urlopen",
+                          return_value=_FakeResponse(json.dumps(answer).encode("utf-8"))):
+            data, model = bet_picks._call_openrouter(matches)
+        self.assertEqual(data, {"picks": [{"id": 1}]})
+        self.assertEqual(model, "first/model:free")
 
     def test_no_key_means_no_request(self):
         with patch.object(bet_picks.urllib.request, "urlopen") as urlopen:

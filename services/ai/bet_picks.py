@@ -51,7 +51,17 @@ MAX_PER_MATCH = 2         # не больше исходов одного мат
 CACHE_TTL_SECONDS = 30 * 60
 FALLBACK_TTL_SECONDS = 5 * 60   # фолбэк держим недолго — модель скоро спросим снова
 REFRESH_MIN_SECONDS = 2 * 60
-REQUEST_TIMEOUT_SECONDS = 90
+REQUEST_TIMEOUT_SECONDS = 60   # потолок одной модели
+# Вся цепочка моделей обязана уложиться в это время: туннель Cloudflare рвёт
+# запрос через 100 с, и панель так и висела на «ИИ анализирует линию…».
+CHAIN_BUDGET_SECONDS = 75
+MIN_ATTEMPT_SECONDS = 10       # меньше осталось — следующую модель не трогаем
+# Модель, ответившая 429 или не успевшая, какое-то время не спрашиваем:
+# иначе каждый запрос заново ждёт заведомо занятые модели.
+RATE_LIMIT_COOLDOWN_SECONDS = 10 * 60
+MAX_COOLDOWN_SECONDS = 60 * 60
+TIMEOUT_COOLDOWN_SECONDS = 10 * 60
+GONE_COOLDOWN_SECONDS = 60 * 60   # 404: модель убрали с OpenRouter
 REASON_MAX_CHARS = 220
 
 _FINISHED_MATCH_STATUSES = {"confirmed", "completed", "cancelled"}
@@ -59,6 +69,7 @@ _FINISHED_MATCH_STATUSES = {"confirmed", "completed", "cancelled"}
 _cache: dict[tuple, tuple[float, dict]] = {}
 _cache_lock = threading.Lock()
 _call_lock = threading.Lock()
+_cooldowns: dict[str, float] = {}   # модель → time.monotonic(), до которого её пропускаем
 
 
 # Группы рынков для фильтра вкладки: id → (подпись, market_key движка).
@@ -119,6 +130,7 @@ def _cache_key(division_ids: list[int] | None, filters: dict | None = None) -> t
 def clear_cache() -> None:
     with _cache_lock:
         _cache.clear()
+        _cooldowns.clear()
 
 
 # ─── Кандидаты ──────────────────────────────────────────────────────────────
@@ -379,7 +391,18 @@ def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
     system = _SYSTEM_PROMPT.format(limit=PICKS_LIMIT, per_match=MAX_PER_MATCH)
     user = "ДАННЫЕ (JSON):\n" + json.dumps(_payload_for_model(matches), ensure_ascii=False)
 
+    started = time.monotonic()
     for model in _models():
+        now = time.monotonic()
+        with _cache_lock:
+            until = _cooldowns.get(model, 0.0)
+        if until > now:
+            logger.info("AI picks: model '%s' is cooling down for %d s more, skipping it.", model, until - now)
+            continue
+        timeout = min(REQUEST_TIMEOUT_SECONDS, CHAIN_BUDGET_SECONDS - (now - started))
+        if timeout < MIN_ATTEMPT_SECONDS:
+            logger.warning("AI picks: time budget spent, model '%s' and the rest are not tried.", model)
+            break
         body = json.dumps({
             "model": model,
             "messages": [{"role": "system", "content": system},
@@ -400,7 +423,7 @@ def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=REQUEST_TIMEOUT_SECONDS) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 result = json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
             err_msg = ""
@@ -408,15 +431,28 @@ def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
                 err_msg = e.read().decode("utf-8", errors="replace")[:250].strip()
             except Exception:
                 pass
-            logger.warning("AI picks: model '%s' HTTP %s (%s), trying the next one.", model, e.code, err_msg)
-            if e.code == 429:
-                time.sleep(0.5)
+            pause = _http_cooldown(e)
+            if pause:
+                _cool_down(model, pause)
+            logger.warning("AI picks: model '%s' HTTP %s (%s)%s, trying the next one.", model, e.code, err_msg,
+                           f", skipped for {pause} s" if pause else "")
+            continue
+        except (TimeoutError, urllib.error.URLError) as e:
+            if not isinstance(e, TimeoutError) and not isinstance(getattr(e, "reason", None), TimeoutError):
+                logger.warning("AI picks: model '%s' failed (%s), trying the next one.", model, type(e).__name__)
+                continue
+            _cool_down(model, TIMEOUT_COOLDOWN_SECONDS)
+            logger.warning("AI picks: model '%s' timed out after %d s (skipped for %d s), trying the next one.",
+                           model, timeout, TIMEOUT_COOLDOWN_SECONDS)
             continue
         except Exception as e:
             logger.warning("AI picks: model '%s' failed (%s), trying the next one.", model, type(e).__name__)
             continue
         try:
-            msg = result["choices"][0]["message"]
+            choice = result["choices"][0]
+            msg = choice["message"]
+            # Часть моделей при exclude-рассуждениях оставляет content пустым,
+            # а ответ целиком кладёт в reasoning.
             text = msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or ""
         except (KeyError, IndexError, TypeError):
             logger.warning("AI picks: model '%s' returned no choices.", model)
@@ -426,10 +462,36 @@ def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
             return data, model
         snippet = (text[:250] if isinstance(text, str) else "")
         logger.warning(
-            "AI picks: model '%s' returned no parsable JSON (len=%d, snippet=%r).",
-            model, len(text) if isinstance(text, str) else 0, snippet,
+            "AI picks: model '%s' returned no parsable JSON (finish_reason=%s, len=%d, snippet=%r).",
+            model, choice.get("finish_reason"), len(text) if isinstance(text, str) else 0, snippet,
         )
     return None, None
+
+
+def _http_cooldown(e: urllib.error.HTTPError) -> int:
+    """Сколько секунд не спрашивать модель после ошибки; 0 — спрашивать как обычно."""
+    if e.code == 404:
+        return GONE_COOLDOWN_SECONDS
+    if e.code != 429:
+        return 0
+    headers = e.headers or {}
+    wait = None
+    try:
+        # Retry-After — секунды; X-RateLimit-Reset у OpenRouter — эпоха в миллисекундах.
+        if headers.get("Retry-After"):
+            wait = float(headers["Retry-After"])
+        elif headers.get("X-RateLimit-Reset"):
+            wait = float(headers["X-RateLimit-Reset"]) / 1000.0 - time.time()
+    except (TypeError, ValueError):
+        wait = None
+    if wait is None or wait <= 0:
+        return RATE_LIMIT_COOLDOWN_SECONDS
+    return int(min(max(wait, 60), MAX_COOLDOWN_SECONDS))
+
+
+def _cool_down(model: str, seconds: int) -> None:
+    with _cache_lock:
+        _cooldowns[model] = time.monotonic() + seconds
 
 
 # ─── Ранжирование ───────────────────────────────────────────────────────────
