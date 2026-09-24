@@ -163,7 +163,8 @@ class TestDivisionsCatalogAndRosters(unittest.IsolatedAsyncioTestCase):
         context.user_data = {}
 
         with patch("handlers.base.is_admin", return_value=True), \
-             patch("handlers.admin.is_admin", return_value=True):
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=True):
             await admin_rosters_for_division(update, context)
 
         self.assertEqual(context.user_data.get("admin_roster_div_id"), self.div_a_id)

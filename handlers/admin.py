@@ -137,6 +137,37 @@ async def _ensure_super_admin(update: Update) -> bool:
     return True
 
 
+def _division_home_cb(user_id: int, div_id: int) -> str:
+    """
+    Куда ведёт «Назад в дивизион» с общих экранов: супер-админа — в карточку
+    дивизиона, админа дивизиона — в его панель (карточка закрыта
+    `_ensure_super_admin` и отшила бы его).
+    """
+    if is_global_admin(user_id):
+        return f"admin_div_view_{div_id}"
+    return f"admin_div_panel:{div_id}"
+
+
+async def _ensure_club_access(update: Update, club: str) -> bool:
+    """
+    Составы клуба — только для супер-админа или админа дивизиона, в котором
+    этот клуб играет. Клуб приходит из callback_data, поэтому без проверки
+    админ дивизиона 1 мог бы очистить состав клуба из дивизиона 2.
+    """
+    user = update.effective_user
+    if not user:
+        return False
+    if is_global_admin(user.id):
+        return True
+    key = (club or "").strip().lower()
+    for division in await asyncio.to_thread(database.get_admin_divisions, user.id):
+        teams = await asyncio.to_thread(database.get_division_teams, division["id"])
+        if any(team.strip().lower() == key for team in teams):
+            return True
+    await _deny_access(update, "⛔ Этот клуб не из вашего дивизиона")
+    return False
+
+
 async def _resolve_division_group_chat(div_id: int) -> int | None:
     """
     Группа, в которой живут топики дивизиона: сначала любой уже привязанный
@@ -266,6 +297,7 @@ async def show_division_admin_panel(update: Update, context: ContextTypes.DEFAUL
 
     keyboard = [
         [InlineKeyboardButton("⚔️ Управление матчами", callback_data=f"admin_div_manage_matches:{div_id}")],
+        [InlineKeyboardButton("📋 Составы команд", callback_data=f"admin_roster_div:{div_id}")],
         [InlineKeyboardButton("🔗 Привязка клубов", callback_data=f"admin_bind_div:{div_id}")],
         [InlineKeyboardButton("📢 Рассылка задолженностей", callback_data=f"admin_div_debts_menu:{div_id}")],
         [InlineKeyboardButton("👥 Выдача варнов", callback_data=f"admin_div_manage_players:{div_id}")],
@@ -5180,10 +5212,14 @@ async def admin_rosters_for_division(update: Update, context: ContextTypes.DEFAU
     except (ValueError, TypeError):
         div_id = 1
 
+    if not await _ensure_division_access(update, div_id):
+        return
+
     context.user_data["admin_roster_div_id"] = div_id
 
     division = await asyncio.to_thread(database.get_division, div_id)
     div_name = division.get("name") if division else f"Дивизион #{div_id}"
+    home_cb = _division_home_cb(query.from_user.id, div_id)
 
     teams = await asyncio.to_thread(database.get_division_teams, div_id)
 
@@ -5199,7 +5235,7 @@ async def admin_rosters_for_division(update: Update, context: ContextTypes.DEFAU
             keyboard.append(row)
     else:
         text_empty = f"⚠️ В дивизионе <b>{html.escape(div_name)}</b> пока нет зарегистрированных команд."
-        keyboard.append([InlineKeyboardButton("« Назад в дивизион", callback_data=f"admin_div_view_{div_id}")])
+        keyboard.append([InlineKeyboardButton("« Назад в дивизион", callback_data=home_cb)])
         await query.edit_message_text(text_empty, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
         return
 
@@ -5208,11 +5244,13 @@ async def admin_rosters_for_division(update: Update, context: ContextTypes.DEFAU
         InlineKeyboardButton("➕ Добавить игроков из матчей", callback_data=f"admin_squad_add_missing_div:{div_id}")
     ])
     # Кэш портретов общий для всей лиги (get_all_unique_players), дивизионного
-    # скоупа у него нет — подпись говорит об этом прямо.
-    keyboard.append([
-        InlineKeyboardButton("🖼 Загрузить фото игроков (вся лига)", callback_data="admin_fetch_photos_cb")
-    ])
-    keyboard.append([InlineKeyboardButton("« Назад в дивизион", callback_data=f"admin_div_view_{div_id}")])
+    # скоупа у него нет — подпись говорит об этом прямо, а админу дивизиона
+    # кнопку не показываем: общелиговая операция вне его скоупа.
+    if is_global_admin(query.from_user.id):
+        keyboard.append([
+            InlineKeyboardButton("🖼 Загрузить фото игроков (вся лига)", callback_data="admin_fetch_photos_cb")
+        ])
+    keyboard.append([InlineKeyboardButton("« Назад в дивизион", callback_data=home_cb)])
 
     text = (
         f"📋 <b>Составы — {html.escape(div_name)}</b>\n\n"
@@ -5235,6 +5273,8 @@ async def admin_view_squad(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     club = query.data.replace("admin_squad_view_", "")
+    if not await _ensure_club_access(update, club):
+        return
     squad_items = await asyncio.to_thread(database.get_squad_with_positions, club)
 
     div_id = context.user_data.get("admin_roster_div_id")
@@ -5243,7 +5283,8 @@ async def admin_view_squad(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if user and user.get("division_id"):
             div_id = user["division_id"]
 
-    back_cb = f"admin_roster_div:{div_id}" if div_id else "admin_divs_hub"
+    # Хаб дивизионов закрыт для админа дивизиона — без дивизиона уводим в админку.
+    back_cb = f"admin_roster_div:{div_id}" if div_id else "admin_main_menu"
 
     if squad_items:
         lines = [f"👥 <b>Состав команды {html.escape(club)}:</b>\n"]
@@ -5290,6 +5331,9 @@ async def admin_squad_upload_start(update: Update, context: ContextTypes.DEFAULT
     else:
         club = query.data.replace("admin_squad_upload_", "")
         is_reserves = False
+
+    if not await _ensure_club_access(update, club):
+        return ConversationHandler.END
 
     context.user_data["admin_squad_club"] = club
     context.user_data["admin_squad_is_reserves"] = is_reserves
@@ -5373,6 +5417,8 @@ async def admin_squad_add_player_start(update: Update, context: ContextTypes.DEF
         return ConversationHandler.END
 
     club = query.data.replace("admin_squad_add_player_", "")
+    if not await _ensure_club_access(update, club):
+        return ConversationHandler.END
     context.user_data["admin_squad_club"] = club
 
     text = (
@@ -5420,6 +5466,8 @@ async def admin_squad_clear(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         return
 
     club = query.data.replace("admin_squad_clear_", "")
+    if not await _ensure_club_access(update, club):
+        return
     deleted = await asyncio.to_thread(database.clear_squad, club)
 
     text = f"🗑️ Состав команды <b>{html.escape(club)}</b> очищен. Удалено игроков: <b>{deleted}</b>."
@@ -5440,6 +5488,8 @@ async def admin_squad_rm_menu(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     club = query.data.replace("admin_squad_rm_menu_", "")
+    if not await _ensure_club_access(update, club):
+        return
     squad = await asyncio.to_thread(database.get_squad, club)
 
     if not squad:
@@ -5489,6 +5539,8 @@ async def admin_squad_del_player(update: Update, context: ContextTypes.DEFAULT_T
         idx = int(idx_str)
     except ValueError:
         await query.answer("❌ Неверный индекс.")
+        return
+    if not await _ensure_club_access(update, club):
         return
 
     squad = context.user_data.get(f"rm_squad_{club}")
@@ -5565,6 +5617,8 @@ async def admin_squad_add_missing(update: Update, context: ContextTypes.DEFAULT_
         back_data = f"admin_roster_div:{div_id}"
     else:
         club = data.replace("admin_squad_add_missing_", "")
+        if not await _ensure_club_access(update, club):
+            return
         missing = await asyncio.to_thread(database.get_missing_squad_players, club)
         if not missing:
             text = f"✅ В составе <b>{html.escape(club)}</b> нет игроков из матчей, отсутствующих в составе."
@@ -5625,7 +5679,16 @@ def _format_division_squads_status_html(status_data: dict) -> str:
     return "\n".join(lines)
 
 
-def _build_division_squads_keyboard(div_id: int, all_div_ids: list[int], has_debtors: bool = True) -> InlineKeyboardMarkup:
+def _build_division_squads_keyboard(
+    div_id: int,
+    all_div_ids: list[int],
+    has_debtors: bool = True,
+    is_super: bool = True,
+) -> InlineKeyboardMarkup:
+    """
+    Для админа дивизиона `all_div_ids` — только его дивизионы, без «Вся лига»
+    (сводка закрыта супер-админу), а «Назад» ведёт в его панель.
+    """
     keyboard = []
 
     action_row = []
@@ -5640,11 +5703,13 @@ def _build_division_squads_keyboard(div_id: int, all_div_ids: list[int], has_deb
         prev_id = all_div_ids[(curr_idx - 1) % len(all_div_ids)]
         next_id = all_div_ids[(curr_idx + 1) % len(all_div_ids)]
         nav_row.append(InlineKeyboardButton(f"« Див. {prev_id}", callback_data=f"admin_squads_view:{prev_id}"))
-        nav_row.append(InlineKeyboardButton("📊 Вся лига", callback_data="admin_squads_all"))
+        if is_super:
+            nav_row.append(InlineKeyboardButton("📊 Вся лига", callback_data="admin_squads_all"))
         nav_row.append(InlineKeyboardButton(f"Див. {next_id} »", callback_data=f"admin_squads_view:{next_id}"))
         keyboard.append(nav_row)
 
-    keyboard.append([InlineKeyboardButton("« К дивизиону", callback_data=f"admin_div_view_{div_id}")])
+    home_cb = f"admin_div_view_{div_id}" if is_super else f"admin_div_panel:{div_id}"
+    keyboard.append([InlineKeyboardButton("« К дивизиону", callback_data=home_cb)])
     return InlineKeyboardMarkup(keyboard)
 
 
@@ -5756,7 +5821,8 @@ async def admin_squads_status_command(update: Update, context: ContextTypes.DEFA
         status_data = await asyncio.to_thread(database.get_division_squads_status, div_id)
         has_debtors = any(c["status"] in ("empty", "partial") for c in status_data["clubs"])
         text = _format_division_squads_status_html(status_data)
-        markup = _build_division_squads_keyboard(div_id, all_div_ids, has_debtors=has_debtors)
+        nav_ids = all_div_ids if is_admin else [i for i in all_div_ids if i in admin_div_ids]
+        markup = _build_division_squads_keyboard(div_id, nav_ids, has_debtors=has_debtors, is_super=is_admin)
         if update.message:
             await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
         elif update.callback_query:
@@ -5803,11 +5869,15 @@ async def admin_squads_view_cb(update: Update, context: ContextTypes.DEFAULT_TYP
 
     all_divs = await asyncio.to_thread(database.get_divisions, True)
     all_div_ids = [d["id"] for d in all_divs]
+    is_super = is_global_admin(query.from_user.id)
+    if not is_super:
+        own_ids = {d["id"] for d in await asyncio.to_thread(database.get_admin_divisions, query.from_user.id)}
+        all_div_ids = [i for i in all_div_ids if i in own_ids]
 
     status_data = await asyncio.to_thread(database.get_division_squads_status, div_id)
     has_debtors = any(c["status"] in ("empty", "partial") for c in status_data["clubs"])
     text = _format_division_squads_status_html(status_data)
-    markup = _build_division_squads_keyboard(div_id, all_div_ids, has_debtors=has_debtors)
+    markup = _build_division_squads_keyboard(div_id, all_div_ids, has_debtors=has_debtors, is_super=is_super)
 
     await safe_edit_or_reply(query, context, text, reply_markup=markup, parse_mode="HTML")
 

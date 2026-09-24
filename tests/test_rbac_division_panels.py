@@ -12,6 +12,10 @@ from handlers.admin import (
     admin_div_manage_matches,
     admin_div_broadcast_debts,
     admin_div_manage_players,
+    admin_rosters_for_division,
+    admin_squad_clear,
+    admin_squads_view_cb,
+    admin_view_squad,
 )
 
 
@@ -19,7 +23,8 @@ class TestRbacDivisionPanels(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         database.init_db()
         uid = uuid.uuid4().hex[:6].upper()
-        self.div_a = database.create_division(name=f"RBAC Альфа {uid}", code=f"RBACA_{uid}")
+        self.club_a = f"RBAC FC {uid}"
+        self.div_a =database.create_division(name=f"RBAC Альфа {uid}", code=f"RBACA_{uid}")
         self.div_b = database.create_division(name=f"RBAC Бета {uid}", code=f"RBACB_{uid}")
         self.super_id = 970001
         self.div_admin_id = 970002
@@ -32,7 +37,7 @@ class TestRbacDivisionPanels(unittest.IsolatedAsyncioTestCase):
         database.register_user(self.div_admin_id, "rbac_div_admin")
         database.register_user(self.multi_admin_id, "rbac_multi_admin")
         database.register_user(self.nobody_id, "rbac_nobody")
-        database.register_user(self.player_id, "rbac_player", team_name=f"RBAC FC {uid}")
+        database.register_user(self.player_id, "rbac_player", team_name=self.club_a)
         database.assign_user_division(self.player_id, self.div_a)
 
         database.add_division_admin(self.div_a, self.div_admin_id)
@@ -105,6 +110,7 @@ class TestRbacDivisionPanels(unittest.IsolatedAsyncioTestCase):
             self.assertIn(f"admin_div_manage_matches:{self.div_a}", callbacks)
             self.assertIn(f"admin_div_debts_menu:{self.div_a}", callbacks)
             self.assertIn(f"admin_div_manage_players:{self.div_a}", callbacks)
+            self.assertIn(f"admin_roster_div:{self.div_a}", callbacks)
             # Урезанная панель: глобальных разделов быть не должно
             self.assertNotIn("admin_manage_squads", callbacks)
             self.assertNotIn("admin_divs_hub", callbacks)
@@ -186,6 +192,80 @@ class TestRbacDivisionPanels(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(update.callback_query.edit_message_text.called)
             markup = update.callback_query.edit_message_text.call_args[1]["reply_markup"]
             self.assertIn(f"admin_div_panel:{self.div_a}", self._callbacks(markup))
+
+    # --- squads (rosters) ---
+
+    async def test_rosters_open_for_own_division_and_return_to_panel(self):
+        update = self._build_update(self.div_admin_id, f"admin_roster_div:{self.div_a}")
+        context = MagicMock()
+        context.user_data = {}
+        p_base, p_adm, p_glob, p_edit = self._patches(False)
+        with p_base, p_adm, p_glob, p_edit:
+            await admin_rosters_for_division(update, context)
+
+        markup = update.callback_query.edit_message_text.call_args[1]["reply_markup"]
+        callbacks = self._callbacks(markup)
+        self.assertIn(f"admin_squad_view_{self.club_a}", callbacks)
+        # Карточка дивизиона закрыта супер-админу — «Назад» ведёт в панель дивизиона
+        self.assertIn(f"admin_div_panel:{self.div_a}", callbacks)
+        self.assertNotIn(f"admin_div_view_{self.div_a}", callbacks)
+        # Общелиговая загрузка фото админу дивизиона не показывается
+        self.assertNotIn("admin_fetch_photos_cb", callbacks)
+
+    async def test_rosters_reject_foreign_division(self):
+        update = self._build_update(self.div_admin_id, f"admin_roster_div:{self.div_b}")
+        context = MagicMock()
+        context.user_data = {}
+        p_base, p_adm, p_glob, p_edit = self._patches(False)
+        with p_base, p_adm, p_glob, p_edit:
+            await admin_rosters_for_division(update, context)
+
+        self.assertFalse(update.callback_query.edit_message_text.called)
+        self.assertNotIn("admin_roster_div_id", context.user_data)
+        answers = [c.args[0] for c in update.callback_query.answer.call_args_list if c.args]
+        self.assertTrue(any("нет прав на этот дивизион" in a for a in answers), answers)
+
+    async def test_squad_actions_limited_to_own_division_clubs(self):
+        foreign_club = f"RBAC Чужой {uuid.uuid4().hex[:6]}"
+        for handler, data in (
+            (admin_view_squad, f"admin_squad_view_{foreign_club}"),
+            (admin_squad_clear, f"admin_squad_clear_{foreign_club}"),
+        ):
+            with self.subTest(callback=data):
+                update = self._build_update(self.div_admin_id, data)
+                context = MagicMock()
+                context.user_data = {}
+                p_base, p_adm, p_glob, p_edit = self._patches(False)
+                with p_base, p_adm, p_glob, p_edit as edit_mock, \
+                        patch("handlers.admin.database.clear_squad") as clear_mock:
+                    await handler(update, context)
+
+                    self.assertFalse(edit_mock.called)
+                    self.assertFalse(update.callback_query.edit_message_text.called)
+                    self.assertFalse(clear_mock.called)
+
+        update = self._build_update(self.div_admin_id, f"admin_squad_view_{self.club_a}")
+        context = MagicMock()
+        context.user_data = {"admin_roster_div_id": self.div_a}
+        p_base, p_adm, p_glob, p_edit = self._patches(False)
+        with p_base, p_adm, p_glob, p_edit as edit_mock:
+            await admin_view_squad(update, context)
+
+            self.assertTrue(edit_mock.called)
+            callbacks = self._callbacks(edit_mock.call_args[1]["reply_markup"])
+            self.assertIn(f"admin_roster_div:{self.div_a}", callbacks)
+
+    async def test_squads_status_keeps_division_admin_in_scope(self):
+        update = self._build_update(self.div_admin_id, f"admin_squads_view:{self.div_a}")
+        context = MagicMock()
+        p_base, p_adm, p_glob, p_edit = self._patches(False)
+        with p_base, p_adm, p_glob, p_edit as edit_mock:
+            await admin_squads_view_cb(update, context)
+
+            callbacks = self._callbacks(edit_mock.call_args[1]["reply_markup"])
+            self.assertIn(f"admin_div_panel:{self.div_a}", callbacks)
+            self.assertNotIn("admin_squads_all", callbacks)
+            self.assertNotIn(f"admin_squads_view:{self.div_b}", callbacks)
 
     # --- super-admin division admins UI ---
 
