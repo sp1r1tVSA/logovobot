@@ -11,7 +11,7 @@ from aiohttp import web
 import database
 from config import INITIAL_WALLET_BALANCE
 from api.auth import get_authenticated_user, check_user_access
-from handlers.base import is_admin
+from handlers.base import is_admin, is_super_admin
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +99,8 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
             "bets_count": wallet.get("bets_count", 0),
             "bets_won": wallet.get("bets_won", 0),
             "is_admin": is_adm,
+            # Кнопка панели Logovo.bet — только для ADMIN_IDS, как и сам /api/admin/panel.
+            "is_panel_admin": is_super_admin(user_id),
             "has_access": has_access,
             "bet_limits": bet_limits
         },

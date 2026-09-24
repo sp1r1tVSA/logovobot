@@ -308,6 +308,18 @@ def is_admin_user(user_id: int) -> bool:
     return is_global_admin(user_id)
 
 
+def is_super_admin(telegram_id: int) -> bool:
+    """Only the ADMIN_IDS env list — no DB roles, no division admins.
+
+    Gate for the Logovo.bet admin panel in the Mini App: the league economy is
+    managed by the owners listed in the environment, not by anyone a role grants.
+    """
+    if not telegram_id:
+        return False
+    import config
+    return telegram_id in config.ADMIN_IDS
+
+
 def round_schedule_missing_message(round_number: int, division_name: str) -> str:
     """Единый текст отказа, когда тур пытаются открыть без расписания.
 

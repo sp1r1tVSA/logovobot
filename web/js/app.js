@@ -36,9 +36,9 @@ class AppController {
 
       this.renderBlock('header', [state.user, state.progression, state.unclaimedAchievementsCount],
         () => UIRenderer.renderHeader(state.user, state.progression, state.unclaimedAchievementsCount));
-      this.renderBlock('adminBtn', [Boolean(state.user?.is_admin)], () => {
+      this.renderBlock('adminBtn', [Boolean(state.user?.is_panel_admin)], () => {
         const btn = document.getElementById('header-admin-btn');
-        if (btn) btn.hidden = !state.user?.is_admin;
+        if (btn) btn.hidden = !state.user?.is_panel_admin;
       });
       this.renderBlock('navClubIcon', [myClub.overview],
         () => UIRenderer.updateNavClubIcon(myClub.overview));

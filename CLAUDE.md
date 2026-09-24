@@ -418,6 +418,9 @@ compare against `config.ADMIN_IDS` inline:
 - `is_global_admin(telegram_id)` — full access, includes the `ADMIN_IDS` env list.
 - `is_admin(telegram_id)` — global admins plus per-division admins (`division_admins`).
 - `is_admin_user(user_id)` — the general check used by most handlers.
+- `is_super_admin(telegram_id)` — the `ADMIN_IDS` env list and nothing else: no DB role,
+  no division. It alone gates the Logovo.bet panel (`api/routes_admin_panel.py`) and the
+  bootstrap `is_panel_admin` flag that shows its ⚙️ button in the Mini App.
 
 `config.py` re-reads `config.ADMIN_IDS` dynamically inside these helpers, so admin changes
 take effect without a restart. Keep that behaviour.

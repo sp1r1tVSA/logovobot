@@ -20,10 +20,10 @@ api/routes_admin_panel.py
   POST /api/admin/panel/limits                  задать / сбросить лимит  (глобальный админ)
   POST /api/admin/panel/pause                   экстренная остановка приёма
 
-Права: глобальный админ видит всё; админ дивизиона — только матчи, рынки и
-купоны своих дивизионов (матч без дивизиона — дивизион 1), а экспресс,
-задевающий чужой дивизион, править не может. Кошельки, запреты и лимиты —
-только глобальный админ: это экономика всей лиги, а не одного дивизиона.
+Права: панель открыта только тем, кто указан в ADMIN_IDS (is_super_admin), —
+ни роль admin в базе, ни назначение админом дивизиона доступа к ней не дают.
+Разбор по дивизионам (Scope.division_ids, _narrow) остаётся на случай, если
+дивизионным админам панель когда-нибудь вернут; сейчас эти ветки не достижимы.
 SQL здесь нет — всё через database.py.
 """
 from __future__ import annotations
@@ -37,7 +37,7 @@ from aiohttp import web
 import database
 from api.auth import get_authenticated_user
 from api.params import body_int, path_int, query_int
-from handlers.base import is_global_admin
+from handlers.base import is_super_admin
 from services.betting_limits import BettingLimitsService
 
 logger = logging.getLogger(__name__)
@@ -91,12 +91,9 @@ def _resolve_scope(request: web.Request) -> Scope | web.Response:
     if not user or "id" not in user:
         return _error(401, "unauthorized")
     actor_id = int(user["id"])
-    if is_global_admin(actor_id):
-        return Scope(actor_id, True, None)
-    divisions = [int(d["id"]) for d in database.get_admin_divisions(actor_id)]
-    if not divisions:
-        return _error(403, "forbidden", "Панель доступна только администраторам.")
-    return Scope(actor_id, False, divisions)
+    if not is_super_admin(actor_id):
+        return _error(403, "forbidden", "Панель доступна только главным администраторам.")
+    return Scope(actor_id, True, None)
 
 
 def _global_only(scope: Scope) -> web.Response | None:

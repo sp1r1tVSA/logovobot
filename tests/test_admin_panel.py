@@ -29,6 +29,7 @@ PLAYER = 971001
 OTHER_PLAYER = 971002
 GLOBAL_ADMIN = 971900
 DIV2_ADMIN = 971901
+ROLE_ADMIN = 971902  # users.role = 'admin', но не в ADMIN_IDS
 
 # (match_id, market_id, selection_id, division_id) — None: матч без дивизиона.
 MATCHES = {
@@ -43,7 +44,8 @@ def _seed() -> None:
     with database.transaction() as conn:
         cursor = conn.cursor()
         for uid, name in ((PLAYER, "panel_player"), (OTHER_PLAYER, "panel_other"),
-                          (GLOBAL_ADMIN, "panel_global"), (DIV2_ADMIN, "panel_div2")):
+                          (GLOBAL_ADMIN, "panel_global"), (DIV2_ADMIN, "panel_div2"),
+                          (ROLE_ADMIN, "panel_role")):
             cursor.execute(
                 "INSERT OR IGNORE INTO users (telegram_id, username, role) VALUES (?, ?, 'user')",
                 (uid, name),
@@ -347,12 +349,28 @@ class TestPanelRoutes(AioHTTPTestCase):
         self.assertEqual(resp.status, 401)
 
     async def test_me_reports_scope(self):
-        status, body = await self._call("GET", "/me", DIV2_ADMIN)
-        self.assertEqual(status, 200, body)
-        self.assertFalse(body["is_global"])
         status, body = await self._call("GET", "/me", GLOBAL_ADMIN)
         self.assertEqual(status, 200, body)
         self.assertTrue(body["is_global"])
+
+    async def test_panel_is_limited_to_admin_ids(self):
+        with database.transaction() as conn:
+            conn.execute("UPDATE users SET role = 'admin' WHERE telegram_id = ?", (ROLE_ADMIN,))
+        self.assertNotIn(ROLE_ADMIN, config.ADMIN_IDS)
+        for user_id in (DIV2_ADMIN, ROLE_ADMIN):
+            for method, path in (("GET", "/me"), ("GET", "/dashboard"), ("GET", "/markets"),
+                                 ("GET", "/bets"), ("GET", "/limits")):
+                with self.subTest(user=user_id, path=path):
+                    status, body = await self._call(method, path, user_id)
+                    self.assertEqual((status, body["error"]), (403, "forbidden"))
+
+    async def test_bootstrap_shows_the_panel_button_to_admin_ids_only(self):
+        for user_id, expected in ((GLOBAL_ADMIN, True), (DIV2_ADMIN, False), (PLAYER, False)):
+            with self.subTest(user=user_id):
+                resp = await self.client.get("/api/bootstrap",
+                                             headers={"X-Telegram-Init-Data": make_init_data(user_id)})
+                self.assertEqual(resp.status, 200, await resp.text())
+                self.assertIs((await resp.json())["user"]["is_panel_admin"], expected)
 
     async def test_division_admin_cannot_touch_other_divisions(self):
         _, _, div1_selection, _ = MATCHES["div1"]
@@ -383,18 +401,14 @@ class TestPanelRoutes(AioHTTPTestCase):
         self.assertEqual(database.get_betting_pause(), {"global": None, "divisions": {}})
         self.assertIsNone(database.get_betting_ban(PLAYER))
 
-    async def test_division_admin_manages_own_division(self):
+    async def test_division_admin_cannot_manage_even_own_division(self):
         market = MATCHES["div2"][1]
         status, body = await self._call("POST", f"/markets/{market}/action", DIV2_ADMIN, {"action": "suspend"})
-        self.assertEqual(status, 200, body)
+        self.assertEqual(status, 403, body)
         status, body = await self._call("POST", "/pause", DIV2_ADMIN,
                                         {"paused": True, "division_id": 2, "reason": "перенос"})
-        self.assertEqual(status, 200, body)
-        self.assertIn(2, database.get_betting_pause()["divisions"])
-        status, body = await self._call("GET", "/limits", DIV2_ADMIN)
-        self.assertEqual(status, 200, body)
-        self.assertFalse(body["can_edit"])
-        self.assertEqual([d["id"] for d in body["divisions"]], [2])
+        self.assertEqual(status, 403, body)
+        self.assertEqual(database.get_betting_pause(), {"global": None, "divisions": {}})
 
     async def test_pause_requires_a_reason(self):
         status, body = await self._call("POST", "/pause", GLOBAL_ADMIN, {"paused": True})
@@ -440,7 +454,7 @@ class TestPanelRoutes(AioHTTPTestCase):
         self.assertTrue(ok, bet_id)
         status, body = await self._call("POST", f"/bets/{bet_id}/void", GLOBAL_ADMIN, {"reason": "x"})
         self.assertEqual((status, body["error"]), (400, "confirmation_required"))
-        status, body = await self._call("POST", f"/bets/{bet_id}/void", DIV2_ADMIN,
+        status, body = await self._call("POST", f"/bets/{bet_id}/void", GLOBAL_ADMIN,
                                         {"confirm": True, "reason": "ошибка линии"})
         self.assertEqual(status, 200, body)
         with database.transaction() as conn:
@@ -643,8 +657,7 @@ class TestPanelRoutes(AioHTTPTestCase):
         self.assertEqual(entry["limits"], {"max_open_bets": 3})
 
         status, body = await self._call("GET", "/limits", DIV2_ADMIN)
-        self.assertEqual(status, 200, body)
-        self.assertEqual(body["user_overrides"], [])
+        self.assertEqual(status, 403, body)
 
     def test_migration_drops_the_daily_bonus_setting(self):
         with database.transaction() as conn:
