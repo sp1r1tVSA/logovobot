@@ -375,6 +375,11 @@ const OUTCOME_NAMES = {
   'it2_under_1.5': 'ИТМ2 (1.5)'
 };
 
+/** «Кубок» у общего кубка, «Кубок Д3» у кубка дивизиона — начало подписи в купоне. */
+export function cupMetaName(cup) {
+  return cup?.divisionId ? (cup.cupLabel || 'Кубок') : 'Кубок';
+}
+
 /** «1/64 финала», «Финал» — подпись этапа кубка. */
 export function cupStageLabel(stage) {
   if (!stage) return 'Кубок';
@@ -786,12 +791,22 @@ export class UIRenderer {
     if (!container) return;
     const stages = cup?.stages || [];
 
+    // Переключатель «Общий · Д1 … Д5» — только если заведено больше одного кубка.
+    const cups = cup?.cups || [];
+    const scopeChips = cups.length > 1 ? `
+      <div class="cup-stage-chips cup-scope-chips scroll-row">${cups.map(c => `
+        <button class="cup-stage-chip cup-scope-chip ${(c.division_id ?? null) === (cup.divisionId ?? null) ? 'active' : ''}"
+                data-cup-division="${c.division_id || 0}" title="${escapeHtml(c.title || '')}">
+          ${c.division_id ? '' : '🏆 '}${escapeHtml(c.label || 'Кубок')}
+        </button>`).join('')}
+      </div>` : '';
+
     if (cup?.loading && stages.length === 0) {
-      container.innerHTML = `<div class="cup-empty"><div class="cup-empty-icon">⏳</div>Загрузка кубка...</div>`;
+      container.innerHTML = `${scopeChips}<div class="cup-empty"><div class="cup-empty-icon">⏳</div>Загрузка кубка...</div>`;
       return;
     }
     if (stages.length === 0) {
-      container.innerHTML = `
+      container.innerHTML = `${scopeChips}
         <div class="cup-empty">
           <div class="cup-empty-icon">🏆</div>
           <div class="cup-empty-title">${cup?.error ? escapeHtml(cup.error) : 'Сетка кубка ещё не сформирована'}</div>
@@ -823,10 +838,10 @@ export class UIRenderer {
     } else {
       body = view === 'bracket'
         ? UIRenderer._renderCupBracket(cup.bracket, searchQuery)
-        : UIRenderer._renderCupLine(cup.line, searchQuery);
+        : UIRenderer._renderCupLine(cup.line, searchQuery, cupMetaName(cup));
     }
 
-    container.innerHTML = `
+    container.innerHTML = `${scopeChips}
       <div class="cup-stage-chips scroll-row">${stageChips}</div>
       ${toggle}
       ${body}`;
@@ -840,7 +855,7 @@ export class UIRenderer {
       (s.team2_name || '').toLowerCase().includes(q));
   }
 
-  static _renderCupLine(line, searchQuery) {
+  static _renderCupLine(line, searchQuery, cupName = 'Кубок') {
     if (!line) return '';
     const stage = line.stage || {};
     const label = cupStageLabel(stage.stage);
@@ -860,7 +875,7 @@ export class UIRenderer {
       const t1 = s.team1_name;
       const t2 = s.team2_name;
       const h = s.header ? { ...s.header, team1_name: t1, team2_name: t2 } : null;
-      const seriesMeta = `Кубок · ${label} · серия`;
+      const seriesMeta = `${cupName} · ${label} · серия`;
       const headerBlock = h ? `
         <div class="cup-market-title">Проход дальше</div>
         <div class="odds-grid-2col">
@@ -876,7 +891,7 @@ export class UIRenderer {
       const games = (s.games || []).map(g => {
         const tile = { ...g, team1_name: t1, team2_name: t2 };
         const n = g.game_num_in_series;
-        const meta = `Кубок · ${label} · игра ${n}`;
+        const meta = `${cupName} · ${label} · игра ${n}`;
         const market = `Игра ${n}: исход`;
         return `
           <div class="cup-game-row">

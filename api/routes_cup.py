@@ -1,7 +1,10 @@
 """
 api/routes_cup.py
 
-Общий кубок в Mini App: этапы сезона, сетка серий и линия этапа.
+Кубки в Mini App: общий и кубки дивизионов — этапы сезона, сетка серий и
+линия этапа. Кубок выбирается `?division_id=N` (0 или без параметра — общий);
+ответ `/api/cup` перечисляет кубки сезона, у которых есть этапы, для
+переключателя в чипе «🏆 Кубок».
 
 Ставки на кубок идут через тот же купон (`/api/predictions`): исход кубковой
 игры — обычная пара `match_id` + `outcome`, а гейт этапа, запрет ничьей и
@@ -39,6 +42,7 @@ def _stage_payload(stage: dict, series: list[dict]) -> dict:
         "stage": stage["stage"],
         "stage_order": stage["stage_order"],
         "season_id": stage["season_id"],
+        "division_id": stage.get("division_id"),
         "is_open": bool(stage.get("is_open")),
         "bets_open": bool(stage.get("bets_open")),
         "deadline": stage.get("deadline"),
@@ -63,21 +67,46 @@ def _current_stage(stages: list[dict]) -> dict | None:
     return stages[0] if stages else None
 
 
-def _load_overview() -> dict:
+def _requested_scope(request: web.Request) -> tuple[bool, int | None]:
+    """(задан ли кубок явно, кубок). Мусор в параметре — 400 выше по стеку."""
+    raw = (request.query.get("division_id") or "").strip()
+    if not raw:
+        return False, None
+    return True, database.cup_scope(raw)
+
+
+def _load_overview(explicit: bool, scope: int | None) -> dict:
+    scopes = database.list_cup_scopes()
+    if not explicit and scopes and scope not in scopes:
+        # Без параметра открывается общий кубок, а если его нет — первый из заведённых.
+        scope = scopes[0]
     stages = []
-    for stage in database.list_cup_stages():
-        series = database.get_cup_bracket(stage["stage"], season_id=stage["season_id"])
+    for stage in database.list_cup_stages(division_id=scope):
+        series = database.get_cup_bracket(stage["stage"], season_id=stage["season_id"], division_id=scope)
         stages.append(_stage_payload(stage, series))
     current = _current_stage(stages)
-    return {"stages": stages, "current_stage_id": current["id"] if current else None}
+    return {
+        "division_id": scope,
+        "cup_label": database.cup_scope_label(scope),
+        "cups": [
+            {"division_id": s, "label": database.cup_scope_short(s), "title": database.cup_scope_label(s)}
+            for s in scopes
+        ],
+        "stages": stages,
+        "current_stage_id": current["id"] if current else None,
+    }
 
 
 async def handle_get_cup(request: web.Request) -> web.Response:
-    """GET /api/cup — этапы активного сезона и этап, открываемый по умолчанию."""
+    """GET /api/cup[?division_id=N] — кубки сезона, этапы выбранного и этап по умолчанию."""
     denied = _guard(request)
     if denied is not None:
         return denied
-    overview = await asyncio.to_thread(_load_overview)
+    try:
+        explicit, scope = _requested_scope(request)
+    except ValueError:
+        return web.json_response({"status": "error", "message": "Некорректный дивизион кубка."}, status=400)
+    overview = await asyncio.to_thread(_load_overview, explicit, scope)
     return web.json_response({"status": "ok", **overview})
 
 
@@ -108,13 +137,13 @@ def _attach_usernames(series: list[dict]) -> list[dict]:
 
 
 def _load_line(stage: dict) -> dict:
-    line = database.get_cup_stage_line(stage["stage"], stage["season_id"])
+    line = database.get_cup_stage_line(stage["stage"], stage["season_id"], division_id=stage.get("division_id"))
     _attach_usernames(line.get("series") or [])
     return line
 
 
 def _load_bracket(stage: dict) -> list[dict]:
-    series = database.get_cup_bracket(stage["stage"], season_id=stage["season_id"])
+    series = database.get_cup_stage_series(stage["id"])
     games_by_series: dict[int, list[dict]] = {}
     for g in database.get_cup_stage_games(stage["id"]):
         games_by_series.setdefault(g["series_id"], []).append({
@@ -185,6 +214,7 @@ async def handle_get_cup_line(request: web.Request) -> web.Response:
             "id": stage["id"],
             "stage": stage["stage"],
             "season_id": stage["season_id"],
+            "division_id": stage.get("division_id"),
             "is_open": bool(stage.get("is_open")),
             "bets_open": bets_open,
             "deadline": stage.get("deadline"),

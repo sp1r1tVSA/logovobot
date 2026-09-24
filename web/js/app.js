@@ -6,7 +6,7 @@
 import { api } from './api.js';
 import { store } from './store.js';
 import { tgBridge } from './tg.js';
-import { UIRenderer, escapeHtml, cupStageLabel } from './ui.js';
+import { UIRenderer, escapeHtml, cupStageLabel, cupMetaName } from './ui.js';
 import { ParticleEffects } from './effects.js';
 import { AdminPanel } from './admin.js';
 
@@ -231,17 +231,36 @@ class AppController {
     }
   }
 
-  /** Лобби в режиме кубка: этапы сезона, затем линия и сетка текущего этапа. */
-  async openCupLobby() {
+  /**
+   * Лобби в режиме кубка: кубки сезона, этапы выбранного, затем линия и сетка
+   * текущего этапа. divisionId: 0 — общий, N — кубок дивизиона; без аргумента —
+   * тот, что игрок выбрал раньше, а если не выбирал — кубок по умолчанию.
+   */
+  async openCupLobby(divisionId) {
     store.setLobbyMode('cup');
-    store.setCupState({ loading: true, error: null });
+    const picked = divisionId !== undefined || store.state.cup.picked;
+    const requested = divisionId !== undefined ? divisionId
+      : (store.state.cup.picked ? (store.state.cup.divisionId || 0) : undefined);
+    if (divisionId !== undefined && (divisionId || null) !== store.state.cup.divisionId) {
+      // Другой кубок: старые этапы, линия и сетка к нему не относятся.
+      store.setCupState({ divisionId: divisionId || null, stages: [], line: null, bracket: null, selectedStageId: null });
+    }
+    store.setCupState({ loading: true, error: null, picked });
     try {
-      const res = await api.getCup();
+      const res = await api.getCup(requested);
       if (res.status !== 'ok') throw new Error(res.message || 'Кубок временно недоступен');
+      // Игрок мог успеть переключить кубок, пока шёл запрос.
+      if (requested !== undefined && (res.division_id ?? null) !== (store.state.cup.divisionId ?? null)) return;
       const stages = res.stages || [];
       const keep = stages.some(s => s.id === store.state.cup.selectedStageId);
       const stageId = keep ? store.state.cup.selectedStageId : res.current_stage_id;
-      store.setCupState({ stages, loading: false });
+      store.setCupState({
+        stages,
+        cups: res.cups || [],
+        divisionId: res.division_id ?? null,
+        cupLabel: res.cup_label || 'Кубок',
+        loading: false
+      });
       if (stageId) await this.loadCupStage(stageId);
     } catch (err) {
       console.warn("Could not load cup:", err);
@@ -604,10 +623,19 @@ class AppController {
 
     // 3. Фильтр по турам удалён: лобби показывает единый список открытой линии.
 
-    // 4. Кубок: выбор этапа и переключатель «Линия / Сетка»
+    // 4. Кубок: выбор кубка и этапа, переключатель «Линия / Сетка»
     const cupView = document.getElementById('cup-view-container');
     if (cupView) {
       cupView.addEventListener('click', async (e) => {
+        const scopeBtn = e.target.closest('.cup-scope-chip');
+        if (scopeBtn && scopeBtn.dataset.cupDivision !== undefined) {
+          const divisionId = parseInt(scopeBtn.dataset.cupDivision) || 0;
+          tgBridge.hapticImpact('light');
+          if ((divisionId || null) !== store.state.cup.divisionId || store.state.cup.error) {
+            await this.openCupLobby(divisionId);
+          }
+          return;
+        }
         const stageBtn = e.target.closest('.cup-stage-chip');
         if (stageBtn && stageBtn.dataset.stageId) {
           const stageId = parseInt(stageBtn.dataset.stageId);
@@ -666,9 +694,10 @@ class AppController {
             targetMatch = cupTile;
             if (!slipMeta) {
               const label = cupStageLabel(store.state.cup.line?.stage?.stage);
+              const cupName = cupMetaName(store.state.cup);
               slipMeta = cupTile.is_series_header
-                ? `Кубок · ${label} · серия`
-                : `Кубок · ${label} · игра ${cupTile.game_num_in_series}`;
+                ? `${cupName} · ${label} · серия`
+                : `${cupName} · ${label} · игра ${cupTile.game_num_in_series}`;
             }
           }
         }

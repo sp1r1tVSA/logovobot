@@ -177,15 +177,19 @@ async def resolve_post_target(
     division_id: int | None,
     *topic_types: str,
     legacy_topic_keys: tuple[str, ...] = (),
+    match_id: int | None = None,
 ) -> dict | None:
     """Аргументы `send_*` (чат + тред) или None — пропустить.
 
-    Дивизион — то же, что `resolve_division_target`. Кубок — всегда None:
-    результаты кубка участники выкладывают под постом сами, бот их в группу
-    не публикует.
+    Дивизион — то же, что `resolve_division_target`. Кубок (sentinel-дивизион)
+    идёт в тему «Кубок» того кубка, к которому относится `match_id`; нет матча
+    или тема не привязана — None: в темы лиги кубок не пишет никогда.
     """
     if _is_cup_division(division_id):
-        return None
+        if match_id is None:
+            return None
+        from services.cup_broadcast import match_post_target
+        return await match_post_target(int(match_id))
     chat_id, thread_id = await resolve_division_target(
         division_id, *topic_types, legacy_topic_keys=legacy_topic_keys
     )

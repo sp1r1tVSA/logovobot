@@ -8,7 +8,7 @@ tests/test_cup_stage_schema.py
  1. `cup_stages` есть, колонки называются так же, как в `rounds`, и UNIQUE
     (season_id, stage) действительно один-на-один.
  2. Повторный `init_db()` не роняет миграцию и не дублирует guard-строку.
- 3. `cup_series` получила stage_id/winner_source, а (stage, series_num) уникальна —
+ 3. `cup_series` получила stage_id/winner_source, а (stage_id, series_num) уникальна (027) —
     иначе повторная жеребьёвка удваивает этап.
  4. `matches` получила cup_winner_team и stage_id.
  5. Кубковый матч не берёт `division_id IS NULL`: NULL в проекте читается как
@@ -171,13 +171,16 @@ class TestCupSeriesAndMatchColumns(CupSchemaTestCase):
         self.assertIn("winner_source", cols)
 
     def test_09_series_num_unique_within_stage(self):
+        """С миграции 027 ключ — (stage_id, series_num): одноимённые этапы пяти
+        кубков дивизионов не должны мешать друг другу, а внутри этапа номер один."""
         database.create_cup_series(STAGE, [("Клуб А", "Клуб Б")], season_id=self.season)
+        stage_id = database.get_cup_stage(STAGE, season_id=self.season)["id"]
         with self.assertRaises(sqlite3.IntegrityError):
             with database.transaction() as conn:
                 conn.cursor().execute(
-                    "INSERT INTO cup_series (stage, series_num, team1_name, team2_name) "
-                    "VALUES (?, 1, 'Клуб В', 'Клуб Г')",
-                    (STAGE,)
+                    "INSERT INTO cup_series (stage, series_num, team1_name, team2_name, stage_id) "
+                    "VALUES (?, 1, 'Клуб В', 'Клуб Г', ?)",
+                    (STAGE, stage_id)
                 )
 
     def test_10_match_has_winner_and_stage_columns(self):

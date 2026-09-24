@@ -119,9 +119,12 @@ class ApiClient {
     return this.request(`/api/markets/tours${q}`);
   }
 
-  // Общий кубок: этапы сезона, линия и сетка этапа. Ставки — через /api/predictions.
-  getCup() {
-    return this.request('/api/cup');
+  // Кубки: этапы сезона, линия и сетка этапа. Ставки — через /api/predictions.
+  // divisionId: undefined — кубок по умолчанию, 0 — общий, N — кубок дивизиона N.
+  getCup(divisionId) {
+    const q = divisionId === undefined || divisionId === null
+      ? '' : `?division_id=${encodeURIComponent(divisionId)}`;
+    return this.request(`/api/cup${q}`);
   }
 
   getCupLine(stageId) {

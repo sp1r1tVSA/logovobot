@@ -98,6 +98,7 @@ def main() -> int:
     parser.add_argument("--db", default=None, help="путь к league.db (по умолчанию — из окружения)")
     parser.add_argument("--stage", default="1/64", choices=list(CUP_STAGES))
     parser.add_argument("--season", type=int, default=None, help="id сезона; по умолчанию активный")
+    parser.add_argument("--division", type=int, default=None, help="id дивизиона — кубок дивизиона; без него общий")
     args = parser.parse_args()
 
     if args.db:
@@ -117,9 +118,9 @@ def main() -> int:
     else:
         act = database.get_active_season()
         season_id = act["id"] if act else 1
-    bracket = database.get_cup_bracket(args.stage, season_id=season_id)
+    bracket = database.get_cup_bracket(args.stage, season_id=season_id, division_id=args.division)
 
-    print(f"Сезон {season_id}, этап {args.stage}, база: {database.DB_PATH}")
+    print(f"{database.cup_scope_label(args.division)}, сезон {season_id}, этап {args.stage}, база: {database.DB_PATH}")
     print(f"Лестница классов дивизионов: {config.CUP_DIVISION_CLASS}")
     if not bracket:
         print("Сетка этапа пуста — заведи пары через create_cup_series (или scripts/seed_cup_bracket.py).")

@@ -195,8 +195,13 @@ async def _ensure_match_access(update: Update, match: dict | None) -> bool:
     if is_global_admin(user.id):
         return True
     div_id = (match or {}).get("division_id")
+    if match and match.get("tournament_type") == "cup" and match.get("id"):
+        # Кубковые матчи лежат на sentinel-дивизионе 0; чей это кубок, говорит
+        # этап. Кубок дивизиона — его админу, общий кубок — только глобальным.
+        scope = await asyncio.to_thread(database.get_match_cup_scope, int(match["id"]))
+        div_id = scope["division_id"] if scope else None
     if div_id is None:
-        # Легаси-матч вне дивизионов остаётся за супер-админом.
+        # Легаси-матч вне дивизионов и общий кубок остаются за супер-админом.
         await _deny_access(update, "⛔ У вас нет прав на этот матч")
         return False
     return await _ensure_division_access(update, int(div_id))
@@ -2237,6 +2242,57 @@ async def admin_cancel_div_action(update: Update, context: ContextTypes.DEFAULT_
     return ConversationHandler.END
 
 
+CUP_TOPIC_ALIASES = ("cup", "кубок")
+GENERAL_CUP_ALIASES = ("0", "общий", "general", "all", "все")
+
+
+async def _set_cup_topic(update: Update, context: ContextTypes.DEFAULT_TYPE, target: str) -> None:
+    """`/set_div_topic <дивизион|общий> cup` внутри темы: сделать её темой «Кубок».
+
+    Кубок дивизиона привязывает его админ или глобальный, общий — только
+    глобальный. Сразу после привязки бот публикует и закрепляет сетку — первое
+    сообщение темы, которое потом редактируется по мере результатов.
+    """
+    user = update.effective_user
+    thread_id = update.message.message_thread_id
+    chat_id = update.effective_chat.id
+
+    if target.strip().lower() in GENERAL_CUP_ALIASES:
+        scope = None
+        if not is_global_admin(user.id):
+            await update.message.reply_text("⛔ Тему общего кубка привязывает только глобальный админ.")
+            return
+    else:
+        division = None
+        if target.isdigit():
+            division = await asyncio.to_thread(database.get_division, int(target))
+        if not division:
+            division = await asyncio.to_thread(database.get_division_by_code, target)
+        if not division:
+            await update.message.reply_text(f"❌ Дивизион «{target}» не найден в базе данных.")
+            return
+        scope = division["id"]
+        if not is_global_admin(user.id) and not await asyncio.to_thread(database.is_division_admin, user.id, scope):
+            await update.message.reply_text("⛔ У вас нет прав на этот дивизион.")
+            return
+
+    await asyncio.to_thread(database.set_cup_topic, scope, chat_id, thread_id)
+    # Если тема до этого служила дивизиону, set_cup_topic эту привязку снял —
+    # кэш маршрутизации должен забыть её тоже.
+    from services.topic_cache import topic_cache
+    topic_cache.remove_topic(chat_id, thread_id)
+
+    label = database.cup_scope_label(scope)
+    await update.message.reply_text(
+        f"✅ Эта тема теперь «Кубок» для турнира <b>{html.escape(label)}</b> "
+        f"(ID: <code>{thread_id}</code>): сюда идут результаты, объявления и сетка.",
+        parse_mode="HTML"
+    )
+    from services.cup_broadcast import refresh_cup_bracket
+    if not await refresh_cup_bracket(context.bot, scope, republish=True):
+        await update.message.reply_text("⚠️ Сетку опубликовать не удалось — см. логи бота.")
+
+
 @admin_only
 async def admin_set_div_topic_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Command /set_div_topic [div_id_or_code] [topic_type] called inside a group topic."""
@@ -2255,12 +2311,17 @@ async def admin_set_div_topic_cmd(update: Update, context: ContextTypes.DEFAULT_
     if len(args) < 2:
         await update.message.reply_text(
             f"⚠️ <b>Использование:</b> <code>/set_div_topic [ID_или_КОД_дивизиона] [{types_hint}]</code>\n\n"
-            "Пример: <code>/set_div_topic 1 draft</code>",
+            "Пример: <code>/set_div_topic 1 draft</code>\n\n"
+            "Тема кубка: <code>/set_div_topic 3 cup</code> — кубок дивизиона, "
+            "<code>/set_div_topic общий cup</code> — общий кубок.",
             parse_mode="HTML"
         )
         return
 
     target = args[0].strip()
+    if args[1].strip().lower() in CUP_TOPIC_ALIASES:
+        await _set_cup_topic(update, context, target)
+        return
     # normalize_topic_type also accepts the Russian and plural aliases
     # ("черновик", "drafts", "составы", ...) listed in CANONICAL_TOPIC_TYPES.
     topic_type = database.normalize_topic_type(args[1])
@@ -3338,16 +3399,18 @@ async def _notify_group_about_tp(
     target = await resolve_post_target(
         div_id, "reports", "results",
         legacy_topic_keys=("reports_topic_id",),
+        match_id=match_id,
     )
-    if not target:
-        return
-
-    kwargs = {**target, "text": text, "parse_mode": "HTML"}
-        
-    try:
-        await context.bot.send_message(**kwargs)
-    except Exception as e:
-        logger.error(f"Failed to send TP notification to group: {e}")
+    if target:
+        kwargs = {**target, "text": text, "parse_mode": "HTML"}
+        try:
+            await context.bot.send_message(**kwargs)
+        except Exception as e:
+            logger.error(f"Failed to send TP notification to group: {e}")
+    if div_id == CUP_DIVISION_SENTINEL:
+        # ТП в кубке двигает серию так же, как сыгранная игра.
+        from services.cup_broadcast import after_cup_result
+        await after_cup_result(context.bot, match_id)
 
 _VERDICT_ALERTS = {
     "home": "✅ Назначено ТП 1:0 (Победа Хозяев)",

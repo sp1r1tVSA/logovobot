@@ -61,9 +61,13 @@ class StateStore {
       hotMatches: [],
       recommendations: [],
       capperLeaderboard: [],
-      // Лобби показывает либо линию дивизиона, либо общий кубок.
+      // Лобби показывает либо линию дивизиона, либо кубок (общий или дивизиона).
       lobbyMode: 'league', // 'league' | 'cup'
       cup: {
+        cups: [], // [{division_id, label, title}] — переключатель кубков
+        divisionId: null, // null — общий кубок
+        cupLabel: 'Общий кубок',
+        picked: false, // игрок сам выбрал кубок — открывать его же
         stages: [],
         selectedStageId: null,
         view: 'line', // 'line' | 'bracket'
@@ -265,7 +269,7 @@ class StateStore {
     };
   }
 
-  // --- Общий кубок ---
+  // --- Кубки ---
   setLobbyMode(mode) {
     this.state.lobbyMode = mode === 'cup' ? 'cup' : 'league';
     this.notify();

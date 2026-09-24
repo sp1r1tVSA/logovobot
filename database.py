@@ -469,6 +469,72 @@ def _ensure_cup_schema(cursor: sqlite3.Cursor) -> bool:
     return True
 
 
+MIGRATION_027_DIVISION_CUPS = "027_division_cups"
+CUP_SERIES_STAGE_ID_UNIQUE_INDEX = "idx_cup_series_stage_id_num_unique"
+
+
+def _ensure_division_cups(cursor: sqlite3.Cursor) -> bool:
+    """Миграция 027: кубки дивизионов рядом с общим.
+
+    `cup_stages` несёт встроенный UNIQUE(season_id, stage), снять который без
+    пересборки таблицы нельзя, а пересобирать таблицы здесь запрещено. Поэтому
+    этап кубка дивизиона хранится под ключом `cup_stage_key` («1/8@D3»), а
+    читатели получают из `_cup_stage_dict` обычное имя стадии и `division_id` —
+    новая колонка, NULL у общего кубка.
+
+    Ключ уникальности серий переезжает с (stage, series_num) на (stage_id,
+    series_num): у пяти кубков дивизионов в одном сезоне одинаковые стадии, и
+    старый индекс не дал бы завести вторую 1/8. Это индекс, а не таблица, —
+    удалить его можно. При найденных дублях миграция не применяется, как 022.
+
+    `cup_series.announced_winner` — кому бот уже объявил проход в теме «Кубок»:
+    повторное подтверждение игры не повторяет объявление, а смена победителя
+    после сброса игры объявляется заново.
+    """
+    for ddl in (
+        "ALTER TABLE cup_stages ADD COLUMN division_id INTEGER",
+        "ALTER TABLE cup_series ADD COLUMN announced_winner TEXT",
+    ):
+        try:
+            cursor.execute(ddl)
+        except sqlite3.OperationalError:
+            pass  # колонка уже добавлена предыдущим стартом
+
+    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (MIGRATION_027_DIVISION_CUPS,))
+    if not cursor.fetchone():
+        cursor.execute("""
+            SELECT COUNT(*) AS dup_keys
+            FROM (
+                SELECT 1 FROM cup_series
+                WHERE stage_id IS NOT NULL
+                GROUP BY stage_id, series_num
+                HAVING COUNT(*) > 1
+            )
+        """)
+        row = cursor.fetchone()
+        if row and row["dup_keys"]:
+            logger.error(
+                "Migration %s not applied: cup_series holds %s duplicated (stage_id, series_num) "
+                "key(s). Nothing was deleted.",
+                MIGRATION_027_DIVISION_CUPS, row["dup_keys"]
+            )
+            return False
+        cursor.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {CUP_SERIES_STAGE_ID_UNIQUE_INDEX} "
+            f"ON cup_series(stage_id, series_num)"
+        )
+        cursor.execute("""
+            INSERT OR IGNORE INTO schema_migrations (version, description)
+            VALUES (?, 'Кубки дивизионов: cup_stages.division_id, серии уникальны в пределах этапа')
+        """, (MIGRATION_027_DIVISION_CUPS,))
+        logger.info("Migration %s: division cups enabled", MIGRATION_027_DIVISION_CUPS)
+
+    # Старый индекс снимается на каждом старте, а не один раз: 022, не
+    # применённая из-за дублей, создаёт его заново, как только дубли уберут.
+    cursor.execute(f"DROP INDEX IF EXISTS {CUP_SERIES_UNIQUE_INDEX}")
+    return True
+
+
 def init_db() -> None:
     """Initialize the database tables."""
     logger.info("Initializing database tables...")
@@ -795,10 +861,10 @@ def init_db() -> None:
         """)
         cursor.execute("CREATE INDEX IF NOT EXISTS idx_cup_stages_season ON cup_stages(season_id, stage_order)")
 
-        # ─── Общий кубок: темы вещания ────────────────────────────────────────
-        # Таблица больше не читается и не пишется: /cup_topic снят, результаты
-        # кубка участники выкладывают под постом сами. Схема остаётся — таблицы
-        # здесь не удаляются.
+        # ─── Кубки: темы «Кубок» ──────────────────────────────────────────────
+        # Строка на (сезон, кубок): тема форума, куда бот пишет результаты кубка,
+        # и закреплённая Pillow-сетка (`anchor_message_id`). Привязка — через
+        # /set_div_topic <дивизион|общий> cup (см. set_cup_topic).
         # Отдельная таблица, а не строка в `division_topics`: там `division_id` —
         # FK на `divisions`, а кубок дивизионом не является. Синтетический
         # «дивизион КУБОК» притащил бы его в 11 дивизионные читалки и во вкладки
@@ -820,9 +886,9 @@ def init_db() -> None:
             INSERT OR IGNORE INTO schema_migrations (version, description)
             VALUES (?, 'Общий кубок: таблица cup_topics (темы вещания этапа)')
         """, (MIGRATION_023_CUP_TOPICS,))
-        # Кубок вещает ответами под пост-якорь, а не в тему форума. Старая колонка
-        # message_thread_id остаётся (NOT NULL не снять без пересборки таблицы) и
-        # пишется нулём; адрес вещания — (group_chat_id, anchor_message_id).
+        # anchor_message_id — закреплённое в теме сообщение с сеткой кубка. Строки
+        # прошлой схемы (вещание ответами под пост, message_thread_id = 0) темой
+        # не считаются: get_cup_topic их пропускает.
         try:
             cursor.execute("ALTER TABLE cup_topics ADD COLUMN anchor_message_id INTEGER")
         except sqlite3.OperationalError:
@@ -2219,6 +2285,9 @@ def init_db() -> None:
 
         # ─── 026: журнал «ИИ-прогноза» для сверки с сыгранными матчами ────────
         _ensure_ai_pick_log(cursor)
+
+        # ─── 027: кубки дивизионов — cup_stages.division_id, ключ серий ───────
+        _ensure_division_cups(cursor)
 
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
@@ -6753,7 +6822,7 @@ def evaluate_cup_stage_gate(
     if not st_row:
         return False, "STAGE_NOT_FOUND", f"Этап кубка #{stage_id} не найден — приём прогнозов недоступен."
 
-    return _evaluate_gate_row(cursor, st_row, f"Этап {st_row['stage']}", match_id=match_id)
+    return _evaluate_gate_row(cursor, st_row, f"Этап {cup_stage_title(st_row['stage'])}", match_id=match_id)
 
 
 def _row_col(row, name, default=None):
@@ -8115,8 +8184,84 @@ def get_all_cup_series() -> list[dict]:
 # ═════════════════════════════════════════════════════════════════════════════
 
 
-def create_cup_stage(stage: str, season_id: int | None = None, deadline: str | None = None) -> int:
-    """Завести этап общего кубка. Повторный вызов возвращает уже существующую строку.
+CUP_STAGE_KEY_SEP = "@D"
+
+
+def cup_scope(division_id) -> int | None:
+    """Кубок по номеру дивизиона: None — общий. 0 (sentinel кубковых матчей) и
+    пустое значение тоже означают общий кубок."""
+    try:
+        value = int(division_id) if division_id not in (None, "") else 0
+    except (TypeError, ValueError):
+        raise ValueError(f"Неверный дивизион кубка: {division_id!r}")
+    return value or None
+
+
+def cup_stage_key(stage: str, division_id: int | None = None) -> str:
+    """Ключ этапа в `cup_stages.stage`: у общего кубка это имя стадии, у кубка
+    дивизиона — «1/8@D3» (см. миграцию 027: UNIQUE(season_id, stage) не снять)."""
+    scope = cup_scope(division_id)
+    return stage if scope is None else f"{stage}{CUP_STAGE_KEY_SEP}{scope}"
+
+
+def split_cup_stage_key(key: str) -> tuple[str, int | None]:
+    """Обратная `cup_stage_key`: (имя стадии, дивизион или None)."""
+    key = str(key or "")
+    if CUP_STAGE_KEY_SEP in key:
+        stage, _, div = key.rpartition(CUP_STAGE_KEY_SEP)
+        if div.isdigit():
+            return stage, int(div)
+    return key, None
+
+
+def _cup_stage_dict(row) -> dict | None:
+    """Строка `cup_stages` для читателей: `stage` — обычное имя стадии,
+    `stage_key` — то, что лежит в базе, `division_id` — кубок (None — общий)."""
+    if row is None:
+        return None
+    d = dict(row)
+    stage, div = split_cup_stage_key(d.get("stage"))
+    d["stage_key"] = d.get("stage")
+    d["stage"] = stage
+    d["division_id"] = cup_scope(d.get("division_id") or div)
+    return d
+
+
+def cup_scope_short(division_id) -> str:
+    """Короткая метка кубка: «Общий» или «Д3» (по коду DIV_N, иначе имя)."""
+    scope = cup_scope(division_id)
+    if scope is None:
+        return "Общий"
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT name, code FROM divisions WHERE id = ?", (scope,))
+        row = cursor.fetchone()
+    code = ((row["code"] if row else "") or "").strip().upper()
+    if code.startswith("DIV_") and code[4:].isdigit():
+        return f"Д{int(code[4:])}"
+    return (row["name"] if row and row["name"] else f"Д{scope}")
+
+
+def cup_scope_label(division_id) -> str:
+    """Название кубка для сообщений: «Общий кубок» / «Кубок Д3»."""
+    scope = cup_scope(division_id)
+    return "Общий кубок" if scope is None else f"Кубок {cup_scope_short(scope)}"
+
+
+def cup_stage_title(stage_key: str) -> str:
+    """Этап для текста сообщений: «1/8» у общего кубка, «1/8 · Кубок Д3» у дивизиона."""
+    stage, div = split_cup_stage_key(stage_key)
+    return stage if div is None else f"{stage} · {cup_scope_label(div)}"
+
+
+def create_cup_stage(
+    stage: str,
+    season_id: int | None = None,
+    deadline: str | None = None,
+    division_id: int | None = None,
+) -> int:
+    """Завести этап кубка (общего или дивизиона). Повторный вызов возвращает уже
+    существующую строку.
 
     Идемпотентность здесь нужна не для красоты: `create_cup_series` обеспечивает
     стадию сам, и без этого он плодил бы дубли этапов на каждом запуске жеребьёвки.
@@ -8125,34 +8270,42 @@ def create_cup_stage(stage: str, season_id: int | None = None, deadline: str | N
         raise ValueError(
             f"Неизвестная стадия кубка: {stage!r}. Допустимы: {', '.join(CUP_STAGES)}."
         )
+    scope = cup_scope(division_id)
+    key = cup_stage_key(stage, scope)
     s_id = _resolve_season_id(season_id)
     with transaction() as conn:
         cursor = conn.cursor()
+        if scope is not None:
+            cursor.execute("SELECT 1 FROM divisions WHERE id = ?", (scope,))
+            if not cursor.fetchone():
+                raise ValueError(f"Дивизион #{scope} не найден — кубок дивизиона не завести.")
         cursor.execute(
             "SELECT id FROM cup_stages WHERE season_id = ? AND stage = ? LIMIT 1",
-            (s_id, stage)
+            (s_id, key)
         )
         row = cursor.fetchone()
         if row:
             return row["id"]
         cursor.execute(
             """
-            INSERT INTO cup_stages (season_id, stage, stage_order, deadline, created_at)
-            VALUES (?, ?, ?, ?, datetime('now', '+3 hours'))
+            INSERT INTO cup_stages (season_id, stage, stage_order, deadline, division_id, created_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now', '+3 hours'))
             """,
-            (s_id, stage, CUP_STAGE_ORDER[stage], deadline)
+            (s_id, key, CUP_STAGE_ORDER[stage], deadline, scope)
         )
         return cursor.lastrowid
 
 
-def get_cup_stage(stage: str, season_id: int | None = None) -> dict | None:
-    """Строка этапа по имени (тот же ключ, что выдаёт гейт и линия)."""
+def get_cup_stage(stage: str, season_id: int | None = None, division_id: int | None = None) -> dict | None:
+    """Строка этапа по имени стадии в кубке `division_id` (None — общий)."""
     s_id = _resolve_season_id(season_id)
     with transaction() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM cup_stages WHERE season_id = ? AND stage = ? LIMIT 1", (s_id, stage))
-        row = cursor.fetchone()
-        return dict(row) if row else None
+        cursor.execute(
+            "SELECT * FROM cup_stages WHERE season_id = ? AND stage = ? LIMIT 1",
+            (s_id, cup_stage_key(stage, division_id))
+        )
+        return _cup_stage_dict(cursor.fetchone())
 
 
 def get_cup_stage_by_id(stage_id: int) -> dict | None:
@@ -8160,20 +8313,32 @@ def get_cup_stage_by_id(stage_id: int) -> dict | None:
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT * FROM cup_stages WHERE id = ? LIMIT 1", (stage_id,))
-        row = cursor.fetchone()
-        return dict(row) if row else None
+        return _cup_stage_dict(cursor.fetchone())
 
 
-def list_cup_stages(season_id: int | None = None) -> list[dict]:
-    """Все этапы сезона в порядке игры."""
+def list_cup_stages(season_id: int | None = None, division_id: int | None = None) -> list[dict]:
+    """Этапы одного кубка сезона в порядке игры: общего (по умолчанию) или дивизиона."""
     s_id = _resolve_season_id(season_id)
+    scope = cup_scope(division_id)
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM cup_stages WHERE season_id = ? ORDER BY stage_order ASC",
+            "SELECT * FROM cup_stages WHERE season_id = ? ORDER BY stage_order ASC, id ASC",
             (s_id,)
         )
-        return [dict(r) for r in cursor.fetchall()]
+        rows = [_cup_stage_dict(r) for r in cursor.fetchall()]
+    return [r for r in rows if r["division_id"] == scope]
+
+
+def list_cup_scopes(season_id: int | None = None) -> list[int | None]:
+    """Кубки сезона, у которых есть хотя бы один этап: None (общий) первым,
+    затем дивизионы по возрастанию."""
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT stage, division_id FROM cup_stages WHERE season_id = ?", (s_id,))
+        scopes = {_cup_stage_dict(r)["division_id"] for r in cursor.fetchall()}
+    return sorted(scopes, key=lambda d: -1 if d is None else d)
 
 
 def count_cup_stage_matches(stage_id: int) -> int:
@@ -8197,22 +8362,23 @@ def open_cup_stage_bets(stage_id: int, actor_id: int | None = None) -> tuple[boo
         stage_row = cursor.fetchone()
         if not stage_row:
             return False, f"Этап кубка #{stage_id} не найден."
+        title = cup_stage_title(stage_row["stage"])
         if stage_row["is_open"]:
-            return False, f"Этап {stage_row['stage']} уже открыт для игры — приём прогнозов закрыт."
+            return False, f"Этап {title} уже открыт для игры — приём прогнозов закрыт."
         if stage_row["bets_open"]:
-            return False, f"Приём прогнозов на этап {stage_row['stage']} уже открыт."
+            return False, f"Приём прогнозов на этап {title} уже открыт."
 
         # `transaction()` ре-ентрельна, так что счётчик остаётся внутри этого же
         # заблокированного транзакционного скоупа — второго чтения тех же строк нет.
         if count_cup_stage_matches(stage_id) == 0:
-            return False, f"На этапе {stage_row['stage']} нет матчей — выставлять в линию нечего."
+            return False, f"На этапе {title} нет матчей — выставлять в линию нечего."
 
         cursor.execute(
             "UPDATE cup_stages SET bets_open = 1, bets_opened_at = ? WHERE id = ?",
             (now_msk_str(), stage_id)
         )
-    logger.info("Cup stage #%s (%s) betting line opened by %s", stage_id, stage_row["stage"], actor_id)
-    return True, f"Приём прогнозов на этап {stage_row['stage']} открыт."
+    logger.info("Cup stage #%s (%s) betting line opened by %s", stage_id, title, actor_id)
+    return True, f"Приём прогнозов на этап {title} открыт."
 
 
 def start_cup_stage(stage_id: int, actor_id: int | None = None) -> tuple[bool, str]:
@@ -8223,8 +8389,9 @@ def start_cup_stage(stage_id: int, actor_id: int | None = None) -> tuple[bool, s
         stage_row = cursor.fetchone()
         if not stage_row:
             return False, f"Этап кубка #{stage_id} не найден."
+        title = cup_stage_title(stage_row["stage"])
         if stage_row["is_open"]:
-            return False, f"Этап {stage_row['stage']} уже открыт."
+            return False, f"Этап {title} уже открыт."
         cursor.execute(
             "UPDATE cup_stages SET is_open = 1, bets_open = 0, opened_at = ?, opened_by = ? WHERE id = ?",
             (now_msk_str(), actor_id, stage_id)
@@ -8233,8 +8400,8 @@ def start_cup_stage(stage_id: int, actor_id: int | None = None) -> tuple[bool, s
         # самих рынках, иначе Mini App продолжает показывать кубковую пару как
         # доступную для ставки, а отказ приходит только на попытке поставить.
         _close_line_scope(cursor, "SELECT id FROM matches WHERE stage_id = ?", (stage_id,))
-    logger.info("Cup stage #%s (%s) opened for play by %s", stage_id, stage_row["stage"], actor_id)
-    return True, f"Этап {stage_row['stage']} открыт для игры."
+    logger.info("Cup stage #%s (%s) opened for play by %s", stage_id, title, actor_id)
+    return True, f"Этап {title} открыт для игры."
 
 
 def cup_results_closed_reason(match_id: int) -> str | None:
@@ -8262,13 +8429,21 @@ def cup_results_closed_reason(match_id: int) -> str | None:
     if not row or not match_is_cup(row) or row["is_series_header"] or row["is_open"]:
         return None
     return (
-        f"Этап {row['stage']} ещё не начат: пока идёт приём прогнозов, результаты "
+        f"Этап {cup_stage_title(row['stage'])} ещё не начат: пока идёт приём прогнозов, результаты "
         "не принимаются. Ввод откроется после старта этапа."
     )
 
 
-def create_cup_series(stage: str, pairs: list[tuple[str, str]], season_id: int | None = None) -> list[int]:
+def create_cup_series(
+    stage: str,
+    pairs: list[tuple[str, str]],
+    season_id: int | None = None,
+    division_id: int | None = None,
+) -> list[int]:
     """Завести сетку этапа по готовым парам; порядок пар = номера серий.
+
+    `division_id` — кубок дивизиона: тогда каждый клуб обязан быть в составе
+    этого дивизиона (`get_division_teams`), иначе в кубок Д3 попал бы клуб Д1.
 
     Валидация целиком до первой записи: жеребьёвка, у которой один клуб встречается
     в двух парах, даёт сетку, где клуб выбывает и не выбывает одновременно, а
@@ -8279,8 +8454,14 @@ def create_cup_series(stage: str, pairs: list[tuple[str, str]], season_id: int |
     гейт на них отвечает отказом.
     """
     s_id = _resolve_season_id(season_id)
+    scope = cup_scope(division_id)
     if not pairs:
         raise ValueError("Список пар пуст — сетку этапа не из чего построить.")
+    roster: dict[str, str] | None = None
+    if scope is not None:
+        roster = {t.lower(): t for t in get_division_teams(scope, season_id=s_id)}
+        if not roster:
+            raise ValueError(f"У дивизиона #{scope} нет клубов — кубок дивизиона не из кого собрать.")
 
     canonical: list[tuple[str, str]] = []
     seen: dict[str, str] = {}
@@ -8297,19 +8478,23 @@ def create_cup_series(stage: str, pairs: list[tuple[str, str]], season_id: int |
             raise ValueError(f"Пара #{index}: клуб играет сам с собой ({t1}).")
         for club in (t1, t2):
             key = club.lower()
+            if roster is not None and key not in roster:
+                raise ValueError(
+                    f"Пара #{index}: {club} не из дивизиона {cup_scope_short(scope)} — в его кубок клуб не завести."
+                )
             if key in seen:
                 raise ValueError(f"{club} встречается в сетке дважды: в парах {seen[key]} и {index}.")
             seen[key] = str(index)
         canonical.append((t1, t2))
 
-    stage_id = create_cup_stage(stage, season_id=s_id)
+    stage_id = create_cup_stage(stage, season_id=s_id, division_id=scope)
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM cup_series WHERE stage_id = ?", (stage_id,))
         existing = int(cursor.fetchone()[0])
         if existing:
             raise ValueError(
-                f"Стадия {stage}: сетка уже заведена ({existing} сер.). "
+                f"Стадия {cup_stage_title(cup_stage_key(stage, scope))}: сетка уже заведена ({existing} сер.). "
                 "Правь серии поштучно, а не повторной жеребьёвкой."
             )
         ids: list[int] = []
@@ -8326,9 +8511,16 @@ def create_cup_series(stage: str, pairs: list[tuple[str, str]], season_id: int |
     return ids
 
 
-def get_cup_bracket(stage: str, season_id: int | None = None) -> list[dict]:
-    """Серии этапа в порядке номеров."""
-    s_id = _resolve_season_id(season_id)
+def get_cup_bracket(stage: str, season_id: int | None = None, division_id: int | None = None) -> list[dict]:
+    """Серии этапа кубка `division_id` (None — общий) в порядке номеров."""
+    stage_row = get_cup_stage(stage, season_id=season_id, division_id=division_id)
+    if not stage_row:
+        return []
+    return get_cup_stage_series(stage_row["id"])
+
+
+def get_cup_stage_series(stage_id: int) -> list[dict]:
+    """Серии этапа по его id в порядке номеров."""
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
@@ -8336,13 +8528,132 @@ def get_cup_bracket(stage: str, season_id: int | None = None) -> list[dict]:
             SELECT cs.id, cs.stage, cs.series_num, cs.team1_name, cs.team2_name,
                    cs.team1_wins, cs.team2_wins, cs.winner_name, cs.status, cs.stage_id
             FROM cup_series cs
-            JOIN cup_stages st ON st.id = cs.stage_id
-            WHERE cs.stage = ? AND st.season_id = ?
+            WHERE cs.stage_id = ?
             ORDER BY cs.series_num ASC
             """,
-            (stage, s_id)
+            (stage_id,)
         )
         return [dict(r) for r in cursor.fetchall()]
+
+
+def get_cup_full_bracket(division_id: int | None = None, season_id: int | None = None) -> list[dict]:
+    """Весь кубок по этапам: [{"stage": строка этапа, "series": [...]}, ...] в
+    порядке игры — источник Pillow-сетки и сетки Mini App."""
+    return [
+        {"stage": st, "series": get_cup_stage_series(st["id"])}
+        for st in list_cup_stages(season_id=season_id, division_id=division_id)
+    ]
+
+
+def get_match_cup_scope(match_id: int) -> dict | None:
+    """Кубок, к которому относится матч, — или None для лиги.
+
+    Кубковые матчи лежат на sentinel-дивизионе 0, так что сам матч не говорит,
+    чей это кубок; ответ даёт его этап (`cup_stages.division_id`).
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT m.tournament_type, m.cup_series_id, st.* "
+            "FROM matches m LEFT JOIN cup_stages st ON st.id = m.stage_id "
+            "WHERE m.id = ?",
+            (match_id,)
+        )
+        row = cursor.fetchone()
+    if not row or not match_is_cup(row) or row["id"] is None:
+        return None
+    stage = _cup_stage_dict({k: row[k] for k in row.keys() if k not in ("tournament_type", "cup_series_id")})
+    return {
+        "division_id": stage["division_id"],
+        "season_id": stage["season_id"],
+        "stage_id": stage["id"],
+        "stage": stage["stage"],
+        "series_id": row["cup_series_id"],
+    }
+
+
+# ─── Темы кубков: «Кубок» в форуме группы, закреплённая сетка ─────────────────
+# Живут в `cup_topics` (миграция 023): строка на (сезон, кубок). `topic_type` —
+# «cup» у общего кубка и «cup_div_<id>» у кубка дивизиона, `message_thread_id` —
+# тема форума, `anchor_message_id` — закреплённое сообщение с Pillow-сеткой,
+# которое бот редактирует по мере внесения результатов.
+
+def _cup_topic_type(division_id) -> str:
+    scope = cup_scope(division_id)
+    return "cup" if scope is None else f"cup_div_{scope}"
+
+
+def set_cup_topic(
+    division_id: int | None,
+    group_chat_id: int,
+    message_thread_id: int,
+    season_id: int | None = None,
+) -> None:
+    """Привязать тему форума к кубку. Закреп прошлой темы забывается: сетку в
+    новой теме бот публикует заново. Тема, которая была темой дивизиона, этой
+    привязкой у дивизиона отбирается — одна тема служит одному назначению."""
+    s_id = _resolve_season_id(season_id)
+    topic_type = _cup_topic_type(division_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM division_topics WHERE group_chat_id = ? AND message_thread_id = ?",
+            (group_chat_id, message_thread_id)
+        )
+        cursor.execute(
+            "DELETE FROM cup_topics WHERE season_id = ? AND group_chat_id = ? "
+            "AND message_thread_id = ? AND topic_type != ?",
+            (s_id, group_chat_id, message_thread_id, topic_type)
+        )
+        cursor.execute(
+            """
+            INSERT INTO cup_topics (season_id, topic_type, group_chat_id, message_thread_id,
+                                    anchor_message_id, created_at)
+            VALUES (?, ?, ?, ?, NULL, datetime('now', '+3 hours'))
+            ON CONFLICT(season_id, topic_type) DO UPDATE SET
+                group_chat_id = excluded.group_chat_id,
+                message_thread_id = excluded.message_thread_id,
+                anchor_message_id = NULL
+            """,
+            (s_id, topic_type, group_chat_id, message_thread_id)
+        )
+
+
+def get_cup_topic(division_id: int | None, season_id: int | None = None) -> dict | None:
+    """Тема кубка: {group_chat_id, message_thread_id, anchor_message_id} или None."""
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT group_chat_id, message_thread_id, anchor_message_id FROM cup_topics "
+            "WHERE season_id = ? AND topic_type = ? AND message_thread_id != 0 LIMIT 1",
+            (s_id, _cup_topic_type(division_id))
+        )
+        row = cursor.fetchone()
+    return dict(row) if row else None
+
+
+def clear_cup_topic(division_id: int | None, season_id: int | None = None) -> bool:
+    """Снять привязку темы кубка. True — если было что снимать."""
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM cup_topics WHERE season_id = ? AND topic_type = ?",
+            (s_id, _cup_topic_type(division_id))
+        )
+        return cursor.rowcount > 0
+
+
+def set_cup_bracket_anchor(division_id: int | None, message_id: int | None, season_id: int | None = None) -> None:
+    """Запомнить закреплённое сообщение с сеткой кубка."""
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE cup_topics SET anchor_message_id = ? WHERE season_id = ? AND topic_type = ?",
+            (message_id, s_id, _cup_topic_type(division_id))
+        )
 
 
 def get_cup_stage_games(stage_id: int) -> list[dict]:
@@ -8381,20 +8692,43 @@ def get_cup_series_pair(series_id: int | None) -> tuple[str, str] | None:
 
 
 def get_cup_series(series_id: int) -> dict | None:
-    """Серия кубка по id — для карточки серии в панели /cup."""
+    """Серия кубка по id — для карточки серии в панели /cup. `division_id` и
+    `season_id` — чей это кубок (из этапа серии)."""
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
             """
             SELECT cs.id, cs.stage, cs.series_num, cs.team1_name, cs.team2_name,
-                   cs.team1_wins, cs.team2_wins, cs.winner_name, cs.status, cs.stage_id
+                   cs.team1_wins, cs.team2_wins, cs.winner_name, cs.status, cs.stage_id,
+                   st.division_id, st.season_id
             FROM cup_series cs
+            LEFT JOIN cup_stages st ON st.id = cs.stage_id
             WHERE cs.id = ?
             """,
             (series_id,)
         )
         row = cursor.fetchone()
         return dict(row) if row else None
+
+
+def claim_cup_series_announcement(series_id: int) -> dict | None:
+    """Забрать право объявить победителя серии в теме «Кубок» — ровно один раз
+    на победителя. Возвращает серию, если объявлять надо, иначе None.
+
+    Условный UPDATE атомарен: два одновременных подтверждения игр одной серии
+    не объявят проход дважды.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE cup_series SET announced_winner = winner_name "
+            "WHERE id = ? AND winner_name IS NOT NULL AND TRIM(winner_name) != '' "
+            "AND (announced_winner IS NULL OR announced_winner != winner_name)",
+            (series_id,)
+        )
+        if cursor.rowcount == 0:
+            return None
+    return get_cup_series(series_id)
 
 
 def get_cup_series_games(series_id: int) -> list[dict]:
@@ -8830,6 +9164,7 @@ def provision_cup_stage_line(
     stage: str,
     season_id: int | None = None,
     games_per_series: int = CUP_SERIES_GAMES,
+    division_id: int | None = None,
 ) -> dict:
     """Завести этапу игры всех серий и заголовок каждой серии — одним проходом.
 
@@ -8843,17 +9178,20 @@ def provision_cup_stage_line(
     if games_per_series < 1:
         raise ValueError(f"В серии не может быть {games_per_series} игр.")
     s_id = _resolve_season_id(season_id)
-    if not get_cup_stage(stage, season_id=s_id):
-        raise ValueError(f"Этап кубка {stage} не заведён — сетку строит create_cup_series.")
+    stage_row = get_cup_stage(stage, season_id=s_id, division_id=division_id)
+    if not stage_row:
+        raise ValueError(
+            f"Этап кубка {cup_stage_title(cup_stage_key(stage, division_id))} не заведён — "
+            "сетку строит create_cup_series."
+        )
 
     created_games = 0
     created_headers = 0
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            _CUP_SERIES_WRITE_SELECT +
-            "WHERE st.stage = ? AND st.season_id = ? ORDER BY cs.series_num ASC",
-            (stage, s_id)
+            _CUP_SERIES_WRITE_SELECT + "WHERE cs.stage_id = ? ORDER BY cs.series_num ASC",
+            (stage_row["id"],)
         )
         series_rows = cursor.fetchall()
         for series in series_rows:
@@ -8875,6 +9213,8 @@ def provision_cup_stage_line(
     return {
         "stage": stage,
         "season_id": s_id,
+        "division_id": stage_row["division_id"],
+        "stage_id": stage_row["id"],
         "series": len(series_rows),
         "created_games": created_games,
         "created_headers": created_headers,
@@ -8902,6 +9242,7 @@ def get_cup_stage_matches(
     stage: str,
     season_id: int | None = None,
     unplayed_only: bool = False,
+    division_id: int | None = None,
 ) -> list[dict]:
     """Плоский список матчей этапа: каждая игра каждой серии и заголовок серии.
 
@@ -8911,7 +9252,7 @@ def get_cup_stage_matches(
     ценовая модель.
     """
     s_id = _resolve_season_id(season_id)
-    stage_row = get_cup_stage(stage, season_id=s_id)
+    stage_row = get_cup_stage(stage, season_id=s_id, division_id=division_id)
     if not stage_row:
         return []
     query = """
@@ -8921,9 +9262,9 @@ def get_cup_stage_matches(
                    cs.team1_name, cs.team2_name
             FROM matches m
             JOIN cup_series cs ON cs.id = m.cup_series_id
-            WHERE cs.stage = ? AND cs.stage_id = ?
+            WHERE cs.stage_id = ?
         """
-    params: list = [stage, stage_row["id"]]
+    params: list = [stage_row["id"]]
     if unplayed_only:
         placeholders = ",".join("?" for _ in _CUP_LINE_HIDDEN_STATUSES)
         query += f" AND m.status NOT IN ({placeholders})"
@@ -8935,7 +9276,7 @@ def get_cup_stage_matches(
         return [dict(r) for r in cursor.fetchall()]
 
 
-def get_cup_stage_line(stage: str, season_id: int | None = None) -> dict:
+def get_cup_stage_line(stage: str, season_id: int | None = None, division_id: int | None = None) -> dict:
     """Линия этапа: серии с заголовками и играми и коэффициенты из реляционной схемы.
 
     Кубковый тайл намеренно НЕ заводится в `bet_markets`: `odd_x` там NOT NULL, а
@@ -8949,8 +9290,8 @@ def get_cup_stage_line(stage: str, season_id: int | None = None) -> dict:
     Сыгранные матчи из линии исключаются: их результат живёт в сетке, а не в ставках.
     """
     s_id = _resolve_season_id(season_id)
-    result = {"stage": get_cup_stage(stage, season_id=s_id), "series": []}
-    match_rows = get_cup_stage_matches(stage, season_id=s_id, unplayed_only=True)
+    result = {"stage": get_cup_stage(stage, season_id=s_id, division_id=division_id), "series": []}
+    match_rows = get_cup_stage_matches(stage, season_id=s_id, unplayed_only=True, division_id=division_id)
     if not match_rows:
         return result
 
@@ -15317,6 +15658,11 @@ def set_division_topic(
                     DELETE FROM division_topics
                     WHERE group_chat_id = ? AND message_thread_id = ?
                 """, (group_chat_id, message_thread_id))
+                # Тема, бывшая темой кубка, перестаёт ею быть (см. set_cup_topic).
+                cursor.execute(
+                    "DELETE FROM cup_topics WHERE group_chat_id = ? AND message_thread_id = ?",
+                    (group_chat_id, message_thread_id)
+                )
             cursor.execute("""
                 INSERT INTO division_topics (division_id, topic_type, message_thread_id, group_chat_id, created_at)
                 VALUES (?, ?, ?, ?, datetime('now', '+3 hours'))

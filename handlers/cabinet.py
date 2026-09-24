@@ -3468,6 +3468,7 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
     target = await resolve_post_target(
         div_id, "results", "reports",
         legacy_topic_keys=("results_topic_id", "reports_topic_id"),
+        match_id=match_id,
     )
     if not target:
         logger.warning(f"No results/reports topic configured for division {div_id}; skipping group result announcement.")
@@ -3494,6 +3495,10 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
             await send_result_post(context.bot, target, group_text, photo_ids)
         except Exception as e:
             logger.exception(f"Failed to post result to group: {e}")
+    if div_id == CUP_DIVISION_SENTINEL:
+        # Решённая серия и закреплённая сетка — в теме «Кубок», следом за постом.
+        from services.cup_broadcast import after_cup_result
+        await after_cup_result(context.bot, match_id)
 
     # Process debt reward (-1 warn) and all-debts-cleared notification
     await handle_debt_played_rewards(
@@ -3802,6 +3807,7 @@ async def notify_match_confirmed(
     target = await resolve_post_target(
         div_id, "results", "reports",
         legacy_topic_keys=("results_topic_id", "reports_topic_id"),
+        match_id=match_id,
     )
     if not target:
         logger.warning(f"No results/reports topic configured for division {div_id}; skipping admin-approved group result announcement.")
@@ -3830,6 +3836,9 @@ async def notify_match_confirmed(
             )
         except Exception as e:
             logger.exception("Failed to post result to topic/group")
+    if div_id == CUP_DIVISION_SENTINEL:
+        from services.cup_broadcast import after_cup_result
+        await after_cup_result(context.bot, match_id)
 
 SQUAD_PHOTO = 101
 

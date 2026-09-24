@@ -215,6 +215,25 @@ left «Дивизион 6» with an empty string and a random `DIV_XXXX` that ma
 **League play** runs through `rounds` / `rounds_v` and `matches`. **Cup play** uses
 `cup_series` (stage, series number, per-side win counts, winner, status).
 
+Besides the general cup, each division has its **own cup** (migration `027`): its 16 clubs,
+1/8 → 1/4 → 1/2 → final, best of three, betting like the general cup, no debts. The owning cup
+is `cup_stages.division_id` (NULL = the general cup). The stage key in `cup_stages.stage` is
+`"1/8@D<id>"`, but `cup_series` and `matches` keep the plain stage name. Series are unique per
+`(stage_id, series_num)`. Cup matches still carry `CUP_DIVISION_SENTINEL = 0`, so resolve a match's cup
+through `stage_id` (`get_match_cup_scope`), never through `matches.division_id`. In callbacks
+and the API, `0` means the general cup, and `database.cup_scope()` normalizes it. A division
+admin manages only their own cup; the general cup is global-admin only.
+`scripts/seed_cup_bracket.py --division N --pairs-file … | --from-winners` seeds a stage, and it
+is a dry run without `--apply`.
+
+Every cup can have its own **«Кубок» forum topic**, bound from inside the topic with
+`/set_div_topic <дивизион|общий> cup` and stored in `cup_topics` (`topic_type` is `cup` or
+`cup_div_<id>`). `services/cup_broadcast.py` keeps a pinned Pillow bracket
+(`services/graphics/cup_bracket_generator.py`) as the topic's anchor message. The bracket is edited in
+place as results land, and republished and re-pinned when it can't be edited. Cup result
+posts and the one-time «прошёл дальше» announcement (`claim_cup_series_announcement`) go to that
+topic. With no topic bound the cup stays silent in the group.
+
 **Teams** live in `users.team_name`, one club per coach. Club names are globally unique —
 `idx_users_team_name_unique` enforces `UNIQUE(LOWER(TRIM(team_name)))` across all divisions,
 so a name identifies a club on its own and name-keyed lookups are safe.

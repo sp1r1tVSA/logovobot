@@ -600,6 +600,7 @@ async def cb_draft_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         target = await resolve_post_target(
             div_id, "results", "reports",
             legacy_topic_keys=("results_topic_id", "reports_topic_id"),
+            match_id=m_id,
         )
 
         if target:
@@ -611,6 +612,10 @@ async def cb_draft_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 )
             except Exception as e:
                 logger.error(f"Failed to send match post to group: {e}")
+        if div_id == CUP_DIVISION_SENTINEL:
+            # Решённая серия и закреплённая сетка — в теме «Кубок», следом за постом.
+            from services.cup_broadcast import after_cup_result
+            await after_cup_result(context.bot, m_id)
 
     admin_name = f"@{query.from_user.username}" if query.from_user.username else (query.from_user.first_name or "Администратор")
     original_text = query.message.caption if query.message.photo else query.message.text

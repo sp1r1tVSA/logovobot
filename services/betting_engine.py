@@ -358,18 +358,20 @@ def generate_round_markets(tour: int, division_id: int | None = None, season_id:
     return markets
 
 
-def select_stage_matches(stage: str, season_id: int | None = None) -> list[dict]:
-    """Все матчи этапа общего кубка: каждая игра каждой серии и заголовок серии.
+def select_stage_matches(stage: str, season_id: int | None = None, division_id: int | None = None) -> list[dict]:
+    """Все матчи этапа кубка (общего или дивизиона `division_id`): каждая игра каждой серии и заголовок серии.
 
     Квоты `CENTRAL_MATCHES_PER_ROUND` здесь нет намеренно: в лиге она отбирает
     четыре статусные пары тура, а сетку кубка уже отобрала жеребьёвка — убрать из
     неё матч значит убрать участника из стадии. Сыгранные игры в линию не
     возвращаются (`get_cup_stage_matches(unplayed_only=True)`).
     """
-    return database.get_cup_stage_matches(stage, season_id=season_id, unplayed_only=True)
+    return database.get_cup_stage_matches(
+        stage, season_id=season_id, unplayed_only=True, division_id=division_id
+    )
 
 
-def generate_stage_markets(stage: str, season_id: int | None = None) -> list[dict]:
+def generate_stage_markets(stage: str, season_id: int | None = None, division_id: int | None = None) -> list[dict]:
     """Собрать и выставить линию этапа кубка.
 
     Порядок тот же, что у лиги: сначала завести недостающие строки (`provision_cup_stage_line`
@@ -384,12 +386,12 @@ def generate_stage_markets(stage: str, season_id: int | None = None) -> list[dic
         act = database.get_active_season()
         season_id = act["id"] if act else 1
 
-    database.provision_cup_stage_line(stage, season_id=season_id)
+    database.provision_cup_stage_line(stage, season_id=season_id, division_id=division_id)
 
     from services import odds_engine
 
     priced: list[dict] = []
-    for m in select_stage_matches(stage, season_id=season_id):
+    for m in select_stage_matches(stage, season_id=season_id, division_id=division_id):
         m_id = m["match_id"]
         if not database.match_line_is_open(m_id):
             continue
