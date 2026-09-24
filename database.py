@@ -2217,6 +2217,9 @@ def init_db() -> None:
         # ─── 025: ежедневный бонус убран — его настройка из панели не читается ─
         _drop_daily_bonus_setting(cursor)
 
+        # ─── 026: журнал «ИИ-прогноза» для сверки с сыгранными матчами ────────
+        _ensure_ai_pick_log(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -13650,6 +13653,127 @@ def get_admin_market_board(division_ids: list[int] | None = None, state: str = "
     for m in page:
         m["markets"] = markets_by_match.get(m["match_id"], [])
     return page, total
+
+
+# ═══ Logovo.bet: сверка «ИИ-прогноза» с сыгранными матчами ════════════════════
+
+MIGRATION_026_AI_PICK_LOG = "026_ai_pick_log"
+
+
+def _ensure_ai_pick_log(cursor: sqlite3.Cursor) -> None:
+    """Миграция 026: журнал исходов, которые ИИ показал во вкладке «ИИ-прогноз».
+
+    Одна строка на исход: повторный прогноз того же исхода (другой фильтр,
+    пересчёт) перезаписывает её, так что в сверку идёт последняя оценка до
+    матча. Рынок и исход записаны копией, а не внешним ключом: пересборка линии
+    не должна стирать историю. Итог в таблице не хранится — его каждый раз
+    считает `market_settler` по счёту матча, и исправленный счёт не требует
+    пересчёта журнала.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ai_pick_log (
+            selection_id INTEGER PRIMARY KEY,
+            match_id INTEGER NOT NULL,
+            division_id INTEGER,
+            round_number INTEGER,
+            team1 TEXT,
+            team2 TEXT,
+            market_key TEXT NOT NULL,
+            market_group TEXT,
+            market_name TEXT,
+            selection_key TEXT NOT NULL,
+            selection_name TEXT,
+            odds REAL NOT NULL,
+            probability REAL NOT NULL,
+            line_probability REAL NOT NULL,
+            model TEXT,
+            predicted_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ai_pick_log_match ON ai_pick_log(match_id)")
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_026_AI_PICK_LOG, "ai_pick_log: AI picks kept for the check against played matches"),
+    )
+
+
+_AI_LOG_PLAYED = ("confirmed", "completed")
+
+
+def log_ai_picks(picks: list[dict], model: str | None) -> int:
+    """Записать исходы, показанные ИИ. Исходы уже сыгранных матчей пропускаются:
+    оценка, сделанная после результата, сверке не нужна."""
+    rows = [p for p in picks if p.get("selection_id") and p.get("match_id")]
+    if not rows:
+        return 0
+    match_ids = sorted({int(p["match_id"]) for p in rows})
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT id FROM matches WHERE id IN ({','.join('?' * len(match_ids))}) "
+            f"AND status IN (?, ?)",
+            match_ids + list(_AI_LOG_PLAYED),
+        )
+        played = {r["id"] for r in cursor.fetchall()}
+        written = 0
+        for p in rows:
+            if int(p["match_id"]) in played:
+                continue
+            cursor.execute("""
+                INSERT INTO ai_pick_log (
+                    selection_id, match_id, division_id, round_number, team1, team2,
+                    market_key, market_group, market_name, selection_key, selection_name,
+                    odds, probability, line_probability, model, predicted_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
+                ON CONFLICT(selection_id) DO UPDATE SET
+                    odds = excluded.odds,
+                    probability = excluded.probability,
+                    line_probability = excluded.line_probability,
+                    model = excluded.model,
+                    predicted_at = excluded.predicted_at
+            """, (
+                int(p["selection_id"]), int(p["match_id"]), p.get("division_id"),
+                p.get("round_number"), p.get("team1"), p.get("team2"),
+                p.get("market_key") or "", p.get("market_group"), p.get("market_name"),
+                p.get("selection_key") or "", p.get("selection_name"),
+                float(p["odds"]), float(p["probability"]), float(p["line_probability"]), model,
+            ))
+            written += 1
+        return written
+
+
+def get_ai_pick_log(division_ids: list[int] | None = None) -> tuple[list[dict], int]:
+    """Прогнозы ИИ по сыгранным матчам (со счётом и полями для расчёта) и
+    число прогнозов, чьи матчи ещё не сыграны.
+
+    Технические результаты и отменённые матчи в сверку не идут: счёт там
+    назначен, а не сыгран. Удалённый матч выпадает сам — журнал без него
+    ничего не значит.
+    """
+    in_list, div_params = _division_scope(division_ids)
+    scope_sql = f" AND l.division_id IN {in_list}" if in_list else ""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT l.*, m.player1_score, m.player2_score, m.ht_score1, m.ht_score2,
+                   m.status AS match_status, m.tournament_type, m.cup_winner_team,
+                   m.player1_team, m.player2_team, m.played_at, d.name AS division_name
+            FROM ai_pick_log l
+            JOIN matches m ON m.id = l.match_id
+            LEFT JOIN divisions d ON d.id = l.division_id
+            WHERE m.status IN (?, ?)
+              AND m.player1_score IS NOT NULL AND m.player2_score IS NOT NULL
+              AND COALESCE(m.is_technical, 0) = 0{scope_sql}
+            ORDER BY COALESCE(m.played_at, l.predicted_at) DESC, l.selection_id DESC
+        """, list(_AI_LOG_PLAYED) + div_params)
+        played = [dict(r) for r in cursor.fetchall()]
+        cursor.execute(f"""
+            SELECT COUNT(*) FROM ai_pick_log l
+            JOIN matches m ON m.id = l.match_id
+            WHERE m.status NOT IN (?, ?, 'cancelled'){scope_sql}
+        """, list(_AI_LOG_PLAYED) + div_params)
+        pending = cursor.fetchone()[0]
+    return played, pending
 
 
 def get_tournament_standings(division_id: int | None = None, season_id: int | None = None) -> list[dict]:

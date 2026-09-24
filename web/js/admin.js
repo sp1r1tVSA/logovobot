@@ -180,7 +180,8 @@ export class AdminPanel {
     this.bets = { status: 'pending', userId: null, offset: 0, items: [], total: 0 };
     this.players = { q: '', sort: 'balance', banned: false, items: [] };
     // markets/oddsMin/oddsMax — применённые (уходят в запрос), draft — ещё не применённые.
-    this.picks = { markets: [], oddsMin: '', oddsMax: '', draft: null, minChance: 0, valueOnly: false, res: null };
+    // view: 'list' — прогноз по открытой линии, 'review' — сверка с сыгранными матчами.
+    this.picks = { view: 'list', markets: [], oddsMin: '', oddsMax: '', draft: null, minChance: 0, valueOnly: false, res: null };
 
     this._searchTimer = null;
     this._modalSubmit = null;
@@ -293,7 +294,7 @@ export class AdminPanel {
     const loaders = {
       dashboard: () => this.loadDashboard(),
       markets: () => this.loadMarkets(true),
-      picks: () => this.loadPicks(false),
+      picks: () => (this.picks.view === 'review' ? this.loadPicksReview() : this.loadPicks(false)),
       bets: () => this.loadBets(true),
       players: () => this.loadPlayers(),
       limits: () => this.loadLimits(),
@@ -799,6 +800,7 @@ export class AdminPanel {
     const pill = (attr, active, label) => `<button class="category-pill ${active ? 'active' : ''}" ${attr}>${label}</button>`;
 
     body.innerHTML = `
+      ${this.picksViewSwitch()}
       <div class="adm-card">
         <div class="adm-pause-row">
           <div class="adm-row-main">
@@ -893,6 +895,110 @@ export class AdminPanel {
     }
     Object.assign(this.picks, { markets: [...draft.markets], oddsMin: draft.oddsMin, oddsMax: draft.oddsMax });
     this.loadPicks(false).catch(err => this.toast(err.message, true));
+  }
+
+  picksViewSwitch() {
+    const v = this.picks.view;
+    return `
+      <div class="category-pills adm-picks-pills">
+        <button class="category-pill ${v === 'list' ? 'active' : ''}" data-adm-pview="list">Прогноз</button>
+        <button class="category-pill ${v === 'review' ? 'active' : ''}" data-adm-pview="review">Сверка с матчами</button>
+      </div>`;
+  }
+
+  // ─── Сверка ИИ-прогноза с сыгранными матчами ───────────────────────────
+
+  async loadPicksReview() {
+    const body = this.body();
+    const r = await this.get(`${PANEL}/picks/review`, this.scopeParams());
+    if (this.tab !== 'picks' || this.picks.view !== 'review' || this.body() !== body) return;
+
+    const t = r.total;
+    const pct = v => (v == null ? '—' : `${Number(v).toFixed(1)}%`);
+    const brier = v => (v == null ? '—' : Number(v).toFixed(3));
+    const signed = v => (v == null ? '—' : `${v > 0 ? '+' : ''}${Number(v).toFixed(1)}%`);
+    const roiClass = v => (v == null ? '' : v >= 0 ? 'green' : 'red');
+    const verdicts = {
+      few: [`Пока мало данных: ${fmt(t.count)} из ${fmt(r.min_sample)} рассчитанных исходов`,
+        'Вывод о точности появится, когда сыграют матчи из журнала. До этого цифры — шум.', 'gold'],
+      ai: ['ИИ точнее линии', 'Оценки модели ближе к реальным исходам, чем вероятность, заложенная в коэффициенты.', 'green'],
+      line: ['Линия точнее ИИ', 'Коэффициенты предсказывают исходы лучше модели — её шансам доверять осторожно.', 'red'],
+      even: ['ИИ и линия на равных', 'Разница в точности меньше погрешности: модель не добавляет знания сверх линии.', ''],
+    };
+    const [title, text, cls] = verdicts[r.verdict] || verdicts.few;
+    const kv = (label, value, c = '') => `<div class="adm-kv"><span>${label}</span><b class="${c}">${value}</b></div>`;
+    // Строка группы: слева что за группа, справа факт против обещанного ИИ.
+    const statRow = (label, s, extra = '') => `
+      <div class="adm-row adm-pick-row">
+        <div class="adm-row-main">
+          <b>${esc(label)}</b>
+          <small>${fmt(s.count)} исх. · линия ждала ${pct(s.avg_line)}${extra}</small>
+        </div>
+        <div class="adm-row-side adm-pick-prob">${pct(s.hit_rate)}
+          <small>ИИ ждал ${pct(s.avg_ai)}</small></div>
+      </div>`;
+
+    if (!t.count) {
+      body.innerHTML = `
+        ${this.picksViewSwitch()}
+        <div class="adm-card">
+          <div class="adm-card-title">Сверять пока нечего</div>
+          <div class="adm-muted">Журнал пополняется каждый раз, когда ИИ отдаёт прогноз: запоминается последняя оценка
+            исхода до матча. Как только матч сыграют, исход попадёт в сверку.
+            ${r.pending ? `<br>Ждут результата: <b>${fmt(r.pending)}</b> исх.` : ''}</div>
+        </div>`;
+      return;
+    }
+
+    body.innerHTML = `
+      ${this.picksViewSwitch()}
+      <div class="adm-card">
+        <div class="adm-card-title adm-verdict ${cls}">${esc(title)}</div>
+        <div class="adm-muted">${esc(text)}</div>
+      </div>
+      <div class="kpi-grid">
+        ${this.kpi('Угадано', pct(t.hit_rate), '', `${fmt(t.won)} из ${fmt(t.count)} исходов`)}
+        ${this.kpi('ИИ ждал в среднем', pct(t.avg_ai), '', `линия — ${pct(t.avg_line)}`)}
+        ${this.kpi('Brier ИИ', brier(t.brier_ai), t.brier_ai < t.brier_line ? 'green' : '', `линия — ${brier(t.brier_line)}, меньше — точнее`)}
+        ${this.kpi('ROI по всем', signed(t.roi), roiClass(t.roi), 'ставка по 1 🪙 на каждый исход')}
+      </div>
+      <div class="adm-card">
+        <div class="adm-card-title">Ценные исходы</div>
+        ${r.value.count ? `
+          ${kv('Исходов', fmt(r.value.count))}
+          ${kv('Угадано', `${pct(r.value.hit_rate)} <span class="adm-muted">(${fmt(r.value.won)})</span>`)}
+          ${kv('ИИ ждал / линия', `${pct(r.value.avg_ai)} / ${pct(r.value.avg_line)}`)}
+          ${kv('ROI', signed(r.value.roi), roiClass(r.value.roi))}
+          <small class="adm-muted">Шанс по ИИ × кэф &gt; 1. Плюсовой ROI на большой выборке — модель находит недооценённые исходы.</small>
+        ` : '<div class="adm-muted">Ценных среди рассчитанных исходов не было</div>'}
+      </div>
+      <div class="adm-card">
+        <div class="adm-card-title">Калибровка: обещанный шанс против факта</div>
+        ${r.buckets.map(b => statRow(`ИИ: ${b.label}`, b)).join('')}
+        <small class="adm-muted">Справа — сколько зашло на деле. У откалиброванной модели это близко к «ИИ ждал».</small>
+      </div>
+      ${r.models.length > 1 ? `
+        <div class="adm-card">
+          <div class="adm-card-title">По моделям</div>
+          ${r.models.map(m => statRow(m.model, m, ` · Brier ${brier(m.brier_ai)} / ${brier(m.brier_line)}`)).join('')}
+        </div>` : ''}
+      <div class="adm-card">
+        <div class="adm-card-title">Последние рассчитанные</div>
+        ${r.recent.map(p => `
+          <div class="adm-row adm-pick-row">
+            <div class="adm-row-main">
+              <b>${esc(p.selection_name)}</b> <span class="adm-muted">× ${odd(p.odds)}</span>
+              <span class="adm-badge adm-st-${p.won ? 'won' : 'lost'}">${p.won ? 'зашёл' : 'не зашёл'}</span>
+              <small>${esc(p.team1)} ${esc(p.score)} ${esc(p.team2)} · ${esc(p.division_name || 'Дивизион 1')} · ${esc(matchRoundLabel(p))}</small>
+            </div>
+            <div class="adm-row-side adm-pick-prob">${Number(p.probability).toFixed(0)}%
+              <small>линия ${Number(p.line_probability).toFixed(0)}%</small></div>
+          </div>`).join('')}
+      </div>
+      <div class="adm-muted adm-mb">Сверяется последняя оценка ИИ до матча. Технические результаты и отменённые матчи
+        не учитываются${r.voided ? `, возвратов по рынку — ${fmt(r.voided)}` : ''}.
+        Ждут результата: ${fmt(r.pending)} исх.</div>
+    `;
   }
 
   // ─── Лимиты: вся лига, дивизионы, личные ───────────────────────────────
@@ -1265,6 +1371,11 @@ export class AdminPanel {
       api.cache.clear();
       this.refreshMe();
       this.loadTab();
+    } else if ((el = t('[data-adm-pview]'))) {
+      if (this.picks.view !== el.dataset.admPview) {
+        this.picks.view = el.dataset.admPview;
+        this.loadTab();
+      }
     } else if (t('[data-adm-picks-refresh]')) {
       this.loadPicks(true).catch(err => this.toast(err.message, true));
     } else if ((el = t('[data-adm-pmarket]'))) {

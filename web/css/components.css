@@ -4788,6 +4788,11 @@ span.team-logo-fallback {
   box-sizing: border-box;
 }
 .adm-picks-odds .adm-input:focus { border-color: var(--accent-gold); }
+/* Сверка ИИ-прогноза: вердикт цветом. */
+.adm-verdict { margin-bottom: 4px; }
+.adm-verdict.green { color: var(--color-success); }
+.adm-verdict.red { color: var(--color-danger); }
+.adm-verdict.gold { color: var(--text-gold); }
 .adm-picks-hint { display: block; margin-top: 6px; }
 /* Подсказка у лимита длиннее обычной подписи строки — переносим, а не обрезаем. */
 .adm-limit-row .adm-row-main small { white-space: normal; }

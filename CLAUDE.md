@@ -432,6 +432,21 @@ the line probability and says so (`source: "line"`). Results are cached 30 min (
 fallback), a manual refresh recomputes at most every 2 min, and only one model call runs at a
 time — the free tier's daily quota is small. It is advisory only: nothing in betting reads it.
 
+The tab's «Сверка с матчами» view (`GET /api/admin/panel/picks/review`,
+`services/ai/pick_review.py`) checks those picks against played matches. Every AI answer —
+never the line fallback — is upserted into `ai_pick_log` (migration `026`), one row per
+selection holding its **last** pre-match estimate, the odds and the line probability at that
+moment; picks for matches already played are not written. The log is denormalized with no FK,
+so regenerating a line does not erase history. Outcomes are **not stored**: they are computed
+on read by `market_settler.evaluate_market_selection` (cup games via `_cup_winner_side`), so a
+corrected score changes the review at once. Technical and cancelled matches are excluded, and
+refunds or unknown markets are counted as `voided`. The yardstick is the Brier score of the AI
+probability against the line probability *on the same picks*: the verdict needs
+`MIN_SAMPLE = 30` settled picks, and a Brier gap under `EVEN_MARGIN = 0.005` reads as a tie.
+Alongside it the view shows hit rate, a flat-1-🪙 ROI, value picks (AI probability × odds > 1),
+calibration buckets and a per-model split. A failed log write is logged and never breaks the
+picks response.
+
 ---
 
 ## Roles and access

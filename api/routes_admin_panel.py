@@ -20,6 +20,7 @@ api/routes_admin_panel.py
   POST /api/admin/panel/limits                  задать / сбросить лимит  (глобальный админ)
   POST /api/admin/panel/pause                   экстренная остановка приёма
   GET  /api/admin/panel/picks                   ИИ-прогноз: исходы по шансу захода
+  GET  /api/admin/panel/picks/review            сверка ИИ-прогноза с сыгранными матчами
 
 Права: панель открыта только тем, кто указан в ADMIN_IDS (is_super_admin), —
 ни роль admin в базе, ни назначение админом дивизиона доступа к ней не дают.
@@ -39,7 +40,7 @@ import database
 from api.auth import get_authenticated_user
 from api.params import body_int, path_int, query_int
 from handlers.base import is_super_admin
-from services.ai import bet_picks
+from services.ai import bet_picks, pick_review
 from services.betting_limits import BettingLimitsService
 
 logger = logging.getLogger(__name__)
@@ -566,6 +567,22 @@ async def handle_panel_picks(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", **picks})
 
 
+async def handle_panel_picks_review(request: web.Request) -> web.Response:
+    """GET /api/admin/panel/picks/review?division_id=
+
+    Исходы, которые показывал ИИ, против итогов сыгранных матчей: попадания,
+    Brier score модели и линии на одних и тех же исходах, окупаемость «ценных».
+    """
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    division_ids = _narrow(scope, request)
+    if isinstance(division_ids, web.Response):
+        return division_ids
+    review = await asyncio.to_thread(pick_review.get_review, division_ids)
+    return web.json_response({"status": "ok", **review})
+
+
 def register_admin_panel_routes(app: web.Application) -> None:
     r = app.router
     r.add_get("/api/admin/panel/me", handle_panel_me)
@@ -585,3 +602,4 @@ def register_admin_panel_routes(app: web.Application) -> None:
     r.add_post("/api/admin/panel/limits", handle_panel_set_limit)
     r.add_post("/api/admin/panel/pause", handle_panel_pause)
     r.add_get("/api/admin/panel/picks", handle_panel_picks)
+    r.add_get("/api/admin/panel/picks/review", handle_panel_picks_review)

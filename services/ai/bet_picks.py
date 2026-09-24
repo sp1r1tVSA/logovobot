@@ -17,6 +17,8 @@ services/ai/bet_picks.py
      вернула, сверяется с кандидатами: чужой id или мусор просто отбрасываются.
   4. Нет ключа, модель не ответила или ответила пустым — список строится по
      вероятности линии, и ответ честно помечен source="line".
+  5. Исходы, показанные ИИ, пишутся в журнал (database.log_ai_picks), а
+     services/ai/pick_review сверяет их с сыгранными матчами.
 
 Результат кэшируется (CACHE_TTL_SECONDS), а ручное обновление не чаще
 REFRESH_MIN_SECONDS: у бесплатных моделей дневная квота запросов.
@@ -379,8 +381,10 @@ def _pick_row(match: dict, option: dict, probability: float, reason: str) -> dic
         "round_number": match.get("round_number"),
         "team1": match["team1"],
         "team2": match["team2"],
+        "market_key": option.get("market_key"),
         "market_name": option["market_name"],
         "market_group": option.get("market_group"),
+        "selection_key": option.get("selection_key"),
         "selection_name": option["selection_name"],
         "odds": option["odds"],
         "probability": round(probability, 1),
@@ -438,6 +442,15 @@ def rank_line_picks(matches: list[dict]) -> list[dict]:
 
 # ─── Точка входа ────────────────────────────────────────────────────────────
 
+def _log_for_review(picks: list[dict], model: str | None) -> None:
+    """Показанные ИИ исходы — в журнал для сверки (services/ai/pick_review).
+    Журнал вторичен: его сбой не должен отнимать у админа сам прогноз."""
+    try:
+        database.log_ai_picks(picks, model)
+    except Exception:
+        logger.exception("AI picks: failed to log picks for the review")
+
+
 def build_picks(division_ids: list[int] | None, filters: dict | None = None) -> dict:
     filters = filters or normalize_filters()
     matches = collect_candidates(division_ids, filters=filters)
@@ -462,6 +475,7 @@ def build_picks(division_ids: list[int] | None, filters: dict | None = None) -> 
         picks = rank_ai_picks(matches, data) if data is not None else []
         if picks:
             result.update(source="ai", model=model, picks=picks)
+            _log_for_review(picks, model)
             return result
         result["error"] = "ai_unavailable"
     else:
