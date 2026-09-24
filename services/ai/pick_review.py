@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 
 import database
+from services.ai.bet_picks import MARKET_GROUPS
 from services.market_settler import evaluate_market_selection
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,29 @@ def _verdict(total: dict) -> str:
     return "ai" if diff > 0 else "line"
 
 
+def _by_market(settled: list[dict]) -> list[dict]:
+    """Та же сводка по группам рынков вкладки (Исход, Тотал, Фора…), в их порядке.
+
+    У каждой группы свой вердикт по тому же порогу MIN_SAMPLE: по одной группе
+    выборка набирается медленнее, и честнее сказать «мало данных», чем судить
+    по десятку исходов.
+    """
+    groups: dict[str, list[dict]] = {}
+    for r in settled:
+        gid = next((g for g, (_label, keys) in MARKET_GROUPS.items() if r["market_key"] in keys), "other")
+        groups.setdefault(gid, []).append(r)
+    order = [*MARKET_GROUPS, "other"]
+    result = []
+    for gid in order:
+        part = groups.get(gid)
+        if not part:
+            continue
+        stats = _stats(part)
+        label = MARKET_GROUPS[gid][0] if gid in MARKET_GROUPS else "Прочее"
+        result.append({"group": gid, "label": label, "verdict": _verdict(stats), **stats})
+    return result
+
+
 def summarize(rows: list[dict]) -> dict:
     """Чистая часть: журнал со счётом → сводка. Отдельно от БД ради тестов."""
     settled, voided = [], 0
@@ -131,6 +155,7 @@ def summarize(rows: list[dict]) -> dict:
         "min_sample": MIN_SAMPLE,
         "value": _stats(value),
         "buckets": buckets,
+        "markets": _by_market(settled),
         "models": [{"model": m, **_stats(part)} for m, part in
                    sorted(models.items(), key=lambda kv: -len(kv[1]))],
         "voided": voided,

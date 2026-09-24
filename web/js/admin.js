@@ -926,6 +926,10 @@ export class AdminPanel {
       even: ['ИИ и линия на равных', 'Разница в точности меньше погрешности: модель не добавляет знания сверх линии.', ''],
     };
     const [title, text, cls] = verdicts[r.verdict] || verdicts.few;
+    const marketBadge = {
+      few: ['мало данных', ''], ai: ['ИИ точнее', 'adm-st-won'],
+      line: ['линия точнее', 'adm-st-lost'], even: ['на равных', 'adm-st-pending'],
+    };
     const kv = (label, value, c = '') => `<div class="adm-kv"><span>${label}</span><b class="${c}">${value}</b></div>`;
     // Строка группы: слева что за группа, справа факт против обещанного ИИ.
     const statRow = (label, s, extra = '') => `
@@ -977,6 +981,24 @@ export class AdminPanel {
         ${r.buckets.map(b => statRow(`ИИ: ${b.label}`, b)).join('')}
         <small class="adm-muted">Справа — сколько зашло на деле. У откалиброванной модели это близко к «ИИ ждал».</small>
       </div>
+      ${(r.markets || []).length ? `
+        <div class="adm-card">
+          <div class="adm-card-title">По типам рынков</div>
+          ${r.markets.map(g => {
+            const [badge, badgeCls] = marketBadge[g.verdict] || marketBadge.few;
+            return `
+              <div class="adm-row adm-pick-row">
+                <div class="adm-row-main">
+                  <b>${esc(g.label)}</b> <span class="adm-badge ${badgeCls}">${badge}</span>
+                  <small>${fmt(g.count)} исх. · Brier ${brier(g.brier_ai)} / ${brier(g.brier_line)}</small>
+                </div>
+                <div class="adm-row-side adm-pick-prob">${pct(g.hit_rate)}
+                  <small class="${roiClass(g.roi)}">ROI ${signed(g.roi)}</small></div>
+              </div>`;
+          }).join('')}
+          <small class="adm-muted">Справа — сколько зашло и ROI ставки по 1 🪙. Brier: ИИ / линия, меньше — точнее.
+            Вердикт по группе — от ${fmt(r.min_sample)} рассчитанных исходов.</small>
+        </div>` : ''}
       ${r.models.length > 1 ? `
         <div class="adm-card">
           <div class="adm-card-title">По моделям</div>

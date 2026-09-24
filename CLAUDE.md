@@ -446,7 +446,9 @@ refunds or unknown markets are counted as `voided`. The yardstick is the Brier s
 probability against the line probability *on the same picks*: the verdict needs
 `MIN_SAMPLE = 30` settled picks, and a Brier gap under `EVEN_MARGIN = 0.005` reads as a tie.
 Alongside it the view shows hit rate, a flat-1-🪙 ROI, value picks (AI probability × odds > 1),
-calibration buckets and a per-model split. A failed log write is logged and never breaks the
+calibration buckets, a per-model split and a split by the tab's market groups
+(`bet_picks.MARKET_GROUPS`, unknown keys as «Прочее»), each group with its own verdict against
+the same `MIN_SAMPLE`. A failed log write is logged and never breaks the
 picks response.
 
 ---

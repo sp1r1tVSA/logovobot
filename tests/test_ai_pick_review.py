@@ -113,6 +113,31 @@ class TestSummarize(unittest.TestCase):
         self.assertEqual(res["total"]["count"], 0)
         self.assertIsNone(res["total"]["brier_ai"])
         self.assertEqual(res["verdict"], "few")
+        self.assertEqual(res["markets"], [])
+
+    def test_split_by_market_group(self):
+        rows = [
+            _row("total_goals", "over_2.5", 2, 1, 70, 50, 1.9),
+            _row("1x2", "p1", 2, 0, 80, 60, 1.5),
+            _row("1x2", "p2", 2, 0, 40, 30, 3.0),
+            _row("individual_total_2", "it2_over_0.5", 0, 1, 60, 55, 1.7),
+        ]
+        markets = pick_review.summarize(rows)["markets"]
+        # Порядок — как у групп фильтра вкладки, пустые группы не показываются.
+        self.assertEqual([(g["group"], g["label"], g["count"], g["won"]) for g in markets],
+                         [("result", "Исход", 2, 1), ("total", "Тотал", 1, 1), ("itotal", "Инд. тотал", 1, 1)])
+        result = markets[0]
+        self.assertEqual(result["brier_ai"], round((0.2 ** 2 + 0.4 ** 2) / 2, 4))
+        self.assertEqual(result["brier_line"], round((0.4 ** 2 + 0.3 ** 2) / 2, 4))
+        self.assertEqual(result["verdict"], "few")
+
+    def test_market_group_verdicts_are_independent(self):
+        n = pick_review.MIN_SAMPLE
+        rows = ([_row("1x2", "p1", 1, 0, 90, 60, 1.6)] * n
+                + [_row("total_goals", "over_2.5", 2, 1, 40, 70, 1.6)] * n
+                + [_row("btts", "yes", 1, 1, 90, 60, 1.6)] * (n - 1))
+        verdicts = {g["group"]: g["verdict"] for g in pick_review.summarize(rows)["markets"]}
+        self.assertEqual(verdicts, {"result": "ai", "total": "line", "btts": "few"})
 
 
 # match_id: (division_id, status, score1, score2, is_technical)
