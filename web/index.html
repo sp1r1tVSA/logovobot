@@ -128,6 +128,8 @@
       <span class="brand-title">LOGOVO.BET</span>
     </div>
     <div class="header-right">
+      <!-- Admin Panel Button: shown only to admins -->
+      <button class="admin-pill" id="header-admin-btn" type="button" title="Управление Logovo.bet" hidden>⚙️</button>
       <!-- Level Badge Pill -->
       <div class="level-pill" id="header-level-btn" title="Ваш уровень и опыт">
         <span class="level-badge-icon">🎯</span>
@@ -313,7 +315,17 @@
       <div id="my-club-history-container" class="club-panel" style="display: none;"></div>
     </section>
 
+    <!-- VIEW: ADMIN PANEL (admins only, filled by js/admin.js) -->
+    <section id="view-admin" class="view-section">
+      <div id="admin-root"></div>
+    </section>
+
   </main>
+
+  <!-- Admin Panel Modal: confirmations, forms, coupon and player cards -->
+  <div class="modal-overlay" id="admin-modal">
+    <div class="modal-content adm-modal"></div>
+  </div>
 
   <!-- Floating Bet Bar: appears as soon as the coupon has an event -->
   <div class="betbar" id="betbar" role="button" tabindex="0" aria-label="Открыть купон" aria-hidden="true">

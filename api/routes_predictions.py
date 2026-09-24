@@ -132,6 +132,13 @@ async def handle_place_prediction(request: web.Request) -> web.Response:
                     "new_odd": result.get("new_odd"),
                     "message": result.get("message", "Коэффициент изменился.")
                 }, status=409)
+            if error_code in ("BETTING_BANNED", "BETTING_PAUSED", "BETTING_UNAVAILABLE"):
+                # Запрет игроку или экстренная остановка из админ-панели.
+                return web.json_response({
+                    "status": "error",
+                    "error": error_code,
+                    "message": result.get("message", "Приём ставок недоступен."),
+                }, status=503 if error_code == "BETTING_UNAVAILABLE" else 403)
             if error_code == "IDEMPOTENCY_KEY_REUSED":
                 return web.json_response({
                     "status": "error",

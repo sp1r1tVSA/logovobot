@@ -121,6 +121,7 @@ from api.routes_live import (
     handle_get_odds_movers,
     handle_get_live_intelligence,
 )
+from api.routes_admin_panel import register_admin_panel_routes
 from api.routes_admin_live import (
     handle_admin_live_overview,
     handle_admin_suspend_market,
@@ -554,6 +555,9 @@ def create_app() -> web.Application:
     app.router.add_get("/api/admin/risk/limits", handle_admin_get_limits)
     app.router.add_post("/api/admin/risk/limits", handle_admin_set_limits)
     app.router.add_post("/api/admin/risk/suspend", handle_admin_emergency_suspend)
+
+    # 11b. Вкладка «Управление» в Mini App — панель Logovo.bet
+    register_admin_panel_routes(app)
 
     # 12. Player Cabinet («Мой Клуб»)
     app.router.add_get("/api/cabinet/overview", handle_get_cabinet_overview)

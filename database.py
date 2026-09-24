@@ -2211,6 +2211,9 @@ def init_db() -> None:
         # ─── 022: общий кубок — стадии, серии, поля матча ─────────────────────
         _ensure_cup_schema(cursor)
 
+        # ─── 024: запрет ставок для отдельного игрока (панель Logovo.bet) ─────
+        _ensure_betting_bans(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -11598,6 +11601,18 @@ def place_user_bet(
                                    "message": "Ключ идемпотентности уже использован для другой ставки."}
                 return True, existing["id"]
 
+        # Запрет ставок игроку и экстренная остановка приёма из админ-панели.
+        # Проверка стоит в той же транзакции, что и списание, и работает
+        # FAIL-CLOSED: если её не удалось выполнить, купон не принимается.
+        try:
+            block = _betting_block_reason(cursor, user_id, [s["match_id"] for s in selections])
+        except Exception:
+            logger.exception(f"Betting block check failed for user_id={user_id}; bet rejected")
+            block = {"error": "BETTING_UNAVAILABLE",
+                     "message": "Приём ставок временно недоступен. Попробуйте позже."}
+        if block is not None:
+            return False, block
+
         # 322-защита (дублирующая проверка). RiskEngine отклоняет такие купоны
         # раньше, но эта проверка выполняется в той же транзакции, что и списание
         # монет: она закрывает и гонку (матч мог получить участника между
@@ -12218,10 +12233,14 @@ def get_all_bets(
     division_id: int | None = None,
     user_id: int | None = None,
     limit: int = 10,
-    offset: int = 0
+    offset: int = 0,
+    division_ids: list[int] | None = None,
 ) -> tuple[list[dict], int]:
     """Fetch prediction slips across all users (super-admin view) with user details, nested legs and pagination.
     Returns (list_of_bets, total_matching_count).
+
+    `division_ids` scopes the feed to several divisions at once (a division
+    admin's set); a match without a division counts as division 1 there.
     """
     with transaction() as conn:
         cursor = conn.cursor()
@@ -12248,6 +12267,17 @@ def get_all_bets(
                 )
             """)
             params.append(division_id)
+
+        if division_ids is not None:
+            in_list, div_params = _division_scope(division_ids)
+            where_clauses.append(f"""
+                EXISTS (
+                    SELECT 1 FROM bet_items bi_s
+                    JOIN matches m_s ON bi_s.match_id = m_s.id
+                    WHERE bi_s.bet_id = ub.id AND COALESCE(m_s.division_id, 1) IN {in_list}
+                )
+            """)
+            params.extend(div_params)
 
         where_sql = " AND ".join(where_clauses)
 
@@ -12866,6 +12896,719 @@ def get_betting_audit_log(
         params.extend([limit, offset])
         cursor.execute(query, params)
         return [dict(r) for r in cursor.fetchall()]
+
+
+# ═══ Logovo.bet: админ-панель в Mini App ═════════════════════════════════════
+#
+# То, чего вкладке «Управление» не хватало в уже существующих /api/admin/*:
+# запрет ставок отдельному игроку, экстренная остановка приёма, ручная
+# корректировка баланса, поиск игроков и сводка букмекера.
+
+MIGRATION_024_BETTING_BANS = "024_betting_bans"
+BETTING_PAUSE_KEY = "betting_pause"
+BETTING_BANNED_ERROR = "BETTING_BANNED"
+BETTING_PAUSED_ERROR = "BETTING_PAUSED"
+# Потолок одной ручной корректировки: опечатка в лишний ноль не должна
+# вливать в закрытую экономику миллионы (стартовый кошелёк — 677 🪙).
+ADMIN_WALLET_ADJUST_MAX = 100_000
+
+
+def _ensure_betting_bans(cursor: sqlite3.Cursor) -> None:
+    """Миграция 024: одна строка на игрока, которому запрещены ставки.
+
+    Истории в таблице нет — снятие запрета удаляет строку, а кто, когда и
+    почему запрещал, остаётся в `bet_audit_log`. Внешнего ключа на `users` нет
+    сознательно: кошелёк бывает и у того, кто не зарегистрирован тренером.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS betting_bans (
+            user_id INTEGER PRIMARY KEY,
+            reason TEXT,
+            banned_by INTEGER NOT NULL,
+            banned_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+        )
+    """)
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_024_BETTING_BANS, "betting_bans: per-player betting ban set from the admin panel"),
+    )
+
+
+def _parse_betting_pause(raw: str | None) -> dict:
+    """Состояние остановки приёма: {'global': entry|None, 'divisions': {id: entry}}.
+
+    Битый JSON — это исключение, а не «пауз нет»: `place_user_bet` превращает
+    его в отказ (fail-closed), а новая запись паузы перезаписывает состояние.
+    """
+    state = {"global": None, "divisions": {}}
+    if not raw:
+        return state
+    data = json.loads(raw)
+    state["global"] = data.get("global") or None
+    for key, entry in (data.get("divisions") or {}).items():
+        if entry:
+            state["divisions"][int(key)] = entry
+    return state
+
+
+def _read_betting_pause(cursor: sqlite3.Cursor) -> dict:
+    cursor.execute("SELECT value FROM system_config WHERE key = ?", (BETTING_PAUSE_KEY,))
+    row = cursor.fetchone()
+    return _parse_betting_pause(row["value"] if row else None)
+
+
+def get_betting_pause() -> dict:
+    """Текущая экстренная остановка приёма ставок (глобальная и по дивизионам)."""
+    with transaction() as conn:
+        return _read_betting_pause(conn.cursor())
+
+
+def set_betting_pause(actor_id: int, paused: bool, division_id: int | None = None,
+                      reason: str | None = None) -> dict:
+    """Остановить или возобновить приём новых купонов — везде или в одном дивизионе.
+
+    Рынки при этом не трогаются: остановка действует на входе в
+    `place_user_bet`, поэтому её не может молча отменить синхронизация линии,
+    которая переоткрывает приостановленные рынки. Уже принятые купоны
+    рассчитываются как обычно.
+    """
+    entry = ({"reason": (reason or "").strip() or None, "by": actor_id, "at": now_msk_str()}
+             if paused else None)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        try:
+            state = _read_betting_pause(cursor)
+        except (ValueError, TypeError, AttributeError):
+            logger.warning("Corrupt betting pause state was overwritten by actor %s", actor_id)
+            state = {"global": None, "divisions": {}}
+
+        if division_id is None:
+            old = state["global"]
+            state["global"] = entry
+        else:
+            old = state["divisions"].get(division_id)
+            if entry:
+                state["divisions"][division_id] = entry
+            else:
+                state["divisions"].pop(division_id, None)
+
+        stored = {"global": state["global"],
+                  "divisions": {str(k): v for k, v in state["divisions"].items()}}
+        cursor.execute(
+            "REPLACE INTO system_config (key, value) VALUES (?, ?)",
+            (BETTING_PAUSE_KEY, json.dumps(stored, ensure_ascii=False)),
+        )
+        log_betting_audit(
+            actor_id=actor_id,
+            action="betting_paused" if paused else "betting_resumed",
+            entity_type="betting",
+            entity_id=division_id or 0,
+            old_value=old,
+            new_value=entry,
+            division_id=division_id,
+        )
+    return state
+
+
+def _betting_block_reason(cursor: sqlite3.Cursor, user_id: int, match_ids: list[int]) -> dict | None:
+    """Причина, по которой купон не принимается ещё до лимитов и баланса, или None.
+
+    Порядок: персональный запрет → глобальная остановка → остановка дивизиона
+    одного из матчей купона (матч без дивизиона — это дивизион 1).
+    """
+    cursor.execute("SELECT reason FROM betting_bans WHERE user_id = ?", (user_id,))
+    ban = cursor.fetchone()
+    if ban:
+        message = "Ставки для вашего аккаунта отключены администратором."
+        if ban["reason"]:
+            message += f" Причина: {ban['reason']}"
+        return {"error": BETTING_BANNED_ERROR, "message": message}
+
+    state = _read_betting_pause(cursor)
+    if state["global"]:
+        return {"error": BETTING_PAUSED_ERROR,
+                "message": "Приём ставок временно остановлен администратором."}
+
+    if state["divisions"] and match_ids:
+        placeholders = ",".join("?" * len(match_ids))
+        cursor.execute(
+            f"SELECT DISTINCT COALESCE(division_id, 1) AS div FROM matches WHERE id IN ({placeholders})",
+            list(match_ids),
+        )
+        for row in cursor.fetchall():
+            if row["div"] in state["divisions"]:
+                return {"error": BETTING_PAUSED_ERROR, "division_id": row["div"],
+                        "message": "Приём ставок на матчи этого дивизиона временно остановлен."}
+    return None
+
+
+def _betting_player_exists(cursor: sqlite3.Cursor, user_id: int) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM users WHERE telegram_id = ? UNION SELECT 1 FROM user_wallets WHERE user_id = ?",
+        (user_id, user_id),
+    )
+    return cursor.fetchone() is not None
+
+
+def get_betting_ban(user_id: int) -> dict | None:
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT user_id, reason, banned_by, banned_at FROM betting_bans WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def set_betting_ban(user_id: int, actor_id: int, reason: str | None = None) -> dict:
+    """Запретить игроку новые ставки. Открытые купоны остаются и рассчитываются."""
+    reason = (reason or "").strip() or None
+    with transaction() as conn:
+        cursor = conn.cursor()
+        if not _betting_player_exists(cursor, user_id):
+            raise ValueError(f"Игрок #{user_id} не найден.")
+        cursor.execute("SELECT reason, banned_at FROM betting_bans WHERE user_id = ?", (user_id,))
+        old = cursor.fetchone()
+        cursor.execute(
+            """
+            INSERT INTO betting_bans (user_id, reason, banned_by, banned_at)
+            VALUES (?, ?, ?, datetime('now', '+3 hours'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                reason = excluded.reason,
+                banned_by = excluded.banned_by,
+                banned_at = excluded.banned_at
+            """,
+            (user_id, reason, actor_id),
+        )
+        log_betting_audit(
+            actor_id=actor_id,
+            action="player_betting_banned",
+            entity_type="user",
+            entity_id=user_id,
+            old_value=dict(old) if old else None,
+            new_value={"reason": reason},
+        )
+    return get_betting_ban(user_id)
+
+
+def lift_betting_ban(user_id: int, actor_id: int) -> bool:
+    """Снять запрет ставок. False — запрета и не было."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT reason, banned_at FROM betting_bans WHERE user_id = ?", (user_id,))
+        old = cursor.fetchone()
+        if not old:
+            return False
+        cursor.execute("DELETE FROM betting_bans WHERE user_id = ?", (user_id,))
+        log_betting_audit(
+            actor_id=actor_id,
+            action="player_betting_unbanned",
+            entity_type="user",
+            entity_id=user_id,
+            old_value=dict(old),
+            new_value=None,
+        )
+    return True
+
+
+def admin_adjust_wallet(user_id: int, amount: int, actor_id: int, reason: str) -> dict:
+    """Ручное начисление (amount > 0) или списание (amount < 0) монет.
+
+    В отличие от `deduct_coins`, не трогает `total_wagered`: списание — это не
+    ставка, и оборот игрока от него расти не должен. Баланс в минус не уходит.
+    """
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount == 0:
+        raise ValueError("Сумма корректировки — ненулевое целое число.")
+    if abs(amount) > ADMIN_WALLET_ADJUST_MAX:
+        raise ValueError(f"За один раз можно изменить баланс не больше чем на {ADMIN_WALLET_ADJUST_MAX:,} 🪙.")
+    reason = (reason or "").strip()
+    if not reason:
+        raise ValueError("Укажите причину корректировки.")
+
+    with transaction() as conn:
+        cursor = conn.cursor()
+        if not _betting_player_exists(cursor, user_id):
+            raise ValueError(f"Игрок #{user_id} не найден.")
+        get_or_create_wallet(user_id)
+        cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+        old_balance = int(cursor.fetchone()["balance"])
+        if old_balance + amount < 0:
+            raise ValueError(f"Нельзя списать больше баланса ({old_balance:,} 🪙).")
+
+        cursor.execute(
+            "UPDATE user_wallets SET balance = balance + ?, updated_at = datetime('now', '+3 hours') WHERE user_id = ?",
+            (amount, user_id),
+        )
+        new_balance = old_balance + amount
+        tx_type = "admin_credit" if amount > 0 else "admin_debit"
+        cursor.execute(
+            """
+            INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type, balance_after, created_at)
+            VALUES (?, ?, ?, ?, 'admin', ?, datetime('now', '+3 hours'))
+            """,
+            (user_id, amount, tx_type, actor_id, new_balance),
+        )
+        tx_id = cursor.lastrowid
+        log_betting_audit(
+            actor_id=actor_id,
+            action=f"wallet_{tx_type}",
+            entity_type="user",
+            entity_id=user_id,
+            old_value={"balance": old_balance},
+            new_value={"balance": new_balance, "amount": amount, "reason": reason},
+        )
+
+    return {"user_id": user_id, "amount": amount, "old_balance": old_balance,
+            "new_balance": new_balance, "transaction_id": tx_id, "transaction_type": tx_type}
+
+
+def get_coin_transactions(user_id: int, limit: int = 30, offset: int = 0) -> list[dict]:
+    with transaction() as conn:
+        rows = conn.execute(
+            """
+            SELECT id, amount, transaction_type, reference_id, reference_type, balance_after, created_at
+            FROM coin_transactions
+            WHERE user_id = ?
+            ORDER BY id DESC
+            LIMIT ? OFFSET ?
+            """,
+            (user_id, limit, offset),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_risk_limit_overrides(scope_type: str, scope_id: int) -> dict[str, int]:
+    """Лимиты, заданные именно на этом уровне (без наследования сверху)."""
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT limit_key, limit_value FROM risk_limits_config WHERE scope_type = ? AND scope_id = ?",
+            (scope_type, scope_id),
+        ).fetchall()
+        return {r["limit_key"]: int(r["limit_value"]) for r in rows}
+
+
+def delete_risk_limit_override(scope_type: str, scope_id: int, limit_key: str) -> bool:
+    """Снять переопределение — уровень снова наследует лимит сверху."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "DELETE FROM risk_limits_config WHERE scope_type = ? AND scope_id = ? AND limit_key = ?",
+            (scope_type, scope_id, limit_key),
+        )
+        return cursor.rowcount > 0
+
+
+def _fold_search_text(value) -> str:
+    return str(value or "").casefold().replace("ё", "е")
+
+
+def search_betting_players(query: str = "", banned_only: bool = False,
+                           sort: str = "balance", limit: int = 50) -> list[dict]:
+    """Игроки с кошельком или регистрацией: баланс, оборот, открытые купоны, запрет.
+
+    Фильтр по имени — в Python: SQLite `LOWER()` не знает кириллицы, а
+    названия клубов русские. Игроков — сотни, это дёшево.
+    """
+    with transaction() as conn:
+        rows = conn.execute("""
+            SELECT ids.user_id,
+                   u.username,
+                   u.team_name,
+                   u.division_id,
+                   d.name AS division_name,
+                   w.balance,
+                   w.total_wagered,
+                   w.total_won,
+                   w.bets_count,
+                   w.bets_won,
+                   COALESCE(ob.open_bets, 0) AS open_bets,
+                   COALESCE(ob.open_stake, 0) AS open_stake,
+                   b.reason AS ban_reason,
+                   b.banned_at
+            FROM (SELECT telegram_id AS user_id FROM users
+                  UNION SELECT user_id FROM user_wallets) ids
+            LEFT JOIN users u ON u.telegram_id = ids.user_id
+            LEFT JOIN divisions d ON d.id = u.division_id
+            LEFT JOIN user_wallets w ON w.user_id = ids.user_id
+            LEFT JOIN betting_bans b ON b.user_id = ids.user_id
+            LEFT JOIN (
+                SELECT user_id, COUNT(*) AS open_bets, SUM(amount) AS open_stake
+                FROM user_bets WHERE status = 'pending' GROUP BY user_id
+            ) ob ON ob.user_id = ids.user_id
+        """).fetchall()
+
+    needle = _fold_search_text(query).strip().lstrip("@")
+    players = []
+    for row in rows:
+        p = dict(row)
+        p["is_banned"] = p["banned_at"] is not None
+        if banned_only and not p["is_banned"]:
+            continue
+        if needle and not (
+            needle == str(p["user_id"])
+            or needle in _fold_search_text(p["username"])
+            or needle in _fold_search_text(p["team_name"])
+        ):
+            continue
+        players.append(p)
+
+    sort_keys = {
+        "balance": lambda p: -(p["balance"] or 0),
+        "wagered": lambda p: -(p["total_wagered"] or 0),
+        "open": lambda p: -(p["open_stake"] or 0),
+        "name": lambda p: _fold_search_text(p["username"] or p["team_name"] or p["user_id"]),
+    }
+    players.sort(key=sort_keys.get(sort, sort_keys["balance"]))
+    return players[:limit]
+
+
+def get_betting_player(user_id: int) -> dict | None:
+    """Карточка игрока для панели: профиль, кошелёк, итоги ставок, запрет, лимиты, движения монет."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT u.telegram_id, u.username, u.team_name, u.division_id,
+                   d.name AS division_name, u.registered_at
+            FROM users u
+            LEFT JOIN divisions d ON d.id = u.division_id
+            WHERE u.telegram_id = ?
+        """, (user_id,))
+        profile = cursor.fetchone()
+        cursor.execute("SELECT * FROM user_wallets WHERE user_id = ?", (user_id,))
+        wallet = cursor.fetchone()
+        if not profile and not wallet:
+            return None
+
+    return {
+        "user_id": user_id,
+        "username": profile["username"] if profile else None,
+        "team_name": profile["team_name"] if profile else None,
+        "division_id": profile["division_id"] if profile else None,
+        "division_name": profile["division_name"] if profile else None,
+        "registered_at": profile["registered_at"] if profile else None,
+        "wallet": dict(wallet) if wallet else None,
+        "summary": get_user_bet_summary(user_id),
+        "ban": get_betting_ban(user_id),
+        "limit_overrides": get_risk_limit_overrides("user", user_id),
+        "transactions": get_coin_transactions(user_id, limit=30),
+    }
+
+
+def _division_scope(division_ids: list[int] | None) -> tuple[str, list[int]]:
+    """Кусок `IN (?, ?, …)` для дивизионов; None — без ограничения.
+
+    Интерполируются только знаки вопроса, значения идут параметрами.
+    Пустой список — «ничего не видно», а не «видно всё».
+    """
+    if division_ids is None:
+        return "", []
+    if not division_ids:
+        return "(NULL)", []
+    return "(" + ",".join("?" * len(division_ids)) + ")", [int(d) for d in division_ids]
+
+
+def get_betting_dashboard(division_ids: list[int] | None = None) -> dict:
+    """Сводка букмекера: открытый риск, оборот, GGR, рынки, алерты, крупнейшие купоны.
+
+    GGR (валовый доход) считается только по рассчитанным купонам: ставки
+    проигравших и выигравших минус выплаты. Возвраты дают ноль, открытые
+    купоны — это риск, а не доход. Купон попадает в дивизион, если хотя бы
+    одна его нога — матч этого дивизиона (как в `get_all_bets`).
+    """
+    in_list, div_params = _division_scope(division_ids)
+    bet_scope = ""
+    if in_list:
+        bet_scope = f"""
+            AND EXISTS (
+                SELECT 1 FROM bet_items bi_d
+                JOIN matches m_d ON m_d.id = bi_d.match_id
+                WHERE bi_d.bet_id = ub.id AND COALESCE(m_d.division_id, 1) IN {in_list}
+            )
+        """
+
+    now = now_msk()
+    today_start = now.strftime("%Y-%m-%d 00:00:00")
+    week_start = (now - datetime.timedelta(days=7)).strftime("%Y-%m-%d %H:%M:%S")
+    chart_start = (now - datetime.timedelta(days=13)).strftime("%Y-%m-%d 00:00:00")
+
+    with transaction() as conn:
+        cursor = conn.cursor()
+
+        cursor.execute(f"""
+            SELECT
+                COUNT(*) AS total_bets,
+                COUNT(DISTINCT ub.user_id) AS bettors,
+                COALESCE(SUM(CASE WHEN ub.status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+                COALESCE(SUM(CASE WHEN ub.status = 'pending' THEN ub.amount ELSE 0 END), 0) AS pending_stake,
+                COALESCE(SUM(CASE WHEN ub.status = 'pending' THEN ub.potential_win ELSE 0 END), 0) AS pending_liability,
+                COALESCE(SUM(CASE WHEN ub.status IN ('won', 'lost', 'cashed_out') THEN ub.amount ELSE 0 END), 0) AS settled_stake,
+                COALESCE(SUM(CASE WHEN ub.status IN ('won', 'cashed_out') THEN ub.actual_payout ELSE 0 END), 0) AS paid_out,
+                COALESCE(SUM(CASE WHEN ub.status = 'won' THEN 1 ELSE 0 END), 0) AS count_won,
+                COALESCE(SUM(CASE WHEN ub.status = 'lost' THEN 1 ELSE 0 END), 0) AS count_lost,
+                COALESCE(SUM(CASE WHEN ub.status IN ('refunded', 'cancelled') THEN 1 ELSE 0 END), 0) AS count_refunded,
+                COALESCE(SUM(CASE WHEN ub.status = 'cashed_out' THEN 1 ELSE 0 END), 0) AS count_cashed_out
+            FROM user_bets ub
+            WHERE 1 = 1 {bet_scope}
+        """, div_params)
+        totals = dict(cursor.fetchone())
+        totals["ggr"] = totals["settled_stake"] - totals["paid_out"]
+        totals["margin_pct"] = (round(totals["ggr"] * 100.0 / totals["settled_stake"], 1)
+                                if totals["settled_stake"] else None)
+
+        periods = {}
+        for name, start in (("today", today_start), ("week", week_start)):
+            cursor.execute(f"""
+                SELECT
+                    COALESCE(SUM(CASE WHEN ub.created_at >= ? THEN 1 ELSE 0 END), 0) AS bets,
+                    COUNT(DISTINCT CASE WHEN ub.created_at >= ? THEN ub.user_id END) AS bettors,
+                    COALESCE(SUM(CASE WHEN ub.created_at >= ? AND ub.status NOT IN ('refunded', 'cancelled')
+                                      THEN ub.amount ELSE 0 END), 0) AS turnover,
+                    COALESCE(SUM(CASE WHEN ub.settled_at >= ? AND ub.status IN ('won', 'lost', 'cashed_out')
+                                      THEN ub.amount ELSE 0 END), 0)
+                  - COALESCE(SUM(CASE WHEN ub.settled_at >= ? AND ub.status IN ('won', 'cashed_out')
+                                      THEN ub.actual_payout ELSE 0 END), 0) AS ggr
+                FROM user_bets ub
+                WHERE 1 = 1 {bet_scope}
+            """, [start] * 5 + div_params)
+            periods[name] = dict(cursor.fetchone())
+
+        cursor.execute(f"""
+            SELECT date(ub.created_at) AS day,
+                   COUNT(*) AS bets,
+                   COALESCE(SUM(CASE WHEN ub.status NOT IN ('refunded', 'cancelled') THEN ub.amount ELSE 0 END), 0) AS turnover
+            FROM user_bets ub
+            WHERE ub.created_at >= ? {bet_scope}
+            GROUP BY date(ub.created_at)
+            ORDER BY day
+        """, [chart_start] + div_params)
+        by_day = {r["day"]: dict(r) for r in cursor.fetchall()}
+        daily = []
+        for offset in range(13, -1, -1):
+            day = (now - datetime.timedelta(days=offset)).strftime("%Y-%m-%d")
+            daily.append(by_day.get(day, {"day": day, "bets": 0, "turnover": 0}))
+
+        match_scope = f" AND COALESCE(m.division_id, 1) IN {in_list}" if in_list else ""
+        cursor.execute(f"""
+            SELECT mk.status, COUNT(*) AS cnt
+            FROM markets mk
+            JOIN matches m ON m.id = mk.match_id
+            WHERE 1 = 1 {match_scope}
+            GROUP BY mk.status
+        """, div_params)
+        markets = {s: 0 for s in ("open", "suspended", "closed", "settled", "voided")}
+        for r in cursor.fetchall():
+            markets[r["status"]] = r["cnt"]
+
+        alert_scope = f" AND COALESCE(division_id, 1) IN {in_list}" if in_list else ""
+        cursor.execute(f"""
+            SELECT
+                COALESCE(SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END), 0) AS active,
+                COALESCE(SUM(CASE WHEN status = 'active' AND severity IN ('high', 'critical') THEN 1 ELSE 0 END), 0) AS high
+            FROM risk_alerts
+            WHERE 1 = 1 {alert_scope}
+        """, div_params)
+        alerts = dict(cursor.fetchone())
+
+        cursor.execute(f"""
+            SELECT ub.id, ub.user_id, ub.bet_type, ub.amount, ub.total_odd, ub.potential_win, ub.created_at,
+                   u.username, u.team_name AS user_team
+            FROM user_bets ub
+            LEFT JOIN users u ON u.telegram_id = ub.user_id
+            WHERE ub.status = 'pending' {bet_scope}
+            ORDER BY ub.potential_win DESC, ub.id DESC
+            LIMIT 5
+        """, div_params)
+        top_liability = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute(f"""
+            SELECT ub.user_id, u.username, u.team_name AS user_team,
+                   COUNT(*) AS bets,
+                   COALESCE(SUM(CASE WHEN ub.status IN ('won', 'cashed_out') THEN ub.actual_payout ELSE 0 END), 0)
+                 - COALESCE(SUM(ub.amount), 0) AS net_profit
+            FROM user_bets ub
+            LEFT JOIN users u ON u.telegram_id = ub.user_id
+            WHERE ub.status IN ('won', 'lost', 'cashed_out') {bet_scope}
+            GROUP BY ub.user_id
+            ORDER BY net_profit DESC
+            LIMIT 5
+        """, div_params)
+        top_winners = [dict(r) for r in cursor.fetchall()]
+
+        economy = None
+        if division_ids is None:
+            cursor.execute("""
+                SELECT COUNT(*) AS wallets, COALESCE(SUM(balance), 0) AS coins_in_wallets
+                FROM user_wallets
+            """)
+            economy = dict(cursor.fetchone())
+            cursor.execute("SELECT COUNT(*) AS cnt FROM betting_bans")
+            economy["banned_players"] = cursor.fetchone()["cnt"]
+
+        try:
+            pause = _read_betting_pause(cursor)
+        except (ValueError, TypeError, AttributeError):
+            pause = {"global": {"reason": "Повреждённое состояние — приём ставок закрыт"}, "divisions": {}}
+
+    return {
+        "totals": totals,
+        "periods": periods,
+        "daily": daily,
+        "markets": markets,
+        "alerts": alerts,
+        "top_liability": top_liability,
+        "top_winners": top_winners,
+        "economy": economy,
+        "pause": pause,
+    }
+
+
+def get_betting_entity_divisions(entity: str, entity_id: int) -> set[int] | None:
+    """Дивизионы рынка, исхода или купона — для проверки прав админа дивизиона.
+
+    None — сущность не найдена. Матч без дивизиона — это дивизион 1. У
+    экспресса дивизионов может быть несколько: править его может только тот,
+    кому доступны все.
+    """
+    queries = {
+        "market": """
+            SELECT COALESCE(m.division_id, 1) AS div
+            FROM markets mk JOIN matches m ON m.id = mk.match_id
+            WHERE mk.id = ?
+        """,
+        "selection": """
+            SELECT COALESCE(m.division_id, 1) AS div
+            FROM market_selections ms
+            JOIN markets mk ON mk.id = ms.market_id
+            JOIN matches m ON m.id = mk.match_id
+            WHERE ms.id = ?
+        """,
+        "bet": """
+            SELECT DISTINCT COALESCE(m.division_id, 1) AS div
+            FROM user_bets ub
+            LEFT JOIN bet_items bi ON bi.bet_id = ub.id
+            LEFT JOIN matches m ON m.id = bi.match_id
+            WHERE ub.id = ?
+        """,
+    }
+    if entity not in queries:
+        raise ValueError(f"Unknown betting entity: {entity}")
+    with transaction() as conn:
+        rows = conn.execute(queries[entity], (entity_id,)).fetchall()
+    if not rows:
+        return None
+    return {r["div"] for r in rows}
+
+
+_MARKET_BOARD_STATES = {
+    "active": ("open", "suspended"),
+    "closed": ("closed",),
+    "finished": ("settled", "voided"),
+}
+
+
+def get_admin_market_board(division_ids: list[int] | None = None, state: str = "active",
+                           query: str = "", limit: int = 20, offset: int = 0) -> tuple[list[dict], int]:
+    """Матчи с рынками и исходами для экрана «Рынки»: статусы, коэффициенты, нагрузка.
+
+    На каждом исходе — открытые купоны, в которых он стоит живой ногой: число,
+    сумма ставок и потенциальная выплата. Для экспресса это купон целиком,
+    поэтому суммы по исходам не складываются в общий риск — это индикатор
+    того, куда идут деньги, а не бухгалтерия.
+    """
+    in_list, div_params = _division_scope(division_ids)
+    statuses = _MARKET_BOARD_STATES.get(state)
+    status_sql = ""
+    status_params: list = []
+    if statuses:
+        status_sql = " AND mk.status IN (" + ",".join("?" * len(statuses)) + ")"
+        status_params = list(statuses)
+    match_scope = f" AND COALESCE(m.division_id, 1) IN {in_list}" if in_list else ""
+    order = "ASC" if state == "active" else "DESC"
+
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(f"""
+            SELECT DISTINCT m.id AS match_id,
+                   COALESCE(m.division_id, 1) AS division_id,
+                   d.name AS division_name,
+                   m.round_number,
+                   m.tournament_type,
+                   cs.stage AS cup_stage,
+                   m.game_num_in_series,
+                   COALESCE(m.is_series_header, 0) AS is_series_header,
+                   COALESCE(m.player1_team, cs.team1_name, 'Хозяева') AS team1_name,
+                   COALESCE(m.player2_team, cs.team2_name, 'Гости') AS team2_name,
+                   m.status AS match_status,
+                   m.match_date,
+                   m.match_time,
+                   m.live_minute,
+                   m.player1_score,
+                   m.player2_score
+            FROM markets mk
+            JOIN matches m ON m.id = mk.match_id
+            LEFT JOIN divisions d ON d.id = m.division_id
+            LEFT JOIN cup_series cs ON cs.id = m.cup_series_id
+            WHERE 1 = 1 {status_sql} {match_scope}
+            ORDER BY m.id {order}
+        """, status_params + div_params)
+        matches = [dict(r) for r in cursor.fetchall()]
+
+        needle = _fold_search_text(query).strip()
+        if needle:
+            matches = [m for m in matches
+                       if needle == str(m["match_id"])
+                       or needle in _fold_search_text(m["team1_name"])
+                       or needle in _fold_search_text(m["team2_name"])]
+        total = len(matches)
+        page = matches[offset:offset + limit]
+        if not page:
+            return [], total
+
+        match_ids = [m["match_id"] for m in page]
+        id_list = ",".join("?" * len(match_ids))
+        cursor.execute(f"""
+            SELECT mk.id, mk.match_id, mk.market_key, mk.market_name, mk.category, mk.status, mk.sort_order
+            FROM markets mk
+            WHERE mk.match_id IN ({id_list}) {status_sql}
+            ORDER BY mk.match_id, mk.sort_order, mk.id
+        """, match_ids + status_params)
+        markets = [dict(r) for r in cursor.fetchall()]
+        market_ids = [mk["id"] for mk in markets]
+
+        selections_by_market: dict[int, list[dict]] = {}
+        if market_ids:
+            mk_list = ",".join("?" * len(market_ids))
+            cursor.execute(f"""
+                SELECT ms.id, ms.market_id, ms.selection_key, ms.selection_name, ms.odds_value,
+                       ms.model_odds, ms.previous_odds, ms.odds_version, ms.status, ms.updated_at,
+                       COALESCE(ex.bets, 0) AS open_bets,
+                       COALESCE(ex.stake, 0) AS open_stake,
+                       COALESCE(ex.liability, 0) AS open_liability
+                FROM market_selections ms
+                LEFT JOIN (
+                    SELECT bi.selection_id,
+                           COUNT(DISTINCT ub.id) AS bets,
+                           SUM(ub.amount) AS stake,
+                           SUM(ub.potential_win) AS liability
+                    FROM bet_items bi
+                    JOIN user_bets ub ON ub.id = bi.bet_id
+                    WHERE ub.status = 'pending' AND bi.status = 'pending'
+                      AND bi.market_id IN ({mk_list})
+                    GROUP BY bi.selection_id
+                ) ex ON ex.selection_id = ms.id
+                WHERE ms.market_id IN ({mk_list})
+                ORDER BY ms.market_id, ms.id
+            """, market_ids + market_ids)
+            for s in cursor.fetchall():
+                selections_by_market.setdefault(s["market_id"], []).append(dict(s))
+
+    markets_by_match: dict[int, list[dict]] = {}
+    for mk in markets:
+        mk["selections"] = selections_by_market.get(mk["id"], [])
+        mk["open_bets"] = sum(s["open_bets"] for s in mk["selections"])
+        markets_by_match.setdefault(mk["match_id"], []).append(mk)
+    for m in page:
+        m["markets"] = markets_by_match.get(m["match_id"], [])
+    return page, total
 
 
 def get_tournament_standings(division_id: int | None = None, season_id: int | None = None) -> list[dict]:

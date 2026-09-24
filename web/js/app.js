@@ -8,6 +8,7 @@ import { store } from './store.js';
 import { tgBridge } from './tg.js';
 import { UIRenderer, escapeHtml, cupStageLabel } from './ui.js';
 import { ParticleEffects } from './effects.js';
+import { AdminPanel } from './admin.js';
 
 class AppController {
   constructor() {
@@ -20,6 +21,8 @@ class AppController {
     this._renderSigs = new Map();
     // Матч, который Матч-Центр грузит или уже показал: ответ на более старый запрос отбрасывается.
     this._matchCenterRequestedId = null;
+    // Панель управления Logovo.bet создаётся при первом открытии вкладки.
+    this.adminPanel = null;
     this.init();
   }
 
@@ -33,6 +36,10 @@ class AppController {
 
       this.renderBlock('header', [state.user, state.progression, state.unclaimedAchievementsCount],
         () => UIRenderer.renderHeader(state.user, state.progression, state.unclaimedAchievementsCount));
+      this.renderBlock('adminBtn', [Boolean(state.user?.is_admin)], () => {
+        const btn = document.getElementById('header-admin-btn');
+        if (btn) btn.hidden = !state.user?.is_admin;
+      });
       this.renderBlock('navClubIcon', [myClub.overview],
         () => UIRenderer.updateNavClubIcon(myClub.overview));
 
@@ -542,6 +549,11 @@ class AppController {
         const view = btn.dataset.view;
         this.switchView(view);
       });
+    });
+
+    // 1b. Admin Panel (кнопка видна только админам; права всё равно проверяет сервер)
+    document.getElementById('header-admin-btn')?.addEventListener('click', () => {
+      this.switchView('admin');
     });
 
     // 2b. Division Selector Tabs (Lobby)
@@ -1458,9 +1470,22 @@ class AppController {
       this.fetchMyClubData();
     } else if (viewName === 'match_center') {
       this.ensureMatchCenterMatch();
+    } else if (viewName === 'admin') {
+      this.openAdminPanel();
     }
 
+    document.getElementById('header-admin-btn')?.classList.toggle('active', viewName === 'admin');
     tgBridge.hapticImpact('light');
+  }
+
+  openAdminPanel() {
+    if (!this.adminPanel) {
+      const root = document.getElementById('admin-root');
+      const modal = document.getElementById('admin-modal');
+      if (!root || !modal) return;
+      this.adminPanel = new AdminPanel(root, modal);
+    }
+    this.adminPanel.open();
   }
 
   showSuccessModal(title, desc) {
