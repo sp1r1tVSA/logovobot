@@ -11,11 +11,11 @@ from services.ai import persona_base
 
 logger = logging.getLogger(__name__)
 
-GEMINI_CHAT_MODELS = [
+GEMINI_CHAT_MODELS = getattr(config, "GEMINI_CHAT_MODELS", [
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
-    "gemini-2.5-flash-lite",
-]
+    "gemini-3.8-flash",
+])
 
 _chat_key_index = 0
 _chat_key_lock = threading.Lock()
@@ -53,7 +53,7 @@ def get_ordered_chat_models() -> list[str]:
     Возвращает список моделей Gemini для чата и аналитики с ротацией Round-Robin.
     Каждый следующий вызов сдвигает начальную модель, балансируя нагрузку
     между всеми тремя моделями:
-    gemini-3.1-flash-lite -> gemini-3.5-flash-lite -> gemini-2.5-flash-lite.
+    gemini-3.1-flash-lite -> gemini-3.5-flash-lite -> gemini-3.8-flash.
     """
     global _chat_model_index
     with _chat_model_lock:
@@ -155,8 +155,11 @@ def generate_chat_reply(
                     
             except urllib.error.HTTPError as e:
                 key_suffix = f"...{api_key[-4:]}" if len(api_key) > 4 else "***"
-                if e.code in (400, 403, 404, 429, 503):
-                    logger.warning(f"AI Chat: Model '{model_name}' (key {key_suffix}) HTTP {e.code} (rate-limit / quota / 404). Trying next key/model fallback...")
+                if e.code == 404:
+                    logger.warning(f"AI Chat: Model '{model_name}' HTTP 404 (model deprecated/not available). Skipping to next model...")
+                    break
+                if e.code in (400, 403, 429, 503):
+                    logger.warning(f"AI Chat: Model '{model_name}' (key {key_suffix}) HTTP {e.code} (rate-limit / quota / unavailable). Trying next key/model fallback...")
                 else:
                     logger.warning(f"AI Chat: Model '{model_name}' (key {key_suffix}) HTTP Error {e.code}: {e}")
                 continue

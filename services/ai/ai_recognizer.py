@@ -10,11 +10,11 @@ import config
 
 logger = logging.getLogger(__name__)
 
-GEMINI_MODELS = [
+GEMINI_MODELS = getattr(config, "GEMINI_MODELS", [
     "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
-    "gemini-2.5-flash-lite",
-]
+    "gemini-3.8-flash",
+])
 
 POS_TOKENS = {
     'вр', 'gk', 'цз', 'cb', 'пз', 'rb', 'лз', 'lb', 'цоп', 'cdm',
@@ -805,6 +805,9 @@ def recognize_match_screenshots_bytes(
                 error_body = e.read().decode("utf-8", errors="ignore")
                 key_suffix = f"...{target_api_key[-4:]}" if len(target_api_key) > 4 else "***"
                 logger.warning(f"Gemini model '{m_name}' (key {key_suffix}) HTTP {e.code}: {error_body[:300]}")
+                if e.code == 404:
+                    # Модель недоступна/устарела — не проверяем остальные ключи для этой модели
+                    break
                 if e.code in (429, 403, 503):
                     # Лимит или временная недоступность ключа -> сразу пробуем следующий ключ из пула
                     continue

@@ -35,6 +35,29 @@ def _get_gemini_chat_keys() -> list[str]:
 GEMINI_CHAT_API_KEYS = _get_gemini_chat_keys()
 GEMINI_CHAT_API_KEY = GEMINI_CHAT_API_KEYS[0] if GEMINI_CHAT_API_KEYS else ""
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
+
+def _get_gemini_models() -> list[str]:
+    raw = os.getenv("GEMINI_MODELS", "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return [
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
+    ]
+
+def _get_gemini_chat_models() -> list[str]:
+    raw = os.getenv("GEMINI_CHAT_MODELS", "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return [
+        "gemini-3.1-flash-lite",
+        "gemini-3.5-flash-lite",
+        "gemini-3.8-flash",
+    ]
+
+GEMINI_MODELS = _get_gemini_models()
+GEMINI_CHAT_MODELS = _get_gemini_chat_models()
 # ─── OpenRouter: ИИ-прогноз во вкладке панели Logovo.bet ──────────────────────
 # Без ключа вкладка работает по вероятностям линии. OPENROUTER_MODEL — одна
 # модель или несколько через запятую: бесплатные (:free и stealth/*) пропадают

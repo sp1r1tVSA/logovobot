@@ -34,7 +34,7 @@ class TestGeminiPoolRotation(unittest.TestCase):
             [
                 "gemini-3.1-flash-lite",
                 "gemini-3.5-flash-lite",
-                "gemini-2.5-flash-lite",
+                "gemini-3.8-flash",
             ]
         )
 
@@ -70,7 +70,7 @@ class TestGeminiPoolRotation(unittest.TestCase):
 
         self.assertEqual(call1[0], "gemini-3.1-flash-lite")
         self.assertEqual(call2[0], "gemini-3.5-flash-lite")
-        self.assertEqual(call3[0], "gemini-2.5-flash-lite")
+        self.assertEqual(call3[0], "gemini-3.8-flash")
         self.assertEqual(call4[0], "gemini-3.1-flash-lite")
         self.assertEqual(len(call1), 3)
 
@@ -218,7 +218,7 @@ class TestGeminiChatPoolRotation(unittest.TestCase):
             [
                 "gemini-3.1-flash-lite",
                 "gemini-3.5-flash-lite",
-                "gemini-2.5-flash-lite",
+                "gemini-3.8-flash",
             ]
         )
         self.assertEqual(CANDIDATE_MODELS, GEMINI_CHAT_MODELS)
@@ -254,7 +254,7 @@ class TestGeminiChatPoolRotation(unittest.TestCase):
 
         self.assertEqual(call1[0], "gemini-3.1-flash-lite")
         self.assertEqual(call2[0], "gemini-3.5-flash-lite")
-        self.assertEqual(call3[0], "gemini-2.5-flash-lite")
+        self.assertEqual(call3[0], "gemini-3.8-flash")
         self.assertEqual(call4[0], "gemini-3.1-flash-lite")
         self.assertEqual(len(call1), 3)
 
