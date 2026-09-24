@@ -47,7 +47,7 @@ def check_gemini_key(api_key: str, model: str = "gemini-3.1-flash-lite") -> tupl
         },
     )
     try:
-        with opener.open(req, timeout=10) as resp:
+        with opener.open(req, timeout=25) as resp:
             data = json.loads(resp.read().decode("utf-8"))
             if data.get("candidates"):
                 return True, "200 OK (лимит доступен)"
@@ -162,10 +162,16 @@ def main():
     print("🔍 ДИАГНОСТИКА API-КЛЮЧЕЙ LOGOVOBOT")
     print("=" * 60)
 
+    # ─── 0. Статус WARP Proxy ───
+    from services.ai.ai_recognizer import _check_proxy_alive
+    warp_alive = _check_proxy_alive("http://127.0.0.1:4001")
+    warp_str = "✅ Активен (127.0.0.1:4001)" if warp_alive else "❌ Не прослушивается (прямой режим)"
+    print(f"📡 Cloudflare WARP Proxy: {warp_str}")
+
     # ─── 1. Gemini OCR ключи ───
     ocr_keys = config.GEMINI_API_KEYS
     print(f"\n📸 GEMINI VISION OCR (Всего ключей: {len(ocr_keys)})")
-    models_to_test = ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite", "gemini-3.8-flash"]
+    models_to_test = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.5-flash", "gemini-3.8-flash"]
     if not ocr_keys:
         print("  ⚠️ GEMINI_API_KEY не задан в .env")
     for i, k in enumerate(ocr_keys, 1):
