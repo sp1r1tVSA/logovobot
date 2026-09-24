@@ -12,8 +12,8 @@ from services.ai import persona_base
 logger = logging.getLogger(__name__)
 
 GEMINI_CHAT_MODELS = getattr(config, "GEMINI_CHAT_MODELS", [
-    "gemini-3.1-flash-lite",
     "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
     "gemini-3.8-flash",
 ])
 
@@ -53,7 +53,7 @@ def get_ordered_chat_models() -> list[str]:
     Возвращает список моделей Gemini для чата и аналитики с ротацией Round-Robin.
     Каждый следующий вызов сдвигает начальную модель, балансируя нагрузку
     между всеми тремя моделями:
-    gemini-3.1-flash-lite -> gemini-3.5-flash-lite -> gemini-3.8-flash.
+    gemini-3.5-flash-lite -> gemini-3.1-flash-lite -> gemini-3.8-flash.
     """
     global _chat_model_index
     with _chat_model_lock:

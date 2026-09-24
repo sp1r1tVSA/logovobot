@@ -34,15 +34,15 @@ def _get_gemini_chat_keys() -> list[str]:
 
 GEMINI_CHAT_API_KEYS = _get_gemini_chat_keys()
 GEMINI_CHAT_API_KEY = GEMINI_CHAT_API_KEYS[0] if GEMINI_CHAT_API_KEYS else ""
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite").strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite").strip()
 
 def _get_gemini_models() -> list[str]:
     raw = os.getenv("GEMINI_MODELS", "").strip()
     if raw:
         return [m.strip() for m in raw.split(",") if m.strip()]
     return [
-        "gemini-3.1-flash-lite",
         "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
         "gemini-3.8-flash",
     ]
 
@@ -51,8 +51,8 @@ def _get_gemini_chat_models() -> list[str]:
     if raw:
         return [m.strip() for m in raw.split(",") if m.strip()]
     return [
-        "gemini-3.1-flash-lite",
         "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
         "gemini-3.8-flash",
     ]
 

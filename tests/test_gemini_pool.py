@@ -32,8 +32,8 @@ class TestGeminiPoolRotation(unittest.TestCase):
         self.assertEqual(
             GEMINI_MODELS,
             [
-                "gemini-3.1-flash-lite",
                 "gemini-3.5-flash-lite",
+                "gemini-3.1-flash-lite",
                 "gemini-3.8-flash",
             ]
         )
@@ -68,10 +68,10 @@ class TestGeminiPoolRotation(unittest.TestCase):
         call3 = get_ordered_ocr_models()
         call4 = get_ordered_ocr_models()
 
-        self.assertEqual(call1[0], "gemini-3.1-flash-lite")
-        self.assertEqual(call2[0], "gemini-3.5-flash-lite")
+        self.assertEqual(call1[0], "gemini-3.5-flash-lite")
+        self.assertEqual(call2[0], "gemini-3.1-flash-lite")
         self.assertEqual(call3[0], "gemini-3.8-flash")
-        self.assertEqual(call4[0], "gemini-3.1-flash-lite")
+        self.assertEqual(call4[0], "gemini-3.5-flash-lite")
         self.assertEqual(len(call1), 3)
 
     def test_explicit_override_keys(self):
@@ -216,8 +216,8 @@ class TestGeminiChatPoolRotation(unittest.TestCase):
         self.assertEqual(
             GEMINI_CHAT_MODELS,
             [
-                "gemini-3.1-flash-lite",
                 "gemini-3.5-flash-lite",
+                "gemini-3.1-flash-lite",
                 "gemini-3.8-flash",
             ]
         )
@@ -252,10 +252,10 @@ class TestGeminiChatPoolRotation(unittest.TestCase):
         call3 = get_ordered_chat_models()
         call4 = get_ordered_chat_models()
 
-        self.assertEqual(call1[0], "gemini-3.1-flash-lite")
-        self.assertEqual(call2[0], "gemini-3.5-flash-lite")
+        self.assertEqual(call1[0], "gemini-3.5-flash-lite")
+        self.assertEqual(call2[0], "gemini-3.1-flash-lite")
         self.assertEqual(call3[0], "gemini-3.8-flash")
-        self.assertEqual(call4[0], "gemini-3.1-flash-lite")
+        self.assertEqual(call4[0], "gemini-3.5-flash-lite")
         self.assertEqual(len(call1), 3)
 
     def test_chat_explicit_override_keys(self):
