@@ -13462,7 +13462,7 @@ def get_betting_dashboard(division_ids: list[int] | None = None) -> dict:
 
 
 def get_betting_entity_divisions(entity: str, entity_id: int) -> set[int] | None:
-    """Дивизионы рынка, исхода или купона — для проверки прав админа дивизиона.
+    """Дивизионы рынка, исхода, купона или риск-алерта — для проверки прав админа дивизиона.
 
     None — сущность не найдена. Матч без дивизиона — это дивизион 1. У
     экспресса дивизионов может быть несколько: править его может только тот,
@@ -13487,6 +13487,11 @@ def get_betting_entity_divisions(entity: str, entity_id: int) -> set[int] | None
             LEFT JOIN bet_items bi ON bi.bet_id = ub.id
             LEFT JOIN matches m ON m.id = bi.match_id
             WHERE ub.id = ?
+        """,
+        "alert": """
+            SELECT COALESCE(division_id, 1) AS div
+            FROM risk_alerts
+            WHERE id = ?
         """,
     }
     if entity not in queries:

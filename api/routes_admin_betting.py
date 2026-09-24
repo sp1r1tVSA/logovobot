@@ -156,8 +156,9 @@ async def handle_admin_list_markets(request: web.Request) -> web.Response:
 async def handle_admin_transition_market(request: web.Request) -> web.Response:
     """
     POST /api/admin/markets/{id}/transition
-    Body: {"new_status": "suspended"}
-    Validates state machine: created→active→suspended→active→closed→settled/void.
+    Body: {"new_status": "suspended"} (for "voided" also {"reason": "..."})
+    Validates the state machine. "voided" refunds the market's bets through
+    database.void_market; "settled" is refused — only settlement settles.
     """
     actor_id = _get_actor_id(request)
     if not actor_id:
@@ -179,6 +180,38 @@ async def handle_admin_transition_market(request: web.Request) -> web.Response:
     new_status = data.get("new_status", "").strip()
     if not new_status:
         return web.json_response({"status": "error", "message": "new_status is required."}, status=400)
+
+    # Расчёт рынка делает только settlement: ручной 'settled' оставил бы
+    # купоны на рынке висеть в pending навсегда.
+    if new_status == "settled":
+        return web.json_response({
+            "status": "error", "error": "INVALID_TRANSITION",
+            "message": "Markets are settled automatically; manual settlement is not allowed.",
+        }, status=409)
+
+    # Аннулирование — не просто смена статуса: ставки на рынке надо вернуть,
+    # а это умеет только database.void_market.
+    if new_status == "voided":
+        reason = str(data.get("reason") or "").strip()
+        if not reason:
+            return web.json_response({"status": "error", "message": "Reason is required to void market."}, status=400)
+        try:
+            voided = await asyncio.to_thread(database.void_market, market_id, actor_id, reason)
+        except ValueError as e:
+            return web.json_response({"status": "error", "error": "INVALID_TRANSITION", "message": str(e)}, status=409)
+        except Exception as e:
+            logger.exception("Error voiding market via transition")
+            return web.json_response({"status": "error", "message": str(e)}, status=500)
+        if voided.get("already_voided"):
+            return web.json_response({
+                "status": "error", "error": "INVALID_TRANSITION",
+                "message": f"Market #{market_id} is already voided.",
+            }, status=409)
+        return web.json_response({
+            "status": "ok",
+            "market": {"id": market_id, "old_status": voided["old_status"], "new_status": "voided"},
+            "void": voided,
+        })
 
     try:
         result = await asyncio.to_thread(database.transition_market_status, market_id, new_status, actor_id)

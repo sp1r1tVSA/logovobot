@@ -764,6 +764,10 @@ export class AdminPanel {
     const globalKeys = (me.limit_keys && me.limit_keys.global) || [];
     const divisionKeys = (me.limit_keys && me.limit_keys.division) || [];
     const canEdit = limits.can_edit;
+    // Алерт без дивизиона — это дивизион 1, как и на сервере: чужие алерты
+    // админ дивизиона видит, но принять или закрыть их не может.
+    const ownDivs = new Set(me.divisions.map(d => d.id));
+    const canHandleAlert = a => me.is_global || ownDivs.has(a.division_id ?? 1);
 
     this.body().innerHTML = `
       <div class="adm-card">
@@ -778,10 +782,10 @@ export class AdminPanel {
           <div class="adm-alert adm-sev-${esc(a.severity)}">
             <div class="adm-alert-msg">${esc(a.message)}</div>
             <small class="adm-muted">${esc(a.severity)} · ${esc(shortTime(a.created_at))}${a.match_id ? ` · матч #${esc(a.match_id)}` : ''}</small>
-            <div class="adm-actions">
+            ${canHandleAlert(a) ? `<div class="adm-actions">
               <button class="adm-btn small" data-adm-alert="ack" data-alert-id="${a.id}">Принять</button>
               <button class="adm-btn small" data-adm-alert="resolve" data-alert-id="${a.id}">Решено</button>
-            </div>
+            </div>` : ''}
           </div>`).join('') : '<div class="adm-muted">Активных алертов нет</div>'}
       </div>
 

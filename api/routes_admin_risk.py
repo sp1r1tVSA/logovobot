@@ -59,6 +59,20 @@ def _get_division_admin_divisions(actor_id: int) -> list[int]:
         return []
 
 
+def _alert_access_denied(actor_id: int, alert_id: int) -> web.Response | None:
+    """404/403 for an alert the actor may not touch, None when allowed.
+
+    An alert without a division belongs to division 1, as on the dashboard,
+    so a division admin only reaches alerts of the divisions they run.
+    """
+    alert_divs = database.get_betting_entity_divisions("alert", alert_id)
+    if alert_divs is None:
+        return web.json_response({"status": "error", "error": "not_found"}, status=404)
+    if not _is_global_admin(actor_id) and not alert_divs <= set(_get_division_admin_divisions(actor_id)):
+        return web.json_response({"status": "error", "error": "forbidden"}, status=403)
+    return None
+
+
 async def handle_admin_get_exposure(request: web.Request) -> web.Response:
     """
     GET /api/admin/risk/exposure?market_id=X&division_id=Y&season_id=Z
@@ -165,6 +179,10 @@ async def handle_admin_ack_alert(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "error": "forbidden"}, status=403)
 
     alert_id = path_int(request)
+    denied = _alert_access_denied(actor_id, alert_id)
+    if denied is not None:
+        return denied
+
     success = risk_alerts.acknowledge_risk_alert(alert_id, admin_id=actor_id)
     return web.json_response({"status": "ok" if success else "error", "alert_id": alert_id})
 
@@ -183,6 +201,10 @@ async def handle_admin_resolve_alert(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "error": "forbidden"}, status=403)
 
     alert_id = path_int(request)
+    denied = _alert_access_denied(actor_id, alert_id)
+    if denied is not None:
+        return denied
+
     success = risk_alerts.resolve_risk_alert(alert_id, admin_id=actor_id)
     return web.json_response({"status": "ok" if success else "error", "alert_id": alert_id})
 

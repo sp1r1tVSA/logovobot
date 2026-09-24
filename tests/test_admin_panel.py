@@ -451,3 +451,98 @@ class TestPanelRoutes(AioHTTPTestCase):
                                                  "odds": 1.5}]},
         )
         self.assertEqual(resp.status, 403, await resp.text())
+
+    # ─── Старые эндпоинты: переход рынка и риск-алерты ─────────────────────
+
+    async def _legacy(self, path: str, user_id: int, body: dict | None = None):
+        headers = {"X-Telegram-Init-Data": make_init_data(user_id)}
+        resp = await self.client.post(path, headers=headers, json=body if body is not None else {})
+        return resp.status, await resp.json()
+
+    def _balance(self, uid=PLAYER) -> int:
+        with database.transaction() as conn:
+            return conn.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (uid,)).fetchone()[0]
+
+    def _market_status(self, market_id) -> str:
+        with database.transaction() as conn:
+            return conn.execute("SELECT status FROM markets WHERE id = ?", (market_id,)).fetchone()[0]
+
+    async def test_transition_to_voided_refunds_the_bets(self):
+        market = MATCHES["div2"][1]
+        ok, bet_id = _place(PLAYER, "div2", amount=500)
+        self.assertTrue(ok)
+        self.assertEqual(self._balance(), 99500)
+
+        status, body = await self._legacy(f"/api/admin/markets/{market}/transition", DIV2_ADMIN,
+                                          {"new_status": "voided"})
+        self.assertEqual(status, 400, body)
+        self.assertEqual(self._market_status(market), "open")
+
+        status, body = await self._legacy(f"/api/admin/markets/{market}/transition", DIV2_ADMIN,
+                                          {"new_status": "voided", "reason": "матч отменён"})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["market"]["new_status"], "voided")
+        # На рынке могут висеть купоны соседних тестов — сверяем свой.
+        refunded = {b["bet_id"]: b["stake"] for b in body["void"]["refunded_bets"]}
+        self.assertEqual(refunded.get(bet_id), 500)
+        self.assertEqual(self._balance(), 99500 + sum(
+            b["stake"] for b in body["void"]["refunded_bets"] if b["user_id"] == PLAYER))
+        with database.transaction() as conn:
+            bet_status = conn.execute("SELECT status FROM user_bets WHERE id = ?", (bet_id,)).fetchone()[0]
+        self.assertEqual(bet_status, "refunded")
+
+        balance_after_void = self._balance()
+        status, body = await self._legacy(f"/api/admin/markets/{market}/transition", DIV2_ADMIN,
+                                          {"new_status": "voided", "reason": "ещё раз"})
+        self.assertEqual((status, body["error"]), (409, "INVALID_TRANSITION"))
+        self.assertEqual(self._balance(), balance_after_void)
+
+    async def test_transition_cannot_settle_by_hand(self):
+        market = MATCHES["div1"][1]
+        for status_step in ("closed", "settled"):
+            status, body = await self._legacy(f"/api/admin/markets/{market}/transition", GLOBAL_ADMIN,
+                                              {"new_status": status_step})
+            if status_step == "closed":
+                self.assertEqual(status, 200, body)
+        self.assertEqual((status, body["error"]), (409, "INVALID_TRANSITION"))
+        self.assertEqual(self._market_status(market), "closed")
+
+    def _alert(self, division_id):
+        import services.risk_alerts as risk_alerts
+        alert_id = risk_alerts.create_risk_alert(
+            f"panel_test_{time.time_ns()}", "high", f"panel alert {time.time_ns()}",
+            division_id=division_id,
+        )
+        self.assertIsNotNone(alert_id)
+        return alert_id
+
+    def _alert_status(self, alert_id) -> str:
+        with database.transaction() as conn:
+            return conn.execute("SELECT status FROM risk_alerts WHERE id = ?", (alert_id,)).fetchone()[0]
+
+    async def test_division_admin_handles_only_own_alerts(self):
+        foreign = {"div1": self._alert(1), "nodiv": self._alert(None)}
+        for kind in ("ack", "resolve"):
+            for key, alert_id in foreign.items():
+                with self.subTest(kind=kind, alert=key):
+                    status, body = await self._legacy(f"/api/admin/risk/alerts/{alert_id}/{kind}", DIV2_ADMIN)
+                    self.assertEqual(status, 403, body)
+                    self.assertEqual(self._alert_status(alert_id), "active")
+
+        own = self._alert(2)
+        status, body = await self._legacy(f"/api/admin/risk/alerts/{own}/ack", DIV2_ADMIN)
+        self.assertEqual((status, body["status"]), (200, "ok"))
+        self.assertEqual(self._alert_status(own), "acknowledged")
+        status, body = await self._legacy(f"/api/admin/risk/alerts/{own}/resolve", DIV2_ADMIN)
+        self.assertEqual((status, body["status"]), (200, "ok"))
+        self.assertEqual(self._alert_status(own), "resolved")
+
+    async def test_global_admin_handles_any_alert(self):
+        alert_id = self._alert(None)
+        status, body = await self._legacy(f"/api/admin/risk/alerts/{alert_id}/resolve", GLOBAL_ADMIN)
+        self.assertEqual((status, body["status"]), (200, "ok"))
+        self.assertEqual(self._alert_status(alert_id), "resolved")
+
+    async def test_missing_alert_is_not_found(self):
+        status, body = await self._legacy("/api/admin/risk/alerts/987654321/ack", GLOBAL_ADMIN)
+        self.assertEqual((status, body["error"]), (404, "not_found"))
