@@ -155,6 +155,59 @@ class CupSeedWriteTest(unittest.TestCase):
         self.assertEqual(report["created_games"], 48)
         self.assertEqual(report["created_headers"], 16)
 
+    # --- 1/32: победители 1/64 + Д1–Д3, ссылка на серию ---------------------
+
+    def _decide_64(self, overrides=None):
+        """Решить 1/64 так, как её сыграли: победители — клубы из сетки 1/32."""
+        overrides = overrides or {}
+        winners = {"Интер Милан", "Манчестер Сити", "Ювентус", "Атлетико Мадрид", "Бетис",
+                   "Брайтон", "Галатасарай", "Барселона", "Эвертон", "Аль-Хиляль", "ПСЖ",
+                   "Арсенал", "Бавария", "Наполи", "Бешикташ", "Лейпциг"}
+        with database.transaction() as conn:
+            for s in database.get_cup_bracket("1/64"):
+                winner = overrides.get(s["series_num"])
+                if winner is None:
+                    winner = s["team1_name"] if s["team1_name"] in winners else s["team2_name"]
+                if winner is False:
+                    continue
+                conn.execute(
+                    "UPDATE cup_series SET winner_name = ?, status = 'finished' WHERE id = ?",
+                    (winner, s["id"]),
+                )
+
+    def test_11_round_of_32_takes_the_winner_of_the_open_slot(self):
+        self._main(["--stage", "1/64", "--apply"])
+        self._decide_64()
+        pairs = seeder.validate_pairs("1/32")
+        self.assertEqual(len(pairs), 32)
+        self.assertEqual(len({c.lower() for p in pairs for c in p}), 64)
+        self.assertEqual(pairs[-1], ("Борнмут", "Лейпциг"))
+
+        self.assertEqual(self._main(["--stage", "1/32", "--apply"]), 0)
+        bracket = database.get_cup_bracket("1/32")
+        self.assertEqual(len(bracket), 32)
+        self.assertEqual(bracket[31]["team2_name"], "Лейпциг")
+
+    def test_12_undecided_series_blocks_the_round_of_32(self):
+        self._main(["--stage", "1/64", "--apply"])
+        self._decide_64({4: False})
+        with self.assertRaises(ValueError) as ctx:
+            seeder.validate_pairs("1/32")
+        message = str(ctx.exception)
+        self.assertIn("Милан — Лейпциг", message)
+        self.assertIn("не решена", message)
+        self.assertEqual(self._main(["--stage", "1/32", "--apply"]), 1)
+        self.assertEqual(database.get_cup_bracket("1/32"), [])
+
+    def test_13_eliminated_club_is_refused_in_the_round_of_32(self):
+        self._main(["--stage", "1/64", "--apply"])
+        self._decide_64({15: "Ньюкасл"})
+        with self.assertRaises(ValueError) as ctx:
+            seeder.validate_pairs("1/32")
+        message = str(ctx.exception)
+        self.assertIn("«Наполи» выбыл", message)
+        self.assertIn("не хватает: Ньюкасл", message)
+
 
 if __name__ == "__main__":
     unittest.main()
