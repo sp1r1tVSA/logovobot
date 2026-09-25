@@ -95,13 +95,14 @@ class TestBettingEngine(unittest.TestCase):
 
         # 4. Settle Match 8882 (Score: 3-1 -> TB25 won)
         payouts_2 = database.settle_match_bets(8882, 3, 1)
-        # Express bet wins: 200 * 2.88 = 576 coins (+ optional 500 level up reward if XP milestone reached)
+        # Express bet wins: 200 * 2.88 minus the 3% express margin for the second leg
+        # = 200 * 2.79 = 558 coins (+ optional 500 level up reward if XP milestone reached)
         self.assertEqual(len(payouts_2), 1)
-        self.assertEqual(payouts_2[0]["payout"], 576)
+        self.assertEqual(payouts_2[0]["payout"], 558)
         after_settle = START - 300 + 180
         self.assertIn(
             database.get_wallet_balance(test_user),
-            [after_settle + 576, after_settle + 576 + 500]
+            [after_settle + 558, after_settle + 558 + 500]
         )
 
         # Verify bet history

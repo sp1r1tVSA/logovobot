@@ -79,6 +79,7 @@ async def handle_get_tours(request: web.Request) -> web.Response:
         open_tours = await asyncio.to_thread(database.get_open_betting_tours, division_id=div_id)
 
     results = []
+    bans_by_division: dict = {}
 
     for t in open_tours:
         r_num = t["round_number"]
@@ -96,6 +97,9 @@ async def handle_get_tours(request: web.Request) -> web.Response:
 
         for m in markets:
             m_id = m["match_id"]
+            m_div = m.get("division_id") or div_id or 1
+            if m_div not in bans_by_division:
+                bans_by_division[m_div] = await asyncio.to_thread(_safe_bans, m_div)
             seen_match_ids.add(m_id)
             # Сыгранный матч в линии не нужен: его результат живёт в «Турнирах».
             if (m.get("match_status") or "pending") in FINISHED_MATCH_STATUSES:
@@ -109,10 +113,12 @@ async def handle_get_tours(request: web.Request) -> web.Response:
                 "player1_username": m.get("player1_username"),
                 "player2_username": m.get("player2_username"),
                 "status": m.get("match_status") or "pending",
-                "division_id": m.get("division_id") or div_id or 1,
+                "division_id": m_div,
                 "player1_score": m.get("player1_score"),
                 "player2_score": m.get("player2_score"),
                 "is_line": True,
+                # Виды ставок, закрытые в панели: клиент рисует их закрытыми.
+                "banned": sorted(bans_by_division[m_div]),
                 "odds": {
                     "p1": round(m["odd_p1"], 2),
                     "x": round(m["odd_x"], 2),
@@ -165,6 +171,23 @@ async def handle_get_tours(request: web.Request) -> web.Response:
     })
 
 
+def _safe_bans(division_id) -> set:
+    """Запреты видов ставок для витрины; сбой — показать всё (приём проверит RiskEngine)."""
+    try:
+        return database.get_bet_bans(division_id)
+    except Exception:
+        logger.warning("Could not read bet bans for division %s", division_id, exc_info=True)
+        return set()
+
+
+def _safe_match_bans(match_id) -> set:
+    try:
+        return database.get_match_bet_bans(match_id)
+    except Exception:
+        logger.warning("Could not read bet bans for match %s", match_id, exc_info=True)
+        return set()
+
+
 def _load_match_row(match_id):
     with database.transaction() as conn:
         cursor = conn.cursor()
@@ -212,6 +235,12 @@ async def handle_get_match_markets(request: web.Request) -> web.Response:
         # выставляет панель этапа, а лиговая модель записала бы ему ничью.
         markets = await asyncio.to_thread(odds_engine.generate_match_markets, match_id, t1, t2)
 
+    # Запрещённые в панели виды ставок в роспись не попадают.
+    bans = await asyncio.to_thread(_safe_match_bans, match_id)
+    if bans:
+        markets = [mkt for mkt in markets
+                   if database.bet_ban_group(mkt.get("market_key")) not in bans]
+
     # Normalize field name: alias odds_value -> current_odd for frontend consistency
     for mkt in markets:
         for sel in mkt.get("selections", []):
@@ -224,7 +253,8 @@ async def handle_get_match_markets(request: web.Request) -> web.Response:
         "team1_name": t1,
         "team2_name": t2,
         "match_status": match_row["status"],
-        "markets": markets
+        "markets": markets,
+        "banned": sorted(bans),
     })
 
 

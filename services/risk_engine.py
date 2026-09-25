@@ -227,6 +227,7 @@ class RiskEngine:
 
             # 7. Selections Validation (Market State, Selection State, Odds Validity & Freshness)
             resolved_selections = []
+            bans_by_division: dict[Optional[int], set[str]] = {}
             for s in selections:
                 m_id = s.get("match_id")
                 out_type = s.get("outcome") or s.get("selection_key")
@@ -328,6 +329,43 @@ class RiskEngine:
                         message=f"Рынок на исход '{out_type}' временно приостановлен или закрыт.",
                         details={"match_id": m_id, "market_id": mkt_id, "market_status": mkt_status, "sel_status": sel_status}
                     )
+
+                # 7a. Запреты на виды ставок из панели: глобальные ∪ дивизиона матча.
+                # Кубок дивизиона живёт под запретами своего дивизиона, общий
+                # кубок — только под глобальными (см. database.bet_ban_division).
+                ban_div = database.bet_ban_division(cursor, match_row)
+                if ban_div not in bans_by_division:
+                    bans_by_division[ban_div] = database.get_bet_bans(ban_div, cursor=cursor)
+                bans = bans_by_division[ban_div]
+                if bans:
+                    market_key = None
+                    if mkt_id:
+                        cursor.execute("SELECT market_key FROM markets WHERE id = ?", (mkt_id,))
+                        mk_row = cursor.fetchone()
+                        market_key = mk_row["market_key"] if mk_row else None
+                    group = database.bet_ban_group(market_key, out_type)
+                    if group and group in bans:
+                        return RiskDecision(
+                            decision="REJECT",
+                            allowed=False,
+                            reason="BET_TYPE_BANNED",
+                            message=(
+                                f"Ставки «{database.bet_ban_label(group)}» на этот матч "
+                                "закрыты администратором."
+                            ),
+                            details={"match_id": m_id, "outcome": out_type, "group": group}
+                        )
+                    if "express" in bans and len(selections) > 1:
+                        return RiskDecision(
+                            decision="REJECT",
+                            allowed=False,
+                            reason="EXPRESS_BANNED",
+                            message=(
+                                "Экспрессы с этим матчем закрыты администратором — "
+                                "ставьте ординаром."
+                            ),
+                            details={"match_id": m_id, "group": "express"}
+                        )
 
                 # Fallback to legacy bet_markets if relational market not found.
                 # Кубку такой fallback не нужен: тайлов этапа в `bet_markets` не

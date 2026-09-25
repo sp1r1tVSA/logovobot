@@ -163,6 +163,16 @@ async def handle_place_prediction(request: web.Request) -> web.Response:
                     "open_bets": result.get("open_bets"),
                     "message": result.get("message", "Слишком много открытых купонов.")
                 }, status=400)
+            if error_code in ("BET_TYPE_BANNED", "EXPRESS_BANNED"):
+                # Вид ставки закрыт в панели Logovo.bet (глобально или на дивизион).
+                return web.json_response({
+                    "status": "error",
+                    "error": error_code,
+                    "match_id": result.get("match_id"),
+                    "outcome": result.get("outcome"),
+                    "group": result.get("group"),
+                    "message": result.get("message", "Этот вид ставки закрыт администратором."),
+                }, status=403)
             if error_code in ("MAX_BET_EXCEEDED", "MAX_PAYOUT_EXCEEDED"):
                 return web.json_response({
                     "status": "error",

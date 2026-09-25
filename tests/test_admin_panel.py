@@ -659,6 +659,40 @@ class TestPanelRoutes(AioHTTPTestCase):
         status, body = await self._call("GET", "/limits", DIV2_ADMIN)
         self.assertEqual(status, 403, body)
 
+    async def test_bet_type_bans_are_set_and_lifted_from_the_panel(self):
+        status, body = await self._call("GET", "/limits", GLOBAL_ADMIN)
+        self.assertEqual(status, 200, body)
+        self.assertEqual({g["id"] for g in body["ban_groups"]}, set(database.BET_BAN_GROUPS))
+        status, me = await self._call("GET", "/me", GLOBAL_ADMIN)
+        self.assertNotIn("ban_result", me["limit_keys"]["division"])
+
+        status, body = await self._set_limit("ban_result", 1, "division", 1)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(_error_code(_place(OTHER_PLAYER, "div1")), "BET_TYPE_BANNED")
+        self.assertIsNone(_error_code(_place(OTHER_PLAYER, "div2")))
+        status, body = await self._call("GET", "/limits", GLOBAL_ADMIN)
+        div1 = next(d for d in body["divisions"] if d["id"] == 1)
+        self.assertEqual(div1["overrides"].get("ban_result"), 1)
+
+        status, body = await self._set_limit("ban_result", None, "division", 1)
+        self.assertEqual(status, 200, body)
+        self.assertIsNone(_error_code(_place(OTHER_PLAYER, "div1")))
+
+        status, body = await self._set_limit("ban_express", 1)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(_error_code(_place(OTHER_PLAYER, "div1", "div2")), "EXPRESS_BANNED")
+
+    async def test_bet_type_ban_values_and_scopes_are_checked(self):
+        for value in (0, 2, 500):
+            with self.subTest(value=value):
+                status, _ = await self._set_limit("ban_result", value, "division", 1)
+                self.assertEqual(status, 400)
+        for key, scope_type, scope_id in (("ban_result", "user", PLAYER), ("ban_nonsense", "global", 0)):
+            with self.subTest(key=key, scope=scope_type):
+                status, body = await self._set_limit(key, 1, scope_type, scope_id)
+                self.assertEqual((status, body["error"]), (400, "invalid_limit_key"))
+        self.assertEqual(database.get_bet_bans(1), set())
+
     def test_migration_drops_the_daily_bonus_setting(self):
         with database.transaction() as conn:
             conn.execute("DELETE FROM schema_migrations WHERE version = ?",

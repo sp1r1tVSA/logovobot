@@ -186,6 +186,14 @@ async def handle_get_cup_bracket(request: web.Request) -> web.Response:
     })
 
 
+def _stage_bans(stage: dict) -> set[str]:
+    try:
+        return database.get_bet_bans(stage.get("division_id"))
+    except Exception:
+        logger.warning("Could not read bet bans for cup stage %s", stage.get("id"), exc_info=True)
+        return set()
+
+
 async def handle_get_cup_line(request: web.Request) -> web.Response:
     """GET /api/cup/stages/{id}/line — открытая линия этапа.
 
@@ -208,6 +216,17 @@ async def handle_get_cup_line(request: web.Request) -> web.Response:
                 if tile:
                     tile["odds"] = {}
                     tile["is_line"] = False
+    else:
+        # Запрещённые в панели виды ставок: исход без коэффициента клиент рисует
+        # закрытой плашкой. Кубок дивизиона — под запретами дивизиона, общий —
+        # только под глобальными. Принимать всё равно откажет RiskEngine.
+        bans = await asyncio.to_thread(_stage_bans, stage)
+        if bans:
+            for entry in series:
+                for tile in [entry.get("header"), *entry.get("games", [])]:
+                    if tile and tile.get("odds"):
+                        tile["odds"] = {k: v for k, v in tile["odds"].items()
+                                        if database.bet_ban_group(None, k) not in bans}
     return web.json_response({
         "status": "ok",
         "stage": {

@@ -133,6 +133,9 @@ const LIMIT_GROUPS = [
   { title: 'Экономика', keys: ['initial_balance'] },
 ];
 
+// Запрет вида ставки — ключ `ban_<группа>` в тех же лимитах (1 — запрещено).
+const BAN_PREFIX = 'ban_';
+
 // Сумма в монетах или просто число (события, купоны).
 const COUNT_LIMITS = new Set(['max_open_bets', 'max_express_events']);
 const PERCENT_LIMITS = new Set(['express_margin_pct']);
@@ -1201,13 +1204,29 @@ export class AdminPanel {
         </div>`;
     }).join('') : '';
 
-    const divisionCards = divisions.map(d => `
+    const banGroups = limits.ban_groups || [];
+    const globalBanned = new Set(banGroups.filter(g => limits.global_overrides[BAN_PREFIX + g.id] > 0).map(g => g.id));
+    const globalBans = showGlobal && banGroups.length ? `
+      <div class="adm-card">
+        <div class="adm-card-title">Запрещённые ставки · вся лига</div>
+        <div class="adm-muted adm-mb">Красное — не принимается ни на один матч, включая общий кубок. «Экспресс» — купоны из нескольких событий.</div>
+        ${this.banPills('global', 0, banGroups, globalBanned, new Set(), canEdit)}
+      </div>` : '';
+
+    const divisionCards = divisions.map(d => {
+      const own = new Set(banGroups.filter(g => d.overrides[BAN_PREFIX + g.id] > 0).map(g => g.id));
+      return `
       <div class="adm-card">
         <div class="adm-card-title">${esc(d.name)}</div>
         <div class="adm-muted adm-mb">Строже лиги, если задано. Без своего значения действует лимит лиги.</div>
         ${divisionKeys.map(k => this.limitRow('division', d.id, k, d.overrides[k], d.effective[k], d.name, canEdit,
           `${LIMIT_HINTS[k] || ''} · лига: ${limitValue(k, limits.system[k])}`)).join('')}
-      </div>`).join('');
+        ${banGroups.length ? `
+          <div class="adm-card-subtitle">Запрещённые ставки</div>
+          <div class="adm-muted adm-mb">На матчи дивизиона и его кубка. 🔒 — запрещено для всей лиги.</div>
+          ${this.banPills('division', d.id, banGroups, own, globalBanned, canEdit)}` : ''}
+      </div>`;
+    }).join('');
 
     const users = limits.user_overrides || [];
     const personal = me.is_global ? `
@@ -1227,6 +1246,7 @@ export class AdminPanel {
         ? '<div class="adm-muted adm-mb">Нажмите на строку, чтобы изменить значение. ✎ — значение задано вручную.</div>'
         : '<div class="adm-banner">Менять лимиты может только главный админ.</div>'}
       ${globalCards}
+      ${globalBans}
       ${divisionCards}
       ${personal}
     `;
@@ -1315,6 +1335,34 @@ export class AdminPanel {
         <div class="adm-row-main">${esc(LIMIT_LABELS[key] || key)}${hint ? `<small>${hint}</small>` : ''}</div>
         <div class="adm-row-side ${override != null ? 'gold' : ''}">${limitValue(key, effective)}${override != null ? ' ✎' : ''}</div>
       </button>`;
+  }
+
+  // Пилюли запретов: красная — запрещено на этом уровне, 🔒 — запрещено лигой
+  // (с уровня дивизиона не снимается).
+  banPills(scopeType, scopeId, groups, banned, inherited, canEdit) {
+    return `<div class="category-pills adm-picks-pills">${groups.map(g => {
+      const locked = inherited.has(g.id);
+      const on = banned.has(g.id);
+      return `<button class="category-pill adm-ban-pill ${on || locked ? 'adm-ban-on' : ''}"
+        ${canEdit && !locked ? '' : 'disabled'} data-adm-ban="${scopeType}" data-scope-id="${scopeId}"
+        data-group="${esc(g.id)}" data-label="${esc(g.label)}" data-on="${on ? 1 : 0}">${locked ? '🔒 ' : on ? '⛔ ' : ''}${esc(g.label)}</button>`;
+    }).join('')}</div>`;
+  }
+
+  async toggleBan(el) {
+    const on = el.dataset.on === '1';
+    el.disabled = true;
+    try {
+      await this.post(`${PANEL}/limits`, {
+        scope_type: el.dataset.admBan, scope_id: Number(el.dataset.scopeId),
+        limit_key: BAN_PREFIX + el.dataset.group, value: on ? null : 1,
+      });
+      this.toast(on ? `«${el.dataset.label}» снова принимается` : `«${el.dataset.label}» запрещено`);
+      await this.loadLimits();
+    } catch (e) {
+      el.disabled = false;
+      this.toast(e.message, true);
+    }
   }
 
   askPause(action, divisionId, name) {
@@ -1536,6 +1584,8 @@ export class AdminPanel {
       this.root.querySelectorAll('[data-adm-tab]').forEach(b => b.classList.toggle('active', b === el));
       tgBridge.hapticImpact('light');
       this.loadTab();
+    } else if ((el = t('[data-adm-ban]'))) {
+      if (!el.disabled) this.toggleBan(el);
     } else if ((el = t('[data-adm-division]'))) {
       this.divisionId = el.dataset.admDivision ? Number(el.dataset.admDivision) : null;
       this.root.querySelectorAll('[data-adm-division]').forEach(b => b.classList.toggle('active', b === el));

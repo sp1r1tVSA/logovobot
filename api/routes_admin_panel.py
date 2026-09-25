@@ -68,6 +68,10 @@ LIMIT_BOUNDS = {
     "initial_balance": (1, 1_000_000),
 }
 DEFAULT_LIMIT_BOUNDS = (1, 100_000_000)
+# Запреты видов ставок (`ban_<группа>`): 1 — запрещено, сброс (null) — разрешено.
+# В LIMIT_KEYS_BY_SCOPE их нет намеренно: это не числовые лимиты, и вкладка
+# «Лимиты» рисует их отдельной карточкой, а не строками лимитов.
+BAN_SCOPES = ("global", "division")
 MARKET_ACTIONS = {"suspend": "suspended", "resume": "open", "close": "closed"}
 BET_STATUSES = ("all", "pending", "won", "lost", "refunded", "cashed_out")
 
@@ -441,6 +445,8 @@ async def handle_panel_limits(request: web.Request) -> web.Response:
             "defaults": BettingLimitsService.get_default_limits(),
             "bounds": {k: LIMIT_BOUNDS.get(k, DEFAULT_LIMIT_BOUNDS) for k in LIMIT_KEYS + SETTING_KEYS},
             "global_overrides": database.get_risk_limit_overrides("global", 0),
+            "ban_groups": [{"id": g, "label": label}
+                           for g, (label, _keys) in database.BET_BAN_GROUPS.items()],
             # Личные лимиты — кошельки игроков, а их видит только главный админ.
             "user_overrides": database.get_user_limit_overrides() if scope.is_global else [],
             "divisions": [
@@ -475,11 +481,12 @@ async def handle_panel_set_limit(request: web.Request) -> web.Response:
         return _error(400, "invalid_scope", "Уровень лимита: global, division или user.")
     scope_id = 0 if scope_type == "global" else body_int(data, "scope_id", minimum=0)
     limit_key = data.get("limit_key")
-    if limit_key not in LIMIT_KEYS_BY_SCOPE[scope_type]:
+    is_ban = scope_type in BAN_SCOPES and limit_key in database.BET_BAN_KEYS
+    if limit_key not in LIMIT_KEYS_BY_SCOPE[scope_type] and not is_ban:
         return _error(400, "invalid_limit_key", "Этот лимит на этом уровне не настраивается.")
 
     reset = data.get("value") is None
-    low, high = LIMIT_BOUNDS.get(limit_key, DEFAULT_LIMIT_BOUNDS)
+    low, high = (1, 1) if is_ban else LIMIT_BOUNDS.get(limit_key, DEFAULT_LIMIT_BOUNDS)
     value = None if reset else body_int(data, "value", minimum=low, maximum=high)
 
     # Мин. ставка выше макс. закрыла бы приём ставок целиком.

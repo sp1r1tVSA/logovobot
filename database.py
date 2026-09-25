@@ -12159,7 +12159,19 @@ def place_user_bet(
                     "message": risk_decision.message
                     or "Исход в линии общего кубка не разыгрывается."
                 }
-            if risk_decision.reason == "OPEN_BETS_LIMIT":                # Отдаём и сам потолок, и фактическое число открытых купонов:
+            if risk_decision.reason in ("BET_TYPE_BANNED", "EXPRESS_BANNED"):
+                # Запрет вида ставки из панели: называем матч и группу, чтобы
+                # Mini App мог показать, какая нога купона под запретом.
+                details = risk_decision.details or {}
+                return False, {
+                    "error": risk_decision.reason,
+                    "match_id": details.get("match_id"),
+                    "outcome": details.get("outcome"),
+                    "group": details.get("group"),
+                    "message": risk_decision.message,
+                }
+            if risk_decision.reason == "OPEN_BETS_LIMIT":
+                # Отдаём и сам потолок, и фактическое число открытых купонов:
                 # Mini App показывает счётчик слотов и поправит его по ответу,
                 # не дожидаясь следующего bootstrap.
                 details = risk_decision.details or {}
@@ -13690,6 +13702,121 @@ def get_express_margin_pct() -> int:
 
 def get_initial_wallet_balance() -> int:
     return get_global_limit("initial_balance", INITIAL_WALLET_BALANCE)
+
+
+# ─── Запреты на виды ставок ───────────────────────────────────────────────────
+# Запрет — это обычная строка `risk_limits_config` с ключом `ban_<группа>` и
+# значением 1: глобально (scope global/0) или на дивизион (scope division/id).
+# Действуют оба уровня сразу — запрет дивизиона добавляется к глобальным, снять
+# глобальный на уровне дивизиона нельзя. Кубок дивизиона подчиняется запретам
+# своего дивизиона (через `cup_stages.division_id`), общий кубок — только
+# глобальным.
+BET_BAN_PREFIX = "ban_"
+# группа → (подпись, market_key). Синонимы ключей — те же, что понимает
+# `market_settler`: live-провайдер пишет исход как `match_result`. `express`
+# рынков не имеет: он запрещает купон из нескольких событий, если в нём есть
+# матч под запретом.
+BET_BAN_GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "result": ("Исход", ("1x2", "match_winner", "outcome", "match_result")),
+    "double": ("Двойной шанс", ("double_chance",)),
+    "total": ("Тотал", ("total_goals", "totals", "over_under")),
+    "itotal": ("Инд. тотал", ("individual_total_1", "individual_total_2")),
+    "handicap": ("Фора", ("handicap",)),
+    "btts": ("Обе забьют", ("btts", "both_teams_to_score")),
+    "correct_score": ("Точный счёт", ("correct_score",)),
+    "express": ("Экспресс", ()),
+}
+BET_BAN_KEYS = tuple(BET_BAN_PREFIX + g for g in BET_BAN_GROUPS)
+_BAN_GROUP_BY_MARKET_KEY = {
+    key: group for group, (_label, keys) in BET_BAN_GROUPS.items() for key in keys
+}
+# Исход без известного рынка (старая схема `bet_markets`, клиент без market_id):
+# группа по самому ключу исхода. Порядок важен только внутри префиксов — они не
+# пересекаются.
+_BAN_GROUP_BY_OUTCOME_PREFIX = (
+    ("it1_", "itotal"), ("it2_", "itotal"),
+    ("h1_", "handicap"), ("h2_", "handicap"),
+    ("over_", "total"), ("under_", "total"),
+    ("btts_", "btts"), ("cs_", "correct_score"),
+)
+_BAN_GROUP_BY_OUTCOME = {"p1": "result", "x": "result", "p2": "result",
+                         "home": "result", "away": "result",
+                         "1x": "double", "12": "double", "x2": "double",
+                         "dc_1x": "double", "dc_12": "double", "dc_x2": "double"}
+
+
+def bet_ban_label(group: str) -> str:
+    return BET_BAN_GROUPS.get(group, (group, ()))[0]
+
+
+def bet_ban_group(market_key: str | None = None, outcome: str | None = None) -> str | None:
+    """Группа запрета для исхода: по market_key, а без него — по ключу исхода."""
+    if market_key and market_key in _BAN_GROUP_BY_MARKET_KEY:
+        return _BAN_GROUP_BY_MARKET_KEY[market_key]
+    key = normalize_outcome_key(outcome or "")
+    if not key:
+        return None
+    if key in _BAN_GROUP_BY_OUTCOME:
+        return _BAN_GROUP_BY_OUTCOME[key]
+    for prefix, group in _BAN_GROUP_BY_OUTCOME_PREFIX:
+        if key.startswith(prefix):
+            return group
+    return None
+
+
+def get_bet_bans(division_id: int | None = None, cursor=None) -> set[str]:
+    """Группы, закрытые для матчей дивизиона: глобальные запреты ∪ запреты дивизиона.
+
+    `division_id` None (общий кубок, матч без дивизиона) — только глобальные.
+    Ошибку чтения не глушит: RiskEngine должен отказать, а не пропустить.
+    """
+    placeholders = ", ".join("?" * len(BET_BAN_KEYS))
+    sql = (
+        "SELECT DISTINCT limit_key FROM risk_limits_config"
+        f" WHERE limit_key IN ({placeholders}) AND limit_value > 0"
+        " AND ((scope_type = 'global' AND scope_id = 0)"
+        " OR (scope_type = 'division' AND scope_id = ?))"
+    )
+    params = [*BET_BAN_KEYS, division_id if division_id else -1]
+    if cursor is not None:
+        cursor.execute(sql, params)
+        rows = cursor.fetchall()
+    else:
+        with transaction() as conn:
+            rows = conn.execute(sql, params).fetchall()
+    return {r["limit_key"][len(BET_BAN_PREFIX):] for r in rows}
+
+
+def bet_ban_division(cursor, match_row) -> int | None:
+    """Дивизион, чьи запреты действуют на матч.
+
+    Лига — `matches.division_id`. Кубковый матч лежит на sentinel-дивизионе 0,
+    его дивизион — владелец этапа (`cup_stages.division_id`); у общего кубка
+    владельца нет, и действуют только глобальные запреты.
+    """
+    if match_is_cup(match_row):
+        stage_id = _row_col(match_row, "stage_id")
+        if not stage_id:
+            return None
+        cursor.execute("SELECT division_id FROM cup_stages WHERE id = ?", (stage_id,))
+        row = cursor.fetchone()
+        return int(row["division_id"]) if row and row["division_id"] else None
+    division_id = _row_col(match_row, "division_id")
+    return int(division_id) if division_id else None
+
+
+def get_match_bet_bans(match_id: int) -> set[str]:
+    """Закрытые группы для одного матча — для витрины Mini App."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, division_id, tournament_type, stage_id FROM matches WHERE id = ?",
+            (match_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return set()
+        return get_bet_bans(bet_ban_division(cursor, row), cursor=cursor)
 
 
 def get_user_limit_overrides() -> list[dict]:

@@ -210,6 +210,15 @@ async def handle_get_live_markets(request: web.Request) -> web.Response:
             m_dict["selections"] = [dict(s) for s in cursor.fetchall()]
             markets.append(m_dict)
 
+    # Запрещённые в панели виды ставок в роспись не попадают.
+    try:
+        bans = database.get_match_bet_bans(match_id)
+    except Exception:
+        logger.warning("Could not read bet bans for match %s", match_id, exc_info=True)
+        bans = set()
+    if bans:
+        markets = [m for m in markets if database.bet_ban_group(m.get("market_key")) not in bans]
+
     return web.json_response({
         "status": "ok",
         "match_id": match_id,

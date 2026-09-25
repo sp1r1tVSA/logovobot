@@ -4663,6 +4663,19 @@ span.team-logo-fallback {
   color: var(--text-primary);
   margin-bottom: 10px;
 }
+.adm-card-subtitle {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 700;
+  font-size: 0.85rem;
+  color: var(--text-primary);
+  margin: 14px 0 4px;
+}
+.category-pill.adm-ban-on {
+  background: var(--color-danger-bg);
+  border-color: var(--color-danger);
+  color: var(--color-danger);
+}
+.category-pill.adm-ban-pill:disabled { opacity: 0.75; cursor: default; }
 .adm-kpi-hint { font-size: 0.7rem; color: var(--text-muted); margin-top: 2px; }
 #admin-root .kpi-grid { margin-bottom: 12px; }
 #admin-root .kpi-value { font-size: 1.05rem; word-break: break-word; }

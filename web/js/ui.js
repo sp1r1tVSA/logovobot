@@ -337,6 +337,13 @@ export function renderTeamLogoHtml(teamName, size = 28, extraClass = '') {
   return fallback;
 }
 
+// Исход плитки линии → группа запрета из панели (database.BET_BAN_GROUPS).
+const LINE_BAN_GROUP = {
+  p1: 'result', x: 'result', p2: 'result',
+  tb25: 'total', tm25: 'total',
+  btts_yes: 'btts', btts_no: 'btts',
+};
+
 const OUTCOME_NAMES = {
   // Legacy / client-side keys (kept for bet slip display of old bets)
   p1: 'П1',
@@ -654,51 +661,23 @@ export class UIRenderer {
 
           <!-- Primary 1X2 Odds Buttons Grid -->
           <div class="odds-grid-3col">
-            <div class="odd-btn ${store.isSelectionActive(m.match_id, 'p1') ? 'selected' : ''}" 
-                 data-match-id="${m.match_id}" data-outcome="p1" data-odd="${m.odds?.p1 || 1.90}">
-              <span class="odd-label">П1</span>
-              <span class="odd-val">${(m.odds?.p1 || 1.90).toFixed(2)}</span>
-            </div>
-            <div class="odd-btn ${store.isSelectionActive(m.match_id, 'x') ? 'selected' : ''}" 
-                 data-match-id="${m.match_id}" data-outcome="x" data-odd="${m.odds?.x || 3.20}">
-              <span class="odd-label">X</span>
-              <span class="odd-val">${(m.odds?.x || 3.20).toFixed(2)}</span>
-            </div>
-            <div class="odd-btn ${store.isSelectionActive(m.match_id, 'p2') ? 'selected' : ''}" 
-                 data-match-id="${m.match_id}" data-outcome="p2" data-odd="${m.odds?.p2 || 2.40}">
-              <span class="odd-label">П2</span>
-              <span class="odd-val">${(m.odds?.p2 || 2.40).toFixed(2)}</span>
-            </div>
+            ${UIRenderer._lineOddBtn(m, 'p1', 'П1', 1.90)}
+            ${UIRenderer._lineOddBtn(m, 'x', 'X', 3.20)}
+            ${UIRenderer._lineOddBtn(m, 'p2', 'П2', 2.40)}
           </div>
 
           <!-- Secondary Filtered Category Odds (if chosen) -->
           ${(activeCategory === 'totals') ? `
             <div class="odds-grid-2col">
-              <div class="odd-btn ${store.isSelectionActive(m.match_id, 'tb25') ? 'selected' : ''}" 
-                   data-match-id="${m.match_id}" data-outcome="tb25" data-odd="${m.odds?.tb25 || 1.80}">
-                <span class="odd-label">ТБ 2.5</span>
-                <span class="odd-val">${(m.odds?.tb25 || 1.80).toFixed(2)}</span>
-              </div>
-              <div class="odd-btn ${store.isSelectionActive(m.match_id, 'tm25') ? 'selected' : ''}" 
-                   data-match-id="${m.match_id}" data-outcome="tm25" data-odd="${m.odds?.tm25 || 1.95}">
-                <span class="odd-label">ТМ 2.5</span>
-                <span class="odd-val">${(m.odds?.tm25 || 1.95).toFixed(2)}</span>
-              </div>
+              ${UIRenderer._lineOddBtn(m, 'tb25', 'ТБ 2.5', 1.80)}
+              ${UIRenderer._lineOddBtn(m, 'tm25', 'ТМ 2.5', 1.95)}
             </div>
           ` : ''}
 
           ${(activeCategory === 'btts') ? `
             <div class="odds-grid-2col">
-              <div class="odd-btn ${store.isSelectionActive(m.match_id, 'btts_yes') ? 'selected' : ''}" 
-                   data-match-id="${m.match_id}" data-outcome="btts_yes" data-odd="${m.odds?.btts_yes || 1.70}">
-                <span class="odd-label">ОЗ Да</span>
-                <span class="odd-val">${(m.odds?.btts_yes || 1.70).toFixed(2)}</span>
-              </div>
-              <div class="odd-btn ${store.isSelectionActive(m.match_id, 'btts_no') ? 'selected' : ''}" 
-                   data-match-id="${m.match_id}" data-outcome="btts_no" data-odd="${m.odds?.btts_no || 2.05}">
-                <span class="odd-label">ОЗ Нет</span>
-                <span class="odd-val">${(m.odds?.btts_no || 2.05).toFixed(2)}</span>
-              </div>
+              ${UIRenderer._lineOddBtn(m, 'btts_yes', 'ОЗ Да', 1.70)}
+              ${UIRenderer._lineOddBtn(m, 'btts_no', 'ОЗ Нет', 2.05)}
             </div>
           ` : ''}
 
@@ -714,6 +693,29 @@ export class UIRenderer {
         </div>
       `;
     }).join('');
+  }
+
+  /**
+   * Кнопка исхода лиговой линии. Вид ставки, закрытый в панели Logovo.bet
+   * (`m.banned` — группы с сервера), рисуется закрытой плашкой: принять такую
+   * ставку сервер всё равно откажет.
+   */
+  static _lineOddBtn(m, key, label, fallback) {
+    const group = LINE_BAN_GROUP[key];
+    if (group && (m.banned || []).includes(group)) {
+      return `
+            <div class="cup-odd-locked" title="Ставки этого вида закрыты администратором">
+              <span class="odd-label">${escapeHtml(label)}</span>
+              <span class="odd-val">🔒</span>
+            </div>`;
+    }
+    const odd = m.odds?.[key] || fallback;
+    return `
+            <div class="odd-btn ${store.isSelectionActive(m.match_id, key) ? 'selected' : ''}" 
+                 data-match-id="${m.match_id}" data-outcome="${key}" data-odd="${odd}">
+              <span class="odd-label">${escapeHtml(label)}</span>
+              <span class="odd-val">${odd.toFixed(2)}</span>
+            </div>`;
   }
 
   /** Лобби в режиме кубка прячет линию дивизиона и хабы лиги. */

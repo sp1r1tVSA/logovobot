@@ -419,6 +419,20 @@ of the count. Separately, pending coupons with the **same set of selections** sh
 `max_payout` (`get_identical_open_payout`, legacy bets excluded) — repeating a max-payout
 coupon used to multiply it. `tests/test_express_margin.py` covers both.
 
+**Bet-type bans** close a kind of bet for the whole league or one division — the panel's
+«Лимиты» tab, «Запрещённые ставки» chips. Each ban is a `risk_limits_config` row
+`ban_<group>` = 1 (scope `global`/0 or `division`/id; the keys are deliberately not in
+`LIMIT_KEYS_BY_SCOPE`, so they never render as numeric limits). The groups live in
+`database.BET_BAN_GROUPS` — `result`, `double`, `total`, `itotal`, `handicap`, `btts`,
+`correct_score` by `market_key` (with the same key synonyms `market_settler` accepts, and an
+outcome-key fallback for legacy selections), plus `express`, which has no markets and rejects
+any multi-leg coupon containing a match under that ban. A match gets global ∪ its division's
+bans (`get_bet_bans`); a cup match takes the division from `cup_stages.division_id`
+(`bet_ban_division`), so the general cup follows global bans only, and a division ban can't
+lift a global one. `RiskEngine` step 7a enforces it fail-closed (`BET_TYPE_BANNED` /
+`EXPRESS_BANNED`, 403 from the API); the Mini App hides banned markets and shows 🔒 tiles
+fail-open, since the engine rejects anyway. `tests/test_bet_bans.py` covers it.
+
 **Gamification** pays out of the same closed economy, so rewards are calibrated against it
 rather than against round numbers: the starting wallet is `INITIAL_WALLET_BALANCE` (677 🪙),
 the payout ceiling 10 000 🪙 — there is no daily bonus. `seed_gamification_catalog` therefore
