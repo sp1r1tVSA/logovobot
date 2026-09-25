@@ -152,6 +152,7 @@ class InFlightRegistry:
 SENSITIVE_PATH_MARKERS = (
     "/api/predictions",
     "/api/bets",
+    "/api/outrights/bet",
     "/api/achievements/claim",
     "/api/saved-coupons",
     "/api/favorites",

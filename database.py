@@ -3,6 +3,7 @@ import sqlite3
 import datetime
 import re
 import hashlib
+import html
 import threading
 import asyncio
 import json
@@ -6584,7 +6585,8 @@ BET_SETTLED_EVENT = "BET_SETTLED"
 
 
 def enqueue_bet_settled_notice(
-    cursor, user_id: int, bet_id: int, title: str, body: str, resettle: bool = False
+    cursor, user_id: int, bet_id: int, title: str, body: str, resettle: bool = False,
+    key_prefix: str = "bet",
 ) -> bool:
     """Поставить личное уведомление о расчёте ставки в очередь `notification_events`.
 
@@ -6592,7 +6594,8 @@ def enqueue_bet_settled_notice(
     ровно тогда, когда фиксируется выплата, — какой бы путь её ни провёл
     (подтверждение матча, техническое поражение, правка счёта админом,
     фоновый досчёт). Первый расчёт ставки дедуплицируется ключом
-    `bet_<id>`; каждый пересчёт получает свой порядковый ключ.
+    `bet_<id>` (`obet_<id>` у долгосрочной — `key_prefix`); каждый пересчёт
+    получает свой порядковый ключ.
 
     Не бросает: вставка отсекается, если пользователя нет в `users` (FK) или
     он отключил BET_SETTLED, а любая ошибка только логируется — уведомление
@@ -6603,11 +6606,11 @@ def enqueue_bet_settled_notice(
             cursor.execute(
                 "SELECT COUNT(*) FROM notification_events "
                 "WHERE user_id = ? AND event_type = ? AND source_event_id LIKE ?",
-                (user_id, BET_SETTLED_EVENT, f"bet_{bet_id}_rs%"),
+                (user_id, BET_SETTLED_EVENT, f"{key_prefix}_{bet_id}_rs%"),
             )
-            source_event_id = f"bet_{bet_id}_rs{cursor.fetchone()[0] + 1}"
+            source_event_id = f"{key_prefix}_{bet_id}_rs{cursor.fetchone()[0] + 1}"
         else:
-            source_event_id = f"bet_{bet_id}"
+            source_event_id = f"{key_prefix}_{bet_id}"
         cursor.execute(
             """
             INSERT OR IGNORE INTO notification_events
@@ -17901,24 +17904,25 @@ def _general_cup_club_keys(cursor, season_id: int) -> set[str]:
     return keys
 
 
-def _outright_own_scope_reason(cursor, user_id: int, market: dict, selection: dict) -> str | None:
-    """Почему тренер не может ставить на этот исход, или None.
+def outright_lock_reason(coach: dict | None, market: dict, selection: dict | None = None) -> str | None:
+    """Почему тренер не может ставить на рынок (или исход), или None.
 
+    `coach` — {division_id, in_general_cup} из `get_outright_coach_scope`.
     Тренер не ставит на свой дивизион и свой кубок: на победителя и бомбардира
     своего дивизиона, на кубок своего дивизиона, на общий кубок, если его клуб в
-    сетке, и на бомбардиров своего дивизиона в рынке всей лиги.
+    сетке, и на бомбардиров своего дивизиона в рынке всей лиги. Без `selection`
+    рынок бомбардиров лиги целиком не закрыт — закрыты отдельные исходы.
     """
-    coach = _outright_coach(cursor, user_id)
     if not coach:
         return None
-    own_div = coach["division_id"]
+    own_div = coach.get("division_id")
     mtype = market["market_type"]
     if mtype in ("division_winner", "division_top_scorer"):
         if own_div is not None and market["division_id"] == own_div:
             return "Тренер не может ставить на рынки своего дивизиона."
         return None
     if mtype == "league_top_scorer":
-        if own_div is not None and selection.get("division_id") == own_div:
+        if selection is not None and own_div is not None and selection.get("division_id") == own_div:
             return "Тренер не может ставить на бомбардиров своего дивизиона."
         return None
     if mtype == "cup_winner":
@@ -17926,10 +17930,20 @@ def _outright_own_scope_reason(cursor, user_id: int, market: dict, selection: di
             if own_div is not None and market["division_id"] == own_div:
                 return "Тренер не может ставить на кубок своего дивизиона."
             return None
-        if coach["club_key"] in _general_cup_club_keys(cursor, market["season_id"]):
+        if coach.get("in_general_cup"):
             return "Тренер не может ставить на кубок, в котором играет его клуб."
         return None
     return None
+
+
+def _outright_own_scope_reason(cursor, user_id: int, market: dict, selection: dict) -> str | None:
+    coach = _outright_coach(cursor, user_id)
+    if not coach:
+        return None
+    scope = {"division_id": coach["division_id"], "in_general_cup": False}
+    if market["market_type"] == "cup_winner" and market["division_id"] is None:
+        scope["in_general_cup"] = coach["club_key"] in _general_cup_club_keys(cursor, market["season_id"])
+    return outright_lock_reason(scope, market, selection)
 
 
 def get_outright_coach_scope(user_id: int, season_id: int | None = None) -> dict | None:
@@ -18198,6 +18212,25 @@ def _credit_outright(cursor, user_id: int, amount: int, tx_type: str, bet_id: in
     """, (user_id, amount, tx_type, bet_id, row["balance"] if row else None))
 
 
+def _notify_outright(cursor, bet, status: str, payout: int, factor: float | None) -> None:
+    """Личное уведомление о расчёте долгосрочной ставки — в ту же очередь, что у купонов."""
+    pick = (f"{html.escape(str(bet['market_title']))}: <b>{html.escape(str(bet['selection_name']))}</b>"
+            f" @ {float(bet['odd']):.2f}")
+    if status == "won":
+        title = f"✅ Долгосрочная ставка выиграла: +{payout:,} 🪙"
+        body = pick
+        if factor is not None and factor < 1 - 1e-9:
+            body += f"\nДелёж первого места — выплата по доле {factor:.0%}."
+    elif status == "refunded":
+        title = f"↩️ Долгосрочная ставка возвращена: {payout:,} 🪙"
+        body = pick + "\nРынок аннулирован, ставка возвращена целиком."
+    else:
+        title = f"❌ Долгосрочная ставка не сыграла: −{int(bet['amount']):,} 🪙"
+        body = pick
+    enqueue_bet_settled_notice(cursor, bet["user_id"], bet["id"], title.replace(",", " "), body,
+                               key_prefix="obet")
+
+
 def settle_outright_market(
     market_id: int,
     factors: dict[int, float],
@@ -18237,7 +18270,13 @@ def settle_outright_market(
                 ("won" if factor > 0 else "lost", factor, sid),
             )
 
-        cursor.execute("SELECT * FROM outright_bets WHERE market_id = ? AND status = 'pending'", (market_id,))
+        cursor.execute("""
+            SELECT b.*, s.name AS selection_name, m.title AS market_title
+            FROM outright_bets b
+            JOIN outright_selections s ON s.id = b.selection_id
+            JOIN outright_markets m ON m.id = b.market_id
+            WHERE b.market_id = ? AND b.status = 'pending'
+        """, (market_id,))
         won = lost = paid = 0
         for bet in cursor.fetchall():
             factor = clean.get(bet["selection_id"], 0.0)
@@ -18247,6 +18286,7 @@ def settle_outright_market(
                     "settled_at = datetime('now', '+3 hours') WHERE id = ?",
                     (bet["id"],),
                 )
+                _notify_outright(cursor, bet, "lost", 0, factor)
                 lost += 1
                 continue
             payout = int(round(bet["amount"] * factor * float(bet["odd"])))
@@ -18256,6 +18296,7 @@ def settle_outright_market(
                 (factor, payout, bet["id"]),
             )
             _credit_outright(cursor, bet["user_id"], payout, "outright_win", bet["id"], won=True)
+            _notify_outright(cursor, bet, "won", payout, factor)
             won += 1
             paid += payout
 
@@ -18278,7 +18319,13 @@ def void_outright_market(market_id: int, reason: str | None = None,
             return False, "Рынок не найден."
         if market["status"] in ("settled", "voided"):
             return False, "Рынок уже рассчитан или аннулирован."
-        cursor.execute("SELECT * FROM outright_bets WHERE market_id = ? AND status = 'pending'", (market_id,))
+        cursor.execute("""
+            SELECT b.*, s.name AS selection_name, m.title AS market_title
+            FROM outright_bets b
+            JOIN outright_selections s ON s.id = b.selection_id
+            JOIN outright_markets m ON m.id = b.market_id
+            WHERE b.market_id = ? AND b.status = 'pending'
+        """, (market_id,))
         refunded = 0
         for bet in cursor.fetchall():
             cursor.execute(
@@ -18287,6 +18334,7 @@ def void_outright_market(market_id: int, reason: str | None = None,
                 (bet["amount"], bet["id"]),
             )
             _credit_outright(cursor, bet["user_id"], bet["amount"], "outright_refund", bet["id"], won=False)
+            _notify_outright(cursor, bet, "refunded", bet["amount"], None)
             refunded += 1
         cursor.execute("""
             UPDATE outright_markets SET status = 'voided', void_reason = ?, settled_at = datetime('now', '+3 hours'),

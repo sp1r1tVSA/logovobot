@@ -21,6 +21,10 @@ api/routes_admin_panel.py
   POST /api/admin/panel/pause                   экстренная остановка приёма
   GET  /api/admin/panel/picks                   ИИ-прогноз: исходы по шансу захода
   GET  /api/admin/panel/picks/review            сверка ИИ-прогноза с сыгранными матчами
+  GET  /api/admin/panel/outrights               долгосрочные рынки с нагрузкой по исходам
+  POST /api/admin/panel/outrights/refresh       пересчитать цены сейчас
+  POST /api/admin/panel/outrights/{id}/action   suspend | resume | settle | void
+  POST /api/admin/panel/outright-selections/{id} статус исхода и ручной коэффициент
 
 Права: панель открыта только тем, кто указан в ADMIN_IDS (is_super_admin), —
 ни роль admin в базе, ни назначение админом дивизиона доступа к ней не дают.
@@ -40,6 +44,7 @@ import database
 from api.auth import get_authenticated_user
 from api.params import body_int, path_int, query_int
 from handlers.base import is_super_admin
+from services import outright_service
 from services.ai import bet_picks, pick_review
 from services.betting_limits import BettingLimitsService
 
@@ -593,6 +598,155 @@ async def handle_panel_picks_review(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", **review})
 
 
+# ─── Долгосрочные рынки ──────────────────────────────────────────────────────
+
+OUTRIGHT_MARKET_ACTIONS = {"suspend": "suspended", "resume": "open"}
+
+
+def _outright_board() -> dict:
+    markets = database.get_outright_markets()
+    exposure = database.get_outright_exposure([m["id"] for m in markets])
+    empty = {"bets": 0, "stake": 0, "liability": 0}
+    for m in markets:
+        for sel in m["selections"]:
+            sel["exposure"] = exposure.get(sel["id"], empty)
+        stake = sum(sel["exposure"]["stake"] for sel in m["selections"])
+        # Худший исход для книги: выигрывает самый нагруженный.
+        worst = max((sel["exposure"]["liability"] for sel in m["selections"]), default=0)
+        m["exposure"] = {
+            "bets": sum(sel["exposure"]["bets"] for sel in m["selections"]),
+            "stake": stake,
+            "liability": sum(sel["exposure"]["liability"] for sel in m["selections"]),
+            "worst_case": worst - stake,
+        }
+    return {"markets": markets}
+
+
+async def handle_panel_outrights(request: web.Request) -> web.Response:
+    """GET /api/admin/panel/outrights"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    board = await asyncio.to_thread(_outright_board)
+    return web.json_response({"status": "ok", **board})
+
+
+async def handle_panel_outrights_refresh(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/outrights/refresh — пересчёт всех рынков, не дожидаясь джобы."""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    result = await asyncio.to_thread(outright_service.refresh_outrights, True)
+    if result.get("skipped"):
+        return _error(409, "busy", "Пересчёт уже идёт — обновите через минуту.")
+    await asyncio.to_thread(
+        database.log_betting_audit, scope.actor_id, "outright_refresh", "outright_market", 0, None, result,
+    )
+    return web.json_response({"status": "ok", "result": result})
+
+
+def _outright_winner_factors(market: dict, raw) -> dict[int, float] | str:
+    """Победители ручного расчёта: список id исходов, при нескольких — делёж поровну (dead heat)."""
+    if not isinstance(raw, list) or not raw:
+        return "Укажите победителя."
+    try:
+        ids = {int(x) for x in raw if not isinstance(x, bool)}
+    except (TypeError, ValueError):
+        return "Некорректный исход."
+    if not ids or not ids.issubset({s["id"] for s in market["selections"]}):
+        return "Победитель не принадлежит рынку."
+    return {sid: 1.0 / len(ids) for sid in ids}
+
+
+async def handle_panel_outright_action(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/outrights/{id}/action  {action, winners?, reason?, confirm?}"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    market_id = path_int(request)
+    data = await _json_body(request)
+    if isinstance(data, web.Response):
+        return data
+    market = await asyncio.to_thread(database.get_outright_market, market_id)
+    if not market:
+        return _error(404, "not_found", f"Рынок #{market_id} не найден.")
+
+    action = data.get("action")
+    reason = _text(data, "reason")
+    if action in OUTRIGHT_MARKET_ACTIONS:
+        ok, result = await asyncio.to_thread(
+            database.set_outright_market_status, market_id, OUTRIGHT_MARKET_ACTIONS[action],
+        )
+        new = {"status": result, "reason": reason or None}
+    elif action == "settle":
+        if data.get("confirm") is not True:
+            return _error(400, "confirmation_required", "Расчёт нужно подтвердить.")
+        factors = _outright_winner_factors(market, data.get("winners"))
+        if isinstance(factors, str):
+            return _error(400, "invalid_winners", factors)
+        ok, result = await asyncio.to_thread(database.settle_outright_market, market_id, factors, scope.actor_id)
+        new = {"winners": sorted(factors), "result": result if ok else None}
+    elif action == "void":
+        if data.get("confirm") is not True:
+            return _error(400, "confirmation_required", "Аннулирование нужно подтвердить.")
+        if not reason:
+            return _error(400, "reason_required", "Укажите причину аннулирования.")
+        ok, result = await asyncio.to_thread(database.void_outright_market, market_id, reason, scope.actor_id)
+        new = {"reason": reason, "result": result if ok else None}
+    else:
+        return _error(400, "invalid_action", "Неизвестное действие с рынком.")
+
+    if not ok:
+        return _error(409, "invalid_transition", result)
+    await asyncio.to_thread(
+        database.log_betting_audit, scope.actor_id, f"outright_{action}", "outright_market", market_id,
+        {"status": market["status"]}, new, market["division_id"], market["season_id"],
+    )
+    return web.json_response({"status": "ok", "result": result})
+
+
+async def handle_panel_outright_selection(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/outright-selections/{id}  {status?: active|suspended, odds?: number|null}
+
+    `odds: null` снимает ручную цену и возвращает цену модели.
+    """
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    selection_id = path_int(request)
+    data = await _json_body(request)
+    if isinstance(data, web.Response):
+        return data
+    if "status" not in data and "odds" not in data:
+        return _error(400, "nothing_to_change", "Укажите статус или коэффициент.")
+    if "status" in data and data.get("status") not in ("active", "suspended"):
+        return _error(400, "invalid_status", "Статус исхода — active или suspended.")
+    if isinstance(data.get("odds"), bool):
+        return _error(400, "invalid_odds", "Коэффициент должен быть числом.")
+
+    result: dict = {}
+    if "status" in data:
+        status = data["status"]
+        ok, msg = await asyncio.to_thread(database.set_outright_selection_status, selection_id, status)
+        if not ok:
+            return _error(409, "invalid_transition", msg)
+        result["status"] = status
+        await asyncio.to_thread(
+            database.log_betting_audit, scope.actor_id, f"outright_selection_{status}",
+            "outright_selection", selection_id, None, {"status": status},
+        )
+    if "odds" in data:
+        ok, res = await asyncio.to_thread(database.set_outright_odds_override, selection_id, data["odds"])
+        if not ok:
+            return _error(400, "invalid_odds", res)
+        result.update(res)
+        await asyncio.to_thread(
+            database.log_betting_audit, scope.actor_id, "outright_odds_override",
+            "outright_selection", selection_id, None, res,
+        )
+    return web.json_response({"status": "ok", "result": result})
+
+
 def register_admin_panel_routes(app: web.Application) -> None:
     r = app.router
     r.add_get("/api/admin/panel/me", handle_panel_me)
@@ -613,3 +767,7 @@ def register_admin_panel_routes(app: web.Application) -> None:
     r.add_post("/api/admin/panel/pause", handle_panel_pause)
     r.add_get("/api/admin/panel/picks", handle_panel_picks)
     r.add_get("/api/admin/panel/picks/review", handle_panel_picks_review)
+    r.add_get("/api/admin/panel/outrights", handle_panel_outrights)
+    r.add_post("/api/admin/panel/outrights/refresh", handle_panel_outrights_refresh)
+    r.add_post("/api/admin/panel/outrights/{id}/action", handle_panel_outright_action)
+    r.add_post("/api/admin/panel/outright-selections/{id}", handle_panel_outright_selection)
