@@ -5262,6 +5262,7 @@ span.team-logo-fallback {
 }
 .ob-banner.won { color: var(--accent-gold); background: var(--accent-gold-light); }
 .ob-banner.lock { color: var(--text-secondary); background: var(--bg-tertiary); }
+.ob-banner.gift { color: var(--color-success); background: var(--color-success-bg); }
 .ob-hero {
   display: grid;
   grid-template-columns: 1fr;
@@ -5342,6 +5343,7 @@ span.team-logo-fallback {
   letter-spacing: 0.04em;
 }
 .ob-tag.won { background: var(--accent-gold-light); color: var(--accent-gold); }
+.ob-tag.gift { background: var(--color-success-bg); color: var(--color-success); }
 .ob-odd {
   flex-shrink: 0;
   min-width: 58px;
@@ -5475,7 +5477,16 @@ span.team-logo-fallback {
   font-weight: 700;
   cursor: pointer;
 }
-.ob-chip:active { border-color: var(--accent-gold); color: var(--accent-gold); }
+.ob-chip:active,
+.ob-chip.active { border-color: var(--accent-gold); color: var(--accent-gold); }
+.ob-fund { display: flex; gap: 6px; margin: 0 0 12px; flex-wrap: wrap; }
+.ob-fund[hidden] { display: none; }
+.ob-fund .ob-chip { flex: 1 1 auto; padding: 7px 10px; }
+.ob-fund-note { font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 10px; }
+.ob-fund-note[hidden],
+.ob-sheet-hint[hidden] { display: none; }
+.ob-sheet.freebet .ob-stake,
+.ob-sheet.freebet .ob-quick { display: none; }
 .ob-sheet-totals { display: flex; justify-content: space-between; gap: 8px; font-size: 0.8rem; color: var(--text-muted); }
 .ob-sheet-totals b { color: var(--text-primary); }
 .ob-sheet-totals b.ob-sheet-win { color: var(--color-success); }

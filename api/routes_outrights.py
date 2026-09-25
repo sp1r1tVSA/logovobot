@@ -5,13 +5,17 @@ api/routes_outrights.py
 
   GET  /api/outrights                  рынки сезона с исходами и замками тренера
   GET  /api/outrights/{id}/history     история коэффициентов лидеров рынка (график)
-  POST /api/outrights/bet              ординар на исход {selection_id, amount, odd, idempotency_key}
+  POST /api/outrights/bet              ординар на исход {selection_id, amount, odd, idempotency_key, freebet_id}
   GET  /api/outrights/my               мои долгосрочные ставки
 
 Цены считает `services/outright_service` в фоне; здесь только чтение и приём
 ставки через `database.place_outright_bet`, который сам проверяет всё заново —
 замки в ответе нужны лишь для того, чтобы не показывать кнопку, которая
 заведомо откажет.
+
+Фрибет (`freebet_id`) заменяет ставку монетами: сумма берётся из самого
+фрибета, `amount` при этом игнорируется, баланс не трогается. Доступные
+фрибеты игрока приходят в `freebets` ответа `GET /api/outrights`.
 """
 
 import asyncio
@@ -40,6 +44,7 @@ _ERROR_STATUS = {
     "BETTING_UNAVAILABLE": 503,
     "RISK_CHECK_UNAVAILABLE": 503,
     "IDEMPOTENCY_KEY_REUSED": 409,
+    "FREEBET_UNAVAILABLE": 409,
 }
 
 
@@ -103,6 +108,8 @@ def _load_board(user_id: int) -> dict:
         "open_bets": database.count_user_open_outright_bets(user_id),
         "max_open_bets": database.MAX_OPEN_OUTRIGHT_BETS,
         "min_bet": database.OUTRIGHT_MIN_BET,
+        "freebets": [{k: f[k] for k in ("id", "amount", "source", "source_id", "source_name", "source_icon", "granted_at")}
+                     for f in database.get_user_freebets(user_id)],
     }
 
 
@@ -147,7 +154,7 @@ async def handle_get_outright_history(request: web.Request) -> web.Response:
 
 
 async def handle_place_outright_bet(request: web.Request) -> web.Response:
-    """POST /api/outrights/bet  {selection_id, amount, odd?, idempotency_key?}"""
+    """POST /api/outrights/bet  {selection_id, amount, odd?, idempotency_key?, freebet_id?}"""
     user_id, denied = _user(request)
     if denied is not None:
         return denied
@@ -164,7 +171,7 @@ async def handle_place_outright_bet(request: web.Request) -> web.Response:
 
     ok, result = await asyncio.to_thread(
         database.place_outright_bet, user_id, data.get("selection_id"), data.get("amount"),
-        data.get("odd"), idem or None,
+        data.get("odd"), idem or None, data.get("freebet_id"),
     )
     if ok:
         return web.json_response({"status": "ok", **result})
@@ -181,7 +188,8 @@ async def handle_get_my_outright_bets(request: web.Request) -> web.Response:
     open_bets = await asyncio.to_thread(database.count_user_open_outright_bets, user_id)
     fields = ("id", "market_id", "selection_id", "amount", "odd", "potential_win", "status",
               "dead_heat_factor", "actual_payout", "created_at", "settled_at", "selection_name",
-              "team_name", "selection_status", "current_odd", "market_title", "market_type", "market_status")
+              "team_name", "selection_status", "current_odd", "market_title", "market_type", "market_status",
+              "freebet_id")
     return web.json_response({
         "status": "ok",
         "bets": [{k: b.get(k) for k in fields} for b in bets],

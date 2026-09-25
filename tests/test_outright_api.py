@@ -139,6 +139,23 @@ class OutrightApiCase(AioHTTPTestCase):
         return await self._call("POST", "/api/outrights/bet", user_id, body)
 
 
+    def _grant_freebet(self, achievement_id: str = "ACH_POSITIVE_ROI") -> tuple:
+        """Разблокировать и забрать достижение с фрибетом, вернуть (freebet_id, amount)."""
+        with database.transaction() as conn:
+            conn.execute("DELETE FROM user_achievements WHERE user_id = ? AND achievement_id = ?",
+                        (BETTOR, achievement_id))
+        self.assertTrue(database.unlock_achievement(BETTOR, achievement_id))
+        ok, msg, info = database.claim_achievement_reward(BETTOR, achievement_id)
+        self.assertTrue(ok, msg)
+        self.assertGreater(info["freebet"], 0)
+        with database.transaction() as conn:
+            row = conn.execute(
+                "SELECT id, amount FROM user_freebets WHERE user_id = ? AND status = 'available' "
+                "ORDER BY id DESC LIMIT 1", (BETTOR,),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        return row["id"], row["amount"]
+
 class TestBoard(OutrightApiCase):
     async def test_board_requires_init_data(self):
         for path in ("/api/outrights", "/api/outrights/my", f"/api/outrights/{self._winner_market()['id']}/history"):
@@ -237,6 +254,81 @@ class TestPlacement(OutrightApiCase):
         self.assertEqual(status, 400)
         status, _ = await self._bet(sel, amount=1)
         self.assertEqual(status, 400)
+
+
+class TestFreebetApi(OutrightApiCase):
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        with database.transaction() as conn:
+            conn.execute("DELETE FROM user_freebets WHERE user_id = ?", (BETTOR,))
+
+    async def test_board_lists_available_freebets(self):
+        status, body = await self._call("GET", "/api/outrights")
+        self.assertEqual(status, 200)
+        self.assertEqual(body["freebets"], [])
+
+        freebet_id, amount = self._grant_freebet()
+        status, body = await self._call("GET", "/api/outrights")
+        self.assertEqual(len(body["freebets"]), 1)
+        fb = body["freebets"][0]
+        self.assertEqual(fb["id"], freebet_id)
+        self.assertEqual(fb["amount"], amount)
+        self.assertEqual(fb["source"], "achievement")
+        self.assertEqual(fb["source_id"], "ACH_POSITIVE_ROI")
+        self.assertTrue(fb["source_name"])
+
+        # Чужие фрибеты в борд не попадают.
+        status, other = await self._call("GET", "/api/outrights", ADMIN)
+        self.assertEqual(other["freebets"], [])
+
+    async def test_freebet_bet_goes_through_the_api_without_touching_the_wallet(self):
+        sel = self._winner_market()["selections"][0]
+        freebet_id, amount = self._grant_freebet()
+        before = database.get_wallet_balance(BETTOR)
+        # amount из тела игнорируется: ставка идёт на сумму фрибета.
+        status, body = await self._bet(sel, 1, freebet_id=freebet_id)
+        self.assertEqual(status, 200, body)
+        self.assertEqual(body["freebet_id"], freebet_id)
+        self.assertEqual(body["potential_win"], int(round(amount * (sel["odds_value"] - 1))))
+        self.assertEqual(database.get_wallet_balance(BETTOR), before)
+
+        status, mine = await self._call("GET", "/api/outrights/my")
+        self.assertEqual(status, 200)
+        bet = mine["bets"][0]
+        self.assertEqual(bet["freebet_id"], freebet_id)
+        self.assertEqual(bet["amount"], amount)
+
+        status, board = await self._call("GET", "/api/outrights")
+        self.assertEqual(board["freebets"], [])
+
+    async def test_spent_or_foreign_freebet_is_a_conflict(self):
+        sel = self._winner_market()["selections"][0]
+        freebet_id, _ = self._grant_freebet()
+        status, body = await self._bet(sel, freebet_id=freebet_id)
+        self.assertEqual(status, 200, body)
+
+        status, body = await self._bet(sel, freebet_id=freebet_id)
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["error"], "FREEBET_UNAVAILABLE")
+
+        second_id, _ = self._grant_freebet("ACH_VALUE_HUNTER")
+        status, body = await self._bet(sel, user_id=ADMIN, freebet_id=second_id)
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["error"], "FREEBET_UNAVAILABLE")
+
+    async def test_malformed_freebet_id_is_400(self):
+        sel = self._winner_market()["selections"][0]
+        status, body = await self._bet(sel, freebet_id="abc")
+        self.assertEqual(status, 400, body)
+        self.assertEqual(body["error"], "INVALID_FREEBET")
+
+    async def test_plain_bet_keeps_freebet_id_empty(self):
+        sel = self._winner_market()["selections"][0]
+        status, body = await self._bet(sel, 150)
+        self.assertEqual(status, 200, body)
+        self.assertIsNone(body["freebet_id"])
+        status, mine = await self._call("GET", "/api/outrights/my")
+        self.assertIsNone(mine["bets"][0]["freebet_id"])
 
 
 class TestPanel(OutrightApiCase):
@@ -386,9 +478,8 @@ class TestPanel(OutrightApiCase):
                             for r in database.get_betting_audit_log(entity_type="outright_market")))
 
     # ─── фрибеты (награда за достижения) ───
-    # `place_outright_bet(freebet_id=...)` не проведён через HTTP API — Mini App
-    # ещё не собирает купон по фрибету, поэтому ставка кладётся напрямую в БД,
-    # а расчёт/аннулирование идут как обычно через панель.
+    # Здесь ставка кладётся напрямую в БД — проверяется расчёт и аннулирование
+    # через панель; путь через HTTP — в TestFreebetApi.
 
     async def test_freebet_bet_does_not_touch_wallet_balance(self):
         market = self._winner_market()
@@ -498,23 +589,6 @@ class TestPanel(OutrightApiCase):
         ok3, third = database.place_outright_bet(BETTOR, sel["id"], None, sel["odds_value"], key, other_freebet_id)
         self.assertFalse(ok3)
         self.assertEqual(third["error"], "IDEMPOTENCY_KEY_REUSED")
-
-    def _grant_freebet(self, achievement_id: str = "ACH_POSITIVE_ROI") -> tuple:
-        """Разблокировать и забрать достижение с фрибетом, вернуть (freebet_id, amount)."""
-        with database.transaction() as conn:
-            conn.execute("DELETE FROM user_achievements WHERE user_id = ? AND achievement_id = ?",
-                        (BETTOR, achievement_id))
-        self.assertTrue(database.unlock_achievement(BETTOR, achievement_id))
-        ok, msg, info = database.claim_achievement_reward(BETTOR, achievement_id)
-        self.assertTrue(ok, msg)
-        self.assertGreater(info["freebet"], 0)
-        with database.transaction() as conn:
-            row = conn.execute(
-                "SELECT id, amount FROM user_freebets WHERE user_id = ? AND status = 'available' "
-                "ORDER BY id DESC LIMIT 1", (BETTOR,),
-            ).fetchone()
-        self.assertIsNotNone(row)
-        return row["id"], row["amount"]
 
     # ─── helpers ───
 

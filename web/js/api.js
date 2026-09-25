@@ -136,10 +136,10 @@ class ApiClient {
     return this.request(`/api/outrights/${marketId}/history?top=${encodeURIComponent(top)}`);
   }
 
-  placeOutrightBet({ selection_id, amount, odd, idempotency_key }) {
+  placeOutrightBet({ selection_id, amount, odd, idempotency_key, freebet_id }) {
     return this.request('/api/outrights/bet', {
       method: 'POST',
-      body: JSON.stringify({ selection_id, amount, odd, idempotency_key })
+      body: JSON.stringify({ selection_id, amount, odd, idempotency_key, freebet_id })
     });
   }
 

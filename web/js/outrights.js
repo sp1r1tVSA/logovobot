@@ -49,6 +49,18 @@ const pct = (p) => {
 };
 const fmtOdd = (o) => Number(o || 0).toFixed(2);
 const coins = (n) => `${Math.round(Number(n) || 0).toLocaleString('ru-RU')} 🪙`;
+const freebetTotal = (list) => coins(list.reduce((acc, f) => acc + Number(f.amount || 0), 0));
+// Фрибеты по сумме: {id самого старого, amount, count}. Список уже отсортирован по id.
+const freebetOptions = (list) => {
+  const byAmount = new Map();
+  for (const f of list) {
+    const amount = Number(f.amount || 0);
+    const entry = byAmount.get(amount);
+    if (entry) entry.count += 1;
+    else byAmount.set(amount, { id: f.id, amount, count: 1 });
+  }
+  return [...byAmount.values()].sort((a, b) => a.amount - b.amount);
+};
 const hhmm = (t) => {
   const m = /(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})/.exec(String(t || ''));
   return m ? `${m[3]}.${m[2]} ${m[4]}:${m[5]}` : '';
@@ -242,6 +254,10 @@ class OutrightsView {
       banner = `<div class="ob-banner">⏸ Приём ставок на рынок временно остановлен</div>`;
     }
     if (m.locked) banner += `<div class="ob-banner lock">🔒 ${escapeHtml(m.locked)}</div>`;
+    const freebets = this.board?.freebets || [];
+    if (m.status === 'open' && !m.locked && freebets.length) {
+      banner += `<div class="ob-banner gift">🎁 ${freebets.length === 1 ? 'Есть фрибет' : `Фрибетов: ${freebets.length}`} на ${freebetTotal(freebets)} — выберите его в листе ставки</div>`;
+    }
 
     return `
       <div class="ob-market" data-market-id="${m.id}">
@@ -446,7 +462,7 @@ class OutrightsView {
           </div>
           <div class="ob-bet-pick">${escapeHtml(b.selection_name || '')} <b>${fmtOdd(b.odd)}</b> ${drift}</div>
           <div class="ob-bet-foot">
-            <span>#${b.id} · ${hhmm(b.created_at)} · ${coins(b.amount)}${dh}</span>
+            <span>#${b.id} · ${hhmm(b.created_at)} · ${b.freebet_id ? `<span class="ob-tag gift">фрибет</span> ` : ''}${coins(b.amount)}${dh}</span>
             ${payout}
           </div>
         </div>`;
@@ -521,6 +537,13 @@ class OutrightsView {
         tgBridge.hapticImpact('light');
         return;
       }
+      const fund = e.target.closest('[data-ob-fund]');
+      if (fund) {
+        if (this.sheet?.busy) return;
+        this.setFunding(fund.dataset.obFund === 'coins' ? null : parseInt(fund.dataset.obFund));
+        tgBridge.hapticImpact('light');
+        return;
+      }
       if (e.target.closest('[data-ob-confirm]')) this.submitSheet();
     });
     overlay.addEventListener('input', (e) => {
@@ -544,6 +567,7 @@ class OutrightsView {
       odd: Number(selection.odds),
       key: `ob-${selectionId}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       busy: false,
+      freebet: null, // {id, amount} — ставка фрибетом вместо монет
     };
     const overlay = this.ensureSheet();
     const minBet = this.board?.min_bet || 10;
@@ -563,6 +587,8 @@ class OutrightsView {
         <div class="ob-sheet-odd">${fmtOdd(selection.odds)}</div>
       </div>
       <div class="ob-sheet-notice" hidden></div>
+      <div class="ob-fund" hidden></div>
+      <div class="ob-fund-note" hidden></div>
       <label class="ob-stake">
         <span>Сумма ставки</span>
         <input class="ob-stake-input" type="number" inputmode="numeric" min="${minBet}" step="1" value="${preset}">
@@ -576,10 +602,25 @@ class OutrightsView {
         <span>Выигрыш: <b class="ob-sheet-win">—</b></span>
       </div>
       <div class="ob-sheet-hint">Расчёт в конце сезона. При делёже первого места выплата — по доле.</div>
+      <div class="ob-sheet-hint ob-fund-hint" hidden>Фрибет не списывает баланс: при выигрыше приходит только чистая прибыль, сама сумма фрибета не возвращается. При аннулировании рынка фрибет вернётся.</div>
       <div class="ob-sheet-error"></div>
       <button class="ob-confirm" data-ob-confirm>Поставить</button>`;
     overlay.classList.add('active');
+    this.renderFunding();
     this.updateSheetTotals();
+  }
+
+  // Выбор оплаты: монеты или фрибет. Одинаковые по сумме фрибеты — одна
+  // кнопка, тратится самый старый из них.
+  renderFunding() {
+    const row = document.querySelector('#ob-sheet-overlay .ob-fund');
+    if (!row || !this.sheet) return;
+    const options = freebetOptions(this.board?.freebets || []);
+    row.hidden = !options.length;
+    const current = this.sheet.freebet ? String(this.sheet.freebet.id) : 'coins';
+    row.innerHTML = options.length ? `
+      <button class="ob-chip ${current === 'coins' ? 'active' : ''}" data-ob-fund="coins">🪙 Монеты</button>
+      ${options.map(f => `<button class="ob-chip ${current === String(f.id) ? 'active' : ''}" data-ob-fund="${f.id}">🎁 Фрибет ${f.amount}${f.count > 1 ? ` ×${f.count}` : ''}</button>`).join('')}` : '';
   }
 
   closeSheet() {
@@ -591,10 +632,32 @@ class OutrightsView {
   updateSheetTotals() {
     const overlay = document.getElementById('ob-sheet-overlay');
     if (!overlay || !this.sheet) return;
-    const amount = parseInt(overlay.querySelector('.ob-stake-input').value) || 0;
-    overlay.querySelector('.ob-sheet-win').textContent = amount > 0 ? coins(Math.round(amount * this.sheet.odd)) : '—';
+    const freebet = this.sheet.freebet;
+    const amount = freebet ? freebet.amount : parseInt(overlay.querySelector('.ob-stake-input').value) || 0;
+    // Фрибет платит только чистую прибыль — так же считает place_outright_bet.
+    const win = freebet ? Math.round(amount * (this.sheet.odd - 1)) : Math.round(amount * this.sheet.odd);
+    overlay.querySelector('.ob-sheet-win').textContent = amount > 0 ? coins(win) : '—';
     overlay.querySelector('.ob-sheet-odd').textContent = fmtOdd(this.sheet.odd);
     overlay.querySelector('.ob-sheet-error').textContent = '';
+  }
+
+  setFunding(freebetId) {
+    const overlay = document.getElementById('ob-sheet-overlay');
+    if (!overlay || !this.sheet) return;
+    const freebet = freebetId != null
+      ? (this.board?.freebets || []).find(f => f.id === freebetId) || null
+      : null;
+    this.sheet.freebet = freebet ? { id: freebet.id, amount: Number(freebet.amount) } : null;
+    const key = freebet ? String(freebet.id) : 'coins';
+    overlay.querySelectorAll('[data-ob-fund]').forEach(el => el.classList.toggle('active', el.dataset.obFund === key));
+    overlay.querySelector('.ob-sheet').classList.toggle('freebet', !!freebet);
+    overlay.querySelector('.ob-fund-hint').hidden = !freebet;
+    const note = overlay.querySelector('.ob-fund-note');
+    note.hidden = !freebet;
+    note.innerHTML = freebet
+      ? `Ставка фрибетом: <b>${coins(freebet.amount)}</b>${freebet.source_name ? ` · за «${escapeHtml(freebet.source_name)}»` : ''}`
+      : '';
+    this.updateSheetTotals();
   }
 
   sheetNotice(text) {
@@ -608,10 +671,11 @@ class OutrightsView {
     const overlay = document.getElementById('ob-sheet-overlay');
     const sheet = this.sheet;
     if (!overlay || !sheet || sheet.busy) return;
-    const amount = parseInt(overlay.querySelector('.ob-stake-input').value) || 0;
+    const freebet = sheet.freebet;
+    const amount = freebet ? freebet.amount : parseInt(overlay.querySelector('.ob-stake-input').value) || 0;
     const errorEl = overlay.querySelector('.ob-sheet-error');
     const minBet = this.board?.min_bet || 10;
-    if (amount < minBet) {
+    if (!freebet && amount < minBet) {
       errorEl.textContent = `Минимальная ставка — ${minBet} 🪙.`;
       return;
     }
@@ -622,11 +686,12 @@ class OutrightsView {
     try {
       const res = await api.placeOutrightBet({
         selection_id: sheet.selectionId, amount, odd: sheet.odd, idempotency_key: sheet.key,
+        freebet_id: freebet ? freebet.id : undefined,
       });
       if (store.state.user && res.balance != null) store.setUser({ ...store.state.user, balance: res.balance });
       tgBridge.hapticNotification('success');
       this.closeSheet();
-      this.toast(`Ставка #${res.bet_id} принята · выигрыш ${coins(res.potential_win)}`);
+      this.toast(`Ставка #${res.bet_id}${res.freebet_id ? ' фрибетом' : ''} принята · выигрыш ${coins(res.potential_win)}`);
       this.my = null;
       await this.loadBoard();
       return;
@@ -646,6 +711,16 @@ class OutrightsView {
       } else {
         errorEl.textContent = err.message || 'Ставка не принята.';
         if (['MARKET_SUSPENDED', 'OUTRIGHT_OWN_SCOPE', 'INVALID_SELECTION'].includes(code)) this.loadBoard();
+        if (code === 'FREEBET_UNAVAILABLE') {
+          // Фрибет уже потрачен в другой вкладке — убираем его из листа.
+          await this.loadBoard();
+          if (this.sheet === sheet) {
+            sheet.freebet = null;
+            this.renderFunding();
+            this.setFunding(null);
+            errorEl.textContent = err.message || 'Фрибет недоступен.';
+          }
+        }
       }
     } finally {
       if (this.sheet === sheet) {

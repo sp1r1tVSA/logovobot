@@ -18277,6 +18277,22 @@ def count_user_open_outright_bets(user_id: int) -> int:
         return int(cursor.fetchone()[0])
 
 
+def get_user_freebets(user_id: int) -> list[dict]:
+    """Доступные фрибеты игрока, старые первыми, с названием достижения-источника."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT f.id, f.amount, f.source, f.source_id, f.granted_at,
+                   a.name AS source_name, a.badge_icon AS source_icon
+            FROM user_freebets f
+            LEFT JOIN achievements_catalog a
+                   ON f.source = 'achievement' AND a.id = f.source_id
+            WHERE f.user_id = ? AND f.status = 'available'
+            ORDER BY f.id
+        """, (user_id,))
+        return [dict(r) for r in cursor.fetchall()]
+
+
 def get_outright_exposure(market_ids: list[int] | None = None) -> dict[int, dict]:
     """Нагрузка по исходам: {selection_id: {bets, stake, liability}} для открытых ставок."""
     with transaction() as conn:
