@@ -111,6 +111,14 @@ def register_jobs(application: Application) -> None:
     except Exception as e:
         logger.warning(f"Could not register integrity scan job: {e}")
 
+    # Долгосрочные рынки: пересчёт цен после подтверждённых матчей и авторасчёт.
+    # Пересчитываются только рынки, чьё состояние изменилось; Монте-Карло — в потоке.
+    try:
+        from services.outright_service import REFRESH_INTERVAL_SECONDS, refresh_outrights_job
+        application.job_queue.run_repeating(refresh_outrights_job, interval=REFRESH_INTERVAL_SECONDS, first=75)
+    except Exception as e:
+        logger.warning(f"Could not register outright markets job: {e}")
+
 def main() -> None:
     """Initialize and run the Telegram bot application."""
     if not TOKEN:

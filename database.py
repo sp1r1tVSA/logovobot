@@ -2,6 +2,7 @@ import logging
 import sqlite3
 import datetime
 import re
+import hashlib
 import threading
 import asyncio
 import json
@@ -2295,6 +2296,9 @@ def init_db() -> None:
 
         # ─── 027: кубки дивизионов — cup_stages.division_id, ключ серий ───────
         _ensure_division_cups(cursor)
+
+        # ─── 028: долгосрочные рынки — победители, бомбардиры, история цен ────
+        _ensure_outrights(cursor)
 
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
@@ -17397,3 +17401,953 @@ def delete_draft(draft_uuid: str) -> None:
         cursor = conn.cursor()
         cursor.execute("DELETE FROM pending_drafts WHERE draft_uuid = ?", (draft_uuid,))
 
+
+
+# ═══ 028: долгосрочные рынки (outrights) ════════════════════════════════════
+#
+# Победитель дивизиона, победитель кубка (общего и кубков дивизионов), лучший
+# бомбардир дивизиона и всей лиги. Цены считает `services/outright_service.py`
+# по модели `services/outright_engine.py`; здесь хранение, приём ставок и
+# расчёт. Ставка — ординар на один исход рынка, отдельно от купонов линии:
+# у неё свой потолок открытых ставок и своя таблица, а слоты купонов
+# (`DEFAULT_MAX_OPEN_BETS`) она не занимает.
+
+MIGRATION_028_OUTRIGHTS = "028_outright_markets"
+OUTRIGHT_MARKET_TYPES = ("division_winner", "cup_winner", "division_top_scorer", "league_top_scorer")
+OUTRIGHT_OTHER_KEY = "__other__"
+MAX_OPEN_OUTRIGHT_BETS = 20
+OUTRIGHT_MIN_BET = 10
+OUTRIGHT_REPRICING_ERROR = "OUTRIGHT_REPRICING"
+OUTRIGHT_OWN_SCOPE_ERROR = "OUTRIGHT_OWN_SCOPE"
+_OUTRIGHT_PLAYED = ("confirmed", "completed")
+
+
+def _ensure_outrights(cursor: sqlite3.Cursor) -> None:
+    """Миграция 028: рынки, исходы, ставки и история коэффициентов outrights.
+
+    Исходы никогда не удаляются: на них ссылаются ставки, а история цены нужна
+    графику. Выбывший клуб или игрок остаётся строкой со статусом `eliminated`.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS outright_markets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            season_id INTEGER NOT NULL,
+            market_type TEXT NOT NULL CHECK(market_type IN
+                ('division_winner', 'cup_winner', 'division_top_scorer', 'league_top_scorer')),
+            scope_key TEXT NOT NULL,
+            division_id INTEGER,
+            title TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'open'
+                CHECK(status IN ('open', 'suspended', 'settled', 'voided')),
+            model_fingerprint TEXT,
+            model_version INTEGER,
+            priced_at TIMESTAMP,
+            settled_at TIMESTAMP,
+            settled_by INTEGER,
+            void_reason TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+            updated_at TIMESTAMP,
+            UNIQUE(season_id, market_type, scope_key)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS outright_selections (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            market_id INTEGER NOT NULL REFERENCES outright_markets(id),
+            selection_key TEXT NOT NULL,
+            name TEXT NOT NULL,
+            team_name TEXT,
+            division_id INTEGER,
+            probability REAL NOT NULL DEFAULT 0,
+            model_odds REAL,
+            odds_value REAL NOT NULL,
+            odds_override REAL,
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active', 'suspended', 'eliminated', 'won', 'lost')),
+            settle_factor REAL,
+            sort_order INTEGER NOT NULL DEFAULT 0,
+            updated_at TIMESTAMP,
+            UNIQUE(market_id, selection_key)
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS outright_bets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            market_id INTEGER NOT NULL REFERENCES outright_markets(id),
+            selection_id INTEGER NOT NULL REFERENCES outright_selections(id),
+            amount INTEGER NOT NULL,
+            odd REAL NOT NULL,
+            potential_win INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'won', 'lost', 'refunded')),
+            dead_heat_factor REAL,
+            actual_payout INTEGER,
+            freebet_id INTEGER,
+            idempotency_key TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+            settled_at TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS outright_odds_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            selection_id INTEGER NOT NULL REFERENCES outright_selections(id),
+            odds_value REAL NOT NULL,
+            probability REAL,
+            recorded_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+        )
+    """)
+    cursor.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_outright_bets_idem "
+        "ON outright_bets(user_id, idempotency_key) WHERE idempotency_key IS NOT NULL"
+    )
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outright_bets_user ON outright_bets(user_id, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outright_bets_market ON outright_bets(market_id, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_outright_sel_market ON outright_selections(market_id)")
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_outright_history_sel ON outright_odds_history(selection_id, recorded_at)"
+    )
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_028_OUTRIGHTS, "outright markets: division/cup winner, top scorers, odds history"),
+    )
+
+
+def outright_club_key(team_name: str | None) -> str:
+    """Ключ исхода «клуб»: каноническое имя, нормализованное."""
+    team = (team_name or "").strip()
+    return normalize_team_name(resolve_team_name(team) or team) if team else ""
+
+
+# ─── Входные данные модели ───────────────────────────────────────────────────
+
+def get_outright_league_fixtures(division_id: int, season_id: int | None = None) -> dict:
+    """Оставшиеся матчи лиги дивизиона и признаки завершённости чемпионата.
+
+    `fixtures` — пары клубов несыгранных матчей (отменённые не в счёт);
+    `open_rounds` — туры, которые ещё не закрыты; `played` — подтверждённые матчи.
+    """
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT COALESCE(NULLIF(m.player1_team, ''), u1.team_name) AS t1,
+                   COALESCE(NULLIF(m.player2_team, ''), u2.team_name) AS t2,
+                   m.status
+            FROM matches m
+            LEFT JOIN users u1 ON u1.telegram_id = m.player1_id
+            LEFT JOIN users u2 ON u2.telegram_id = m.player2_id
+            WHERE (m.tournament_type IS NULL OR m.tournament_type = 'league')
+              AND m.round_number > 0
+              AND m.division_id = ?
+              AND (m.season_id = ? OR m.season_id IS NULL)
+              AND m.status != 'cancelled'
+        """, (division_id, s_id))
+        fixtures, played = [], 0
+        for r in cursor.fetchall():
+            if r["status"] in _OUTRIGHT_PLAYED:
+                played += 1
+                continue
+            t1, t2 = (r["t1"] or "").strip(), (r["t2"] or "").strip()
+            if t1 and t2:
+                fixtures.append((resolve_team_name(t1) or t1, resolve_team_name(t2) or t2))
+        cursor.execute(
+            "SELECT COUNT(*) FROM rounds WHERE division_id = ? AND season_id = ? "
+            "AND COALESCE(status, 'scheduled') != 'closed'",
+            (division_id, s_id),
+        )
+        open_rounds = int(cursor.fetchone()[0])
+    return {"fixtures": fixtures, "played": played, "open_rounds": open_rounds}
+
+
+def get_outright_scorer_totals(division_id: int | None = None, season_id: int | None = None) -> list[dict]:
+    """Голы игроков в лиге сезона для рынков бомбардира.
+
+    Тот же отбор и та же склейка написаний, что у `get_top_scorers`, только без
+    LIMIT и с ключом исхода: `key` = «клуб|игрок». Игрок, у которого клуб не
+    распознан, в рынок не попадает — ставку на него нечем было бы рассчитать.
+    """
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT me.player_name, me.team_name, m.division_id, SUM(me.count) AS total_goals
+            FROM match_events me
+            JOIN matches m ON me.match_id = m.id
+            WHERE me.event_type = 'goal'
+              AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
+              AND m.round_number > 0
+              AND m.status = 'confirmed'
+              AND (m.season_id = ? OR m.season_id IS NULL)
+              AND (? IS NULL OR m.division_id = ?)
+            GROUP BY me.player_name, me.team_name, m.division_id
+        """, (s_id, division_id, division_id))
+        rows = cursor.fetchall()
+        fold = _player_folder(cursor)
+        merged: dict[str, dict] = {}
+        for r in rows:
+            club_key, player_key, name = fold(r["team_name"], r["player_name"])
+            if not club_key or not player_key:
+                continue
+            key = f"{club_key}|{player_key}"
+            entry = merged.get(key)
+            if entry is None:
+                team = (r["team_name"] or "").strip()
+                merged[key] = {"key": key, "player_name": name, "team_name": resolve_team_name(team) or team,
+                               "division_id": r["division_id"], "goals": int(r["total_goals"] or 0)}
+            else:
+                entry["goals"] += int(r["total_goals"] or 0)
+    return sorted(merged.values(), key=lambda e: (-e["goals"], e["player_name"]))
+
+
+def _outright_league_fp(cursor, season_id: int, division_id: int | None) -> str:
+    cursor.execute("""
+        SELECT COUNT(*) AS n,
+               SUM(CASE WHEN status IN ('confirmed', 'completed') THEN 1 ELSE 0 END) AS played,
+               TOTAL(CASE WHEN status IN ('confirmed', 'completed')
+                     THEN id * (COALESCE(player1_score, 0) * 37 + COALESCE(player2_score, 0) + 1) END) AS h,
+               TOTAL(CASE WHEN status = 'cancelled' THEN id END) AS cancelled
+        FROM matches
+        WHERE (tournament_type IS NULL OR tournament_type = 'league')
+          AND round_number > 0
+          AND (season_id = ? OR season_id IS NULL)
+          AND (? IS NULL OR division_id = ?)
+    """, (season_id, division_id, division_id))
+    r = cursor.fetchone()
+    return f"L{r['n']}:{r['played'] or 0}:{int(r['h'] or 0)}:{int(r['cancelled'] or 0)}"
+
+
+def _outright_goals_fp(cursor, season_id: int, division_id: int | None) -> str:
+    cursor.execute("""
+        SELECT COUNT(*) AS n, TOTAL(me.count) AS goals,
+               TOTAL(me.id * me.count + LENGTH(me.player_name) * 7 + LENGTH(me.team_name)) AS h
+        FROM match_events me
+        JOIN matches m ON m.id = me.match_id
+        WHERE me.event_type = 'goal'
+          AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
+          AND m.round_number > 0
+          AND m.status = 'confirmed'
+          AND (m.season_id = ? OR m.season_id IS NULL)
+          AND (? IS NULL OR m.division_id = ?)
+    """, (season_id, division_id, division_id))
+    r = cursor.fetchone()
+    return f"G{r['n']}:{int(r['goals'] or 0)}:{int(r['h'] or 0)}"
+
+
+def _outright_cup_rows(cursor, season_id: int, cup_division: int | None) -> list[dict]:
+    """Серии кубка сезона по стадиям: [{stage, stage_order, series: [...]}], от ранней к поздней."""
+    cursor.execute("""
+        SELECT st.id AS stage_row, st.stage AS stage_key, st.division_id AS stage_div,
+               cs.id, cs.series_num, cs.team1_name, cs.team2_name, cs.team1_wins, cs.team2_wins,
+               cs.winner_name, cs.status
+        FROM cup_stages st
+        LEFT JOIN cup_series cs ON cs.stage_id = st.id
+        WHERE st.season_id = ?
+        ORDER BY st.id, cs.series_num
+    """, (season_id,))
+    stages: dict[int, dict] = {}
+    for r in cursor.fetchall():
+        stage = _cup_stage_dict({"stage": r["stage_key"], "division_id": r["stage_div"]})
+        if stage["division_id"] != cup_division:
+            continue
+        entry = stages.setdefault(r["stage_row"], {
+            "stage_id": r["stage_row"], "stage": stage["stage"],
+            "stage_order": CUP_STAGE_ORDER.get(stage["stage"], 0), "series": [],
+        })
+        if r["id"] is not None:
+            entry["series"].append({
+                "id": r["id"], "series_num": r["series_num"], "team1_name": r["team1_name"],
+                "team2_name": r["team2_name"], "team1_wins": r["team1_wins"] or 0,
+                "team2_wins": r["team2_wins"] or 0, "winner_name": r["winner_name"], "status": r["status"],
+            })
+    return sorted(stages.values(), key=lambda s: s["stage_order"])
+
+
+def get_outright_cup_bracket(cup_division: int | None, season_id: int | None = None) -> list[dict]:
+    """Стадии кубка (None — общий) с сериями, от ранней к поздней."""
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        return _outright_cup_rows(conn.cursor(), s_id, cup_division)
+
+
+def _outright_cup_fp(cursor, season_id: int, cup_division: int | None) -> str:
+    parts = []
+    for st in _outright_cup_rows(cursor, season_id, cup_division):
+        parts.append(f"#{st['stage_id']}")
+        for s in st["series"]:
+            parts.append(f"{s['id']}/{s['team1_name']}/{s['team2_name']}/{s['team1_wins']}/"
+                         f"{s['team2_wins']}/{s['winner_name']}")
+    return "C" + "|".join(parts)
+
+
+def _outright_state_fingerprint(cursor, season_id: int, market_type: str, division_id: int | None) -> str:
+    """Отпечаток состояния, от которого зависит цена рынка.
+
+    Цена верна, пока отпечаток совпадает с тем, по которому она посчитана:
+    подтверждённый матч, исправленный счёт, новый гол или сыгранная игра серии
+    меняют его, и до пересчёта ставки на рынок не принимаются.
+    """
+    if market_type == "division_winner":
+        raw = _outright_league_fp(cursor, season_id, division_id)
+    elif market_type == "division_top_scorer":
+        raw = _outright_league_fp(cursor, season_id, division_id) + _outright_goals_fp(cursor, season_id, division_id)
+    elif market_type == "league_top_scorer":
+        raw = _outright_league_fp(cursor, season_id, None) + _outright_goals_fp(cursor, season_id, None)
+    elif market_type == "cup_winner":
+        raw = _outright_cup_fp(cursor, season_id, division_id)
+    else:
+        raise ValueError(f"unknown outright market type {market_type!r}")
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()[:20]
+
+
+def get_outright_fingerprint(season_id: int, market_type: str, division_id: int | None) -> str:
+    with transaction() as conn:
+        return _outright_state_fingerprint(conn.cursor(), season_id, market_type, division_id)
+
+
+# ─── Рынки и исходы ──────────────────────────────────────────────────────────
+
+def _load_outright_selections(cursor, market_ids: list[int]) -> dict[int, list[dict]]:
+    if not market_ids:
+        return {}
+    placeholders = ",".join("?" * len(market_ids))
+    cursor.execute(f"""
+        SELECT * FROM outright_selections WHERE market_id IN ({placeholders})
+        ORDER BY market_id,
+                 CASE status WHEN 'won' THEN 0 WHEN 'active' THEN 1 WHEN 'suspended' THEN 2 ELSE 3 END,
+                 CASE WHEN selection_key = ? THEN 1 ELSE 0 END,
+                 probability DESC, sort_order ASC, id ASC
+    """, [*market_ids, OUTRIGHT_OTHER_KEY])
+    out: dict[int, list[dict]] = {}
+    for r in cursor.fetchall():
+        out.setdefault(r["market_id"], []).append(dict(r))
+    return out
+
+
+def get_outright_markets(season_id: int | None = None, statuses: tuple[str, ...] | None = None) -> list[dict]:
+    """Рынки сезона с исходами: победители дивизионов, кубки, бомбардиры."""
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM outright_markets WHERE season_id = ? ORDER BY id", (s_id,))
+        markets = [dict(r) for r in cursor.fetchall()]
+        if statuses:
+            markets = [m for m in markets if m["status"] in statuses]
+        sels = _load_outright_selections(cursor, [m["id"] for m in markets])
+    order = {t: i for i, t in enumerate(OUTRIGHT_MARKET_TYPES)}
+    for m in markets:
+        m["selections"] = sels.get(m["id"], [])
+    markets.sort(key=lambda m: (order.get(m["market_type"], 9),
+                                m["division_id"] is not None, m["division_id"] or 0, m["id"]))
+    return markets
+
+
+def get_outright_market(market_id: int) -> dict | None:
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM outright_markets WHERE id = ?", (market_id,))
+        row = cursor.fetchone()
+        if not row:
+            return None
+        market = dict(row)
+        market["selections"] = _load_outright_selections(cursor, [market_id]).get(market_id, [])
+    return market
+
+
+def _record_outright_price(cursor, selection_id: int, odds_value: float, probability: float | None) -> None:
+    cursor.execute(
+        "INSERT INTO outright_odds_history (selection_id, odds_value, probability, recorded_at) "
+        "VALUES (?, ?, ?, datetime('now', '+3 hours'))",
+        (selection_id, odds_value, probability),
+    )
+
+
+def sync_outright_market(
+    season_id: int,
+    market_type: str,
+    scope_key: str,
+    division_id: int | None,
+    title: str,
+    fingerprint: str,
+    model_version: int,
+    selections: list[dict],
+) -> int | None:
+    """Создать рынок или обновить цены его исходов.
+
+    `selections` — {key, name, team_name, division_id, probability, model_odds,
+    eliminated, sort_order}. Ручная цена админа (`odds_override`) остаётся в силе:
+    модель обновляет только `model_odds`. Приостановленный админом исход модель
+    не открывает, а исход, которого нет в новом списке, выбывает. Рассчитанный
+    или аннулированный рынок не трогается — вернётся None. История пишется
+    только при смене итоговой цены.
+    """
+    if market_type not in OUTRIGHT_MARKET_TYPES:
+        raise ValueError(f"unknown outright market type {market_type!r}")
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, status FROM outright_markets WHERE season_id = ? AND market_type = ? AND scope_key = ?",
+            (season_id, market_type, scope_key),
+        )
+        row = cursor.fetchone()
+        if row and row["status"] in ("settled", "voided"):
+            return None
+        if row:
+            market_id = row["id"]
+        else:
+            cursor.execute("""
+                INSERT INTO outright_markets
+                    (season_id, market_type, scope_key, division_id, title, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, 'open', datetime('now', '+3 hours'), datetime('now', '+3 hours'))
+            """, (season_id, market_type, scope_key, division_id, title))
+            market_id = cursor.lastrowid
+
+        cursor.execute("SELECT * FROM outright_selections WHERE market_id = ?", (market_id,))
+        existing = {r["selection_key"]: dict(r) for r in cursor.fetchall()}
+        seen = set()
+        for sel in selections:
+            key = str(sel["key"])
+            seen.add(key)
+            prob = float(sel.get("probability") or 0.0)
+            model_odds = float(sel["model_odds"])
+            eliminated = bool(sel.get("eliminated"))
+            cur = existing.get(key)
+            if cur is None:
+                cursor.execute("""
+                    INSERT INTO outright_selections
+                        (market_id, selection_key, name, team_name, division_id, probability,
+                         model_odds, odds_value, status, sort_order, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
+                """, (market_id, key, sel["name"], sel.get("team_name"), sel.get("division_id"), prob,
+                      model_odds, model_odds, "eliminated" if eliminated else "active",
+                      int(sel.get("sort_order") or 0)))
+                if not eliminated:
+                    _record_outright_price(cursor, cursor.lastrowid, model_odds, prob)
+                continue
+
+            status = cur["status"]
+            if status in ("active", "eliminated"):
+                status = "eliminated" if eliminated else "active"
+            odds_value = float(cur["odds_override"]) if cur["odds_override"] else model_odds
+            cursor.execute("""
+                UPDATE outright_selections
+                SET name = ?, team_name = ?, division_id = ?, probability = ?, model_odds = ?,
+                    odds_value = ?, status = ?, sort_order = ?, updated_at = datetime('now', '+3 hours')
+                WHERE id = ?
+            """, (sel["name"], sel.get("team_name"), sel.get("division_id"), prob, model_odds,
+                  odds_value, status, int(sel.get("sort_order") or 0), cur["id"]))
+            if status == "active" and abs(odds_value - float(cur["odds_value"] or 0)) > 0.001:
+                _record_outright_price(cursor, cur["id"], odds_value, prob)
+
+        for key, cur in existing.items():
+            if key not in seen and cur["status"] == "active":
+                cursor.execute(
+                    "UPDATE outright_selections SET status = 'eliminated', probability = 0, "
+                    "updated_at = datetime('now', '+3 hours') WHERE id = ?",
+                    (cur["id"],),
+                )
+
+        cursor.execute("""
+            UPDATE outright_markets
+            SET title = ?, model_fingerprint = ?, model_version = ?,
+                priced_at = datetime('now', '+3 hours'), updated_at = datetime('now', '+3 hours')
+            WHERE id = ?
+        """, (title, fingerprint, model_version, market_id))
+    return market_id
+
+
+def get_outright_history(market_id: int) -> dict[int, list[dict]]:
+    """История цены исходов рынка: {selection_id: [{t, odds, prob}, ...]}."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT h.selection_id, h.odds_value, h.probability, h.recorded_at
+            FROM outright_odds_history h
+            JOIN outright_selections s ON s.id = h.selection_id
+            WHERE s.market_id = ?
+            ORDER BY h.recorded_at ASC, h.id ASC
+        """, (market_id,))
+        out: dict[int, list[dict]] = {}
+        for r in cursor.fetchall():
+            out.setdefault(r["selection_id"], []).append(
+                {"t": r["recorded_at"], "odds": r["odds_value"], "prob": r["probability"]}
+            )
+    return out
+
+
+# ─── Доступ тренера ──────────────────────────────────────────────────────────
+
+def _outright_coach(cursor, user_id: int) -> dict | None:
+    cursor.execute(
+        "SELECT division_id, team_name FROM users WHERE telegram_id = ? "
+        "AND team_name IS NOT NULL AND TRIM(team_name) != ''",
+        (user_id,),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    return {"division_id": row["division_id"], "team_name": row["team_name"],
+            "club_key": outright_club_key(row["team_name"])}
+
+
+def _general_cup_club_keys(cursor, season_id: int) -> set[str]:
+    keys = set()
+    for st in _outright_cup_rows(cursor, season_id, None):
+        for s in st["series"]:
+            for name in (s["team1_name"], s["team2_name"]):
+                if name:
+                    keys.add(outright_club_key(name))
+    return keys
+
+
+def _outright_own_scope_reason(cursor, user_id: int, market: dict, selection: dict) -> str | None:
+    """Почему тренер не может ставить на этот исход, или None.
+
+    Тренер не ставит на свой дивизион и свой кубок: на победителя и бомбардира
+    своего дивизиона, на кубок своего дивизиона, на общий кубок, если его клуб в
+    сетке, и на бомбардиров своего дивизиона в рынке всей лиги.
+    """
+    coach = _outright_coach(cursor, user_id)
+    if not coach:
+        return None
+    own_div = coach["division_id"]
+    mtype = market["market_type"]
+    if mtype in ("division_winner", "division_top_scorer"):
+        if own_div is not None and market["division_id"] == own_div:
+            return "Тренер не может ставить на рынки своего дивизиона."
+        return None
+    if mtype == "league_top_scorer":
+        if own_div is not None and selection.get("division_id") == own_div:
+            return "Тренер не может ставить на бомбардиров своего дивизиона."
+        return None
+    if mtype == "cup_winner":
+        if market["division_id"] is not None:
+            if own_div is not None and market["division_id"] == own_div:
+                return "Тренер не может ставить на кубок своего дивизиона."
+            return None
+        if coach["club_key"] in _general_cup_club_keys(cursor, market["season_id"]):
+            return "Тренер не может ставить на кубок, в котором играет его клуб."
+        return None
+    return None
+
+
+def get_outright_coach_scope(user_id: int, season_id: int | None = None) -> dict | None:
+    """Что закрыто тренеру — Mini App заранее ставит замки на эти рынки.
+
+    {division_id, in_general_cup}; None — пользователь не тренер.
+    """
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        coach = _outright_coach(cursor, user_id)
+        if not coach:
+            return None
+        return {"division_id": coach["division_id"],
+                "in_general_cup": coach["club_key"] in _general_cup_club_keys(cursor, s_id)}
+
+
+# ─── Приём ставки ────────────────────────────────────────────────────────────
+
+def place_outright_bet(
+    user_id: int,
+    selection_id,
+    amount,
+    client_odd: float | None = None,
+    idempotency_key: str | None = None,
+) -> tuple[bool, dict]:
+    """Ординар на исход долгосрочного рынка.
+
+    Порядок проверок как у купона: блокировка → запрет/остановка → доступ
+    тренера → рынок открыт и цена свежая → коэффициент клиента → лимиты →
+    списание. Всё, что не удалось проверить, — отказ (fail-closed).
+    """
+    try:
+        from config import is_global_lockdown_enabled
+        if is_global_lockdown_enabled():
+            from handlers.base import is_global_admin
+            if not is_global_admin(user_id):
+                return False, {"error": "LOGOVO_LOCKDOWN", "message": "Logovo.bet временно закрыт для пользователей"}
+    except Exception:
+        logger.exception("Lockdown check failed for outright bet of user_id=%s; bet rejected", user_id)
+        return False, {"error": "BETTING_UNAVAILABLE", "message": "Приём ставок временно недоступен."}
+
+    try:
+        if isinstance(amount, bool) or (isinstance(amount, float) and not amount.is_integer()):
+            raise ValueError
+        amount = int(amount)
+    except (ValueError, TypeError):
+        return False, {"error": "INVALID_AMOUNT", "message": "Сумма ставки должна быть целым числом."}
+    try:
+        selection_id = int(selection_id)
+    except (ValueError, TypeError):
+        return False, {"error": "INVALID_SELECTION", "message": "Некорректный исход."}
+
+    with _bet_placement_lock, transaction() as conn:
+        cursor = conn.cursor()
+
+        if idempotency_key:
+            cursor.execute(
+                "SELECT id, selection_id, amount, odd, potential_win FROM outright_bets "
+                "WHERE user_id = ? AND idempotency_key = ?",
+                (user_id, idempotency_key),
+            )
+            prev = cursor.fetchone()
+            if prev:
+                if prev["selection_id"] != selection_id or prev["amount"] != amount:
+                    return False, {"error": "IDEMPOTENCY_KEY_REUSED",
+                                   "message": "Ключ идемпотентности уже использован для другой ставки."}
+                return True, {"bet_id": prev["id"], "odd": prev["odd"],
+                              "potential_win": prev["potential_win"], "duplicate": True}
+
+        cursor.execute("""
+            SELECT s.*, m.market_type, m.season_id, m.division_id AS market_division_id,
+                   m.status AS market_status, m.model_fingerprint
+            FROM outright_selections s JOIN outright_markets m ON m.id = s.market_id
+            WHERE s.id = ?
+        """, (selection_id,))
+        row = cursor.fetchone()
+        if not row:
+            return False, {"error": "INVALID_SELECTION", "message": "Исход не найден."}
+        sel = dict(row)
+        market = {"id": sel["market_id"], "market_type": sel["market_type"], "season_id": sel["season_id"],
+                  "division_id": sel["market_division_id"]}
+
+        try:
+            block = _betting_block_reason(cursor, user_id, [])
+            if block is None:
+                paused = _read_betting_pause(cursor)["divisions"]
+                for div in (market["division_id"], sel.get("division_id")):
+                    if div is not None and div in paused:
+                        block = {"error": BETTING_PAUSED_ERROR, "division_id": div,
+                                 "message": "Приём ставок на этот дивизион временно остановлен."}
+                        break
+            if block is None:
+                reason = _outright_own_scope_reason(cursor, user_id, market, sel)
+                if reason:
+                    block = {"error": OUTRIGHT_OWN_SCOPE_ERROR, "message": reason}
+        except Exception:
+            logger.exception("Outright block check failed for user_id=%s; bet rejected", user_id)
+            block = {"error": "BETTING_UNAVAILABLE",
+                     "message": "Приём ставок временно недоступен. Попробуйте позже."}
+        if block is not None:
+            return False, block
+
+        if sel["market_status"] != "open" or sel["status"] != "active":
+            return False, {"error": "MARKET_SUSPENDED", "message": "Приём ставок на этот исход закрыт."}
+
+        try:
+            fresh = _outright_state_fingerprint(cursor, sel["season_id"], sel["market_type"],
+                                                sel["market_division_id"])
+        except Exception:
+            logger.exception("Outright fingerprint failed for market #%s; bet rejected", sel["market_id"])
+            fresh = None
+        if not fresh or fresh != sel["model_fingerprint"]:
+            return False, {"error": OUTRIGHT_REPRICING_ERROR,
+                           "message": "Коэффициенты пересчитываются после новых результатов. "
+                                      "Попробуйте через пару минут."}
+
+        odd = round(float(sel["odds_value"]), 2)
+        if client_odd is not None:
+            try:
+                client = round(float(client_odd), 2)
+            except (ValueError, TypeError):
+                client = None
+            if client is None or abs(client - odd) > 0.001:
+                return False, {"error": "ODDS_CHANGED", "selection_id": selection_id,
+                               "old_odd": client, "new_odd": odd,
+                               "message": f"Коэффициент изменился: {client} → {odd}"}
+
+        try:
+            from services.betting_limits import BettingLimitsService
+            limits = BettingLimitsService.get_user_effective_limits(
+                user_id, market["division_id"] or sel.get("division_id")
+            )
+            min_bet = max(OUTRIGHT_MIN_BET, int(limits.get("min_bet") or OUTRIGHT_MIN_BET))
+            max_bet = min(_MAX_BET, int(limits.get("max_bet") or _MAX_BET))
+            max_payout = min(_MAX_PAYOUT, int(limits.get("max_payout") or _MAX_PAYOUT))
+        except Exception:
+            logger.exception("Outright limits unavailable for user_id=%s; bet rejected", user_id)
+            return False, {"error": "RISK_CHECK_UNAVAILABLE",
+                           "message": "Не удалось проверить ставку. Ставка не принята, монеты не списаны."}
+
+        if amount < min_bet:
+            return False, {"error": "MIN_STAKE", "min_bet": min_bet,
+                           "message": f"Минимальная сумма ставки — {min_bet} 🪙."}
+        if amount > max_bet:
+            return False, {"error": "MAX_BET_EXCEEDED", "max_bet": max_bet,
+                           "message": f"Максимальная сумма ставки — {max_bet:,} 🪙."}
+
+        potential_win = int(round(amount * odd))
+        cursor.execute(
+            "SELECT COALESCE(SUM(potential_win), 0) FROM outright_bets "
+            "WHERE user_id = ? AND selection_id = ? AND status = 'pending'",
+            (user_id, selection_id),
+        )
+        held = int(cursor.fetchone()[0])
+        if held + potential_win > max_payout:
+            max_allowed = max(0, int((max_payout - held) / odd))
+            return False, {"error": "MAX_PAYOUT_EXCEEDED", "max_payout": max_payout,
+                           "max_allowed_stake": max_allowed,
+                           "message": f"Выигрыш по этому исходу не может превышать {max_payout:,} 🪙"
+                                      + (f" — у вас уже есть ставки на {held:,} 🪙." if held else ".")}
+
+        cursor.execute("SELECT COUNT(*) FROM outright_bets WHERE user_id = ? AND status = 'pending'", (user_id,))
+        open_count = int(cursor.fetchone()[0])
+        if open_count >= MAX_OPEN_OUTRIGHT_BETS:
+            return False, {"error": "OPEN_OUTRIGHT_BETS_LIMIT", "max_open_bets": MAX_OPEN_OUTRIGHT_BETS,
+                           "open_bets": open_count,
+                           "message": f"Открытых долгосрочных ставок — не больше {MAX_OPEN_OUTRIGHT_BETS}."}
+
+        get_or_create_wallet(user_id)
+        cursor.execute("""
+            UPDATE user_wallets
+            SET balance = balance - ?, total_wagered = total_wagered + ?, bets_count = bets_count + 1,
+                updated_at = datetime('now', '+3 hours')
+            WHERE user_id = ? AND balance >= ?
+        """, (amount, amount, user_id, amount))
+        if cursor.rowcount == 0:
+            cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+            bal = cursor.fetchone()
+            return False, {"error": "INSUFFICIENT_BALANCE",
+                           "message": f"Недостаточно монет на балансе (Баланс: {bal['balance'] if bal else 0} 🪙)."}
+
+        cursor.execute("""
+            INSERT INTO outright_bets
+                (user_id, market_id, selection_id, amount, odd, potential_win, status, idempotency_key, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, datetime('now', '+3 hours'))
+        """, (user_id, sel["market_id"], selection_id, amount, odd, potential_win, idempotency_key))
+        bet_id = cursor.lastrowid
+        cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+        balance = cursor.fetchone()["balance"]
+        cursor.execute("""
+            INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
+                                           balance_after, created_at)
+            VALUES (?, ?, 'outright_bet', ?, 'outright_bet', ?, datetime('now', '+3 hours'))
+        """, (user_id, -amount, bet_id, balance))
+
+    return True, {"bet_id": bet_id, "odd": odd, "potential_win": potential_win, "balance": balance}
+
+
+def get_user_outright_bets(user_id: int, limit: int = 100) -> list[dict]:
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT b.*, s.name AS selection_name, s.team_name, s.status AS selection_status,
+                   s.odds_value AS current_odd, m.title AS market_title, m.market_type,
+                   m.status AS market_status
+            FROM outright_bets b
+            JOIN outright_selections s ON s.id = b.selection_id
+            JOIN outright_markets m ON m.id = b.market_id
+            WHERE b.user_id = ?
+            ORDER BY CASE b.status WHEN 'pending' THEN 0 ELSE 1 END, b.id DESC
+            LIMIT ?
+        """, (user_id, int(limit)))
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def count_user_open_outright_bets(user_id: int) -> int:
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*) FROM outright_bets WHERE user_id = ? AND status = 'pending'", (user_id,))
+        return int(cursor.fetchone()[0])
+
+
+def get_outright_exposure(market_ids: list[int] | None = None) -> dict[int, dict]:
+    """Нагрузка по исходам: {selection_id: {bets, stake, liability}} для открытых ставок."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        query = """
+            SELECT selection_id, COUNT(*) AS bets, SUM(amount) AS stake, SUM(potential_win) AS liability
+            FROM outright_bets WHERE status = 'pending'
+        """
+        params: list = []
+        if market_ids is not None:
+            if not market_ids:
+                return {}
+            query += f" AND market_id IN ({','.join('?' * len(market_ids))})"
+            params = list(market_ids)
+        cursor.execute(query + " GROUP BY selection_id", params)
+        return {r["selection_id"]: {"bets": r["bets"], "stake": int(r["stake"] or 0),
+                                    "liability": int(r["liability"] or 0)} for r in cursor.fetchall()}
+
+
+# ─── Расчёт и аннулирование ──────────────────────────────────────────────────
+
+def _credit_outright(cursor, user_id: int, amount: int, tx_type: str, bet_id: int, won: bool) -> None:
+    if amount <= 0:
+        return
+    get_or_create_wallet(user_id)
+    if won:
+        cursor.execute("""
+            UPDATE user_wallets SET balance = balance + ?, total_won = total_won + ?, bets_won = bets_won + 1,
+                updated_at = datetime('now', '+3 hours')
+            WHERE user_id = ?
+        """, (amount, amount, user_id))
+    else:
+        cursor.execute("""
+            UPDATE user_wallets SET balance = balance + ?, updated_at = datetime('now', '+3 hours')
+            WHERE user_id = ?
+        """, (amount, user_id))
+    cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    cursor.execute("""
+        INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
+                                       balance_after, created_at)
+        VALUES (?, ?, ?, ?, 'outright_bet', ?, datetime('now', '+3 hours'))
+    """, (user_id, amount, tx_type, bet_id, row["balance"] if row else None))
+
+
+def settle_outright_market(
+    market_id: int,
+    factors: dict[int, float],
+    actor_id: int | None = None,
+) -> tuple[bool, dict | str]:
+    """Рассчитать рынок: `factors` — {selection_id выигравшего исхода: доля dead heat}.
+
+    Доля — какая часть ставки играет по полному коэффициенту: 1.0 у
+    единоличного победителя, 1/k при k-стороннем равенстве; у «Другого игрока»
+    она складывается из долей всех неназванных победителей. Остальные ставки
+    проигрывают. Выплата — `ставка · доля · кэф`.
+    """
+    try:
+        clean = {int(k): float(v) for k, v in (factors or {}).items() if float(v) > 0}
+    except (TypeError, ValueError):
+        return False, "Некорректные доли победителей."
+    if not clean or any(v > 1.0 + 1e-9 for v in clean.values()) or sum(clean.values()) > 1.0 + 1e-6:
+        return False, "Некорректные доли победителей."
+    with _bet_placement_lock, transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM outright_markets WHERE id = ?", (market_id,))
+        market = cursor.fetchone()
+        if not market:
+            return False, "Рынок не найден."
+        if market["status"] in ("settled", "voided"):
+            return False, "Рынок уже рассчитан или аннулирован."
+        cursor.execute("SELECT id FROM outright_selections WHERE market_id = ?", (market_id,))
+        own = {r["id"] for r in cursor.fetchall()}
+        if not set(clean).issubset(own):
+            return False, "Победитель не принадлежит рынку."
+
+        for sid in own:
+            factor = clean.get(sid, 0.0)
+            cursor.execute(
+                "UPDATE outright_selections SET status = ?, settle_factor = ?, "
+                "updated_at = datetime('now', '+3 hours') WHERE id = ?",
+                ("won" if factor > 0 else "lost", factor, sid),
+            )
+
+        cursor.execute("SELECT * FROM outright_bets WHERE market_id = ? AND status = 'pending'", (market_id,))
+        won = lost = paid = 0
+        for bet in cursor.fetchall():
+            factor = clean.get(bet["selection_id"], 0.0)
+            if factor <= 0:
+                cursor.execute(
+                    "UPDATE outright_bets SET status = 'lost', dead_heat_factor = 0, actual_payout = 0, "
+                    "settled_at = datetime('now', '+3 hours') WHERE id = ?",
+                    (bet["id"],),
+                )
+                lost += 1
+                continue
+            payout = int(round(bet["amount"] * factor * float(bet["odd"])))
+            cursor.execute(
+                "UPDATE outright_bets SET status = 'won', dead_heat_factor = ?, actual_payout = ?, "
+                "settled_at = datetime('now', '+3 hours') WHERE id = ?",
+                (factor, payout, bet["id"]),
+            )
+            _credit_outright(cursor, bet["user_id"], payout, "outright_win", bet["id"], won=True)
+            won += 1
+            paid += payout
+
+        cursor.execute("""
+            UPDATE outright_markets SET status = 'settled', settled_at = datetime('now', '+3 hours'),
+                settled_by = ?, updated_at = datetime('now', '+3 hours') WHERE id = ?
+        """, (actor_id, market_id))
+    logger.info("Outright market #%s settled: won=%s lost=%s paid=%s", market_id, won, lost, paid)
+    return True, {"won": won, "lost": lost, "paid": paid}
+
+
+def void_outright_market(market_id: int, reason: str | None = None,
+                         actor_id: int | None = None) -> tuple[bool, dict | str]:
+    """Аннулировать рынок: все открытые ставки возвращаются целиком."""
+    with _bet_placement_lock, transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT status FROM outright_markets WHERE id = ?", (market_id,))
+        market = cursor.fetchone()
+        if not market:
+            return False, "Рынок не найден."
+        if market["status"] in ("settled", "voided"):
+            return False, "Рынок уже рассчитан или аннулирован."
+        cursor.execute("SELECT * FROM outright_bets WHERE market_id = ? AND status = 'pending'", (market_id,))
+        refunded = 0
+        for bet in cursor.fetchall():
+            cursor.execute(
+                "UPDATE outright_bets SET status = 'refunded', actual_payout = ?, "
+                "settled_at = datetime('now', '+3 hours') WHERE id = ?",
+                (bet["amount"], bet["id"]),
+            )
+            _credit_outright(cursor, bet["user_id"], bet["amount"], "outright_refund", bet["id"], won=False)
+            refunded += 1
+        cursor.execute("""
+            UPDATE outright_markets SET status = 'voided', void_reason = ?, settled_at = datetime('now', '+3 hours'),
+                settled_by = ?, updated_at = datetime('now', '+3 hours') WHERE id = ?
+        """, ((reason or "").strip()[:300] or None, actor_id, market_id))
+    return True, {"refunded": refunded}
+
+
+# ─── Правка из панели ────────────────────────────────────────────────────────
+
+def set_outright_market_status(market_id: int, status: str) -> tuple[bool, str]:
+    if status not in ("open", "suspended"):
+        return False, "Недопустимый статус."
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE outright_markets SET status = ?, updated_at = datetime('now', '+3 hours') "
+            "WHERE id = ? AND status IN ('open', 'suspended')",
+            (status, market_id),
+        )
+        if cursor.rowcount == 0:
+            return False, "Рынок не найден или уже рассчитан."
+    return True, status
+
+
+def set_outright_selection_status(selection_id: int, status: str) -> tuple[bool, str]:
+    if status not in ("active", "suspended"):
+        return False, "Недопустимый статус."
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "UPDATE outright_selections SET status = ?, updated_at = datetime('now', '+3 hours') "
+            "WHERE id = ? AND status IN ('active', 'suspended')",
+            (status, selection_id),
+        )
+        if cursor.rowcount == 0:
+            return False, "Исход выбыл или уже рассчитан."
+    return True, status
+
+
+def set_outright_odds_override(selection_id: int, odd) -> tuple[bool, dict | str]:
+    """Ручная цена исхода; None возвращает цену модели."""
+    if odd is not None:
+        try:
+            odd = round(float(odd), 2)
+        except (ValueError, TypeError):
+            return False, "Некорректный коэффициент."
+        if not (1.01 <= odd <= 1000):
+            return False, "Коэффициент должен быть от 1.01 до 1000."
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM outright_selections WHERE id = ?", (selection_id,))
+        sel = cursor.fetchone()
+        if not sel or sel["status"] in ("won", "lost"):
+            return False, "Исход не найден или уже рассчитан."
+        new_value = odd if odd is not None else float(sel["model_odds"] or sel["odds_value"])
+        cursor.execute(
+            "UPDATE outright_selections SET odds_override = ?, odds_value = ?, "
+            "updated_at = datetime('now', '+3 hours') WHERE id = ?",
+            (odd, new_value, selection_id),
+        )
+        if abs(new_value - float(sel["odds_value"])) > 0.001:
+            _record_outright_price(cursor, selection_id, new_value, sel["probability"])
+    return True, {"odds_value": new_value, "odds_override": odd, "market_id": sel["market_id"]}
