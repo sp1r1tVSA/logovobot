@@ -102,7 +102,7 @@ const LIMIT_LABELS = {
   max_open_bets: 'Открытых купонов',
   market_exposure_limit: 'Риск на рынок',
   division_exposure_limit: 'Риск на дивизион',
-  global_exposure_limit: 'Риск всей лиги',
+  global_exposure_limit: 'Риск на все дивизионы',
   max_express_events: 'Событий в экспрессе',
   express_margin_pct: 'Надбавка на экспресс',
   initial_balance: 'Стартовый баланс',
@@ -120,7 +120,7 @@ const LIMIT_HINTS = {
   express_margin_pct: 'Минус столько % к кэфу экспресса за каждое событие после первого; 0 — выключить',
   market_exposure_limit: 'Возможная выплата по одному рынку',
   division_exposure_limit: 'Возможная выплата по дивизиону',
-  global_exposure_limit: 'Возможная выплата по всей лиге',
+  global_exposure_limit: 'Возможная выплата по всем дивизионам вместе',
   initial_balance: 'Кошелёк нового игрока; уже созданные не меняются',
 };
 
@@ -129,7 +129,7 @@ const LIMIT_HINTS = {
 const LIMIT_GROUPS = [
   { title: 'Ставки и купон', keys: ['min_bet', 'max_bet', 'max_open_bets', 'max_express_events', 'express_margin_pct'] },
   { title: 'Игрок', keys: ['max_payout', 'max_daily_stake', 'max_daily_loss', 'max_open_exposure'] },
-  { title: 'Риск лиги', keys: ['market_exposure_limit', 'division_exposure_limit', 'global_exposure_limit'] },
+  { title: 'Риск по рынкам и дивизионам', keys: ['market_exposure_limit', 'division_exposure_limit', 'global_exposure_limit'] },
   { title: 'Экономика', keys: ['initial_balance'] },
 ];
 
@@ -286,7 +286,7 @@ export class AdminPanel {
     const divPills = me.divisions.length > 1 || me.is_global
       ? `<div class="category-pills adm-div-pills">
           <button class="category-pill ${this.divisionId ? '' : 'active'}" data-adm-division="">
-            ${me.is_global ? 'Вся лига' : 'Все мои'}
+            ${me.is_global ? 'Все дивизионы' : 'Все мои'}
           </button>
           ${me.divisions.map(d => `
             <button class="category-pill ${this.divisionId === d.id ? 'active' : ''}" data-adm-division="${d.id}">${esc(d.name)}</button>
@@ -319,7 +319,7 @@ export class AdminPanel {
     const names = new Map(this.me.divisions.map(d => [String(d.id), d.name]));
     const lines = [];
     if (pause.global) {
-      lines.push(`Приём ставок остановлен во всей лиге${pause.global.reason ? ` — ${esc(pause.global.reason)}` : ''}`);
+      lines.push(`Приём ставок остановлен во всех дивизионах${pause.global.reason ? ` — ${esc(pause.global.reason)}` : ''}`);
     }
     Object.entries(pause.divisions || {}).forEach(([id, entry]) => {
       if (!entry) return;
@@ -1177,7 +1177,7 @@ export class AdminPanel {
     `;
   }
 
-  // ─── Лимиты: вся лига, дивизионы, личные ───────────────────────────────
+  // ─── Лимиты: все дивизионы, дивизион, личные ───────────────────────────────
 
   async loadLimits() {
     const limits = await this.get(`${PANEL}/limits`);
@@ -1199,7 +1199,7 @@ export class AdminPanel {
       return `
         <div class="adm-card">
           <div class="adm-card-title">${esc(g.title)}</div>
-          ${keys.map(k => this.limitRow('global', 0, k, limits.global_overrides[k], limits.system[k], 'вся лига', canEdit,
+          ${keys.map(k => this.limitRow('global', 0, k, limits.global_overrides[k], limits.system[k], 'все дивизионы', canEdit,
             `${LIMIT_HINTS[k] || ''} · по умолчанию ${limitValue(k, defaults[k])}`)).join('')}
         </div>`;
     }).join('') : '';
@@ -1208,7 +1208,7 @@ export class AdminPanel {
     const globalBanned = new Set(banGroups.filter(g => limits.global_overrides[BAN_PREFIX + g.id] > 0).map(g => g.id));
     const globalBans = showGlobal && banGroups.length ? `
       <div class="adm-card">
-        <div class="adm-card-title">Запрещённые ставки · вся лига</div>
+        <div class="adm-card-title">Запрещённые ставки · все дивизионы</div>
         <div class="adm-muted adm-mb">Красное — не принимается ни на один матч, включая общий кубок. «Экспресс» — купоны из нескольких событий.</div>
         ${this.banPills('global', 0, banGroups, globalBanned, new Set(), canEdit)}
       </div>` : '';
@@ -1218,12 +1218,12 @@ export class AdminPanel {
       return `
       <div class="adm-card">
         <div class="adm-card-title">${esc(d.name)}</div>
-        <div class="adm-muted adm-mb">Строже лиги, если задано. Без своего значения действует лимит лиги.</div>
+        <div class="adm-muted adm-mb">Только для этого дивизиона. Без своего значения действует общий лимит всех дивизионов.</div>
         ${divisionKeys.map(k => this.limitRow('division', d.id, k, d.overrides[k], d.effective[k], d.name, canEdit,
-          `${LIMIT_HINTS[k] || ''} · лига: ${limitValue(k, limits.system[k])}`)).join('')}
+          `${LIMIT_HINTS[k] || ''} · все дивизионы: ${limitValue(k, limits.system[k])}`)).join('')}
         ${banGroups.length ? `
           <div class="adm-card-subtitle">Запрещённые ставки</div>
-          <div class="adm-muted adm-mb">На матчи дивизиона и его кубка. 🔒 — запрещено для всей лиги.</div>
+          <div class="adm-muted adm-mb">На матчи дивизиона и его кубка. 🔒 — запрещено во всех дивизионах, снимается в карточке «все дивизионы».</div>
           ${this.banPills('division', d.id, banGroups, own, globalBanned, canEdit)}` : ''}
       </div>`;
     }).join('');
@@ -1272,7 +1272,7 @@ export class AdminPanel {
 
     const pauseRows = [];
     if (me.is_global && !this.divisionId) {
-      pauseRows.push(this.pauseRow(null, 'Вся лига', pause.global));
+      pauseRows.push(this.pauseRow(null, 'Все дивизионы', pause.global));
     }
     me.divisions
       .filter(d => !this.divisionId || d.id === this.divisionId)
@@ -1337,7 +1337,7 @@ export class AdminPanel {
       </button>`;
   }
 
-  // Пилюли запретов: красная — запрещено на этом уровне, 🔒 — запрещено лигой
+  // Пилюли запретов: красная — запрещено на этом уровне, 🔒 — запрещено во всех дивизионах
   // (с уровня дивизиона не снимается).
   banPills(scopeType, scopeId, groups, banned, inherited, canEdit) {
     return `<div class="category-pills adm-picks-pills">${groups.map(g => {
@@ -1410,7 +1410,7 @@ export class AdminPanel {
     // Сброс глобального — к значению по умолчанию, дивизиона и игрока — к уровню выше.
     const resetTo = scopeType === 'global'
       ? `значение по умолчанию${def != null ? ` (${limitValue(key, def)})` : ''}`
-      : scopeType === 'division' ? 'лимит лиги' : 'лимит дивизиона или лиги';
+      : scopeType === 'division' ? 'общий лимит всех дивизионов' : 'лимит дивизиона или общий';
     this.openForm({
       title: LIMIT_LABELS[key] || key,
       desc: `${owner} · сейчас ${limitValue(key, effective)}${current !== '' ? ' (задано вручную)' : ''}.`
