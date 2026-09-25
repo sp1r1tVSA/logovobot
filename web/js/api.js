@@ -127,6 +127,26 @@ class ApiClient {
     return this.request(`/api/cup${q}`);
   }
 
+  // Долгосрочные рынки: победители дивизионов и кубков, бомбардиры.
+  getOutrights() {
+    return this.request('/api/outrights');
+  }
+
+  getOutrightHistory(marketId, top = 4) {
+    return this.request(`/api/outrights/${marketId}/history?top=${encodeURIComponent(top)}`);
+  }
+
+  placeOutrightBet({ selection_id, amount, odd, idempotency_key }) {
+    return this.request('/api/outrights/bet', {
+      method: 'POST',
+      body: JSON.stringify({ selection_id, amount, odd, idempotency_key })
+    });
+  }
+
+  getMyOutrightBets() {
+    return this.request('/api/outrights/my');
+  }
+
   getCupLine(stageId) {
     return this.request(`/api/cup/stages/${stageId}/line`);
   }

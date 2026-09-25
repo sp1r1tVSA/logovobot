@@ -637,6 +637,8 @@ async def handle_panel_outrights_refresh(request: web.Request) -> web.Response:
     if isinstance(scope, web.Response):
         return scope
     result = await asyncio.to_thread(outright_service.refresh_outrights, True)
+    if result.get("skipped") == "no_season":
+        return _error(409, "no_season", "Нет активного сезона — считать нечего.")
     if result.get("skipped"):
         return _error(409, "busy", "Пересчёт уже идёт — обновите через минуту.")
     await asyncio.to_thread(

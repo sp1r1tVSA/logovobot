@@ -9,6 +9,7 @@ import { tgBridge } from './tg.js';
 import { UIRenderer, escapeHtml, cupStageLabel, cupMetaName } from './ui.js';
 import { ParticleEffects } from './effects.js';
 import { AdminPanel } from './admin.js';
+import { outrightsView } from './outrights.js';
 
 class AppController {
   constructor() {
@@ -59,6 +60,10 @@ class AppController {
         if (state.lobbyMode === 'cup') {
           this.renderBlock('cup', [state.cup, state.searchQuery],
             () => UIRenderer.renderCupView(state.cup, state.searchQuery));
+        }
+        if (state.lobbyMode === 'outrights') {
+          this.renderBlock('outrights', [state.searchQuery],
+            () => outrightsView.setQuery(state.searchQuery));
         }
       } else if (view === 'match_center') {
         this.renderBlock('matchCenter',
@@ -583,6 +588,12 @@ class AppController {
         if (cupBtn) {
           tgBridge.hapticImpact('light');
           await this.openCupLobby();
+          return;
+        }
+        if (e.target.closest('.outright-tab-btn')) {
+          tgBridge.hapticImpact('light');
+          store.setLobbyMode('outrights');
+          await outrightsView.open();
           return;
         }
         const btn = e.target.closest('.division-tab-btn');

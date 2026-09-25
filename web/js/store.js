@@ -62,7 +62,7 @@ class StateStore {
       recommendations: [],
       capperLeaderboard: [],
       // Лобби показывает либо линию дивизиона, либо кубок (общий или дивизиона).
-      lobbyMode: 'league', // 'league' | 'cup'
+      lobbyMode: 'league', // 'league' | 'cup' | 'outrights'
       cup: {
         cups: [], // [{division_id, label, title}] — переключатель кубков
         divisionId: null, // null — общий кубок
@@ -271,7 +271,7 @@ class StateStore {
 
   // --- Кубки ---
   setLobbyMode(mode) {
-    this.state.lobbyMode = mode === 'cup' ? 'cup' : 'league';
+    this.state.lobbyMode = ['cup', 'outrights'].includes(mode) ? mode : 'league';
     this.notify();
   }
 

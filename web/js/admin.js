@@ -27,10 +27,21 @@ const TABS = [
   { id: 'markets', label: 'Рынки' },
   { id: 'picks', label: 'ИИ-прогноз' },
   { id: 'bets', label: 'Купоны' },
+  { id: 'outrights', label: 'Долгосрочные', globalOnly: true },
   { id: 'players', label: 'Игроки', globalOnly: true },
   { id: 'limits', label: 'Лимиты' },
   { id: 'risk', label: 'Риски' },
 ];
+
+// Долгосрочные рынки: фильтр по виду и сколько исходов показывать до «Показать всех».
+const OUTRIGHT_TYPES = [
+  { id: '', label: 'Все' },
+  { id: 'division_winner', label: 'Чемпион дивизиона' },
+  { id: 'cup_winner', label: 'Кубки' },
+  { id: 'division_top_scorer', label: 'Бомбардир дивизиона' },
+  { id: 'league_top_scorer', label: 'Бомбардир лиги' },
+];
+const OUTRIGHT_PREVIEW = 10;
 
 const MARKET_STATES = [
   { id: 'active', label: 'Активные' },
@@ -89,7 +100,7 @@ const STATUS_LABELS = {
   open: 'Открыт', suspended: 'Пауза', closed: 'Закрыт', settled: 'Рассчитан', voided: 'Аннулирован',
   pending: 'В игре', won: 'Выигрыш', lost: 'Проигрыш', refunded: 'Возврат',
   cancelled: 'Отменён', cashed_out: 'Кэшаут',
-  active: 'Активен', acknowledged: 'Принят', resolved: 'Решён',
+  active: 'Активен', acknowledged: 'Принят', resolved: 'Решён', eliminated: 'Выбыл',
 };
 
 const LIMIT_LABELS = {
@@ -157,6 +168,9 @@ const TX_LABELS = {
   daily_bonus: 'Ежедневный бонус',
   welcome_bonus: 'Стартовый баланс',
   level_up_reward: 'Новый уровень',
+  outright_bet: 'Долгосрочная ставка',
+  outright_win: 'Выигрыш: долгосрочная',
+  outright_refund: 'Возврат: долгосрочная',
 };
 
 const AUDIT_LABELS = {
@@ -186,6 +200,14 @@ const AUDIT_LABELS = {
   limit_set: 'Лимит задан',
   limit_reset: 'Лимит сброшен',
   result_correction: 'Исправление результата',
+  outright_refresh: 'Долгосрочные: пересчёт',
+  outright_suspend: 'Долгосрочный рынок на паузе',
+  outright_resume: 'Долгосрочный рынок открыт',
+  outright_settle: 'Долгосрочный рынок рассчитан',
+  outright_void: 'Долгосрочный рынок аннулирован',
+  outright_selection_active: 'Долгосрочный исход открыт',
+  outright_selection_suspended: 'Долгосрочный исход на паузе',
+  outright_odds_override: 'Долгосрочный: коэффициент',
 };
 
 const fmt = (n) => Number(n || 0).toLocaleString('ru-RU');
@@ -224,6 +246,8 @@ export class AdminPanel {
     this.markets = { state: 'active', q: '', offset: 0, items: [], total: 0 };
     this.bets = { status: 'pending', userId: null, offset: 0, items: [], total: 0 };
     this.players = { q: '', sort: 'balance', banned: false, items: [] };
+    // expanded — рынки, где раскрыт весь список исходов.
+    this.outrights = { type: '', items: [], expanded: new Set() };
     // markets/oddsMin/oddsMax — применённые (уходят в запрос), draft — ещё не применённые.
     // view: 'list' — прогноз по открытой линии, 'review' — сверка с сыгранными матчами.
     this.picks = { view: 'list', markets: [], oddsMin: '', oddsMax: '', draft: null, minChance: 0, valueOnly: false, res: null };
@@ -309,6 +333,9 @@ export class AdminPanel {
       </div>
       <div id="adm-body"></div>
     `;
+    // Вкладки листаются по горизонтали — текущая не должна оказаться за краем.
+    const active = this.root.querySelector('.adm-tabs .active');
+    if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     this.renderPauseBanner();
   }
 
@@ -343,6 +370,7 @@ export class AdminPanel {
       markets: () => this.loadMarkets(true),
       picks: () => (this.picks.view === 'review' ? this.loadPicksReview() : this.loadPicks(false)),
       bets: () => this.loadBets(true),
+      outrights: () => this.loadOutrights(),
       players: () => this.loadPlayers(),
       limits: () => this.loadLimits(),
       risk: () => this.loadRisk(),
@@ -568,6 +596,255 @@ export class AdminPanel {
         await this.loadMarkets(true);
       },
     });
+  }
+
+  // ─── Долгосрочные ──────────────────────────────────────────────────────
+
+  async loadOutrights() {
+    const res = await this.get(`${PANEL}/outrights`);
+    if (this.tab !== 'outrights') return;
+    this.outrights.items = res.markets || [];
+    this.renderOutrights();
+  }
+
+  renderOutrights() {
+    const body = this.body();
+    if (!body) return;
+    const o = this.outrights;
+    const markets = o.items.filter(m => !o.type || m.market_type === o.type);
+    const live = o.items.filter(m => m.status === 'open' || m.status === 'suspended');
+    const total = live.reduce((acc, m) => {
+      const ex = m.exposure || {};
+      acc.bets += ex.bets || 0;
+      acc.stake += ex.stake || 0;
+      acc.worst += Math.max(0, ex.worst_case || 0);
+      return acc;
+    }, { bets: 0, stake: 0, worst: 0 });
+
+    body.innerHTML = `
+      <div class="kpi-grid">
+        ${this.kpi('Ставок в игре', fmt(total.bets))}
+        ${this.kpi('Принято', coins(total.stake), 'gold')}
+        ${this.kpi('Худший случай', coins(total.worst), total.worst > 0 ? 'red' : 'green', 'если везде выиграет самый нагруженный')}
+      </div>
+      <div class="adm-toolbar">
+        <div class="category-pills">
+          ${OUTRIGHT_TYPES.map(t => `<button class="category-pill ${o.type === t.id ? 'active' : ''}" data-adm-otype="${t.id}">${t.label}</button>`).join('')}
+        </div>
+        <button class="adm-btn small" data-adm-orefresh title="Пересчитать цены модели сейчас">↻ Пересчитать</button>
+      </div>
+      ${markets.length
+        ? markets.map(m => this.outrightCard(m)).join('')
+        : '<div class="adm-empty">Рынков нет — они появятся после пересчёта линии</div>'}
+    `;
+  }
+
+  outrightCard(mk) {
+    const finished = mk.status === 'settled' || mk.status === 'voided';
+    const ex = mk.exposure || {};
+    const actions = [];
+    if (mk.status === 'open') actions.push(['suspend', '⏸', 'Приостановить']);
+    if (mk.status === 'suspended') actions.push(['resume', '▶', 'Открыть']);
+    if (!finished) actions.push(['settle', '🏁', 'Рассчитать']);
+    if (!finished) actions.push(['void', '✖', 'Аннулировать']);
+
+    const expanded = this.outrights.expanded.has(mk.id);
+    // Нагруженные исходы видны всегда, даже в свёрнутом списке.
+    const shown = expanded
+      ? mk.selections
+      : mk.selections.filter((s, i) => i < OUTRIGHT_PREVIEW || (s.exposure && s.exposure.bets));
+    const hidden = mk.selections.length - shown.length;
+    const worst = ex.worst_case || 0;
+
+    return `
+      <div class="adm-card adm-match">
+        <div class="adm-market-head">
+          <div class="adm-market-name">${esc(mk.title)} ${statusBadge(mk.status)}</div>
+          <div class="adm-market-actions">
+            ${actions.map(([a, icon, title]) => `
+              <button class="adm-icon-btn ${a === 'void' ? 'danger' : ''}" title="${title}"
+                      data-adm-oaction="${a}" data-market-id="${mk.id}">${icon}</button>`).join('')}
+          </div>
+        </div>
+        <div class="adm-chips adm-ob-chips">
+          <span class="adm-chip">Ставок <b>${fmt(ex.bets)}</b></span>
+          <span class="adm-chip">Принято <b>${coins(ex.stake)}</b></span>
+          <span class="adm-chip">Худший исход <b class="${worst > 0 ? 'red' : 'green'}">${worst > 0 ? '−' : '+'}${coins(Math.abs(worst))}</b></span>
+        </div>
+        ${mk.status === 'voided' && mk.void_reason ? `<small class="adm-muted">Причина: ${esc(mk.void_reason)}</small>` : ''}
+        <div class="adm-selections">
+          ${shown.map(s => this.outrightSelection(s, finished)).join('')}
+        </div>
+        ${hidden > 0 || expanded
+          ? `<button class="adm-more" data-adm-oexpand="${mk.id}">${expanded ? 'Свернуть' : `Показать всех (${fmt(mk.selections.length)})`}</button>`
+          : ''}
+      </div>`;
+  }
+
+  outrightSelection(s, finished) {
+    const ex = s.exposure || {};
+    const editable = !finished && (s.status === 'active' || s.status === 'suspended');
+    const chance = Number(s.probability || 0) * 100;
+    return `
+      <button class="adm-sel ${ex.bets ? 'loaded' : ''} ${s.status !== 'active' ? 'adm-sel-off' : ''}" ${editable ? '' : 'disabled'}
+              data-adm-oselection="${s.id}">
+        <span class="adm-sel-name">${esc(s.name)}</span>
+        <span class="adm-sel-odd">${odd(s.odds_value)}${s.odds_override != null ? ' ✎' : ''}</span>
+        <span class="adm-sel-meta">${chance > 0 && chance < 1 ? '<1' : chance.toFixed(chance >= 10 ? 0 : 1)}%${s.status !== 'active' ? ` · ${esc(STATUS_LABELS[s.status] || s.status)}` : ''}</span>
+        ${ex.bets ? `<span class="adm-sel-risk">${fmt(ex.bets)} ст. · выплата ${fmt(ex.liability)}</span>` : ''}
+      </button>`;
+  }
+
+  findOutright(marketId) {
+    return this.outrights.items.find(m => String(m.id) === String(marketId)) || null;
+  }
+
+  findOutrightSelection(selectionId) {
+    for (const market of this.outrights.items) {
+      const sel = market.selections.find(s => String(s.id) === String(selectionId));
+      if (sel) return { market, sel };
+    }
+    return null;
+  }
+
+  async refreshOutrights(button) {
+    if (this.busy) return;
+    this.busy = true;
+    button.disabled = true;
+    try {
+      const res = await this.post(`${PANEL}/outrights/refresh`);
+      const r = res.result || {};
+      this.toast(`Пересчитано: ${fmt(r.priced)}, без изменений: ${fmt(r.unchanged)}${r.settled ? `, рассчитано: ${fmt(r.settled)}` : ''}`);
+      await this.loadOutrights();
+    } catch (e) {
+      this.toast(e.message || 'Не получилось', true);
+      button.disabled = false;
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  askOutrightAction(action, marketId) {
+    const mk = this.findOutright(marketId);
+    if (!mk) return;
+    if (action === 'settle') {
+      this.askOutrightSettle(mk);
+      return;
+    }
+    const titles = {
+      suspend: ['Приостановить рынок?', 'Приём ставок встанет, принятые ставки останутся в игре.'],
+      resume: ['Открыть рынок?', 'Рынок снова начнёт принимать ставки.'],
+      void: ['Аннулировать рынок?', 'Все ставки на рынок получат возврат. Это необратимо.'],
+    };
+    const [title, desc] = titles[action];
+    this.openForm({
+      title,
+      desc: `«${mk.title}» · ${desc}`,
+      fields: [{ name: 'reason', label: action === 'void' ? 'Причина (обязательно)' : 'Причина (необязательно)', type: 'text' }],
+      submitLabel: action === 'void' ? 'Аннулировать' : 'Подтвердить',
+      danger: action === 'void',
+      onSubmit: async ({ reason }) => {
+        if (action === 'void' && !reason) throw new Error('Укажите причину аннулирования.');
+        await this.post(`${PANEL}/outrights/${mk.id}/action`, { action, reason, confirm: action === 'void' });
+        this.toast(action === 'void' ? 'Рынок аннулирован, ставки возвращены' : 'Готово');
+        await this.loadOutrights();
+      },
+    });
+  }
+
+  // Ручной расчёт: победителя выбирает админ; несколько отмеченных — делёж
+  // поровну (dead heat), каждый получает выплату с долей 1/N.
+  askOutrightSettle(mk) {
+    const candidates = [...mk.selections]
+      .filter(s => s.status !== 'eliminated')
+      .sort((a, b) => (b.probability || 0) - (a.probability || 0));
+    if (!candidates.length) {
+      this.toast('У рынка нет исходов для расчёта', true);
+      return;
+    }
+    this.showModal(this.modalFrame('Рассчитать рынок', `
+      <form class="adm-form" data-adm-form>
+        <div class="adm-form-desc">«${esc(mk.title)}» · отметьте победителя. Несколько отмеченных делят выплату поровну (dead heat). Расчёт необратим.</div>
+        <div class="adm-checks">
+          ${candidates.map(s => {
+            const ex = s.exposure || {};
+            return `
+              <label class="adm-check">
+                <input type="checkbox" name="w_${s.id}">
+                <span class="adm-check-name">${esc(s.name)}</span>
+                <span class="adm-check-side">${odd(s.odds_value)}${ex.bets ? ` · выплата ${fmt(ex.liability)}` : ''}</span>
+              </label>`;
+          }).join('')}
+        </div>
+        <div class="adm-form-error"></div>
+        <button type="submit" class="adm-btn wide danger">Рассчитать</button>
+      </form>`));
+    this._modalSubmit = async (values) => {
+      const winners = Object.keys(values).filter(k => k.startsWith('w_') && values[k]).map(k => Number(k.slice(2)));
+      if (!winners.length) throw new Error('Отметьте хотя бы одного победителя.');
+      const res = await this.post(`${PANEL}/outrights/${mk.id}/action`, { action: 'settle', winners, confirm: true });
+      const r = res.result || {};
+      this.toast(r.paid != null ? `Рынок рассчитан, выплачено ${coins(r.paid)}` : 'Рынок рассчитан');
+      await this.loadOutrights();
+    };
+  }
+
+  openOutrightSelection(selectionId) {
+    const found = this.findOutrightSelection(selectionId);
+    if (!found) return;
+    const { market, sel: s } = found;
+    const ex = s.exposure || {};
+    const facts = [
+      `сейчас ${odd(s.odds_value)}`,
+      s.model_odds != null ? `модель ${odd(s.model_odds)}` : null,
+      `шанс ${(Number(s.probability || 0) * 100).toFixed(1)}%`,
+      ex.bets ? `${fmt(ex.bets)} ст. на ${coins(ex.stake)}, выплата ${coins(ex.liability)}` : 'ставок нет',
+    ].filter(Boolean).join(' · ');
+    const suspend = s.status === 'active';
+
+    this.showModal(this.modalFrame(s.name, `
+      <form class="adm-form" data-adm-form>
+        <div class="adm-form-desc">«${esc(market.title)}» · ${esc(facts)}${s.odds_override != null ? '<br>Цена выставлена вручную — модель её не меняет.' : ''}</div>
+        <label class="adm-field">
+          <span>Коэффициент</span>
+          <input class="adm-input" name="odds" type="number" step="0.01" min="1.01" inputmode="decimal"
+                 value="${odd(s.odds_value)}" autocomplete="off">
+        </label>
+        <div class="adm-form-error"></div>
+        <button type="submit" class="adm-btn wide primary">Сохранить цену</button>
+        ${s.odds_override != null
+          ? `<button type="button" class="adm-btn wide" data-adm-osel-reset="${s.id}">Вернуть цену модели${s.model_odds != null ? ` (${odd(s.model_odds)})` : ''}</button>`
+          : ''}
+        <button type="button" class="adm-btn wide ${suspend ? 'danger' : ''}" data-adm-osel-status="${suspend ? 'suspended' : 'active'}"
+                data-sel-id="${s.id}">${suspend ? 'Приостановить исход' : 'Открыть исход'}</button>
+      </form>`));
+    this._modalSubmit = async ({ odds }) => {
+      const value = Number(String(odds).replace(',', '.'));
+      if (!(value >= 1.01 && value <= 1000)) throw new Error('Коэффициент — от 1.01 до 1000.');
+      await this.post(`${PANEL}/outright-selections/${s.id}`, { odds: value });
+      this.toast(`${s.name}: ${value.toFixed(2)}`);
+      await this.loadOutrights();
+    };
+  }
+
+  // Кнопки модалки исхода помимо «Сохранить»: сброс цены и пауза.
+  async changeOutrightSelection(selectionId, body, message) {
+    if (this.busy) return;
+    this.busy = true;
+    const errorEl = this.modal.querySelector('.adm-form-error');
+    try {
+      await this.post(`${PANEL}/outright-selections/${selectionId}`, body);
+      this.closeModal();
+      this.toast(message);
+      tgBridge.hapticNotification('success');
+      await this.loadOutrights();
+    } catch (e) {
+      if (errorEl) errorEl.textContent = e.message || 'Не получилось';
+      else this.toast(e.message || 'Не получилось', true);
+      tgBridge.hapticNotification('error');
+    } finally {
+      this.busy = false;
+    }
   }
 
   // ─── Купоны ────────────────────────────────────────────────────────────
@@ -1490,7 +1767,9 @@ export class AdminPanel {
   async submitForm(form) {
     if (this.busy || !this._modalSubmit) return;
     const values = {};
-    form.querySelectorAll('input').forEach(i => { values[i.name] = i.value.trim(); });
+    form.querySelectorAll('input').forEach(i => {
+      values[i.name] = i.type === 'checkbox' ? i.checked : i.value.trim();
+    });
     const errorEl = form.querySelector('.adm-form-error');
     const button = form.querySelector('button[type="submit"]');
     const onSubmit = this._modalSubmit;
@@ -1656,6 +1935,26 @@ export class AdminPanel {
       run.catch(err => { el.disabled = false; this.toast(err.message, true); });
     } else if ((el = t('[data-adm-market-action]'))) {
       this.askMarketAction(el.dataset.admMarketAction, el.dataset.marketId, el.dataset.marketName);
+    } else if ((el = t('[data-adm-otype]'))) {
+      this.outrights.type = el.dataset.admOtype;
+      this.renderOutrights();
+    } else if ((el = t('[data-adm-orefresh]'))) {
+      this.refreshOutrights(el);
+    } else if ((el = t('[data-adm-oexpand]'))) {
+      const id = Number(el.dataset.admOexpand);
+      const set = this.outrights.expanded;
+      if (set.has(id)) set.delete(id); else set.add(id);
+      this.renderOutrights();
+    } else if ((el = t('[data-adm-oaction]'))) {
+      this.askOutrightAction(el.dataset.admOaction, el.dataset.marketId);
+    } else if ((el = t('[data-adm-oselection]'))) {
+      if (el.disabled) return;
+      this.openOutrightSelection(el.dataset.admOselection);
+    } else if ((el = t('[data-adm-osel-reset]'))) {
+      this.changeOutrightSelection(el.dataset.admOselReset, { odds: null }, 'Вернули цену модели');
+    } else if ((el = t('[data-adm-osel-status]'))) {
+      const status = el.dataset.admOselStatus;
+      this.changeOutrightSelection(el.dataset.selId, { status }, status === 'active' ? 'Исход открыт' : 'Исход на паузе');
     } else if ((el = t('[data-adm-selection]'))) {
       if (el.disabled) return;
       this.askOdds(el.dataset.admSelection, el.dataset.name, el.dataset.odds, el.dataset.model);

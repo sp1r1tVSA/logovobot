@@ -19,9 +19,9 @@
   <!-- Styles. Сервер (api/server.py) переписывает /css/… и /js/app.js на
        /v/<хэш содержимого>/…, так что ?v= ниже нужен только для локального
        просмотра без API-сервера — бампать его вручную не нужно. -->
-  <link rel="stylesheet" href="/css/main.css?v=3.4.5">
-  <link rel="stylesheet" href="/css/components.css?v=3.4.5">
-  <link rel="stylesheet" href="/css/coupon.css?v=3.4.5">
+  <link rel="stylesheet" href="/css/main.css?v=3.5.0">
+  <link rel="stylesheet" href="/css/components.css?v=3.5.0">
+  <link rel="stylesheet" href="/css/coupon.css?v=3.5.0">
 
   <!-- Critical Coupons & Team Logos Styles -->
   <style id="coupons-critical-css">
@@ -169,6 +169,9 @@
 
       <!-- Общий кубок: этапы, линия и сетка (режим лобби «🏆 Кубок») -->
       <div id="cup-view-container" style="display: none;"></div>
+
+      <!-- Долгосрочные рынки: чемпионы, кубки, бомбардиры (режим «📈 Долгосрочные») -->
+      <div id="outrights-view-container" style="display: none;"></div>
 
       <!-- Match Cards List -->
       <div id="matches-list-container">
@@ -580,6 +583,6 @@
 
 
   <!-- Main JavaScript App with cache-busting -->
-  <script type="module" src="/js/app.js?v=3.4.5"></script>
+  <script type="module" src="/js/app.js?v=3.5.0"></script>
 </body>
 </html>

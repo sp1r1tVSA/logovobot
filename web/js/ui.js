@@ -528,16 +528,21 @@ export class UIRenderer {
       { id: 5, name: 'Дивизион 5' }
     ];
 
-    // Чип кубка есть только в лобби: турнирные таблицы кубка не показывают.
+    // Чипы кубка и долгосрочных есть только в лобби: турнирные таблицы их не показывают.
     const isCup = lobbyMode === 'cup';
+    const isOutrights = lobbyMode === 'outrights';
+    const isLeague = !isCup && !isOutrights;
     const cupChip = lobbyMode !== null ? `
       <button class="division-tab-btn cup-tab-btn ${isCup ? 'active' : ''}" data-cup-tab="1">
         🏆 Кубок
       </button>
+      <button class="division-tab-btn outright-tab-btn ${isOutrights ? 'active' : ''}" data-outright-tab="1">
+        📈 Долгосрочные
+      </button>
     ` : '';
 
     container.innerHTML = cupChip + divs.map(d => `
-      <button class="division-tab-btn ${!isCup && d.id === selectedDivisionId ? 'active' : ''}" 
+      <button class="division-tab-btn ${isLeague && d.id === selectedDivisionId ? 'active' : ''}" 
               data-division-id="${d.id}">
         🛡️ ${d.name || `Дивизион ${d.id}`}
       </button>
@@ -718,16 +723,18 @@ export class UIRenderer {
             </div>`;
   }
 
-  /** Лобби в режиме кубка прячет линию дивизиона и хабы лиги. */
+  /** Лобби в режиме кубка или долгосрочных прячет линию дивизиона и хабы лиги. */
   static renderLobbyMode(mode) {
-    const isCup = mode === 'cup';
+    const isLeague = mode !== 'cup' && mode !== 'outrights';
     ['matches-list-container', 'hot-matches-container', 'odds-movers-container', 'recommendations-container']
       .forEach(id => {
         const el = document.getElementById(id);
-        if (el) el.style.display = isCup ? 'none' : '';
+        if (el) el.style.display = isLeague ? '' : 'none';
       });
     const cupEl = document.getElementById('cup-view-container');
-    if (cupEl) cupEl.style.display = isCup ? '' : 'none';
+    if (cupEl) cupEl.style.display = mode === 'cup' ? '' : 'none';
+    const outEl = document.getElementById('outrights-view-container');
+    if (outEl) outEl.style.display = mode === 'outrights' ? '' : 'none';
   }
 
   /**
