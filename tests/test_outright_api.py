@@ -385,6 +385,137 @@ class TestPanel(OutrightApiCase):
         self.assertTrue(any(r["action"] == "outright_refresh"
                             for r in database.get_betting_audit_log(entity_type="outright_market")))
 
+    # ─── фрибеты (награда за достижения) ───
+    # `place_outright_bet(freebet_id=...)` не проведён через HTTP API — Mini App
+    # ещё не собирает купон по фрибету, поэтому ставка кладётся напрямую в БД,
+    # а расчёт/аннулирование идут как обычно через панель.
+
+    async def test_freebet_bet_does_not_touch_wallet_balance(self):
+        market = self._winner_market()
+        win_sel = market["selections"][0]
+        freebet_id, freebet_amount = self._grant_freebet()
+        before = database.get_wallet_balance(BETTOR)
+        ok, bet = database.place_outright_bet(BETTOR, win_sel["id"], None, win_sel["odds_value"],
+                                              uuid.uuid4().hex, freebet_id)
+        self.assertTrue(ok, bet)
+        self.assertEqual(bet["freebet_id"], freebet_id)
+        self.assertEqual(database.get_wallet_balance(BETTOR), before)
+        expected_win = int(round(freebet_amount * (win_sel["odds_value"] - 1)))
+        self.assertEqual(bet["potential_win"], expected_win)
+        with database.transaction() as conn:
+            row = conn.execute("SELECT status FROM user_freebets WHERE id = ?", (freebet_id,)).fetchone()
+        self.assertEqual(row["status"], "used")
+
+    async def test_freebet_win_pays_net_winnings_only(self):
+        market = self._winner_market()
+        win_sel = market["selections"][0]
+        freebet_id, freebet_amount = self._grant_freebet()
+        before = database.get_wallet_balance(BETTOR)
+        ok, bet = database.place_outright_bet(BETTOR, win_sel["id"], None, win_sel["odds_value"],
+                                              uuid.uuid4().hex, freebet_id)
+        self.assertTrue(ok, bet)
+
+        path = f"/api/admin/panel/outrights/{market['id']}/action"
+        status, body = await self._call("POST", path, ADMIN, {"action": "settle", "winners": [win_sel["id"]],
+                                                              "confirm": True})
+        self.assertEqual(status, 200, body)
+        expected_payout = int(round(freebet_amount * (win_sel["odds_value"] - 1)))
+        self.assertEqual(database.get_wallet_balance(BETTOR), before + expected_payout)
+
+        notice = self._notice_bodies()[f"obet_{bet['bet_id']}"]
+        self.assertIn("выиграла", notice)
+        self.assertIn("номинал фрибета не возвращается", notice)
+        with database.transaction() as conn:
+            row = conn.execute("SELECT status, actual_payout FROM outright_bets WHERE id = ?",
+                               (bet["bet_id"],)).fetchone()
+        self.assertEqual(row["status"], "won")
+        self.assertEqual(row["actual_payout"], expected_payout)
+
+    async def test_freebet_loss_does_not_touch_balance_or_restore_the_freebet(self):
+        market = self._winner_market()
+        win_sel, lose_sel = market["selections"][0], market["selections"][1]
+        freebet_id, _ = self._grant_freebet()
+        ok, bet = database.place_outright_bet(BETTOR, lose_sel["id"], None, lose_sel["odds_value"],
+                                              uuid.uuid4().hex, freebet_id)
+        self.assertTrue(ok, bet)
+        before = database.get_wallet_balance(BETTOR)
+
+        path = f"/api/admin/panel/outrights/{market['id']}/action"
+        status, body = await self._call("POST", path, ADMIN, {"action": "settle", "winners": [win_sel["id"]],
+                                                              "confirm": True})
+        self.assertEqual(status, 200, body)
+        self.assertEqual(database.get_wallet_balance(BETTOR), before)
+        with database.transaction() as conn:
+            row = conn.execute("SELECT status FROM user_freebets WHERE id = ?", (freebet_id,)).fetchone()
+        self.assertEqual(row["status"], "used")  # проигрыш фрибет не возвращает
+        self.assertIn("Фрибет сгорел", self._notice_bodies()[f"obet_{bet['bet_id']}"])
+
+    async def test_freebet_void_restores_it_instead_of_paying_coins(self):
+        market = self._winner_market()
+        sel = market["selections"][0]
+        freebet_id, _ = self._grant_freebet()
+        ok, bet = database.place_outright_bet(BETTOR, sel["id"], None, sel["odds_value"],
+                                              uuid.uuid4().hex, freebet_id)
+        self.assertTrue(ok, bet)
+        before = database.get_wallet_balance(BETTOR)
+
+        path = f"/api/admin/panel/outrights/{market['id']}/action"
+        status, _ = await self._call("POST", path, ADMIN, {"action": "void", "reason": "тест фрибета",
+                                                           "confirm": True})
+        self.assertEqual(status, 200)
+        self.assertEqual(database.get_wallet_balance(BETTOR), before)  # монеты не списывались — нечего возвращать
+        with database.transaction() as conn:
+            row = conn.execute("SELECT uf.status AS status, ob.actual_payout AS actual_payout "
+                               "FROM user_freebets uf "
+                               "JOIN outright_bets ob ON ob.freebet_id = uf.id "
+                               "WHERE uf.id = ?", (freebet_id,)).fetchone()
+        self.assertEqual(row["status"], "available")
+        self.assertEqual(row["actual_payout"], 0)
+        self.assertIn("Фрибет возвращён", self._notices()[f"obet_{bet['bet_id']}"])
+
+    def test_freebet_cannot_be_used_twice(self):
+        freebet_id, _ = self._grant_freebet()
+        sel = self._winner_market()["selections"][0]
+        ok, _ = database.place_outright_bet(BETTOR, sel["id"], None, sel["odds_value"], uuid.uuid4().hex, freebet_id)
+        self.assertTrue(ok)
+        ok2, err2 = database.place_outright_bet(BETTOR, sel["id"], None, sel["odds_value"],
+                                                uuid.uuid4().hex, freebet_id)
+        self.assertFalse(ok2)
+        self.assertEqual(err2["error"], "FREEBET_UNAVAILABLE")
+
+    def test_freebet_idempotency_key_matches_and_conflicts_on_a_different_freebet(self):
+        freebet_id, _ = self._grant_freebet()
+        sel = self._winner_market()["selections"][0]
+        key = uuid.uuid4().hex
+        ok, first = database.place_outright_bet(BETTOR, sel["id"], None, sel["odds_value"], key, freebet_id)
+        self.assertTrue(ok, first)
+        ok2, second = database.place_outright_bet(BETTOR, sel["id"], None, sel["odds_value"], key, freebet_id)
+        self.assertTrue(ok2)
+        self.assertTrue(second.get("duplicate"))
+        self.assertEqual(second["bet_id"], first["bet_id"])
+
+        other_freebet_id, _ = self._grant_freebet("ACH_VALUE_HUNTER")
+        ok3, third = database.place_outright_bet(BETTOR, sel["id"], None, sel["odds_value"], key, other_freebet_id)
+        self.assertFalse(ok3)
+        self.assertEqual(third["error"], "IDEMPOTENCY_KEY_REUSED")
+
+    def _grant_freebet(self, achievement_id: str = "ACH_POSITIVE_ROI") -> tuple:
+        """Разблокировать и забрать достижение с фрибетом, вернуть (freebet_id, amount)."""
+        with database.transaction() as conn:
+            conn.execute("DELETE FROM user_achievements WHERE user_id = ? AND achievement_id = ?",
+                        (BETTOR, achievement_id))
+        self.assertTrue(database.unlock_achievement(BETTOR, achievement_id))
+        ok, msg, info = database.claim_achievement_reward(BETTOR, achievement_id)
+        self.assertTrue(ok, msg)
+        self.assertGreater(info["freebet"], 0)
+        with database.transaction() as conn:
+            row = conn.execute(
+                "SELECT id, amount FROM user_freebets WHERE user_id = ? AND status = 'available' "
+                "ORDER BY id DESC LIMIT 1", (BETTOR,),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        return row["id"], row["amount"]
+
     # ─── helpers ───
 
     def _notice_rows(self) -> list:

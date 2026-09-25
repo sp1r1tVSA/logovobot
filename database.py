@@ -2301,6 +2301,9 @@ def init_db() -> None:
         # ─── 028: долгосрочные рынки — победители, бомбардиры, история цен ────
         _ensure_outrights(cursor)
 
+        # ─── 029: фрибеты — награда за достижения для долгосрочных ставок ─────
+        _ensure_freebets(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -14492,43 +14495,52 @@ def seed_gamification_catalog(cursor) -> None:
 
     `is_active = 1` проставляется здесь: снятые с вооружения достижения в этом
     списке просто отсутствуют, и миграция 016 гасит их флагом, не удаляя строку.
+
+    `reward_freebet` (миграция 029) — не альтернатива монетам, а отдельный бонус
+    поверх них: разовая бесплатная ставка на outright (`user_freebets`, тратится
+    только через `outright_bets.freebet_id`, выигрыш платит чистую прибыль без
+    возврата номинала). Даётся только достижениям уровня skill/parlays/seasonal
+    — там, где награда празднует именно мастерство прогнозирования, а не факт
+    участия — и масштабируется по редкости независимо от монетной шкалы: rare
+    250, epic 500, legendary 1000.
     """
     achievements = [
-        ("ACH_FIRST_BET", "🐺 Первый шаг", "Сделать свой первый прогноз", "general", "common", 75, 150, "🎯"),
-        ("ACH_FIRST_WIN", "🏆 Первая кровь", "Выиграть свой первый прогноз", "general", "common", 125, 250, "⚔️"),
-        ("ACH_STREAK_3", "🔥 В ударе", "Оформить серию из 3 побед подряд", "streaks", "common", 150, 300, "🔥"),
-        ("ACH_STREAK_5", "🎯 Снайпер", "Оформить серию из 5 побед подряд", "streaks", "rare", 300, 700, "🎯"),
-        ("ACH_STREAK_10", "👑 Непобедимый", "Оформить серию из 10 побед подряд", "streaks", "legendary", 1200, 3000, "👑"),
-        ("ACH_EXPRESS_3", "🚂 Экспресс-старт", "Собрать экспресс из 3+ событий", "parlays", "common", 100, 200, "🚂"),
-        ("ACH_EXPRESS_ODD_5", "💥 Множитель x5", "Выиграть экспресс с коэффициентом 5.0+", "parlays", "rare", 250, 600, "💥"),
-        ("ACH_EXPRESS_ODD_15", "🚀 Ракета x15", "Выиграть экспресс с коэффициентом 15.0+", "parlays", "epic", 600, 1500, "🚀"),
-        ("ACH_EXPRESS_ODD_50", "🌌 Космос x50", "Выиграть экспресс с коэффициентом 50.0+", "parlays", "legendary", 1500, 4000, "🌌"),
-        ("ACH_UNDERDOG", "🐺 Гроза Фаворитов", "Выиграть ординар с коэффициентом 3.5+", "odds", "rare", 200, 500, "⚡"),
-        ("ACH_TOTAL_10_BETS", "📊 Любитель", "Сделать 10 любых прогнозов", "volume", "common", 100, 250, "📊"),
-        ("ACH_TOTAL_50_BETS", "🏅 Регуляр", "Сделать 50 любых прогнозов", "volume", "rare", 300, 750, "🏅"),
-        ("ACH_TOTAL_100_BETS", "💯 Центурион", "Сделать 100 любых прогнозов", "volume", "epic", 600, 1500, "💯"),
-        ("ACH_COIN_MILLIONAIRE", "💰 Мешок Монет", "Накопить 25 000 🪙 на балансе", "wealth", "epic", 500, 1000, "💰"),
-        ("ACH_COIN_TYCOON", "🏦 Олигарх Логова", "Накопить 100 000 🪙 на балансе", "wealth", "legendary", 1000, 2500, "🏦"),
-        ("ACH_LOGIN_3", "📅 Разминка", "Заходить в игру 3 дня подряд", "loyalty", "common", 100, 250, "📅"),
-        ("ACH_LOGIN_7", "🔥 Неделя в строю", "Заходить в игру 7 дней подряд", "loyalty", "rare", 250, 600, "🔥"),
-        ("ACH_LOGIN_30", "🐺 Вожак Стаи", "Заходить в игру 30 дней подряд", "loyalty", "legendary", 1200, 3000, "🐺"),
-        ("ACH_TB_SPECIALIST", "⚽ Голевой Маньяк", "Выиграть 5 прогнозов на Тотал Больше 2.5", "markets", "rare", 200, 500, "⚽"),
-        ("ACH_BTTS_MASTER", "🤝 Обе Забьют", "Выиграть 5 прогнозов на Обе Забьют", "markets", "rare", 200, 500, "🤝"),
+        ("ACH_FIRST_BET", "🐺 Первый шаг", "Сделать свой первый прогноз", "general", "common", 75, 150, "🎯", 0),
+        ("ACH_FIRST_WIN", "🏆 Первая кровь", "Выиграть свой первый прогноз", "general", "common", 125, 250, "⚔️", 0),
+        ("ACH_STREAK_3", "🔥 В ударе", "Оформить серию из 3 побед подряд", "streaks", "common", 150, 300, "🔥", 0),
+        ("ACH_STREAK_5", "🎯 Снайпер", "Оформить серию из 5 побед подряд", "streaks", "rare", 300, 700, "🎯", 0),
+        ("ACH_STREAK_10", "👑 Непобедимый", "Оформить серию из 10 побед подряд", "streaks", "legendary", 1200, 3000, "👑", 0),
+        ("ACH_EXPRESS_3", "🚂 Экспресс-старт", "Собрать экспресс из 3+ событий", "parlays", "common", 100, 200, "🚂", 0),
+        ("ACH_EXPRESS_ODD_5", "💥 Множитель x5", "Выиграть экспресс с коэффициентом 5.0+", "parlays", "rare", 250, 600, "💥", 250),
+        ("ACH_EXPRESS_ODD_15", "🚀 Ракета x15", "Выиграть экспресс с коэффициентом 15.0+", "parlays", "epic", 600, 1500, "🚀", 500),
+        ("ACH_EXPRESS_ODD_50", "🌌 Космос x50", "Выиграть экспресс с коэффициентом 50.0+", "parlays", "legendary", 1500, 4000, "🌌", 1000),
+        ("ACH_UNDERDOG", "🐺 Гроза Фаворитов", "Выиграть ординар с коэффициентом 3.5+", "odds", "rare", 200, 500, "⚡", 0),
+        ("ACH_TOTAL_10_BETS", "📊 Любитель", "Сделать 10 любых прогнозов", "volume", "common", 100, 250, "📊", 0),
+        ("ACH_TOTAL_50_BETS", "🏅 Регуляр", "Сделать 50 любых прогнозов", "volume", "rare", 300, 750, "🏅", 0),
+        ("ACH_TOTAL_100_BETS", "💯 Центурион", "Сделать 100 любых прогнозов", "volume", "epic", 600, 1500, "💯", 0),
+        ("ACH_COIN_MILLIONAIRE", "💰 Мешок Монет", "Накопить 25 000 🪙 на балансе", "wealth", "epic", 500, 1000, "💰", 0),
+        ("ACH_COIN_TYCOON", "🏦 Олигарх Логова", "Накопить 100 000 🪙 на балансе", "wealth", "legendary", 1000, 2500, "🏦", 0),
+        ("ACH_LOGIN_3", "📅 Разминка", "Заходить в игру 3 дня подряд", "loyalty", "common", 100, 250, "📅", 0),
+        ("ACH_LOGIN_7", "🔥 Неделя в строю", "Заходить в игру 7 дней подряд", "loyalty", "rare", 250, 600, "🔥", 0),
+        ("ACH_LOGIN_30", "🐺 Вожак Стаи", "Заходить в игру 30 дней подряд", "loyalty", "legendary", 1200, 3000, "🐺", 0),
+        ("ACH_TB_SPECIALIST", "⚽ Голевой Маньяк", "Выиграть 5 прогнозов на Тотал Больше 2.5", "markets", "rare", 200, 500, "⚽", 0),
+        ("ACH_BTTS_MASTER", "🤝 Обе Забьют", "Выиграть 5 прогнозов на Обе Забьют", "markets", "rare", 200, 500, "🤝", 0),
         # Phase 10 Competitive & Seasonal Achievements
-        ("ACH_10_WINS", "🎯 10 Побед", "Выиграть 10 любых прогнозов", "volume", "common", 150, 300, "🎯"),
-        ("ACH_50_WINS", "🏆 50 Побед", "Выиграть 50 любых прогнозов", "volume", "rare", 400, 1000, "🏆"),
-        ("ACH_100_WINS", "👑 100 Побед", "Выиграть 100 любых прогнозов", "volume", "legendary", 1200, 3000, "👑"),
-        ("ACH_POSITIVE_ROI", "📈 В Плюсе", "Достичь положительного ROI при 10+ прогнозах", "skill", "rare", 300, 700, "📈"),
-        ("ACH_VALUE_HUNTER", "💎 Охотник за Валуем", "Выиграть 5 валуйных прогнозов с перевесом", "skill", "epic", 500, 1200, "💎"),
-        ("ACH_NO_LOSS_STREAK", "🛡 Без Поражений", "Оформить серию из 7 побед подряд без поражений", "streaks", "epic", 600, 1500, "🛡"),
-        ("ACH_SEASON_TOP_10", "🌟 Топ-10 Сезона", "Завершить сезон в топ-10 своего дивизиона", "seasonal", "epic", 600, 1500, "🌟"),
-        ("ACH_SEASON_CHAMPION", "🥇 Чемпион Сезона", "Занять 1-е место в дивизионе по итогам сезона", "seasonal", "legendary", 2000, 5000, "🥇"),
-        ("ACH_PROMOTED", "🚀 Повышение в Классе", "Заработать повышение в высший дивизион", "seasonal", "rare", 400, 1000, "🚀")
+        ("ACH_10_WINS", "🎯 10 Побед", "Выиграть 10 любых прогнозов", "volume", "common", 150, 300, "🎯", 0),
+        ("ACH_50_WINS", "🏆 50 Побед", "Выиграть 50 любых прогнозов", "volume", "rare", 400, 1000, "🏆", 0),
+        ("ACH_100_WINS", "👑 100 Побед", "Выиграть 100 любых прогнозов", "volume", "legendary", 1200, 3000, "👑", 0),
+        ("ACH_POSITIVE_ROI", "📈 В Плюсе", "Достичь положительного ROI при 10+ прогнозах", "skill", "rare", 300, 700, "📈", 250),
+        ("ACH_VALUE_HUNTER", "💎 Охотник за Валуем", "Выиграть 5 валуйных прогнозов с перевесом", "skill", "epic", 500, 1200, "💎", 500),
+        ("ACH_NO_LOSS_STREAK", "🛡 Без Поражений", "Оформить серию из 7 побед подряд без поражений", "streaks", "epic", 600, 1500, "🛡", 0),
+        ("ACH_SEASON_TOP_10", "🌟 Топ-10 Сезона", "Завершить сезон в топ-10 своего дивизиона", "seasonal", "epic", 600, 1500, "🌟", 500),
+        ("ACH_SEASON_CHAMPION", "🥇 Чемпион Сезона", "Занять 1-е место в дивизионе по итогам сезона", "seasonal", "legendary", 2000, 5000, "🥇", 1000),
+        ("ACH_PROMOTED", "🚀 Повышение в Классе", "Заработать повышение в высший дивизион", "seasonal", "rare", 400, 1000, "🚀", 250)
     ]
     for ach in achievements:
         cursor.execute("""
-            INSERT INTO achievements_catalog (id, name, description, category, rarity, reward_xp, reward_coins, badge_icon, is_active)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+            INSERT INTO achievements_catalog
+                (id, name, description, category, rarity, reward_xp, reward_coins, badge_icon, reward_freebet, is_active)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1)
             ON CONFLICT(id) DO UPDATE SET
                 name = excluded.name,
                 description = excluded.description,
@@ -14537,6 +14549,7 @@ def seed_gamification_catalog(cursor) -> None:
                 reward_xp = excluded.reward_xp,
                 reward_coins = excluded.reward_coins,
                 badge_icon = excluded.badge_icon,
+                reward_freebet = excluded.reward_freebet,
                 is_active = 1
         """, ach)
 
@@ -14776,7 +14789,7 @@ def claim_achievement_reward(user_id: int, achievement_id: str) -> tuple[bool, s
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute("""
-            SELECT ua.id, ua.is_claimed, ac.reward_xp, ac.reward_coins, ac.name
+            SELECT ua.id, ua.is_claimed, ac.reward_xp, ac.reward_coins, ac.reward_freebet, ac.name
             FROM user_achievements ua
             JOIN achievements_catalog ac ON ua.achievement_id = ac.id
             WHERE ua.user_id = ? AND ua.achievement_id = ?
@@ -14796,9 +14809,21 @@ def claim_achievement_reward(user_id: int, achievement_id: str) -> tuple[bool, s
         xp_res = add_user_xp(user_id, row["reward_xp"])
         add_coins(user_id, row["reward_coins"], tx_type="achievement_reward")
 
-        return True, f"🏆 Достижение получено: +{row['reward_coins']} 🪙 и +{row['reward_xp']} XP!", {
+        freebet_amount = row["reward_freebet"] or 0
+        if freebet_amount > 0:
+            cursor.execute("""
+                INSERT INTO user_freebets (user_id, amount, status, source, source_id)
+                VALUES (?, ?, 'available', 'achievement', ?)
+            """, (user_id, freebet_amount, achievement_id))
+
+        message = f"🏆 Достижение получено: +{row['reward_coins']} 🪙 и +{row['reward_xp']} XP!"
+        if freebet_amount > 0:
+            message += f" +фрибет {freebet_amount} 🪙 на долгосрочные ставки!"
+
+        return True, message, {
             "coins": row["reward_coins"],
             "xp": row["reward_xp"],
+            "freebet": freebet_amount,
             "progression": xp_res
         }
 
@@ -17416,6 +17441,7 @@ def delete_draft(draft_uuid: str) -> None:
 # (`DEFAULT_MAX_OPEN_BETS`) она не занимает.
 
 MIGRATION_028_OUTRIGHTS = "028_outright_markets"
+MIGRATION_029_FREEBETS = "029_freebets"
 OUTRIGHT_MARKET_TYPES = ("division_winner", "cup_winner", "division_top_scorer", "league_top_scorer")
 OUTRIGHT_OTHER_KEY = "__other__"
 MAX_OPEN_OUTRIGHT_BETS = 20
@@ -17514,6 +17540,41 @@ def _ensure_outrights(cursor: sqlite3.Cursor) -> None:
     cursor.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
         (MIGRATION_028_OUTRIGHTS, "outright markets: division/cup winner, top scorers, odds history"),
+    )
+
+
+def _ensure_freebets(cursor: sqlite3.Cursor) -> None:
+    """Миграция 029: фрибеты — награда за достижения, разовая ставка на outright.
+
+    Фрибет тратится только на долгосрочные ставки (`outright_bets.freebet_id`,
+    уже заведённая в миграции 028): баланс не списывается, выигрыш платит
+    только чистую прибыль (сама сумма фрибета не возвращается), а при
+    аннулировании рынка фрибет возвращается в `available` — конвертировать его
+    обратно в монеты нельзя, они никогда и не списывались.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_freebets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'available'
+                CHECK(status IN ('available', 'used', 'cancelled')),
+            source TEXT NOT NULL,
+            source_id TEXT,
+            granted_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+            used_at TIMESTAMP
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_user_freebets_user ON user_freebets(user_id, status)")
+
+    try:
+        cursor.execute("ALTER TABLE achievements_catalog ADD COLUMN reward_freebet INTEGER NOT NULL DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass  # Column already exists
+
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_029_FREEBETS, "freebets: user_freebets table + achievements_catalog.reward_freebet"),
     )
 
 
@@ -17969,12 +18030,20 @@ def place_outright_bet(
     amount,
     client_odd: float | None = None,
     idempotency_key: str | None = None,
+    freebet_id: int | None = None,
 ) -> tuple[bool, dict]:
     """Ординар на исход долгосрочного рынка.
 
     Порядок проверок как у купона: блокировка → запрет/остановка → доступ
     тренера → рынок открыт и цена свежая → коэффициент клиента → лимиты →
     списание. Всё, что не удалось проверить, — отказ (fail-closed).
+
+    `freebet_id` заменяет обычное списание баланса: сумма берётся из самого
+    фрибета (`user_freebets.amount`), переданный `amount` при этом игнорируется,
+    а выигрыш на расчёте платит только чистую прибыль — номинал фрибета не
+    возвращается (`settle_outright_market`). Фрибет помечается использованным
+    атомарно в этой же транзакции, гонка с повторным использованием исключена
+    условием `status = 'available'` в UPDATE.
     """
     try:
         from config import is_global_lockdown_enabled
@@ -17986,12 +18055,18 @@ def place_outright_bet(
         logger.exception("Lockdown check failed for outright bet of user_id=%s; bet rejected", user_id)
         return False, {"error": "BETTING_UNAVAILABLE", "message": "Приём ставок временно недоступен."}
 
-    try:
-        if isinstance(amount, bool) or (isinstance(amount, float) and not amount.is_integer()):
-            raise ValueError
-        amount = int(amount)
-    except (ValueError, TypeError):
-        return False, {"error": "INVALID_AMOUNT", "message": "Сумма ставки должна быть целым числом."}
+    if freebet_id is not None:
+        try:
+            freebet_id = int(freebet_id)
+        except (ValueError, TypeError):
+            return False, {"error": "INVALID_FREEBET", "message": "Некорректный фрибет."}
+    else:
+        try:
+            if isinstance(amount, bool) or (isinstance(amount, float) and not amount.is_integer()):
+                raise ValueError
+            amount = int(amount)
+        except (ValueError, TypeError):
+            return False, {"error": "INVALID_AMOUNT", "message": "Сумма ставки должна быть целым числом."}
     try:
         selection_id = int(selection_id)
     except (ValueError, TypeError):
@@ -18000,19 +18075,39 @@ def place_outright_bet(
     with _bet_placement_lock, transaction() as conn:
         cursor = conn.cursor()
 
+        freebet = None
+        if freebet_id is not None:
+            cursor.execute(
+                "SELECT id, amount, status FROM user_freebets WHERE id = ? AND user_id = ?",
+                (freebet_id, user_id),
+            )
+            freebet = cursor.fetchone()
+            if not freebet:
+                return False, {"error": "FREEBET_UNAVAILABLE",
+                               "message": "Фрибет недоступен или уже использован."}
+            amount = int(freebet["amount"])
+
         if idempotency_key:
             cursor.execute(
-                "SELECT id, selection_id, amount, odd, potential_win FROM outright_bets "
+                "SELECT id, selection_id, amount, odd, potential_win, freebet_id FROM outright_bets "
                 "WHERE user_id = ? AND idempotency_key = ?",
                 (user_id, idempotency_key),
             )
             prev = cursor.fetchone()
             if prev:
-                if prev["selection_id"] != selection_id or prev["amount"] != amount:
+                if (prev["selection_id"] != selection_id or prev["amount"] != amount
+                        or prev["freebet_id"] != freebet_id):
                     return False, {"error": "IDEMPOTENCY_KEY_REUSED",
                                    "message": "Ключ идемпотентности уже использован для другой ставки."}
                 return True, {"bet_id": prev["id"], "odd": prev["odd"],
                               "potential_win": prev["potential_win"], "duplicate": True}
+
+        # Свежесть проверяем только для новой ставки — повтор того же ключа
+        # (в т.ч. по фрибету, который эта самая ставка уже пометила использованным)
+        # обработан выше и сюда не доходит.
+        if freebet is not None and freebet["status"] != "available":
+            return False, {"error": "FREEBET_UNAVAILABLE",
+                           "message": "Фрибет недоступен или уже использован."}
 
         cursor.execute("""
             SELECT s.*, m.market_type, m.season_id, m.division_id AS market_division_id,
@@ -18085,14 +18180,17 @@ def place_outright_bet(
             return False, {"error": "RISK_CHECK_UNAVAILABLE",
                            "message": "Не удалось проверить ставку. Ставка не принята, монеты не списаны."}
 
-        if amount < min_bet:
-            return False, {"error": "MIN_STAKE", "min_bet": min_bet,
-                           "message": f"Минимальная сумма ставки — {min_bet} 🪙."}
-        if amount > max_bet:
-            return False, {"error": "MAX_BET_EXCEEDED", "max_bet": max_bet,
-                           "message": f"Максимальная сумма ставки — {max_bet:,} 🪙."}
+        if freebet_id is None:
+            if amount < min_bet:
+                return False, {"error": "MIN_STAKE", "min_bet": min_bet,
+                               "message": f"Минимальная сумма ставки — {min_bet} 🪙."}
+            if amount > max_bet:
+                return False, {"error": "MAX_BET_EXCEEDED", "max_bet": max_bet,
+                               "message": f"Максимальная сумма ставки — {max_bet:,} 🪙."}
 
-        potential_win = int(round(amount * odd))
+        # Фрибет платит только чистую прибыль — номинал не возвращается вместе
+        # с выигрышем (settle_outright_market использует ту же формулу).
+        potential_win = int(round(amount * (odd - 1))) if freebet_id is not None else int(round(amount * odd))
         cursor.execute(
             "SELECT COALESCE(SUM(potential_win), 0) FROM outright_bets "
             "WHERE user_id = ? AND selection_id = ? AND status = 'pending'",
@@ -18114,33 +18212,45 @@ def place_outright_bet(
                            "message": f"Открытых долгосрочных ставок — не больше {MAX_OPEN_OUTRIGHT_BETS}."}
 
         get_or_create_wallet(user_id)
-        cursor.execute("""
-            UPDATE user_wallets
-            SET balance = balance - ?, total_wagered = total_wagered + ?, bets_count = bets_count + 1,
-                updated_at = datetime('now', '+3 hours')
-            WHERE user_id = ? AND balance >= ?
-        """, (amount, amount, user_id, amount))
-        if cursor.rowcount == 0:
-            cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
-            bal = cursor.fetchone()
-            return False, {"error": "INSUFFICIENT_BALANCE",
-                           "message": f"Недостаточно монет на балансе (Баланс: {bal['balance'] if bal else 0} 🪙)."}
+        if freebet_id is not None:
+            cursor.execute("""
+                UPDATE user_freebets SET status = 'used', used_at = datetime('now', '+3 hours')
+                WHERE id = ? AND user_id = ? AND status = 'available'
+            """, (freebet_id, user_id))
+            if cursor.rowcount == 0:
+                return False, {"error": "FREEBET_UNAVAILABLE",
+                               "message": "Фрибет недоступен или уже использован."}
+        else:
+            cursor.execute("""
+                UPDATE user_wallets
+                SET balance = balance - ?, total_wagered = total_wagered + ?, bets_count = bets_count + 1,
+                    updated_at = datetime('now', '+3 hours')
+                WHERE user_id = ? AND balance >= ?
+            """, (amount, amount, user_id, amount))
+            if cursor.rowcount == 0:
+                cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+                bal = cursor.fetchone()
+                return False, {"error": "INSUFFICIENT_BALANCE",
+                               "message": f"Недостаточно монет на балансе (Баланс: {bal['balance'] if bal else 0} 🪙)."}
 
         cursor.execute("""
             INSERT INTO outright_bets
-                (user_id, market_id, selection_id, amount, odd, potential_win, status, idempotency_key, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, datetime('now', '+3 hours'))
-        """, (user_id, sel["market_id"], selection_id, amount, odd, potential_win, idempotency_key))
+                (user_id, market_id, selection_id, amount, odd, potential_win, status, freebet_id,
+                 idempotency_key, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, datetime('now', '+3 hours'))
+        """, (user_id, sel["market_id"], selection_id, amount, odd, potential_win, freebet_id, idempotency_key))
         bet_id = cursor.lastrowid
         cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
         balance = cursor.fetchone()["balance"]
-        cursor.execute("""
-            INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
-                                           balance_after, created_at)
-            VALUES (?, ?, 'outright_bet', ?, 'outright_bet', ?, datetime('now', '+3 hours'))
-        """, (user_id, -amount, bet_id, balance))
+        if freebet_id is None:
+            cursor.execute("""
+                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
+                                               balance_after, created_at)
+                VALUES (?, ?, 'outright_bet', ?, 'outright_bet', ?, datetime('now', '+3 hours'))
+            """, (user_id, -amount, bet_id, balance))
 
-    return True, {"bet_id": bet_id, "odd": odd, "potential_win": potential_win, "balance": balance}
+    return True, {"bet_id": bet_id, "odd": odd, "potential_win": potential_win, "balance": balance,
+                  "freebet_id": freebet_id}
 
 
 def get_user_outright_bets(user_id: int, limit: int = 100) -> list[dict]:
@@ -18216,14 +18326,23 @@ def _notify_outright(cursor, bet, status: str, payout: int, factor: float | None
     """Личное уведомление о расчёте долгосрочной ставки — в ту же очередь, что у купонов."""
     pick = (f"{html.escape(str(bet['market_title']))}: <b>{html.escape(str(bet['selection_name']))}</b>"
             f" @ {float(bet['odd']):.2f}")
+    is_freebet = bet["freebet_id"] is not None
     if status == "won":
         title = f"✅ Долгосрочная ставка выиграла: +{payout:,} 🪙"
         body = pick
+        if is_freebet:
+            body += "\nСтавка по фрибету — выплата чистой прибылью, номинал фрибета не возвращается."
         if factor is not None and factor < 1 - 1e-9:
             body += f"\nДелёж первого места — выплата по доле {factor:.0%}."
+    elif status == "freebet_refunded":
+        title = "↩️ Фрибет возвращён"
+        body = pick + "\nРынок аннулирован — фрибет снова доступен для новой ставки."
     elif status == "refunded":
         title = f"↩️ Долгосрочная ставка возвращена: {payout:,} 🪙"
         body = pick + "\nРынок аннулирован, ставка возвращена целиком."
+    elif is_freebet:
+        title = "❌ Ставка по фрибету не сыграла"
+        body = pick + "\nФрибет сгорел."
     else:
         title = f"❌ Долгосрочная ставка не сыграла: −{int(bet['amount']):,} 🪙"
         body = pick
@@ -18289,7 +18408,12 @@ def settle_outright_market(
                 _notify_outright(cursor, bet, "lost", 0, factor)
                 lost += 1
                 continue
-            payout = int(round(bet["amount"] * factor * float(bet["odd"])))
+            # Фрибет платит только чистую прибыль (см. place_outright_bet.potential_win) —
+            # номинал фрибета не входит в выплату.
+            if bet["freebet_id"] is not None:
+                payout = int(round(bet["amount"] * factor * (float(bet["odd"]) - 1)))
+            else:
+                payout = int(round(bet["amount"] * factor * float(bet["odd"])))
             cursor.execute(
                 "UPDATE outright_bets SET status = 'won', dead_heat_factor = ?, actual_payout = ?, "
                 "settled_at = datetime('now', '+3 hours') WHERE id = ?",
@@ -18328,13 +18452,22 @@ def void_outright_market(market_id: int, reason: str | None = None,
         """, (market_id,))
         refunded = 0
         for bet in cursor.fetchall():
+            is_freebet = bet["freebet_id"] is not None
             cursor.execute(
                 "UPDATE outright_bets SET status = 'refunded', actual_payout = ?, "
                 "settled_at = datetime('now', '+3 hours') WHERE id = ?",
-                (bet["amount"], bet["id"]),
+                (0 if is_freebet else bet["amount"], bet["id"]),
             )
-            _credit_outright(cursor, bet["user_id"], bet["amount"], "outright_refund", bet["id"], won=False)
-            _notify_outright(cursor, bet, "refunded", bet["amount"], None)
+            if is_freebet:
+                # Монеты не списывались — возвращать нечего, фрибет просто снова доступен.
+                cursor.execute(
+                    "UPDATE user_freebets SET status = 'available', used_at = NULL WHERE id = ?",
+                    (bet["freebet_id"],),
+                )
+                _notify_outright(cursor, bet, "freebet_refunded", 0, None)
+            else:
+                _credit_outright(cursor, bet["user_id"], bet["amount"], "outright_refund", bet["id"], won=False)
+                _notify_outright(cursor, bet, "refunded", bet["amount"], None)
             refunded += 1
         cursor.execute("""
             UPDATE outright_markets SET status = 'voided', void_reason = ?, settled_at = datetime('now', '+3 hours'),

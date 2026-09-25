@@ -52,6 +52,41 @@ class TestGamificationEngine(unittest.TestCase):
         self.assertTrue(success)
         self.assertGreater(reward["coins"], 0)
 
+    def test_claiming_a_skill_achievement_grants_a_freebet(self):
+        # Фрибеты (миграция 029) — награда только для достижений уровня
+        # skill/parlays/seasonal, отдельная от монет и XP.
+        with database.transaction() as conn:
+            conn.execute("DELETE FROM user_freebets WHERE user_id = ?", (self.user_id,))
+        database.unlock_achievement(self.user_id, "ACH_POSITIVE_ROI")
+        success, msg, reward = database.claim_achievement_reward(self.user_id, "ACH_POSITIVE_ROI")
+        self.assertTrue(success, msg)
+        self.assertEqual(reward["freebet"], 250)
+        self.assertIn("фрибет", msg.lower())
+
+        with database.transaction() as conn:
+            row = conn.execute(
+                "SELECT amount, status, source, source_id FROM user_freebets WHERE user_id = ?",
+                (self.user_id,),
+            ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["amount"], 250)
+        self.assertEqual(row["status"], "available")
+        self.assertEqual(row["source"], "achievement")
+        self.assertEqual(row["source_id"], "ACH_POSITIVE_ROI")
+
+    def test_claiming_an_achievement_without_a_freebet_grants_none(self):
+        with database.transaction() as conn:
+            conn.execute("DELETE FROM user_freebets WHERE user_id = ?", (self.user_id,))
+        database.unlock_achievement(self.user_id, "ACH_FIRST_BET")
+        success, _, reward = database.claim_achievement_reward(self.user_id, "ACH_FIRST_BET")
+        self.assertTrue(success)
+        self.assertEqual(reward["freebet"], 0)
+        with database.transaction() as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM user_freebets WHERE user_id = ?", (self.user_id,)
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
+
 
 class TestLoginStreakIsolation(unittest.TestCase):
     """
@@ -203,6 +238,17 @@ class TestAchievementsCatalog(unittest.TestCase):
         # заходов, иначе каталог печатает монеты быстрее самой игры.
         total = sum(a["reward_coins"] for a in self._active())
         self.assertLessEqual(total, 45_000)
+
+    def test_freebet_rewards_are_rare_and_scale_with_rarity(self):
+        # Фрибет — бонус поверх монет для skill/parlays/seasonal, не для каждого
+        # достижения, и его шкала (миграция 029) не завязана на монетную.
+        band = {"rare": 250, "epic": 500, "legendary": 1000}
+        active = self._active()
+        with_freebet = [a for a in active if a["reward_freebet"] > 0]
+        self.assertGreater(len(with_freebet), 0)
+        self.assertLess(len(with_freebet), len(active))
+        for a in with_freebet:
+            self.assertEqual(a["reward_freebet"], band.get(a["rarity"]), a["id"])
 
 
 if __name__ == "__main__":
