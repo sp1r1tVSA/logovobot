@@ -110,7 +110,7 @@ class TestLoginStreakIsolation(unittest.TestCase):
                 with database.transaction() as conn:
                     conn.execute("""
                         UPDATE user_progression
-                        SET last_active_date = date('now', '-1 day')
+                        SET last_active_date = date('now', '+3 hours', '-1 day')
                         WHERE user_id = ?
                     """, (self.user_id,))
 
