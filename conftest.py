@@ -42,6 +42,11 @@ os.environ.setdefault("TELEGRAM_BOT_TOKEN", "123456:ABC-DEF1234ghIkl-zyx57W2v1u1
 # диапазонов, которые тесты используют под обычных игроков.
 os.environ.setdefault("ADMIN_IDS", "990000001")
 
+# Срок приёма долгосрочных ставок — реальная дата, и после неё тесты outright
+# стали бы падать сами собой. Здесь срока нет; тесты срока подменяют
+# `config.OUTRIGHT_BETS_CLOSE_AT` сами.
+os.environ["OUTRIGHT_BETS_CLOSE_AT"] = ""
+
 import pytest  # noqa: E402  (must come after the env var above)
 
 

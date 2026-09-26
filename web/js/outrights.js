@@ -69,6 +69,19 @@ const shortDate = (t) => {
   const m = /(\d{4})-(\d{2})-(\d{2})/.exec(String(t || ''));
   return m ? `${m[3]}.${m[2]}` : '';
 };
+// Срок приёма: общий кубок закрывается с 1/4 финала, остальные рынки — к общей дате.
+const closingBanner = (m) => {
+  const stage = `${m.close_stage || '1/4'} финала`;
+  if (m.close_rule === 'cup_stage') {
+    return m.bets_closed
+      ? `<div class="ob-banner lock">⛔ Приём ставок на общий кубок закрыт — начался ${escapeHtml(stage)}</div>`
+      : `<div class="ob-banner">⏳ Ставки на общий кубок принимаются до начала ${escapeHtml(stage)}</div>`;
+  }
+  if (m.bets_closed) {
+    return `<div class="ob-banner lock">⛔ Приём долгосрочных ставок закрыт${m.bets_until ? ` ${escapeHtml(m.bets_until)} МСК` : ''}</div>`;
+  }
+  return m.bets_until ? `<div class="ob-banner">⏳ Ставки принимаются до ${escapeHtml(m.bets_until)} МСК</div>` : '';
+};
 
 class OutrightsView {
   constructor() {
@@ -253,9 +266,11 @@ class OutrightsView {
     } else if (m.status === 'suspended') {
       banner = `<div class="ob-banner">⏸ Приём ставок на рынок временно остановлен</div>`;
     }
-    if (m.locked) banner += `<div class="ob-banner lock">🔒 ${escapeHtml(m.locked)}</div>`;
+    const closed = !!m.bets_closed;
+    if (m.status === 'open') banner += closingBanner(m);
+    if (m.locked && !closed) banner += `<div class="ob-banner lock">🔒 ${escapeHtml(m.locked)}</div>`;
     const freebets = this.board?.freebets || [];
-    if (m.status === 'open' && !m.locked && freebets.length) {
+    if (m.status === 'open' && !closed && !m.locked && freebets.length) {
       banner += `<div class="ob-banner gift">🎁 ${freebets.length === 1 ? 'Есть фрибет' : `Фрибетов: ${freebets.length}`} на ${freebetTotal(freebets)} — выберите его в листе ставки</div>`;
     }
 
@@ -369,7 +384,7 @@ class OutrightsView {
   selectionRow(m, s, idx, isScorer, maxProb) {
     const done = ['eliminated', 'lost'].includes(s.status);
     const won = s.status === 'won';
-    const canBet = m.status === 'open' && s.status === 'active' && !s.locked;
+    const canBet = m.status === 'open' && s.status === 'active' && !s.locked && !m.bets_closed;
     const logo = s.team_name ? renderTeamLogoHtml(s.team_name, 26) : '<span class="ob-other-icon">＋</span>';
     const sub = isScorer && s.team_name && s.team_name !== s.name ? `<span class="ob-sel-sub">${escapeHtml(s.team_name)}</span>` : '';
     let tag = '';
@@ -384,8 +399,8 @@ class OutrightsView {
           <span class="ob-odd-val">${fmtOdd(s.odds)}</span>
         </button>`;
     } else {
-      const reason = s.locked || (done ? 'Исход разыгран' : 'Приём ставок закрыт');
-      button = `<span class="ob-odd locked" title="${escapeHtml(reason)}">${s.locked ? '🔒' : fmtOdd(s.odds)}</span>`;
+      const reason = (!m.bets_closed && s.locked) || (done ? 'Исход разыгран' : 'Приём ставок закрыт');
+      button = `<span class="ob-odd locked" title="${escapeHtml(reason)}">${s.locked && !m.bets_closed ? '🔒' : fmtOdd(s.odds)}</span>`;
     }
     const barPct = (Number(s.probability || 0) / maxProb) * 100;
     return `
@@ -710,7 +725,7 @@ class OutrightsView {
         this.loadBoard();
       } else {
         errorEl.textContent = err.message || 'Ставка не принята.';
-        if (['MARKET_SUSPENDED', 'OUTRIGHT_OWN_SCOPE', 'INVALID_SELECTION'].includes(code)) this.loadBoard();
+        if (['MARKET_SUSPENDED', 'OUTRIGHT_OWN_SCOPE', 'OUTRIGHT_BETTING_CLOSED', 'INVALID_SELECTION'].includes(code)) this.loadBoard();
         if (code === 'FREEBET_UNAVAILABLE') {
           // Фрибет уже потрачен в другой вкладке — убираем его из листа.
           await this.loadBoard();

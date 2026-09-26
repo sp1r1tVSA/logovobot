@@ -256,6 +256,77 @@ class TestPlacement(OutrightApiCase):
         self.assertEqual(status, 400)
 
 
+class TestDeadline(OutrightApiCase):
+    """Срок приёма `config.OUTRIGHT_BETS_CLOSE_AT`; conftest по умолчанию его снимает."""
+
+    async def asyncSetUp(self):
+        await super().asyncSetUp()
+        self._orig_close_at = config.OUTRIGHT_BETS_CLOSE_AT
+
+    async def asyncTearDown(self):
+        config.OUTRIGHT_BETS_CLOSE_AT = self._orig_close_at
+        await super().asyncTearDown()
+
+    async def test_without_a_deadline_the_board_has_none(self):
+        config.OUTRIGHT_BETS_CLOSE_AT = ""
+        status, body = await self._call("GET", "/api/outrights")
+        self.assertEqual(status, 200)
+        self.assertIsNone(body["bets_until"])
+        self.assertFalse(body["bets_closed"])
+
+    async def test_before_the_deadline_bets_are_accepted(self):
+        config.OUTRIGHT_BETS_CLOSE_AT = "2099-01-01 00:00:00"
+        status, body = await self._call("GET", "/api/outrights")
+        self.assertEqual(body["bets_until"], "01.01.2099 00:00")
+        self.assertEqual(body["bets_close_at"], "2099-01-01 00:00:00")
+        self.assertFalse(body["bets_closed"])
+        market = await self._board_market()
+        self.assertEqual(market["close_rule"], "deadline")
+        self.assertEqual(market["bets_until"], "01.01.2099 00:00")
+        self.assertFalse(market["bets_closed"])
+        status, body = await self._bet(self._winner_market()["selections"][0])
+        self.assertEqual(status, 200, body)
+
+    async def test_after_the_deadline_bets_are_refused(self):
+        config.OUTRIGHT_BETS_CLOSE_AT = "2000-01-01 00:00:00"
+        status, body = await self._call("GET", "/api/outrights")
+        self.assertTrue(body["bets_closed"])
+        self.assertTrue((await self._board_market())["bets_closed"])
+        before = database.get_wallet_balance(BETTOR)
+        status, body = await self._bet(self._winner_market()["selections"][0])
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["error"], database.OUTRIGHT_BETTING_CLOSED_ERROR)
+        self.assertEqual(database.get_wallet_balance(BETTOR), before)
+
+    async def test_freebet_is_refused_after_the_deadline_and_stays_available(self):
+        freebet_id, _ = self._grant_freebet()
+        config.OUTRIGHT_BETS_CLOSE_AT = "2000-01-01 00:00:00"
+        status, body = await self._bet(self._winner_market()["selections"][0], freebet_id=freebet_id)
+        self.assertEqual(status, 409, body)
+        self.assertIn(freebet_id, [f["id"] for f in database.get_user_freebets(BETTOR)])
+
+    async def test_retry_of_a_bet_accepted_before_the_deadline_returns_it(self):
+        config.OUTRIGHT_BETS_CLOSE_AT = "2099-01-01 00:00:00"
+        sel = self._winner_market()["selections"][0]
+        key = uuid.uuid4().hex
+        status, first = await self._bet(sel, idempotency_key=key)
+        self.assertEqual(status, 200, first)
+        config.OUTRIGHT_BETS_CLOSE_AT = "2000-01-01 00:00:00"
+        status, again = await self._bet(sel, idempotency_key=key)
+        self.assertEqual(status, 200, again)
+        self.assertEqual(again["bet_id"], first["bet_id"])
+        self.assertTrue(again["duplicate"])
+
+    async def test_malformed_deadline_closes_betting(self):
+        config.OUTRIGHT_BETS_CLOSE_AT = "не дата"
+        status, body = await self._call("GET", "/api/outrights")
+        self.assertEqual(status, 200)
+        self.assertTrue(body["bets_closed"])
+        status, body = await self._bet(self._winner_market()["selections"][0])
+        self.assertEqual(status, 409, body)
+        self.assertEqual(body["error"], database.OUTRIGHT_BETTING_CLOSED_ERROR)
+
+
 class TestFreebetApi(OutrightApiCase):
     async def asyncSetUp(self):
         await super().asyncSetUp()

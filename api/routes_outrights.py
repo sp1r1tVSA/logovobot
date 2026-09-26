@@ -16,9 +16,16 @@ api/routes_outrights.py
 Фрибет (`freebet_id`) заменяет ставку монетами: сумма берётся из самого
 фрибета, `amount` при этом игнорируется, баланс не трогается. Доступные
 фрибеты игрока приходят в `freebets` ответа `GET /api/outrights`.
+
+Приём ставок ограничен сроком: дивизионы, их кубки и бомбардиры — до
+`config.OUTRIGHT_BETS_CLOSE_AT` (по умолчанию 30.09.2026 18:00 МСК), общий кубок —
+до появления в сетке 1/4 финала. Каждый рынок доски несёт `close_rule` /
+`bets_until` / `bets_closed`, после срока ставка получает
+`OUTRIGHT_BETTING_CLOSED` (409). Линия и расчёт живут дальше.
 """
 
 import asyncio
+import datetime
 import logging
 
 from aiohttp import web
@@ -37,6 +44,7 @@ _ERROR_STATUS = {
     "ODDS_CHANGED": 409,
     database.OUTRIGHT_REPRICING_ERROR: 409,
     database.OUTRIGHT_OWN_SCOPE_ERROR: 403,
+    database.OUTRIGHT_BETTING_CLOSED_ERROR: 409,
     "LOGOVO_LOCKDOWN": 403,
     "BETTING_BANNED": 403,
     "BETTING_PAUSED": 403,
@@ -97,12 +105,36 @@ def _market_payload(market: dict, coach: dict | None) -> dict:
     }
 
 
+def _bets_deadline() -> dict:
+    """Общий срок приёма: момент закрытия («30.09.2026 18:00») и наступил ли он."""
+    try:
+        close_at = database.outright_bets_close_at()
+    except ValueError:
+        return {"bets_close_at": None, "bets_until": None, "bets_closed": True}
+    if close_at is None:
+        return {"bets_close_at": None, "bets_until": None, "bets_closed": False}
+    return {"bets_close_at": close_at.strftime("%Y-%m-%d %H:%M:%S"),
+            "bets_until": close_at.strftime("%d.%m.%Y %H:%M"),
+            "bets_closed": database.outright_betting_closed()}
+
+
+def _market_closing(market: dict, deadline: dict, cup_closed: bool) -> dict:
+    """Правило закрытия рынка: общий кубок — до 1/4 финала, остальные — по общему сроку."""
+    if database.is_general_cup_market(market):
+        return {"close_rule": "cup_stage", "close_stage": database.OUTRIGHT_GENERAL_CUP_CLOSE_STAGE,
+                "bets_until": None, "bets_closed": cup_closed}
+    return {"close_rule": "deadline" if deadline["bets_until"] else None, "close_stage": None,
+            "bets_until": deadline["bets_until"], "bets_closed": deadline["bets_closed"]}
+
+
 def _load_board(user_id: int) -> dict:
     markets = database.get_outright_markets()
     coach = database.get_outright_coach_scope(user_id)
     divisions = [{"id": d["id"], "name": d["name"]} for d in database.get_divisions()]
+    deadline = _bets_deadline()
+    cup_closed = database.is_general_cup_outright_closed()
     return {
-        "markets": [_market_payload(m, coach) for m in markets],
+        "markets": [{**_market_payload(m, coach), **_market_closing(m, deadline, cup_closed)} for m in markets],
         "divisions": divisions,
         "coach": coach,
         "open_bets": database.count_user_open_outright_bets(user_id),
@@ -110,6 +142,7 @@ def _load_board(user_id: int) -> dict:
         "min_bet": database.OUTRIGHT_MIN_BET,
         "freebets": [{k: f[k] for k in ("id", "amount", "source", "source_id", "source_name", "source_icon", "granted_at")}
                      for f in database.get_user_freebets(user_id)],
+        **deadline,
     }
 
 

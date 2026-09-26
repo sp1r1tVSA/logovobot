@@ -305,14 +305,17 @@ class TestSettlement(OutrightCase):
 class TestCupMarket(OutrightCase):
     def setUp(self):
         super().setUp()
-        database.create_cup_series("1/2", [(self.clubs[0], self.clubs[1]), (self.clubs[2], "Сельта Б")],
-                                   season_id=self.season)
+        # Полная 1/8: с 1/4 общий кубок закрыт для ставок, до неё — открыт.
+        others = config.DIVISION_CLUBS["DIV_3"][:12]
+        pairs = [(self.clubs[0], self.clubs[1]), (self.clubs[2], "Сельта Б")]
+        pairs += list(zip(others[::2], others[1::2]))
+        database.create_cup_series("1/8", pairs, season_id=self.season)
         outright_service.refresh_outrights()
         self.market = self._market("cup_winner", "CUP")
 
     def test_general_cup_market_covers_the_bracket(self):
         self.assertIsNotNone(self.market)
-        self.assertEqual(len(self.market["selections"]), 4)
+        self.assertEqual(len(self.market["selections"]), 16)
         self.assertAlmostEqual(sum(s["probability"] for s in self.market["selections"]), 1.0, places=6)
 
     def test_coach_in_the_bracket_is_locked_out_of_the_general_cup(self):
@@ -329,6 +332,60 @@ class TestCupMarket(OutrightCase):
         sel = self._selection(self.market, self.clubs[0])
         ok, res = database.place_outright_bet(outside, sel["id"], 100)
         self.assertTrue(ok, res)
+
+    def test_eliminated_coach_may_bet_on_the_general_cup(self):
+        """Общий кубок играют все, поэтому замок держится, только пока клуб жив в сетке."""
+        loser, winner = self.coaches[self.clubs[0]], self.coaches[self.clubs[1]]
+        with database.transaction() as conn:
+            conn.cursor().execute("UPDATE cup_series SET winner_name = ?, team2_wins = 2, status = 'finished' "
+                                  "WHERE team1_name = ?", (self.clubs[1], self.clubs[0]))
+        outright_service.refresh_outrights()
+        market = self._market("cup_winner", "CUP")
+        sel = self._selection(market, self.clubs[2])
+
+        self.assertFalse(database.get_outright_coach_scope(loser)["in_general_cup"])
+        ok, res = database.place_outright_bet(loser, sel["id"], 100)
+        self.assertTrue(ok, res)
+
+        self.assertTrue(database.get_outright_coach_scope(winner)["in_general_cup"])
+        ok, res = database.place_outright_bet(winner, sel["id"], 100)
+        self.assertFalse(ok)
+        self.assertEqual(res["error"], database.OUTRIGHT_OWN_SCOPE_ERROR)
+
+    def test_general_cup_closes_when_the_quarterfinal_appears(self):
+        sel = self._selection(self.market, self.clubs[0])
+        self.assertFalse(database.is_general_cup_outright_closed(self.season))
+        self.assertTrue(database.place_outright_bet(BETTOR, sel["id"], 100)[0])
+
+        database.create_cup_series("1/4", [(self.clubs[0], self.clubs[2])], season_id=self.season)
+        outright_service.refresh_outrights()
+        self.assertTrue(database.is_general_cup_outright_closed(self.season))
+        sel = self._selection(self._market("cup_winner", "CUP"), self.clubs[0])
+        ok, res = database.place_outright_bet(BETTOR, sel["id"], 100)
+        self.assertFalse(ok)
+        self.assertEqual(res["error"], database.OUTRIGHT_BETTING_CLOSED_ERROR)
+        self.assertIn("1/4", res["message"])
+
+    def test_quarterfinal_does_not_close_division_markets(self):
+        database.create_cup_series("1/4", [(self.clubs[0], self.clubs[2])], season_id=self.season)
+        outright_service.refresh_outrights()
+        winner = self._market("division_winner", f"D{self.div}")
+        ok, res = database.place_outright_bet(BETTOR, winner["selections"][0]["id"], 100)
+        self.assertTrue(ok, res)
+
+    def test_date_deadline_does_not_close_the_general_cup(self):
+        orig = config.OUTRIGHT_BETS_CLOSE_AT
+        config.OUTRIGHT_BETS_CLOSE_AT = "2000-01-01 00:00:00"
+        try:
+            sel = self._selection(self.market, self.clubs[0])
+            ok, res = database.place_outright_bet(BETTOR, sel["id"], 100)
+            self.assertTrue(ok, res)
+            winner = self._market("division_winner", f"D{self.div}")
+            ok, res = database.place_outright_bet(BETTOR, winner["selections"][0]["id"], 100)
+            self.assertFalse(ok)
+            self.assertEqual(res["error"], database.OUTRIGHT_BETTING_CLOSED_ERROR)
+        finally:
+            config.OUTRIGHT_BETS_CLOSE_AT = orig
 
     def test_final_winner_settles_the_cup(self):
         sel = self._selection(self.market, self.clubs[0])

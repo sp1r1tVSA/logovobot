@@ -11,7 +11,7 @@ from typing import Generator
 from contextlib import contextmanager
 from config import DB_PATH, INITIAL_WALLET_BALANCE, MAX_OPEN_ROUNDS_PER_DIVISION, ROUND_DEADLINE_REMINDER_HOURS
 from constants import CUP_DIVISION_SENTINEL, CUP_SERIES_GAMES, CUP_STAGES, CUP_STAGE_ORDER
-from time_utils import SQL_NOW, now_msk, now_msk_str, today_msk
+from time_utils import SQL_NOW, now_msk, now_msk_str, parse_msk, today_msk
 from club_registry import normalize_team_name, resolve_team_name
 from services import debt_policy
 from services.player_names import (
@@ -14812,9 +14812,9 @@ def claim_achievement_reward(user_id: int, achievement_id: str) -> tuple[bool, s
         freebet_amount = row["reward_freebet"] or 0
         if freebet_amount > 0:
             cursor.execute("""
-                INSERT INTO user_freebets (user_id, amount, status, source, source_id)
-                VALUES (?, ?, 'available', 'achievement', ?)
-            """, (user_id, freebet_amount, achievement_id))
+                INSERT INTO user_freebets (user_id, amount, status, source, source_id, granted_at)
+                VALUES (?, ?, 'available', 'achievement', ?, ?)
+            """, (user_id, freebet_amount, achievement_id, now_msk_str()))
 
         message = f"🏆 Достижение получено: +{row['reward_coins']} 🪙 и +{row['reward_xp']} XP!"
         if freebet_amount > 0:
@@ -17448,6 +17448,7 @@ MAX_OPEN_OUTRIGHT_BETS = 20
 OUTRIGHT_MIN_BET = 10
 OUTRIGHT_REPRICING_ERROR = "OUTRIGHT_REPRICING"
 OUTRIGHT_OWN_SCOPE_ERROR = "OUTRIGHT_OWN_SCOPE"
+OUTRIGHT_BETTING_CLOSED_ERROR = "OUTRIGHT_BETTING_CLOSED"
 _OUTRIGHT_PLAYED = ("confirmed", "completed")
 
 
@@ -17955,14 +17956,25 @@ def _outright_coach(cursor, user_id: int) -> dict | None:
             "club_key": outright_club_key(row["team_name"])}
 
 
-def _general_cup_club_keys(cursor, season_id: int) -> set[str]:
-    keys = set()
+def _general_cup_alive_club_keys(cursor, season_id: int) -> set[str]:
+    """Клубы общего кубка, которые ещё не вылетели.
+
+    Участник — любой клуб из серий сетки; вылетевший — проигравший серию,
+    у которой уже есть победитель. Общий кубок играют все клубы лиги, поэтому
+    замок тренеру держится только, пока его клуб жив в сетке.
+    """
+    alive, out = set(), set()
     for st in _outright_cup_rows(cursor, season_id, None):
         for s in st["series"]:
+            winner = outright_club_key(s["winner_name"]) if s["winner_name"] else ""
             for name in (s["team1_name"], s["team2_name"]):
-                if name:
-                    keys.add(outright_club_key(name))
-    return keys
+                if not name:
+                    continue
+                key = outright_club_key(name)
+                alive.add(key)
+                if winner and key != winner:
+                    out.add(key)
+    return alive - out
 
 
 def outright_lock_reason(coach: dict | None, market: dict, selection: dict | None = None) -> str | None:
@@ -17970,8 +17982,8 @@ def outright_lock_reason(coach: dict | None, market: dict, selection: dict | Non
 
     `coach` — {division_id, in_general_cup} из `get_outright_coach_scope`.
     Тренер не ставит на свой дивизион и свой кубок: на победителя и бомбардира
-    своего дивизиона, на кубок своего дивизиона, на общий кубок, если его клуб в
-    сетке, и на бомбардиров своего дивизиона в рынке всей лиги. Без `selection`
+    своего дивизиона, на кубок своего дивизиона, на общий кубок, пока его клуб
+    не вылетел из сетки, и на бомбардиров своего дивизиона в рынке всей лиги. Без `selection`
     рынок бомбардиров лиги целиком не закрыт — закрыты отдельные исходы.
     """
     if not coach:
@@ -17992,7 +18004,7 @@ def outright_lock_reason(coach: dict | None, market: dict, selection: dict | Non
                 return "Тренер не может ставить на кубок своего дивизиона."
             return None
         if coach.get("in_general_cup"):
-            return "Тренер не может ставить на кубок, в котором играет его клуб."
+            return "Тренер не может ставить на общий кубок, пока его клуб в сетке — замок снимется после вылета."
         return None
     return None
 
@@ -18003,7 +18015,7 @@ def _outright_own_scope_reason(cursor, user_id: int, market: dict, selection: di
         return None
     scope = {"division_id": coach["division_id"], "in_general_cup": False}
     if market["market_type"] == "cup_winner" and market["division_id"] is None:
-        scope["in_general_cup"] = coach["club_key"] in _general_cup_club_keys(cursor, market["season_id"])
+        scope["in_general_cup"] = coach["club_key"] in _general_cup_alive_club_keys(cursor, market["season_id"])
     return outright_lock_reason(scope, market, selection)
 
 
@@ -18019,10 +18031,76 @@ def get_outright_coach_scope(user_id: int, season_id: int | None = None) -> dict
         if not coach:
             return None
         return {"division_id": coach["division_id"],
-                "in_general_cup": coach["club_key"] in _general_cup_club_keys(cursor, s_id)}
+                "in_general_cup": coach["club_key"] in _general_cup_alive_club_keys(cursor, s_id)}
 
 
 # ─── Приём ставки ────────────────────────────────────────────────────────────
+
+class _BadOutrightDeadline(ValueError):
+    pass
+
+
+def outright_bets_close_at() -> datetime.datetime | None:
+    """Момент (МСК, naive), с которого долгосрочные ставки не принимаются; None — срока нет.
+
+    Читает `config.OUTRIGHT_BETS_CLOSE_AT` при каждом вызове, чтобы тесты могли
+    его подменить. Непонятное значение — ошибка конфигурации, `_BadOutrightDeadline`.
+    """
+    import config
+    raw = (config.OUTRIGHT_BETS_CLOSE_AT or "").strip()
+    if not raw:
+        return None
+    close_at = parse_msk(raw)
+    if close_at is None:
+        raise _BadOutrightDeadline(raw)
+    return close_at
+
+
+def outright_betting_closed(now: datetime.datetime | None = None) -> bool:
+    """Наступил ли срок `OUTRIGHT_BETS_CLOSE_AT`. Кривой срок в конфиге — закрыт (fail-closed).
+
+    Срок действует на все рынки, кроме общего кубка — у того своё правило,
+    см. `outright_market_closed`.
+    """
+    try:
+        close_at = outright_bets_close_at()
+    except _BadOutrightDeadline as exc:
+        logger.error("OUTRIGHT_BETS_CLOSE_AT is not a date: %r; outright bets closed", str(exc))
+        return True
+    return close_at is not None and (now or now_msk()) >= close_at
+
+
+# С этой стадии общий кубок закрыт для долгосрочных ставок.
+OUTRIGHT_GENERAL_CUP_CLOSE_STAGE = "1/4"
+
+
+def _general_cup_outright_closed(cursor, season_id: int) -> bool:
+    """В сетке общего кубка есть серии 1/4 финала или дальше."""
+    close_order = CUP_STAGE_ORDER[OUTRIGHT_GENERAL_CUP_CLOSE_STAGE]
+    return any(st["series"] and st["stage_order"] >= close_order
+               for st in _outright_cup_rows(cursor, season_id, None))
+
+
+def is_general_cup_outright_closed(season_id: int | None = None) -> bool:
+    s_id = _resolve_season_id(season_id)
+    with transaction() as conn:
+        return _general_cup_outright_closed(conn.cursor(), s_id)
+
+
+def is_general_cup_market(market: dict) -> bool:
+    return market["market_type"] == "cup_winner" and market["division_id"] is None
+
+
+def _outright_market_closed(cursor, market: dict) -> bool:
+    """Приём ставок на рынок закрыт по сроку.
+
+    Общий кубок — как только в сетке появилась 1/4 финала; остальные рынки
+    (дивизионы, их кубки, бомбардиры) — в момент `OUTRIGHT_BETS_CLOSE_AT`.
+    """
+    if is_general_cup_market(market):
+        return _general_cup_outright_closed(cursor, market["season_id"])
+    return outright_betting_closed()
+
 
 def place_outright_bet(
     user_id: int,
@@ -18121,6 +18199,14 @@ def place_outright_bet(
         sel = dict(row)
         market = {"id": sel["market_id"], "market_type": sel["market_type"], "season_id": sel["season_id"],
                   "division_id": sel["market_division_id"]}
+
+        # Срок — после идемпотентности: повтор ставки, принятой до срока, вернёт
+        # её же, а не отказ.
+        if _outright_market_closed(cursor, market):
+            return False, {"error": OUTRIGHT_BETTING_CLOSED_ERROR,
+                           "message": ("Приём ставок на общий кубок закрыт: начался 1/4 финала."
+                                       if is_general_cup_market(market)
+                                       else "Приём долгосрочных ставок закрыт.")}
 
         try:
             block = _betting_block_reason(cursor, user_id, [])
