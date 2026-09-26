@@ -14881,8 +14881,8 @@ def claim_achievement_reward(user_id: int, achievement_id: str) -> tuple[bool, s
         freebet_amount = row["reward_freebet"] or 0
         if freebet_amount > 0:
             cursor.execute("""
-                INSERT INTO user_freebets (user_id, amount, status, source, source_id)
-                VALUES (?, ?, 'available', 'achievement', ?)
+                INSERT INTO user_freebets (user_id, amount, status, source, source_id, granted_at)
+                VALUES (?, ?, 'available', 'achievement', ?, datetime('now', '+3 hours'))
             """, (user_id, freebet_amount, achievement_id))
 
         message = f"🏆 Достижение получено: +{row['reward_coins']} 🪙 и +{row['reward_xp']} XP!"
