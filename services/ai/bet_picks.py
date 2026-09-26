@@ -385,12 +385,22 @@ def _extract_json(text: str) -> dict | None:
 
 def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
     """(разобранный JSON, модель) или (None, None). Модели пробуются по очереди."""
+    system = _SYSTEM_PROMPT.format(limit=PICKS_LIMIT, per_match=MAX_PER_MATCH)
+    user = "ДАННЫЕ (JSON):\n" + json.dumps(_payload_for_model(matches), ensure_ascii=False)
+    return call_model_chain(system, user, tag="AI picks")
+
+
+def call_model_chain(system: str, user: str, tag: str = "AI picks") -> tuple[dict | None, str | None]:
+    """Один запрос к цепочке моделей OPENROUTER_MODEL: (JSON-ответ, модель) или (None, None).
+
+    Общая часть «ИИ-прогноза» и анализа рынка (services/ai/market_analysis):
+    одни и те же модели, бюджет времени и паузы после 429 / таймаута / 404 —
+    занятую модель пропускают обе вкладки.
+    """
     api_key = config.OPENROUTER_API_KEY
     if not api_key:
         return None, None
     base_url = (config.OPENROUTER_BASE_URL or "https://openrouter.ai/api/v1").rstrip("/")
-    system = _SYSTEM_PROMPT.format(limit=PICKS_LIMIT, per_match=MAX_PER_MATCH)
-    user = "ДАННЫЕ (JSON):\n" + json.dumps(_payload_for_model(matches), ensure_ascii=False)
 
     started = time.monotonic()
     for model in _models():
@@ -398,11 +408,11 @@ def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
         with _cache_lock:
             until = _cooldowns.get(model, 0.0)
         if until > now:
-            logger.info("AI picks: model '%s' is cooling down for %d s more, skipping it.", model, until - now)
+            logger.info("%s: model '%s' is cooling down for %d s more, skipping it.", tag, model, until - now)
             continue
         timeout = min(REQUEST_TIMEOUT_SECONDS, CHAIN_BUDGET_SECONDS - (now - started))
         if timeout < MIN_ATTEMPT_SECONDS:
-            logger.warning("AI picks: time budget spent, model '%s' and the rest are not tried.", model)
+            logger.warning("%s: time budget spent, model '%s' and the rest are not tried.", tag, model)
             break
         body = json.dumps({
             "model": model,
@@ -435,19 +445,19 @@ def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
             pause = _http_cooldown(e)
             if pause:
                 _cool_down(model, pause)
-            logger.warning("AI picks: model '%s' HTTP %s (%s)%s, trying the next one.", model, e.code, err_msg,
+            logger.warning("%s: model '%s' HTTP %s (%s)%s, trying the next one.", tag, model, e.code, err_msg,
                            f", skipped for {pause} s" if pause else "")
             continue
         except (TimeoutError, urllib.error.URLError) as e:
             if not isinstance(e, TimeoutError) and not isinstance(getattr(e, "reason", None), TimeoutError):
-                logger.warning("AI picks: model '%s' failed (%s), trying the next one.", model, type(e).__name__)
+                logger.warning("%s: model '%s' failed (%s), trying the next one.", tag, model, type(e).__name__)
                 continue
             _cool_down(model, TIMEOUT_COOLDOWN_SECONDS)
-            logger.warning("AI picks: model '%s' timed out after %d s (skipped for %d s), trying the next one.",
+            logger.warning("%s: model '%s' timed out after %d s (skipped for %d s), trying the next one.", tag,
                            model, timeout, TIMEOUT_COOLDOWN_SECONDS)
             continue
         except Exception as e:
-            logger.warning("AI picks: model '%s' failed (%s), trying the next one.", model, type(e).__name__)
+            logger.warning("%s: model '%s' failed (%s), trying the next one.", tag, model, type(e).__name__)
             continue
         try:
             choice = result["choices"][0]
@@ -456,14 +466,13 @@ def _call_openrouter(matches: list[dict]) -> tuple[dict | None, str | None]:
             # а ответ целиком кладёт в reasoning.
             text = msg.get("content") or msg.get("reasoning") or msg.get("reasoning_content") or ""
         except (KeyError, IndexError, TypeError):
-            logger.warning("AI picks: model '%s' returned no choices.", model)
+            logger.warning("%s: model '%s' returned no choices.", tag, model)
             continue
         data = _extract_json(text if isinstance(text, str) else "")
         if data is not None:
             return data, model
         snippet = (text[:250] if isinstance(text, str) else "")
-        logger.warning(
-            "AI picks: model '%s' returned no parsable JSON (finish_reason=%s, len=%d, snippet=%r).",
+        logger.warning("%s: model '%s' returned no parsable JSON (finish_reason=%s, len=%d, snippet=%r).", tag,
             model, choice.get("finish_reason"), len(text) if isinstance(text, str) else 0, snippet,
         )
     return None, None

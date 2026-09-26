@@ -14125,6 +14125,75 @@ def get_betting_dashboard(division_ids: list[int] | None = None) -> dict:
     }
 
 
+def get_market_analysis_data(since: str) -> dict:
+    """Сырьё для анализа рынка (services/ai/market_analysis): купоны, их ноги, приток монет.
+
+    Купоны — созданные или рассчитанные с `since` (MSK) и все открытые. У каждой
+    ноги — группа рынка по `bet_ban_group` и дивизион, чьи запреты и лимиты на
+    неё действуют: у кубка — владелец этапа, у общего кубка — None.
+    Считать здесь нечего: разрезы собирает сервис.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT ub.id, ub.user_id, ub.bet_type, ub.amount, ub.potential_win,
+                   COALESCE(ub.actual_payout, 0) AS actual_payout, ub.status,
+                   ub.created_at, ub.settled_at, u.username, u.team_name
+            FROM user_bets ub
+            LEFT JOIN users u ON u.telegram_id = ub.user_id
+            WHERE ub.status = 'pending' OR ub.created_at >= ? OR ub.settled_at >= ?
+        """, (since, since))
+        bets = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT bi.bet_id, bi.match_id, bi.outcome_type, bi.odd, bi.status,
+                   mk.market_key, m.division_id, m.tournament_type, cs.division_id AS cup_division_id
+            FROM bet_items bi
+            JOIN user_bets ub ON ub.id = bi.bet_id
+            LEFT JOIN markets mk ON mk.id = bi.market_id
+            LEFT JOIN matches m ON m.id = bi.match_id
+            LEFT JOIN cup_stages cs ON cs.id = m.stage_id
+            WHERE ub.status = 'pending' OR ub.created_at >= ? OR ub.settled_at >= ?
+        """, (since, since))
+        legs = []
+        for r in cursor.fetchall():
+            leg = dict(r)
+            if (leg.pop("tournament_type") or "league") == "cup":
+                leg["division_id"] = leg["cup_division_id"] or None
+            else:
+                # Матч без дивизиона — это дивизион 1, как в паузе и правах админа.
+                leg["division_id"] = leg["division_id"] or 1
+            leg.pop("cup_division_id")
+            leg["group"] = bet_ban_group(leg.pop("market_key"), leg["outcome_type"])
+            legs.append(leg)
+
+        cursor.execute("""
+            SELECT transaction_type,
+                   COUNT(*) AS cnt,
+                   COALESCE(SUM(CASE WHEN amount > 0 THEN amount ELSE 0 END), 0) AS credited,
+                   COALESCE(SUM(CASE WHEN amount < 0 THEN -amount ELSE 0 END), 0) AS debited
+            FROM coin_transactions
+            WHERE created_at >= ?
+            GROUP BY transaction_type
+        """, (since,))
+        coin_flows = [dict(r) for r in cursor.fetchall()]
+
+        cursor.execute("""
+            SELECT COUNT(*) AS wallets, COALESCE(SUM(balance), 0) AS coins_in_wallets,
+                   COALESCE(MAX(balance), 0) AS max_balance
+            FROM user_wallets
+        """)
+        wallets = dict(cursor.fetchone())
+        cursor.execute("SELECT balance FROM user_wallets ORDER BY balance DESC LIMIT 5")
+        wallets["top5_balance"] = sum(r["balance"] or 0 for r in cursor.fetchall())
+
+        cursor.execute("SELECT id, name FROM divisions ORDER BY id")
+        divisions = [dict(r) for r in cursor.fetchall()]
+
+    return {"bets": bets, "legs": legs, "coin_flows": coin_flows,
+            "wallets": wallets, "divisions": divisions}
+
+
 def get_betting_entity_divisions(entity: str, entity_id: int) -> set[int] | None:
     """Дивизионы рынка, исхода, купона или риск-алерта — для проверки прав админа дивизиона.
 

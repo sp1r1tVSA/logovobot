@@ -5005,6 +5005,24 @@ span.team-logo-fallback {
 .adm-sev-medium { border-left-color: var(--color-warning); }
 .adm-sev-high, .adm-sev-critical { border-left-color: var(--color-danger); }
 
+/* Анализ рынка: вывод ИИ, находки и предложения лимитов. */
+.adm-analysis-summary { font-size: 0.86rem; line-height: 1.45; color: var(--text-primary); white-space: pre-line; }
+.adm-analysis-risks { margin: 0; padding-left: 18px; font-size: 0.82rem; color: var(--text-secondary); }
+.adm-analysis-risks li { margin-bottom: 4px; }
+#admin-root .adm-alert { font-size: 0.82rem; line-height: 1.4; }
+.adm-row-main small.adm-analysis-groups,
+.adm-row-main small.adm-sugg-change { white-space: normal; }
+.adm-sugg-row {
+  flex-wrap: wrap;
+  align-items: flex-start;
+  padding-left: 10px;
+  border-left: 3px solid var(--border-subtle);
+}
+.adm-sugg-change { font-size: 0.82rem; }
+.adm-sugg-change b { color: var(--text-primary); }
+/* Кнопки — всегда строкой ниже: на узком экране описанию нужна вся ширина. */
+.adm-sugg-actions { display: flex; gap: 6px; flex-basis: 100%; }
+
 .adm-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; }
 .adm-btn {
   flex: 1 1 auto;

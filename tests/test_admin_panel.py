@@ -16,12 +16,14 @@ import json
 import time
 import unittest
 import urllib.parse
+from unittest import mock
 
 from aiohttp.test_utils import AioHTTPTestCase
 
 import config
 import database
 from api.server import create_app
+from services.ai import market_analysis
 
 TEST_BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 
@@ -692,6 +694,31 @@ class TestPanelRoutes(AioHTTPTestCase):
                 status, body = await self._set_limit(key, 1, scope_type, scope_id)
                 self.assertEqual((status, body["error"]), (400, "invalid_limit_key"))
         self.assertEqual(database.get_bet_bans(1), set())
+
+    async def test_market_analysis_is_global_only(self):
+        for user_id in (DIV2_ADMIN, PLAYER):
+            with self.subTest(user=user_id):
+                status, body = await self._call("GET", "/analysis", user_id)
+                self.assertEqual((status, body["error"]), (403, "forbidden"))
+
+    async def test_market_analysis_report(self):
+        market_analysis.clear_cache()
+        self.addCleanup(market_analysis.clear_cache)
+        with mock.patch.object(config, "OPENROUTER_API_KEY", ""):
+            status, body = await self._call("GET", "/analysis?days=7", GLOBAL_ADMIN)
+            self.assertEqual(status, 200, body)
+            self.assertEqual((body["status"], body["source"], body["error"]), ("ok", "rules", "no_key"))
+            self.assertEqual((body["period_days"], body["cached"]), (7, False))
+            for key in ("findings", "stats", "suggestions", "refresh_in"):
+                self.assertIn(key, body)
+            _, again = await self._call("GET", "/analysis?days=7", GLOBAL_ADMIN)
+            self.assertTrue(again["cached"])
+
+    async def test_market_analysis_rejects_other_periods(self):
+        for days in ("5", "abc"):
+            with self.subTest(days=days):
+                status, body = await self._call("GET", f"/analysis?days={days}", GLOBAL_ADMIN)
+                self.assertEqual((status, body["error"]), (400, "bad_period"))
 
     def test_migration_drops_the_daily_bonus_setting(self):
         with database.transaction() as conn:
