@@ -32,9 +32,13 @@ class TestTrackerApi(AioHTTPTestCase):
     async def asyncSetUp(self):
         self._orig_rate_limit = config.API_RATE_LIMIT_ENABLED
         self._orig_ocr = config.TRACKER_OCR_ENABLED
+        self._orig_dev_pin = config.TRACKER_DEV_PIN_ENABLED
         config.API_RATE_LIMIT_ENABLED = False
         # OCR ходит в сеть: в тестах кадр разбираться не должен.
         config.TRACKER_OCR_ENABLED = False
+        # Бэкдор 7777/0000 выключен по умолчанию — как в проде. Тесты самого
+        # бэкдора включают его точечно и возвращают обратно в tearDown.
+        config.TRACKER_DEV_PIN_ENABLED = False
 
         await super().asyncSetUp()
 
@@ -56,6 +60,7 @@ class TestTrackerApi(AioHTTPTestCase):
     async def asyncTearDown(self):
         config.API_RATE_LIMIT_ENABLED = self._orig_rate_limit
         config.TRACKER_OCR_ENABLED = self._orig_ocr
+        config.TRACKER_DEV_PIN_ENABLED = self._orig_dev_pin
         reset_tracker_state()
         await super().asyncTearDown()
 
@@ -303,3 +308,42 @@ class TestTrackerApi(AioHTTPTestCase):
         await self.client.post("/api/tracker/session/finish", headers=headers, json={"match_id": self.match_id})
         again = await self.client.post("/api/tracker/session/start", headers=headers, json={"match_id": self.match_id})
         self.assertEqual(409, again.status)
+
+    async def test_dev_pin_backdoor_disabled_by_default(self):
+        """Коды 7777/0000 без флага — обычный неверный ПИН, а не бэкдор."""
+        self.assertFalse(config.TRACKER_DEV_PIN_ENABLED)
+        for pin in ("7777", "0000"):
+            resp = await self.client.post("/api/tracker/auth/pair", json={"pin_code": pin})
+            self.assertEqual(401, resp.status, f"pin={pin}")
+
+    async def test_dev_pin_backdoor_works_only_behind_flag(self):
+        """Флаг включён — 7777/0000 мгновенно выдают токен на мок-профиль."""
+        config.TRACKER_DEV_PIN_ENABLED = True
+        for pin in ("7777", "0000"):
+            resp = await self.client.post("/api/tracker/auth/pair", json={"pin_code": pin})
+            self.assertEqual(200, resp.status, f"pin={pin}")
+            body = await resp.json()
+            self.assertEqual("ok", body["status"])
+            self.assertTrue(body["token"])
+
+    async def test_logout_revokes_token_immediately(self):
+        """После /auth/logout тот же токен сразу получает 401, не дожидаясь TTL."""
+        token = await self._pair(self.owner_id)
+        headers = self._auth(token)
+
+        before = await self.client.get("/api/tracker/matches", headers=headers)
+        self.assertEqual(200, before.status)
+
+        logout = await self.client.post("/api/tracker/auth/logout", headers=headers)
+        self.assertEqual(200, logout.status)
+        self.assertEqual("ok", (await logout.json())["status"])
+
+        after = await self.client.get("/api/tracker/matches", headers=headers)
+        self.assertEqual(401, after.status)
+
+    async def test_logout_is_idempotent_without_token(self):
+        """Logout не должен требовать валидную сессию: выйти можно и с мусорным/пустым токеном."""
+        for headers in ({}, {"Authorization": "Bearer not-a-real-token"}):
+            resp = await self.client.post("/api/tracker/auth/logout", headers=headers)
+            self.assertEqual(200, resp.status, f"headers={headers}")
+            self.assertEqual("ok", (await resp.json())["status"])
