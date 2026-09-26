@@ -83,7 +83,7 @@ def clean(user_id: int) -> int:
 def main():
     parser = argparse.ArgumentParser(description="Создать/удалить тестовый матч для Logovo Tracker")
     parser.add_argument("--user-id", type=int, default=777777, help="telegram_id владельца матча (по умолчанию dev-пользователь 777777)")
-    parser.add_argument("--own-team", type=str, default="Манчестер Сити", help="Название своего клуба")
+    parser.add_argument("--own-team", type=str, default=None, help="Название своего клуба (по умолчанию уникальное тестовое имя с telegram_id, чтобы не столкнуться с именем реального клуба)")
     parser.add_argument("--opponent", type=str, default="Ливерпуль", help="Название клуба соперника")
     parser.add_argument("--division-id", type=int, default=1)
     parser.add_argument("--season-id", type=int, default=1)
@@ -95,8 +95,9 @@ def main():
         print(f"Удалено тестовых матчей: {n}")
         return
 
-    match_id = seed(args.user_id, args.own_team, args.opponent, args.division_id, args.season_id)
-    print(f"Создан тестовый матч id={match_id}: {args.own_team} vs {args.opponent} (owner telegram_id={args.user_id})")
+    own_team = args.own_team or f"Тест-клуб {args.user_id}"
+    match_id = seed(args.user_id, own_team, args.opponent, args.division_id, args.season_id)
+    print(f"Создан тестовый матч id={match_id}: {own_team} vs {args.opponent} (owner telegram_id={args.user_id})")
     print("Теперь он появится в лобби приложения вместо заглушек 9991-9993, и трансляцию по нему можно реально запускать.")
 
 
