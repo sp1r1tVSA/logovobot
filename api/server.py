@@ -66,6 +66,7 @@ from api.routes_player_cabinet import (
 )
 from api.routes_tracker import (
     handle_tracker_pair,
+    handle_tracker_logout,
     handle_tracker_matches,
     handle_tracker_session_start,
     handle_tracker_session_tick,
@@ -569,6 +570,7 @@ def create_app() -> web.Application:
 
     # 13. Logovo Tracker («мобильное приложение live-трансляции»)
     app.router.add_post("/api/tracker/auth/pair", handle_tracker_pair)
+    app.router.add_post("/api/tracker/auth/logout", handle_tracker_logout)
     app.router.add_get("/api/tracker/matches", handle_tracker_matches)
     app.router.add_post("/api/tracker/session/start", handle_tracker_session_start)
     app.router.add_post("/api/tracker/session/tick", handle_tracker_session_tick)
