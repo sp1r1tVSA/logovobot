@@ -505,6 +505,34 @@ opens it. **It never places a bet**: the admin enters the stake and confirms, an
 carry `market_id` and `cup_series_id` for this, plus `tournament_type` / `cup_stage` /
 `game_num_in_series` so `matchRoundLabel` can label cup games.
 
+The panel's **«Анализ рынка»** tab (`GET /api/admin/panel/analysis?days=7|14|30`, global admins
+only, `services/ai/market_analysis.py`) reports where players beat the line and suggests
+stricter limits. The numbers are deterministic: `database.get_market_analysis_data` returns the
+coupons settled or created in the period plus all open ones. Each leg is attributed to the
+division whose limits govern it: a division cup goes to `cup_stages.division_id`, the general
+cup has its own row, and a league match with no division counts as 1. `compute_stats` slices
+them by division, by bet-ban group (with express as its own group), by player and by coin-flow
+type. An express counts once in the «все дивизионы» total and once in every division it
+touches. `rule_suggestions` turns losses into tightenings. A group at ≤ −50% margin gets a
+division ban. A division at ≤ −10% gets a lower `max_payout`, and at ≤ −25% also `max_bet`
+(p95 of its stakes) and `max_open_bets`. The other rules cover the express margin, the global
+cap for a losing general cup, open exposure, and a personal cap for a player holding ≥ 30% of
+all player profit. Scopes under 5 000 🪙 settled are ignored as noise. The OpenRouter model
+gets the stats, the current limits, the allowed keys with their bounds and the rule
+suggestions, through the same `bet_picks.call_model_chain` as «ИИ-прогноз». It returns a
+summary, risks and its own suggestions. Every one of them passes `validate_suggestion`, which
+applies the checks of `POST /limits` (scope, key, bounds, existing division or player, ban = 1
+at global/division only) and accepts tightening only; anything else is dropped. With no key, a
+failed call, or no valid AI suggestion, the rule suggestions are shown instead
+(`suggestions_source`). Caching follows the picks: 30 min, 5 min for the fallback, a 2-min
+refresh floor, one model call at a time. On every response `annotate` refreshes each
+suggestion's current value and «уже стоит» flag. **Nothing is applied automatically.** The
+admin sets one suggestion («Установить»), all of them after a confirm («Установить все»), or
+opens it in the ordinary limit form («Вручную»). All three go through `POST /limits`. The
+limit keys, scopes and bounds shared by the route and the analysis (`LIMIT_KEYS_BY_SCOPE`,
+`LIMIT_BOUNDS`, `BAN_SCOPES`, …) live in `services/betting_limits.py`.
+`tests/test_market_analysis.py` covers it.
+
 ---
 
 ## Roles and access

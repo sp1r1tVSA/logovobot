@@ -25,6 +25,7 @@ api/routes_admin_panel.py
   POST /api/admin/panel/outrights/refresh       пересчитать цены сейчас
   POST /api/admin/panel/outrights/{id}/action   suspend | resume | settle | void
   POST /api/admin/panel/outright-selections/{id} статус исхода и ручной коэффициент
+  GET  /api/admin/panel/analysis                анализ рынка и предложения лимитов (глобальный админ)
 
 Права: панель открыта только тем, кто указан в ADMIN_IDS (is_super_admin), —
 ни роль admin в базе, ни назначение админом дивизиона доступа к ней не дают.
@@ -45,38 +46,14 @@ from api.auth import get_authenticated_user
 from api.params import body_int, path_int, query_int
 from handlers.base import is_super_admin
 from services import outright_service
-from services.ai import bet_picks, pick_review
-from services.betting_limits import BettingLimitsService
+from services.ai import bet_picks, market_analysis, pick_review
+from services.betting_limits import (
+    BAN_SCOPES, DEFAULT_LIMIT_BOUNDS, LIMIT_BOUNDS, LIMIT_KEYS, LIMIT_KEYS_BY_SCOPE, SETTING_KEYS,
+    BettingLimitsService,
+)
 
 logger = logging.getLogger(__name__)
 
-LIMIT_KEYS = (
-    "min_bet", "max_bet", "max_payout", "max_daily_stake", "max_daily_loss",
-    "max_open_exposure", "max_open_bets", "market_exposure_limit",
-    "division_exposure_limit", "global_exposure_limit",
-)
-# Настройки купона и экономики: только глобальные, читает их database.
-SETTING_KEYS = ("max_express_events", "express_margin_pct", "initial_balance")
-# Какие ключи вообще читаются на каждом уровне (см. BettingLimitsService):
-# переопределение другого ключа легло бы в таблицу и ничего бы не изменило.
-LIMIT_KEYS_BY_SCOPE = {
-    "global": LIMIT_KEYS + SETTING_KEYS,
-    "division": ("max_bet", "max_payout", "max_open_bets", "market_exposure_limit", "division_exposure_limit"),
-    "user": ("max_bet", "max_payout", "max_daily_stake", "max_daily_loss", "max_open_exposure", "max_open_bets"),
-}
-# Допустимый диапазон значения; ключа нет — 1..100 000 000.
-LIMIT_BOUNDS = {
-    "max_express_events": (database.MIN_EXPRESS_EVENTS, 50),
-    "max_open_bets": (1, 1_000),
-    # 0 — надбавку выключить.
-    "express_margin_pct": (0, database.MAX_EXPRESS_MARGIN_PCT),
-    "initial_balance": (1, 1_000_000),
-}
-DEFAULT_LIMIT_BOUNDS = (1, 100_000_000)
-# Запреты видов ставок (`ban_<группа>`): 1 — запрещено, сброс (null) — разрешено.
-# В LIMIT_KEYS_BY_SCOPE их нет намеренно: это не числовые лимиты, и вкладка
-# «Лимиты» рисует их отдельной карточкой, а не строками лимитов.
-BAN_SCOPES = ("global", "division")
 MARKET_ACTIONS = {"suspend": "suspended", "resume": "open", "close": "closed"}
 BET_STATUSES = ("all", "pending", "won", "lost", "refunded", "cashed_out")
 
@@ -749,6 +726,28 @@ async def handle_panel_outright_selection(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "result": result})
 
 
+async def handle_panel_analysis(request: web.Request) -> web.Response:
+    """GET /api/admin/panel/analysis?days=14&refresh=1
+
+    Анализ рынка за 7 / 14 / 30 дней: где игроки обыгрывают линию, откуда
+    приходят монеты, и какие лимиты ужесточить. Сам ничего не меняет —
+    предложения ставятся обычным POST /limits.
+    """
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+    try:
+        days = market_analysis.normalize_period(request.query.get("days"))
+    except ValueError:
+        return _error(400, "bad_period", "Период анализа: 7, 14 или 30 дней.")
+    refresh = request.query.get("refresh") in ("1", "true")
+    result = await asyncio.to_thread(market_analysis.get_analysis, days, refresh)
+    return web.json_response({"status": "ok", **result})
+
+
 def register_admin_panel_routes(app: web.Application) -> None:
     r = app.router
     r.add_get("/api/admin/panel/me", handle_panel_me)
@@ -773,3 +772,4 @@ def register_admin_panel_routes(app: web.Application) -> None:
     r.add_post("/api/admin/panel/outrights/refresh", handle_panel_outrights_refresh)
     r.add_post("/api/admin/panel/outrights/{id}/action", handle_panel_outright_action)
     r.add_post("/api/admin/panel/outright-selections/{id}", handle_panel_outright_selection)
+    r.add_get("/api/admin/panel/analysis", handle_panel_analysis)

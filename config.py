@@ -306,4 +306,8 @@ API_RATE_LIMIT_TRACKER_RPM = int(os.getenv("API_RATE_LIMIT_TRACKER_RPM", "180"))
 TRACKER_MAX_SCREENSHOT_BYTES = int(os.getenv("TRACKER_MAX_SCREENSHOT_BYTES", str(2 * 1024 * 1024)))
 # Распознавание фамилии с кадра — отключено по умолчанию для экономии лимитов Gemini API.
 TRACKER_OCR_ENABLED = os.getenv("TRACKER_OCR_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+# Бэкдор для ручного теста без реального ПИН-кода из бота (коды 7777/0000 и
+# мок-профиль 777777). Только для локальной разработки — выключен по
+# умолчанию, включается явным флагом и никогда не должен быть true в проде.
+TRACKER_DEV_PIN_ENABLED = os.getenv("TRACKER_DEV_PIN_ENABLED", "false").strip().lower() in ("true", "1", "yes")
 

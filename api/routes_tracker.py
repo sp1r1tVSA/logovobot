@@ -214,6 +214,12 @@ def get_session(token: str) -> dict[str, Any] | None:
     return session
 
 
+def revoke_session(token: str) -> None:
+    """Отозвать Bearer-токен сразу, не дожидаясь TTL. Отсутствующий токен — не ошибка:
+    logout должен быть идемпотентным (повторный вызов с тем же токеном ничего не ломает)."""
+    _SESSIONS.pop(token, None)
+
+
 def reset_tracker_state() -> None:
     """Сбросить коды и сессии. Нужно тестам для изоляции."""
     _PIN_CODES.clear()
@@ -469,7 +475,7 @@ def _fetch_open_matches(telegram_id: int) -> list[dict[str, Any]]:
         )
         rows = cursor.fetchall()
 
-    if telegram_id == 777777 and not rows:
+    if config.TRACKER_DEV_PIN_ENABLED and telegram_id == 777777 and not rows:
         return [
             {
                 "id": 9991,
@@ -923,8 +929,10 @@ async def handle_tracker_pair(request: web.Request) -> web.Response:
 
     device_info = _clean_text(body.get("device_info"), MAX_DEVICE_INFO_LEN)
 
-    # 🛠️ Режим разработки: код 7777 или 0000 для мгновенного теста без Telegram
-    if pin_code in ("7777", "0000"):
+    # 🛠️ Режим разработки: код 7777 или 0000 для мгновенного теста без Telegram.
+    # Строго за флагом — без него эти коды идут в общий путь и просто не
+    # находят себя в consume_pin_code, как любой другой неверный код.
+    if config.TRACKER_DEV_PIN_ENABLED and pin_code in ("7777", "0000"):
         test_user = {
             "id": 777777,
             "nickname": "Илез (Dev)",
@@ -987,6 +995,19 @@ async def handle_tracker_matches(request: web.Request) -> web.Response:
         "count": len(matches),
         "matches": matches,
     })
+
+
+async def handle_tracker_logout(request: web.Request) -> web.Response:
+    """
+    POST /api/tracker/auth/logout
+    Отзывает Bearer-токен текущего устройства немедленно, а не по истечении
+    TTL сессии — «Выйти» в приложении должен реально закрыть доступ, а не
+    просто спрятать экран локально.
+    """
+    token = _bearer_token(request)
+    if token:
+        revoke_session(token)
+    return web.json_response({"status": "ok"})
 
 
 async def _handle_simple_session_action(request: web.Request, action) -> web.Response:

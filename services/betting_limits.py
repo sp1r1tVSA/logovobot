@@ -38,6 +38,37 @@ DEFAULT_MAX_EXPRESS_EVENTS: int = database.MAX_EXPRESS_EVENTS
 DEFAULT_EXPRESS_MARGIN_PCT: int = database.EXPRESS_MARGIN_PCT
 DEFAULT_INITIAL_BALANCE: int = database.INITIAL_WALLET_BALANCE
 
+# ─── Что настраивается из панели ─────────────────────────────────────────────
+# Этим проверяет значения и панель (POST /api/admin/panel/limits), и анализ
+# рынка (services/ai/market_analysis) — предложение ИИ проходит те же правила.
+LIMIT_KEYS = (
+    "min_bet", "max_bet", "max_payout", "max_daily_stake", "max_daily_loss",
+    "max_open_exposure", "max_open_bets", "market_exposure_limit",
+    "division_exposure_limit", "global_exposure_limit",
+)
+# Настройки купона и экономики: только глобальные, читает их database.
+SETTING_KEYS = ("max_express_events", "express_margin_pct", "initial_balance")
+# Какие ключи вообще читаются на каждом уровне (см. BettingLimitsService):
+# переопределение другого ключа легло бы в таблицу и ничего бы не изменило.
+LIMIT_KEYS_BY_SCOPE = {
+    "global": LIMIT_KEYS + SETTING_KEYS,
+    "division": ("max_bet", "max_payout", "max_open_bets", "market_exposure_limit", "division_exposure_limit"),
+    "user": ("max_bet", "max_payout", "max_daily_stake", "max_daily_loss", "max_open_exposure", "max_open_bets"),
+}
+# Допустимый диапазон значения; ключа нет — 1..100 000 000.
+LIMIT_BOUNDS = {
+    "max_express_events": (database.MIN_EXPRESS_EVENTS, 50),
+    "max_open_bets": (1, 1_000),
+    # 0 — надбавку выключить.
+    "express_margin_pct": (0, database.MAX_EXPRESS_MARGIN_PCT),
+    "initial_balance": (1, 1_000_000),
+}
+DEFAULT_LIMIT_BOUNDS = (1, 100_000_000)
+# Запреты видов ставок (`ban_<группа>`): 1 — запрещено, сброс (null) — разрешено.
+# В LIMIT_KEYS_BY_SCOPE их нет намеренно: это не числовые лимиты, и вкладка
+# «Лимиты» рисует их отдельной карточкой, а не строками лимитов.
+BAN_SCOPES = ("global", "division")
+
 
 class BettingLimitsService:
     """Centralized limit resolution with hierarchical override support (User -> Division -> Global)."""

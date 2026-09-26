@@ -26,6 +26,7 @@ const TABS = [
   { id: 'dashboard', label: 'Сводка' },
   { id: 'markets', label: 'Рынки' },
   { id: 'picks', label: 'ИИ-прогноз' },
+  { id: 'analysis', label: 'Анализ рынка', globalOnly: true },
   { id: 'bets', label: 'Купоны' },
   { id: 'outrights', label: 'Долгосрочные', globalOnly: true },
   { id: 'players', label: 'Игроки', globalOnly: true },
@@ -253,6 +254,8 @@ export class AdminPanel {
     this.picks = { view: 'list', markets: [], oddsMin: '', oddsMax: '', draft: null, minChance: 0, valueOnly: false, res: null };
     // Сборщик купона: собирает из показанного прогноза, ставку подтверждает сам админ.
     this.builder = { mode: 'express', count: 3, strategy: 'safe', items: [] };
+    // Анализ рынка: период в днях и последний ответ сервера.
+    this.analysis = { days: 14, res: null };
 
     this._searchTimer = null;
     this._modalSubmit = null;
@@ -369,6 +372,7 @@ export class AdminPanel {
       dashboard: () => this.loadDashboard(),
       markets: () => this.loadMarkets(true),
       picks: () => (this.picks.view === 'review' ? this.loadPicksReview() : this.loadPicks(false)),
+      analysis: () => this.loadAnalysis(false),
       bets: () => this.loadBets(true),
       outrights: () => this.loadOutrights(),
       players: () => this.loadPlayers(),
@@ -1454,6 +1458,213 @@ export class AdminPanel {
     `;
   }
 
+  // ─── Анализ рынка: отчёт и предложения лимитов (только глобальный админ) ─
+
+  async loadAnalysis(refresh = false) {
+    const a = this.analysis;
+    const body = this.body();
+    body.innerHTML = `<div class="adm-empty">${refresh ? 'Пересчитываем анализ…' : 'ИИ разбирает рынок…'}<br>
+      <small class="adm-muted">Бесплатной модели может понадобиться до минуты.</small></div>`;
+    const res = await this.get(`${PANEL}/analysis`, { days: a.days, ...(refresh ? { refresh: 1 } : {}) });
+    if (this.tab !== 'analysis' || this.body() !== body) return;
+    a.res = res;
+
+    const s = res.stats;
+    const t = s.totals;
+    const inflow = s.inflow;
+    const signedCoins = v => `${v > 0 ? '+' : ''}${coins(v)}`;
+    const margin = v => (v == null ? '—' : `${v > 0 ? '+' : ''}${Number(v).toFixed(1)}%`);
+    const pill = (attr, active, label) => `<button class="category-pill ${active ? 'active' : ''}" ${attr}>${label}</button>`;
+    const note = res.source === 'ai'
+      ? `Модель: <b>${esc(res.model || '')}</b>`
+      : res.error === 'no_key'
+        ? 'OPENROUTER_API_KEY не задан — отчёт и предложения собраны по правилам.'
+        : 'ИИ сейчас недоступен — отчёт и предложения собраны по правилам.';
+    const sevClass = sev => (sev === 'high' ? 'adm-sev-high' : sev === 'medium' ? 'adm-sev-medium' : '');
+    const winners = s.top_winners || [];
+
+    body.innerHTML = `
+      <div class="adm-card">
+        <div class="adm-pause-row">
+          <div class="adm-row-main">
+            <b>Период</b>
+            <div class="category-pills adm-picks-pills">
+              ${(res.periods || [7, 14, 30]).map(d => pill(`data-adm-aperiod="${Number(d)}"`, Number(d) === a.days, `${Number(d)} дн.`)).join('')}
+            </div>
+            <small class="adm-picks-note ${res.source === 'ai' ? '' : 'gold'}">${note}<br>
+              обновлено ${esc(shortTime(res.generated_at))}${res.cached ? ' · из кэша' : ''}</small>
+          </div>
+          <button class="adm-btn small" data-adm-analysis-refresh>Пересчитать</button>
+        </div>
+      </div>
+      <div class="kpi-grid">
+        ${this.kpi('GGR (доход)', coins(t.ggr), t.ggr >= 0 ? 'green' : 'red', `маржа ${margin(t.margin_pct)}`)}
+        ${this.kpi('Рассчитано ставок', coins(t.settled_stake), '', `${fmt(t.settled_bets)} купонов · выплачено ${coins(t.paid_out)}`)}
+        ${this.kpi('В игре', coins(t.pending_stake), 'gold', `${fmt(t.pending_count)} купонов · риск ${coins(t.pending_liability)}`)}
+        ${this.kpi('Приток монет', signedCoins(inflow.total), inflow.total > 0 ? 'red' : 'green',
+          `награды ${signedCoins(inflow.rewards)} · ставки ${signedCoins(inflow.bets)}`)}
+      </div>
+      ${res.summary ? `
+        <div class="adm-card">
+          <div class="adm-card-title">Вывод ИИ</div>
+          <div class="adm-analysis-summary">${esc(res.summary)}</div>
+          ${(res.risks || []).length ? `
+            <div class="adm-card-title adm-mt">Риски</div>
+            <ul class="adm-analysis-risks">${res.risks.map(r => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
+        </div>` : ''}
+      <div class="adm-card">
+        <div class="adm-card-title">Что видно по цифрам</div>
+        ${(res.findings || []).map(f => `<div class="adm-alert ${sevClass(f.severity)}">${esc(f.text)}</div>`).join('')
+          || '<div class="adm-muted">Ставок за период нет</div>'}
+      </div>
+      <div class="adm-card" id="adm-analysis-sugg"></div>
+      <div class="adm-card">
+        <div class="adm-card-title">По дивизионам</div>
+        ${(s.scopes || []).map(sc => `
+          <div class="adm-row adm-pick-row">
+            <div class="adm-row-main">
+              <b>${esc(sc.name)}</b>
+              <small>ставки ${coins(sc.settled_stake)} · выплачено ${coins(sc.paid_out)} · ${fmt(sc.bettors)} игроков</small>
+              <small class="adm-analysis-groups">${(sc.groups || []).filter(g => g.stake).map(g =>
+                `<span class="${g.ggr >= 0 ? 'green' : 'red'}">${esc(g.label)} ${signedCoins(g.ggr)}</span>`).join(' · ')}</small>
+            </div>
+            <div class="adm-row-side adm-pick-prob ${sc.ggr >= 0 ? 'green' : 'red'}">${signedCoins(sc.ggr)}
+              <small>маржа ${margin(sc.margin_pct)}</small></div>
+          </div>`).join('') || '<div class="adm-muted">Нет рассчитанных ставок</div>'}
+        <small class="adm-muted">GGR — доход букмекера: минус значит, что игроки выиграли больше, чем поставили.
+          Экспресс считается в каждом дивизионе, матчи которого в нём есть.</small>
+      </div>
+      ${winners.length ? `
+        <div class="adm-card">
+          <div class="adm-card-title">Кто выигрывает</div>
+          ${winners.map(w => `
+            <div class="adm-row adm-pick-row">
+              <div class="adm-row-main">
+                <b>${esc(playerName(w))}</b>
+                <small>${w.team_name ? `${esc(w.team_name)} · ` : ''}${fmt(w.settled_bets)} рассчитанных купонов</small>
+              </div>
+              <div class="adm-row-side adm-pick-prob">${signedCoins(w.profit)}
+                <small>${w.share_pct != null ? `${Number(w.share_pct).toFixed(1)}% выигрыша игроков` : ''}</small></div>
+            </div>`).join('')}
+        </div>` : ''}
+      <div class="adm-card">
+        <div class="adm-card-title">Движение монет</div>
+        ${(s.coin_flows || []).map(f => `
+          <div class="adm-kv"><span>${esc(f.label)}</span><b class="${f.net > 0 ? 'red' : f.net < 0 ? 'green' : ''}">${signedCoins(f.net)}</b></div>`).join('')
+          || '<div class="adm-muted">Движений за период нет</div>'}
+        <small class="adm-muted">Плюс — монеты пришли игрокам, минус — ушли из экономики.
+          В кошельках сейчас ${coins(s.wallets?.coins_in_wallets)}, у пяти богатейших — ${coins(s.wallets?.top5_balance)}.</small>
+      </div>
+      <div class="adm-muted adm-mb">Анализ ничего не меняет сам: лимит встаёт, только когда вы его установите.</div>
+    `;
+    this.renderAnalysisSuggestions();
+  }
+
+  suggestionValue(sg, value) {
+    if (sg.is_ban) return Number(value) ? 'запрещено' : 'разрешено';
+    return limitValue(sg.limit_key, value);
+  }
+
+  renderAnalysisSuggestions() {
+    const card = this.root.querySelector('#adm-analysis-sugg');
+    const res = this.analysis.res;
+    if (!card || !res) return;
+    const list = res.suggestions || [];
+    const pending = list.filter(sg => !sg.applied).length;
+    const sevLabel = { high: 'срочно', medium: 'желательно', low: 'по желанию' };
+    const source = res.suggestions_source === 'ai' ? 'Предложил ИИ, сервер проверил каждое по тем же правилам, что и ручной ввод.'
+      : 'Предложения собраны по правилам: где маржа ушла в минус — ужесточить.';
+    card.innerHTML = `
+      <div class="adm-pause-row">
+        <div class="adm-row-main">
+          <b>Что предлагается сделать</b>
+          <small class="adm-muted">${esc(source)}</small>
+        </div>
+        ${pending > 1 ? `<button class="adm-btn small primary" data-adm-sugg-all>Установить все (${pending})</button>` : ''}
+      </div>
+      ${list.length ? list.map((sg, i) => `
+        <div class="adm-row adm-sugg-row ${sg.severity === 'high' ? 'adm-sev-high' : sg.severity === 'medium' ? 'adm-sev-medium' : ''}">
+          <div class="adm-row-main">
+            <b>${esc(sg.scope_label)} · ${esc(sg.label)}</b>
+            <span class="adm-badge">${esc(sevLabel[sg.severity] || sg.severity)}</span>
+            <small class="adm-sugg-change">${esc(this.suggestionValue(sg, sg.current))} → <b>${esc(this.suggestionValue(sg, sg.value))}</b></small>
+            <small class="adm-pick-reason">${esc(sg.reason)}</small>
+          </div>
+          <div class="adm-sugg-actions">
+            ${sg.applied ? '<span class="adm-badge adm-st-won">уже стоит</span>' : `
+              <button class="adm-btn small primary" data-adm-sugg-apply="${i}">Установить</button>
+              <button class="adm-btn small" data-adm-sugg-manual="${i}">Вручную</button>`}
+          </div>
+        </div>`).join('') : '<div class="adm-muted">Ужесточать нечего: убыточных направлений за период не видно.</div>'}
+    `;
+  }
+
+  postSuggestion(sg) {
+    return this.post(`${PANEL}/limits`, {
+      scope_type: sg.scope_type, scope_id: Number(sg.scope_id), limit_key: sg.limit_key, value: Number(sg.value),
+    });
+  }
+
+  async applySuggestion(index, button) {
+    const sg = this.analysis.res?.suggestions?.[index];
+    if (!sg || sg.applied) return;
+    button.disabled = true;
+    try {
+      await this.postSuggestion(sg);
+      sg.applied = true;
+      sg.current = sg.value;
+      this.toast(`${sg.label}: ${this.suggestionValue(sg, sg.value)}`);
+      this.renderAnalysisSuggestions();
+    } catch (e) {
+      button.disabled = false;
+      this.toast(e.message, true);
+    }
+  }
+
+  manualSuggestion(index) {
+    const sg = this.analysis.res?.suggestions?.[index];
+    if (!sg) return;
+    if (sg.is_ban) {
+      // Запрет — это пилюля на вкладке «Лимиты», а не число: открываем её на нужном уровне.
+      this.divisionId = sg.scope_type === 'division' ? Number(sg.scope_id) : null;
+      this.tab = 'limits';
+      this.renderShell();
+      this.loadTab();
+      this.toast(`Запрет «${sg.label}» — в карточке запретов`);
+      return;
+    }
+    this.askLimit(sg.scope_type, sg.scope_id, sg.limit_key, '', sg.current, sg.scope_label, {
+      prefill: sg.value,
+      onDone: () => this.loadAnalysis(false),
+    });
+  }
+
+  askApplyAllSuggestions() {
+    const todo = (this.analysis.res?.suggestions || []).filter(sg => !sg.applied);
+    if (!todo.length) return;
+    this.openForm({
+      title: `Установить ${todo.length} ${todo.length < 5 ? 'предложения' : 'предложений'}?`,
+      desc: todo.map(sg => `${sg.scope_label} · ${sg.label}: ${this.suggestionValue(sg, sg.value)}`).join('; ') + '.',
+      fields: [],
+      submitLabel: 'Установить все',
+      onSubmit: async () => {
+        // По одному: каждое значение сервер проверяет отдельно, и одна ошибка не отменяет остальные.
+        const failed = [];
+        for (const sg of todo) {
+          try {
+            await this.postSuggestion(sg);
+          } catch (e) {
+            failed.push(`${sg.scope_label} · ${sg.label}: ${e.message}`);
+          }
+        }
+        const done = todo.length - failed.length;
+        if (failed.length) this.toast(`Установлено ${done} из ${todo.length}. ${failed[0]}`, true);
+        else this.toast(`Установлено: ${done}`);
+        await this.loadAnalysis(false);
+      },
+    });
+  }
+
   // ─── Лимиты: все дивизионы, дивизион, личные ───────────────────────────────
 
   async loadLimits() {
@@ -1621,7 +1832,7 @@ export class AdminPanel {
       const locked = inherited.has(g.id);
       const on = banned.has(g.id);
       return `<button class="category-pill adm-ban-pill ${on || locked ? 'adm-ban-on' : ''}"
-        ${canEdit && !locked ? '' : 'disabled'} data-adm-ban="${scopeType}" data-scope-id="${scopeId}"
+        ${canEdit && !locked ? '' : 'disabled'} data-adm-betban="${scopeType}" data-scope-id="${scopeId}"
         data-group="${esc(g.id)}" data-label="${esc(g.label)}" data-on="${on ? 1 : 0}">${locked ? '🔒 ' : on ? '⛔ ' : ''}${esc(g.label)}</button>`;
     }).join('')}</div>`;
   }
@@ -1631,7 +1842,7 @@ export class AdminPanel {
     el.disabled = true;
     try {
       await this.post(`${PANEL}/limits`, {
-        scope_type: el.dataset.admBan, scope_id: Number(el.dataset.scopeId),
+        scope_type: el.dataset.admBetban, scope_id: Number(el.dataset.scopeId),
         limit_key: BAN_PREFIX + el.dataset.group, value: on ? null : 1,
       });
       this.toast(on ? `«${el.dataset.label}» снова принимается` : `«${el.dataset.label}» запрещено`);
@@ -1673,7 +1884,9 @@ export class AdminPanel {
     });
   }
 
-  async askLimit(scopeType, scopeId, key, current, effective, owner) {
+  // opts.prefill — значение в поле вместо текущего (предложение анализа рынка),
+  // opts.onDone — что обновить после сохранения вместо вкладки «Лимиты».
+  async askLimit(scopeType, scopeId, key, current, effective, owner, opts = {}) {
     if (!this._limitsMeta) {
       // Карточка игрока открыта раньше вкладки «Лимиты»: границы и умолчания берём с сервера.
       try {
@@ -1692,7 +1905,7 @@ export class AdminPanel {
       title: LIMIT_LABELS[key] || key,
       desc: `${owner} · сейчас ${limitValue(key, effective)}${current !== '' ? ' (задано вручную)' : ''}.`
         + `${LIMIT_HINTS[key] ? ` ${LIMIT_HINTS[key]}.` : ''} Допустимо ${fmt(low)}–${fmt(high)}. Пустое поле — вернуть ${resetTo}.`,
-      fields: [{ name: 'value', label: 'Новое значение', type: 'number', step: '1', min: String(low), value: current }],
+      fields: [{ name: 'value', label: 'Новое значение', type: 'number', step: '1', min: String(low), value: opts.prefill ?? current }],
       submitLabel: 'Сохранить',
       onSubmit: async ({ value }) => {
         const trimmed = String(value).trim();
@@ -1702,7 +1915,9 @@ export class AdminPanel {
         }
         await this.post(`${PANEL}/limits`, { scope_type: scopeType, scope_id: Number(scopeId), limit_key: key, value: parsed });
         this.toast(parsed === null ? 'Значение сброшено' : 'Значение сохранено');
-        if (scopeType === 'user') {
+        if (opts.onDone) {
+          await opts.onDone(parsed);
+        } else if (scopeType === 'user') {
           await this.openPlayer(Number(scopeId));
           if (this.tab === 'limits') this.loadLimits().catch(() => {});
         } else {
@@ -1863,8 +2078,22 @@ export class AdminPanel {
       this.root.querySelectorAll('[data-adm-tab]').forEach(b => b.classList.toggle('active', b === el));
       tgBridge.hapticImpact('light');
       this.loadTab();
-    } else if ((el = t('[data-adm-ban]'))) {
+    } else if ((el = t('[data-adm-betban]'))) {
       if (!el.disabled) this.toggleBan(el);
+    } else if ((el = t('[data-adm-aperiod]'))) {
+      const days = Number(el.dataset.admAperiod);
+      if (days !== this.analysis.days) {
+        this.analysis.days = days;
+        this.loadAnalysis(false).catch(err => this.toast(err.message, true));
+      }
+    } else if (t('[data-adm-analysis-refresh]')) {
+      this.loadAnalysis(true).catch(err => this.toast(err.message, true));
+    } else if ((el = t('[data-adm-sugg-apply]'))) {
+      if (!el.disabled) this.applySuggestion(Number(el.dataset.admSuggApply), el);
+    } else if ((el = t('[data-adm-sugg-manual]'))) {
+      this.manualSuggestion(Number(el.dataset.admSuggManual));
+    } else if (t('[data-adm-sugg-all]')) {
+      this.askApplyAllSuggestions();
     } else if ((el = t('[data-adm-division]'))) {
       this.divisionId = el.dataset.admDivision ? Number(el.dataset.admDivision) : null;
       this.root.querySelectorAll('[data-adm-division]').forEach(b => b.classList.toggle('active', b === el));
