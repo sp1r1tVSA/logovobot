@@ -262,6 +262,18 @@ class TestTrimToLastSentence(unittest.TestCase):
 
         self.assertEqual(_trim_to_last_sentence("Братан, тут такое дело, что"), "Братан, тут такое дело, что…")
 
+    def test_decimal_number_dot_is_not_treated_as_sentence_terminator(self):
+        from services.ai.ai_chat import _trim_to_last_sentence
+
+        self.assertEqual(
+            _trim_to_last_sentence("Победа ПСВ оценивается в 43.3% шансов."),
+            "Победа ПСВ оценивается в 43.3% шансов.",
+        )
+        self.assertEqual(
+            _trim_to_last_sentence("Победа в 43.3% шансов! А вот дальше ещё кусок"),
+            "Победа в 43.3% шансов!",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

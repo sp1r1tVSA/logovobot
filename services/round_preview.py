@@ -360,9 +360,9 @@ def _fit_html(text: str, limit: int) -> str:
     if line_end >= len(cut) // 2:
         cut = cut[:line_end]
     else:
-        sentence_end = max(cut.rfind(ch) for ch in (".", "!", "?", "…"))
-        if sentence_end >= len(cut) // 2:
-            cut = cut[: sentence_end + 1]
+        sentence_matches = list(re.finditer(r'[.!?…]+(?=\s|$)', cut))
+        if sentence_matches and sentence_matches[-1].end() >= len(cut) // 2:
+            cut = cut[: sentence_matches[-1].end()]
     # Не оставлять половину тега или сущности на конце.
     if cut.rfind("<") > cut.rfind(">"):
         cut = cut[: cut.rfind("<")]
@@ -450,8 +450,28 @@ def _call_gemini(system_text: str, payload: dict, max_output_tokens: int, api_ke
                 if not result.get("candidates"):
                     logger.warning(f"Round analytics: no candidates from '{model_name}'.")
                     continue
-                text = result["candidates"][0]["content"]["parts"][0]["text"]
-                return text.replace("**", "").replace("##", "").strip()
+                candidate = result["candidates"][0]
+
+                # В моделях с рассуждениями (thinking) отфильтровываем служебные мысли
+                parts = candidate.get("content", {}).get("parts", [])
+                text_parts = [p.get("text", "") for p in parts if not p.get("thought")]
+                text = "".join(text_parts).strip()
+                if not text:
+                    logger.warning(f"Round analytics: model '{model_name}' produced no non-thought text parts.")
+                    continue
+
+                finish_reason = candidate.get("finishReason")
+                if finish_reason == "MAX_TOKENS":
+                    logger.warning(f"Round analytics: model '{model_name}' hit MAX_TOKENS (truncated), skipping.")
+                    continue
+
+                clean = text.replace("**", "").replace("##", "").strip()
+                # Защита от обрыва на полуслове / незавершенных знаках препинания
+                if clean.rstrip().endswith(("-", "/", "—", "·", "(", ":")):
+                    logger.warning(f"Round analytics: model '{model_name}' returned incomplete/truncated text: {clean!r}")
+                    continue
+
+                return clean
             except urllib.error.HTTPError as e:
                 key_suffix = f"...{target_key[-4:]}" if len(target_key) > 4 else "***"
                 logger.warning(f"Round analytics: model '{model_name}' (key {key_suffix}) HTTP {e.code}, trying fallback.")
@@ -466,14 +486,16 @@ def _call_gemini(system_text: str, payload: dict, max_output_tokens: int, api_ke
 
 
 def generate_preview_text(payload: dict) -> str:
-    text = _call_gemini(_PREVIEW_INSTRUCTION, _preview_for_model(payload), max_output_tokens=900)
+    # 2500 токенов дают достаточный запас на внутреннее рассуждение (thinking) + полный пост
+    text = _call_gemini(_PREVIEW_INSTRUCTION, _preview_for_model(payload), max_output_tokens=2500)
     if not text:
         return _fallback_preview_text(payload)
     return _fit_html(text, PREVIEW_MAX_CHARS)
 
 
 def generate_digest_caption(payload: dict) -> str:
-    text = _call_gemini(_DIGEST_INSTRUCTION, _digest_for_model(payload), max_output_tokens=500)
+    # 2000 токенов дают достаточный запас на внутреннее рассуждение (thinking) + подпись к фото
+    text = _call_gemini(_DIGEST_INSTRUCTION, _digest_for_model(payload), max_output_tokens=2000)
     if not text:
         return _fallback_digest_caption(payload)
     return _fit_html(text, CAPTION_MAX_CHARS)

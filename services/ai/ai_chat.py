@@ -1,4 +1,5 @@
 import os
+import re
 import base64
 import json
 import logging
@@ -113,9 +114,8 @@ def generate_chat_reply(
         "contents": contents,
         "generationConfig": {
             "temperature": 0.8,
-            # Потолок, а не цель: длину держит промт. 400 токенов хватает на «подробный»
-            # ответ в 6-7 предложений; обрезанный хвост дочищает _trim_to_last_sentence.
-            "maxOutputTokens": 400,
+            # Потолок с запасом на рассуждения (thinking) + генерацию ответа.
+            "maxOutputTokens": 2048,
         }
     }
 
@@ -146,7 +146,13 @@ def generate_chat_reply(
                         continue
                     
                     candidate = result["candidates"][0]
-                    text_response = candidate["content"]["parts"][0]["text"]
+                    # В моделях с thinking отфильтровываем блоки рассуждений
+                    parts = candidate.get("content", {}).get("parts", [])
+                    text_parts = [p.get("text", "") for p in parts if not p.get("thought")]
+                    text_response = "".join(text_parts).strip()
+                    if not text_response and parts:
+                        text_response = parts[-1].get("text", "")
+
                     if candidate.get("finishReason") == "MAX_TOKENS":
                         text_response = _trim_to_last_sentence(text_response)
                     clean_text = text_response.replace("**", "").replace("*", "")
@@ -175,9 +181,11 @@ def _trim_to_last_sentence(text: str) -> str:
     Keeps everything up to the last sentence terminator; a reply without one
     (a single run-on sentence) is returned with an ellipsis instead of being lost.
     """
-    cut = max(text.rfind(ch) for ch in (".", "!", "?", "…"))
-    if cut >= len(text) // 3:
-        return text[: cut + 1]
+    matches = list(re.finditer(r'[.!?…]+(?=\s|$)', text))
+    if matches:
+        cut = matches[-1].end()
+        if cut >= len(text) // 3:
+            return text[:cut].strip()
     return text.rstrip(" ,;:—-") + "…"
 
 

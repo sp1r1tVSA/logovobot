@@ -6,7 +6,9 @@ Gemini здесь не вызывается — генерация текста 
 """
 
 import itertools
+import json
 import unittest
+from unittest.mock import MagicMock, patch
 import uuid
 
 import database
@@ -445,6 +447,94 @@ class TestModelPayloadIsCompact(RoundAnalyticsTestBase):
         self.assertNotIn("table", compact)
         self.assertLessEqual(len(compact["top3"]), 3)
         self.assertEqual(len(compact["results"]), len(payload["results"]))
+
+
+class TestGeminiThinkingAndTruncationHandling(unittest.TestCase):
+    """Тесты на корректную фильтрацию thought-блоков и отсечение оборванных ответов."""
+
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    @patch("services.round_preview.get_ordered_chat_keys", return_value=["fake_key"])
+    def test_thinking_part_is_filtered_out_and_real_text_returned(self, mock_keys, mock_opener):
+        cm = MagicMock()
+        response_data = {
+            "candidates": [{
+                "finishReason": "STOP",
+                "content": {
+                    "parts": [
+                        {"thought": True, "text": "Борнмут: 11 -> 13 (-2 down)\nThinking about recap..."},
+                        {"text": "📈 <b>ИТОГИ ТУРА 7</b>\nОтличный тур, лидер держит марку!"}
+                    ]
+                }
+            }]
+        }
+        cm.__enter__.return_value.read.return_value = json.dumps(response_data).encode("utf-8")
+        mock_opener.return_value.open.return_value = cm
+
+        res = round_preview._call_gemini("instruction", {"round": 7}, 2000)
+        self.assertEqual(res, "📈 <b>ИТОГИ ТУРА 7</b>\nОтличный тур, лидер держит марку!")
+        self.assertNotIn("down", res)
+        self.assertNotIn("Thinking", res)
+
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    @patch("services.round_preview.get_ordered_chat_keys", return_value=["fake_key"])
+    def test_only_thinking_parts_returns_none_triggering_fallback(self, mock_keys, mock_opener):
+        cm = MagicMock()
+        response_data = {
+            "candidates": [{
+                "finishReason": "STOP",
+                "content": {
+                    "parts": [
+                        {"thought": True, "text": "Only internal reasoning here, no final answer."}
+                    ]
+                }
+            }]
+        }
+        cm.__enter__.return_value.read.return_value = json.dumps(response_data).encode("utf-8")
+        mock_opener.return_value.open.return_value = cm
+
+        res = round_preview._call_gemini("instruction", {"round": 7}, 2000)
+        self.assertIsNone(res)
+
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    @patch("services.round_preview.get_ordered_chat_keys", return_value=["fake_key"])
+    def test_max_tokens_finish_reason_is_rejected_as_truncated(self, mock_keys, mock_opener):
+        cm = MagicMock()
+        response_data = {
+            "candidates": [{
+                "finishReason": "MAX_TOKENS",
+                "content": {
+                    "parts": [
+                        {"text": "7 тур · Дивизион 2\n\n⚽️ ПСВ — Монако · 43.3% / "}
+                    ]
+                }
+            }]
+        }
+        cm.__enter__.return_value.read.return_value = json.dumps(response_data).encode("utf-8")
+        mock_opener.return_value.open.return_value = cm
+
+        res = round_preview._call_gemini("instruction", {"round": 7}, 2000)
+        self.assertIsNone(res)
+
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    @patch("services.round_preview.get_ordered_chat_keys", return_value=["fake_key"])
+    def test_incomplete_text_ending_with_hyphen_or_slash_is_rejected(self, mock_keys, mock_opener):
+        cm = MagicMock()
+        response_data = {
+            "candidates": [{
+                "finishReason": "STOP",
+                "content": {
+                    "parts": [
+                        {"text": "Дивизион 5. Итоги 7-"}
+                    ]
+                }
+            }]
+        }
+        cm.__enter__.return_value.read.return_value = json.dumps(response_data).encode("utf-8")
+        mock_opener.return_value.open.return_value = cm
+
+        res = round_preview._call_gemini("instruction", {"round": 7}, 2000)
+        self.assertIsNone(res)
+
 
 if __name__ == "__main__":
     unittest.main()

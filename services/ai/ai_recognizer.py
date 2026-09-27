@@ -707,7 +707,11 @@ def recognize_match_screenshots_bytes(
 
                 candidates = res_json.get("candidates", [])
                 if candidates and "content" in candidates[0]:
-                    text_content = candidates[0]["content"]["parts"][0]["text"]
+                    parts = candidates[0]["content"].get("parts", [])
+                    text_parts = [p.get("text", "") for p in parts if not p.get("thought")]
+                    text_content = "".join(text_parts).strip()
+                    if not text_content and parts:
+                        text_content = parts[-1].get("text", "")
                     clean_text = clean_json_response(text_content)
                     parsed_data = json.loads(clean_text)
 

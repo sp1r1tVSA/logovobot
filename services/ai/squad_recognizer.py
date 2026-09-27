@@ -205,7 +205,11 @@ def recognize_squad_screenshot_bytes(
                     logger.warning(f"Gemini model '{m_name}' returned no candidates for squad OCR")
                     continue
 
-                text_content = candidates[0]["content"]["parts"][0]["text"]
+                parts = candidates[0]["content"].get("parts", [])
+                text_parts = [p.get("text", "") for p in parts if not p.get("thought")]
+                text_content = "".join(text_parts).strip()
+                if not text_content and parts:
+                    text_content = parts[-1].get("text", "")
                 parsed_data = json.loads(clean_json_response(text_content))
                 if not isinstance(parsed_data, dict):
                     logger.warning(f"Gemini model '{m_name}' returned non-dict JSON for squad OCR")
