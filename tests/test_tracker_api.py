@@ -287,6 +287,36 @@ class TestTrackerApi(AioHTTPTestCase):
         self.assertEqual(before["player2_score"], after["player2_score"], "Трансляция изменила официальный счёт")
         self.assertEqual(45, after["live_minute"])
 
+    def _seed_market(self, match_id: int) -> int:
+        with database.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                """INSERT INTO markets (match_id, market_key, market_name, category, status, sort_order, created_at)
+                   VALUES (?, '1x2', 'Исход', 'main', 'open', 0, datetime('now', '+3 hours'))""",
+                (match_id,),
+            )
+            return cur.lastrowid
+
+    def _market_status(self, market_id: int) -> str:
+        with database.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT status FROM markets WHERE id = ?", (market_id,))
+            return cur.fetchone()["status"]
+
+    async def test_start_suspends_prematch_markets(self):
+        """Свисток трансляции гасит довматчевую линию матча — и только его."""
+        own_market = self._seed_market(self.match_id)
+        foreign_market = self._seed_market(self.foreign_match_id)
+        headers = self._auth(await self._pair(self.owner_id))
+
+        for _ in range(2):  # повторный старт (переподключение) — no-op
+            resp = await self.client.post(
+                "/api/tracker/session/start", headers=headers, json={"match_id": self.match_id})
+            self.assertEqual(200, resp.status)
+            self.assertEqual("suspended", self._market_status(own_market))
+
+        self.assertEqual("open", self._market_status(foreign_market))
+
     async def test_finish_is_idempotent(self):
         """Повторный финиш не ломается и сообщает, что трансляция уже закрыта."""
         token = await self._pair(self.owner_id)

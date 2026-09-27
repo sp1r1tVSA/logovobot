@@ -43,6 +43,7 @@ from aiohttp import web
 import config
 import database
 from api.auth import check_user_access
+from services import market_safety
 from services.live_state_machine import (
     FINISHED,
     HALFTIME,
@@ -596,6 +597,12 @@ def _start_session(telegram_id: int, match_id: int) -> dict[str, Any]:
 
         if current != LIVE:
             _audit(cursor, telegram_id, "tracker_session_start", match, current, LIVE)
+
+        # Обычно линия уже закрыта открытием тура, но трекер не проверяет тур:
+        # матч, сыгранный раньше открытия, иначе шёл бы с открытыми довматчевыми
+        # кэфами. Та же транзакция (transaction() реентерабелен); на повторном
+        # старте открытых рынков нет — no-op.
+        market_safety.evaluate_and_apply_suspend_rules(match_id, "kickoff", actor_id=telegram_id)
 
         state = _load_live_state(cursor, match_id)
 

@@ -16,6 +16,13 @@ logger = logging.getLogger(__name__)
 
 # Configurable Live Market Suspension Rules
 LIVE_EVENT_SUSPEND_RULES: dict[str, dict[str, Any]] = {
+    # Старт трансляции из Logovo Tracker = свисток. Довматчевые коэффициенты
+    # после него не имеют смысла; 'suspended' (а не 'closed') переоткрытие
+    # линии тура не воскрешает, а закрытие тура/расчёт всё равно подбирает.
+    "kickoff": {
+        "action": "suspend_all",
+        "reason": "Match kicked off (tracker live session)"
+    },
     "goal": {
         "action": "suspend_all",
         "reason": "Goal scored in live match"
