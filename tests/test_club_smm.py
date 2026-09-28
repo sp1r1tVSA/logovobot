@@ -295,3 +295,63 @@ class TestStageAndRoundPosts(unittest.TestCase):
         self.assertIn("stealth/space-bunny-alpha", club_smm_service.GUARANTEED_OPENROUTER_MODELS)
 
 
+class TestClubSmmOpenRouterImage(unittest.TestCase):
+    @patch("urllib.request.urlopen")
+    def test_call_openrouter_image_b64(self, mock_urlopen):
+        fake_image_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRopenrouter_test"
+        fake_b64 = base64.b64encode(fake_image_bytes).decode("utf-8")
+        fake_response = {
+            "data": [
+                {"b64_json": fake_b64}
+            ]
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(fake_response).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+        mock_urlopen.return_value = mock_resp
+
+        with patch.object(config, "OPENROUTER_API_KEY", "sk-or-test-key"):
+            buf, model = club_smm_service._call_openrouter_image("epic soccer match")
+            self.assertIsNotNone(buf)
+            self.assertEqual(buf.getvalue(), fake_image_bytes)
+            self.assertEqual(model, "recraft/recraft-v4.1-flash")
+
+    @patch("urllib.request.urlopen")
+    def test_call_openrouter_image_url(self, mock_urlopen):
+        fake_image_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRdownloaded_test"
+        fake_response = {
+            "data": [
+                {"url": "https://openrouter.ai/sample.png"}
+            ]
+        }
+        mock_resp_api = MagicMock()
+        mock_resp_api.read.return_value = json.dumps(fake_response).encode("utf-8")
+        mock_resp_api.__enter__.return_value = mock_resp_api
+
+        mock_resp_img = MagicMock()
+        mock_resp_img.read.return_value = fake_image_bytes
+        mock_resp_img.__enter__.return_value = mock_resp_img
+
+        mock_urlopen.side_effect = [mock_resp_api, mock_resp_img]
+
+        with patch.object(config, "OPENROUTER_API_KEY", "sk-or-test-key"):
+            buf, model = club_smm_service._call_openrouter_image("epic soccer match")
+            self.assertIsNotNone(buf)
+            self.assertEqual(buf.getvalue(), fake_image_bytes)
+            self.assertEqual(model, "recraft/recraft-v4.1-flash")
+
+    @patch("services.club_smm_service._call_openrouter_image")
+    def test_generate_club_ai_photo_prefers_openrouter(self, mock_or_img):
+        fake_buf = io.BytesIO(b"fake_image_data")
+        mock_or_img.return_value = (fake_buf, "recraft/recraft-v4.1-flash")
+
+        res = club_smm_service.generate_club_ai_photo("Бешикташ", post_type="matchday")
+        self.assertEqual(res, fake_buf)
+        mock_or_img.assert_called_once()
+
+    def test_openrouter_image_models_config(self):
+        models = config._get_openrouter_image_models()
+        self.assertIn("recraft/recraft-v4.1-flash", models)
+        self.assertEqual(models[0], "recraft/recraft-v4.1-flash")
+
+

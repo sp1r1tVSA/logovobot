@@ -570,12 +570,88 @@ def generate_club_post(
     return _build_fallback_post(payload, post_type, for_caption)
 
 
-# ─── Генерация фото через Gemini Image (GEMINI_SMM_API_KEY) ─────────────────
+# ─── Генерация фото через OpenRouter Image API ──────────────────────────────
+
+def _call_openrouter_image(prompt: str) -> tuple[io.BytesIO | None, str | None]:
+    """
+    Генерирует изображение через OpenRouter Unified Image API (POST /api/v1/images).
+    Использует OPENROUTER_API_KEY и модели (recraft/recraft-v4.1-flash, flux.2-klein-4b и др.).
+    """
+    api_key = getattr(config, "OPENROUTER_API_KEY", "").strip()
+    if not api_key:
+        return None, None
+
+    models = getattr(config, "OPENROUTER_IMAGE_MODELS", [
+        "recraft/recraft-v4.1-flash",
+        "black-forest-labs/flux.2-klein-4b",
+        "sourceful/riverflow-v2.5-fast",
+        "recraft/recraft-v3",
+    ])
+
+    base_url = getattr(config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
+    url = f"{base_url}/images"
+
+    for model in models:
+        payload = {
+            "model": model,
+            "prompt": prompt,
+            "aspect_ratio": "1:1",
+            "n": 1,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            url,
+            data=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://logovobot.local",
+                "X-Title": "Logovobot Club SMM",
+                "User-Agent": "Logovobot/Image",
+            }
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=40) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            items = data.get("data", [])
+            for item in items:
+                b64 = item.get("b64_json")
+                if b64:
+                    img_bytes = base64.b64decode(b64)
+                    buf = io.BytesIO(img_bytes)
+                    buf.seek(0)
+                    logger.info(f"Club SMM: Image successfully generated with OpenRouter ({model})")
+                    return buf, model
+                img_url = item.get("url")
+                if img_url:
+                    img_req = urllib.request.Request(img_url, headers={"User-Agent": "Logovobot/Image"})
+                    with urllib.request.urlopen(img_req, timeout=30) as img_resp:
+                        img_bytes = img_resp.read()
+                    buf = io.BytesIO(img_bytes)
+                    buf.seek(0)
+                    logger.info(f"Club SMM: Image downloaded from OpenRouter ({model})")
+                    return buf, model
+        except urllib.error.HTTPError as e:
+            err_msg = ""
+            try:
+                err_msg = e.read().decode("utf-8")
+            except Exception:
+                pass
+            logger.warning(f"OpenRouter Image: model '{model}' HTTP {e.code}: {err_msg}")
+            continue
+        except Exception as e:
+            logger.warning(f"OpenRouter Image: model '{model}' error: {e}")
+            continue
+
+    return None, None
+
+
+# ─── Генерация спортивных постеров и клубного арта ──────────────────────────
 
 def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_prompt: str = "") -> io.BytesIO | None:
     """
-    Генерирует высококачественное спортивное фото / арт через Google Gemini Image API (GEMINI_SMM_API_KEY).
-    Фолбэк: если Gemini Image недоступен, генерирует карточку клуба (Pillow Retina).
+    Генерирует высококачественное спортивное фото / арт через OpenRouter Image API или Gemini Image.
+    Фолбэк: если AI-генераторы недоступны, генерирует карточку клуба (Pillow Retina).
     """
     canon = resolve_team_name(team_name) or team_name
     is_besiktas = "бешикташ" in canon.lower() or "besiktas" in canon.lower()
@@ -622,9 +698,15 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
             f"Artistic 3D emblem of soccer club {canon} in arena, {soccer_guard}, championship atmosphere, cinematic 4k"
         )
 
+    # 1. Попытка через OpenRouter Image API (Recraft V4.1 Flash $0.007, FLUX.2 $0.014)
+    buf, or_model = _call_openrouter_image(prompt)
+    if buf:
+        return buf
+
+    # 2. Попытка через Google Gemini Image API (если настроен ключ с квотой)
     keys = get_ordered_gemini_keys()
     if not keys:
-        logger.warning("Club SMM: GEMINI_SMM_API_KEY not configured. Falling back to club card graphic.")
+        logger.warning("Club SMM: No image API keys available. Falling back to club card graphic.")
         return generate_club_smm_media(team_name)
 
     models = getattr(config, "GEMINI_IMAGE_MODELS", [

@@ -114,6 +114,19 @@ def _get_gemini_image_models() -> list[str]:
     ]
 
 GEMINI_IMAGE_MODELS = _get_gemini_image_models()
+
+def _get_openrouter_image_models() -> list[str]:
+    raw = os.getenv("OPENROUTER_IMAGE_MODELS", "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return [
+        "recraft/recraft-v4.1-flash",
+        "black-forest-labs/flux.2-klein-4b",
+        "sourceful/riverflow-v2.5-fast",
+        "recraft/recraft-v3",
+    ]
+
+OPENROUTER_IMAGE_MODELS = _get_openrouter_image_models()
 # ─── OpenRouter: ИИ-прогноз во вкладке панели Logovo.bet ──────────────────────
 # Без ключа вкладка работает по вероятностям линии. OPENROUTER_MODEL — одна
 # модель или несколько через запятую: бесплатные (:free и stealth/*) пропадают
