@@ -543,6 +543,19 @@ def _call_free_ai_image(prompt: str) -> io.BytesIO | None:
         with urllib.request.urlopen(req, timeout=30) as resp:
             data = resp.read()
         if data and len(data) > 5000:
+            try:
+                from PIL import Image
+                img = Image.open(io.BytesIO(data))
+                w, h = img.size
+                if h > 100:
+                    cropped = img.crop((0, 0, w, h - 35))
+                    buf = io.BytesIO()
+                    cropped.save(buf, format="JPEG", quality=95)
+                    buf.seek(0)
+                    logger.info(f"Club SMM: Image successfully generated with Free AI (Flux), clean size: {buf.getbuffer().nbytes} bytes")
+                    return buf
+            except Exception:
+                pass
             buf = io.BytesIO(data)
             buf.seek(0)
             logger.info(f"Club SMM: Image successfully generated with Free AI (Flux), size: {len(data)} bytes")
