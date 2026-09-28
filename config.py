@@ -90,11 +90,11 @@ def _get_openrouter_smm_models() -> list[str]:
     if raw:
         return [m.strip() for m in raw.split(",") if m.strip()]
     return [
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "qwen/qwen-2.5-72b-instruct:free",
-        "mistralai/mistral-small-24b-instruct-2501:free",
-        "deepseek/deepseek-r1:free",
-        "google/gemini-2.0-flash-exp:free",
+        "openrouter/free",
+        "qwen/qwen3.8-27b:free",
+        "google/gemma-4-31b-it:free",
+        "nvidia/nemotron-3.5-lightning:free",
+        "google/gemma-4-26b-a4b-it:free",
     ]
 
 OPENROUTER_SMM_MODELS = _get_openrouter_smm_models()

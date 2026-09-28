@@ -44,14 +44,14 @@ _openrouter_lock = threading.Lock()
 def get_ordered_openrouter_models() -> list[str]:
     """Возвращает список бесплатных моделей OpenRouter с ротацией Round-Robin."""
     models = getattr(config, "OPENROUTER_SMM_MODELS", [
-        "meta-llama/llama-3.3-70b-instruct:free",
-        "qwen/qwen-2.5-72b-instruct:free",
-        "mistralai/mistral-small-24b-instruct-2501:free",
-        "deepseek/deepseek-r1:free",
-        "google/gemini-2.0-flash-exp:free",
+        "openrouter/free",
+        "qwen/qwen3.8-27b:free",
+        "google/gemma-4-31b-it:free",
+        "nvidia/nemotron-3.5-lightning:free",
+        "google/gemma-4-26b-a4b-it:free",
     ])
     if not models:
-        return ["meta-llama/llama-3.3-70b-instruct:free"]
+        return ["openrouter/free"]
     global _openrouter_model_idx
     with _openrouter_lock:
         idx = _openrouter_model_idx % len(models)
@@ -476,7 +476,11 @@ def _call_gemini_text(system_text: str, user_text: str, max_tokens: int, audio_b
                     text = parts[-1].get("text", "").strip()
                 if text:
                     return text.replace("**", "").replace("#", ""), model
-            except Exception:
+            except urllib.error.HTTPError as e:
+                logger.warning(f"Gemini SMM: model '{model}' HTTP {e.code}, trying next...")
+                continue
+            except Exception as e:
+                logger.warning(f"Gemini SMM: model '{model}' failed: {e}")
                 continue
 
     return None, None
