@@ -594,12 +594,38 @@ def generate_club_post(
     return _build_fallback_post(payload, post_type, for_caption)
 
 
-# ─── Генерация фото через Gemini Image ──────────────────────────────────────
+# ─── Генерация фото через ИИ (Gemini Image + Free Flux AI) ──────────────────
+
+def _call_free_ai_image(prompt: str) -> io.BytesIO | None:
+    """
+    Генерация бесплатного высококачественного ИИ-арта через Flux / SDXL (Pollinations.ai).
+    Работает без API ключей, без лимитов и без оплаты.
+    """
+    import urllib.parse
+    clean_p = prompt.replace("\n", " ").strip()
+    encoded = urllib.parse.quote(clean_p)
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true&model=flux"
+    req = urllib.request.Request(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Logovobot/SMM"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = resp.read()
+        if data and len(data) > 5000:
+            buf = io.BytesIO(data)
+            buf.seek(0)
+            logger.info(f"Club SMM: Image successfully generated with Free AI (Flux), size: {len(data)} bytes")
+            return buf
+    except Exception as e:
+        logger.warning(f"Free AI Image (Pollinations) failed: {e}")
+    return None
+
 
 def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_prompt: str = "") -> io.BytesIO | None:
     """
-    Генерирует высококачественное спортивное фото / арт через Google Gemini Image API.
-    Фолбэк: если API недоступен, генерирует карточку клуба.
+    Генерирует высококачественное спортивное фото / арт через Google Gemini Image API или Free Flux AI.
+    Фолбэк: если нейросети недоступны, генерирует карточку клуба (Pillow Retina).
     """
     canon = resolve_team_name(team_name) or team_name
     is_besiktas = "бешикташ" in canon.lower() or "besiktas" in canon.lower()
@@ -700,7 +726,13 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
                     logger.warning(f"Gemini Image predict '{model}' failed: {e}")
                     continue
 
-    logger.warning("Gemini Image generation unavailable. Falling back to club card graphic.")
+    # 3. Бесплатный нейросетевой арт (Flux)
+    logger.info("Gemini Image unavailable or no quota. Attempting Free AI Image (Flux)...")
+    free_buf = _call_free_ai_image(prompt)
+    if free_buf:
+        return free_buf
+
+    logger.warning("All AI Image generation methods unavailable. Falling back to club card graphic.")
     return generate_club_smm_media(team_name)
 
 
