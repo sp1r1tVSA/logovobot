@@ -652,14 +652,18 @@ def _call_openrouter_image(prompt: str) -> tuple[io.BytesIO | None, str | None]:
 
 def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_prompt: str = "") -> io.BytesIO | None:
     """
-    Генерирует высококачественное спортивное фото / арт через OpenRouter Image API или Gemini Image.
-    Фолбэк: если AI-генераторы недоступны, генерирует карточку клуба (Pillow Retina).
+    Генерирует визуал клуба для SMM-поста.
+    Использует Pillow Retina club card как основной и единственный надёжный метод.
+    Попытка через OpenRouter Image API оставлена — активируется автоматически
+    если OPENROUTER_API_KEY пополнен (>$0 баланса).
     """
+    # 1. Попытка через OpenRouter Image API (активна только при наличии баланса)
     canon = resolve_team_name(team_name) or team_name
     is_besiktas = "бешикташ" in canon.lower() or "besiktas" in canon.lower()
-
-    soccer_guard = "European soccer association football, classic round soccer ball, green grass pitch, no helmets, no rugby, no american football pads"
-
+    soccer_guard = (
+        "European soccer association football, classic round soccer ball, "
+        "green grass pitch, no helmets, no rugby, no american football pads"
+    )
     if custom_prompt:
         prompt = (
             f"Epic European soccer matchday poster for Besiktas JK, {custom_prompt}, "
@@ -700,107 +704,13 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
             f"Artistic 3D emblem of soccer club {canon} in arena, {soccer_guard}, championship atmosphere, cinematic 4k"
         )
 
-    # 1. Попытка через OpenRouter Image API (Recraft V4.1 Flash $0.007, FLUX.2 $0.014)
     buf, or_model = _call_openrouter_image(prompt)
     if buf:
+        logger.info(f"Club SMM: AI photo via OpenRouter ({or_model})")
         return buf
 
-    # 2. Попытка через Google Gemini Image API (если настроен ключ с квотой)
-    keys = get_ordered_gemini_keys()
-    if not keys:
-        logger.warning("Club SMM: No image API keys available. Falling back to club card graphic.")
-        return generate_club_smm_media(team_name)
-
-    models = getattr(config, "GEMINI_IMAGE_MODELS", [
-        "gemini-3.1-flash-image",
-        "gemini-2.5-flash-image",
-        "gemini-3-pro-image",
-        "imagen-3.0-generate-002",
-    ])
-
-    from services.ai.ai_recognizer import _get_gemini_opener
-    opener = _get_gemini_opener()
-    base_url = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
-
-    for model in models:
-        for key in keys:
-            # 1. Попытка через generateImages (gemini-3.1-flash-image / imagen)
-            url_img = f"{base_url}/v1beta/models/{model}:generateImages?key={key}"
-            payload_img = {
-                "prompt": prompt,
-                "config": {"numberOfImages": 1, "aspectRatio": "1:1"}
-            }
-            body = json.dumps(payload_img).encode("utf-8")
-            req = urllib.request.Request(
-                url_img, data=body,
-                headers={"Content-Type": "application/json", "User-Agent": "Logovobot/Image"}
-            )
-            try:
-                with opener.open(req, timeout=35) as resp:
-                    res = json.loads(resp.read().decode("utf-8"))
-                generated = res.get("generatedImages", [])
-                if generated and generated[0].get("image", {}).get("imageBytes"):
-                    img_bytes = base64.b64decode(generated[0]["image"]["imageBytes"])
-                    buf = io.BytesIO(img_bytes)
-                    buf.seek(0)
-                    logger.info(f"Club SMM: Image successfully generated with {model} (:generateImages)")
-                    return buf
-            except Exception as e:
-                logger.debug(f"Gemini Image generateImages '{model}' failed: {e}")
-
-            # 2. Попытка через generateContent (responseModalities: ["IMAGE"])
-            url_content = f"{base_url}/v1beta/models/{model}:generateContent?key={key}"
-            payload_content = {
-                "contents": [{"parts": [{"text": prompt}]}],
-                "generationConfig": {"responseModalities": ["IMAGE"]},
-            }
-            body = json.dumps(payload_content).encode("utf-8")
-            req = urllib.request.Request(
-                url_content, data=body,
-                headers={"Content-Type": "application/json", "User-Agent": "Logovobot/Image"}
-            )
-            try:
-                with opener.open(req, timeout=35) as resp:
-                    res = json.loads(resp.read().decode("utf-8"))
-                candidate = res.get("candidates", [{}])[0]
-                parts = candidate.get("content", {}).get("parts", [])
-                for p in parts:
-                    inline = p.get("inlineData") or p.get("inline_data")
-                    if inline and inline.get("data"):
-                        img_bytes = base64.b64decode(inline["data"])
-                        buf = io.BytesIO(img_bytes)
-                        buf.seek(0)
-                        logger.info(f"Club SMM: Image successfully generated with {model} (:generateContent)")
-                        return buf
-            except Exception as e:
-                logger.warning(f"Gemini Image generateContent '{model}' failed: {e}")
-
-            # 3. Попытка через predict (legacy Imagen)
-            url_pred = f"{base_url}/v1beta/models/{model}:predict?key={key}"
-            payload_pred = {
-                "instances": [{"prompt": prompt}],
-                "parameters": {"sampleCount": 1, "aspectRatio": "1:1"}
-            }
-            body = json.dumps(payload_pred).encode("utf-8")
-            req = urllib.request.Request(
-                url_pred, data=body,
-                headers={"Content-Type": "application/json", "User-Agent": "Logovobot/Image"}
-            )
-            try:
-                with opener.open(req, timeout=35) as resp:
-                    res = json.loads(resp.read().decode("utf-8"))
-                preds = res.get("predictions", [])
-                if preds and preds[0].get("bytesBase64Encoded"):
-                    img_bytes = base64.b64decode(preds[0]["bytesBase64Encoded"])
-                    buf = io.BytesIO(img_bytes)
-                    buf.seek(0)
-                    logger.info(f"Club SMM: Image successfully generated with {model} (:predict)")
-                    return buf
-            except Exception as e:
-                logger.warning(f"Gemini Image predict '{model}' failed: {e}")
-                continue
-
-    logger.warning("All Gemini Image generation methods unavailable. Falling back to club card graphic.")
+    # 2. Pillow Retina club card — основной надёжный метод (без внешних зависимостей)
+    logger.info(f"Club SMM: Using Pillow club card for '{team_name}' (post_type={post_type})")
     return generate_club_smm_media(team_name)
 
 
