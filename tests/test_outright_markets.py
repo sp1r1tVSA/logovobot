@@ -16,6 +16,7 @@ import database
 from services import outright_service
 
 BETTOR = 971001
+BETTOR_2 = 971002
 COACH_BASE = 971100
 
 
@@ -39,8 +40,9 @@ class OutrightCase(unittest.TestCase):
             cur.execute("UPDATE seasons SET status = 'finished'")
             cur.execute("INSERT INTO seasons (name, status) VALUES ('Outright Season', 'active')")
             self.season = cur.lastrowid
-            cur.execute("INSERT OR REPLACE INTO users (telegram_id, username, role) VALUES (?, 'bettor', 'user')",
-                        (BETTOR,))
+            for uid, name in ((BETTOR, "bettor"), (BETTOR_2, "bettor2")):
+                cur.execute("INSERT OR REPLACE INTO users (telegram_id, username, role) VALUES (?, ?, 'user')",
+                            (uid, name))
             for club, uid in self.coaches.items():
                 cur.execute("""
                     INSERT OR REPLACE INTO users (telegram_id, username, role, team_name, division_id)
@@ -59,7 +61,7 @@ class OutrightCase(unittest.TestCase):
                 """, (self.div, self.season, n // 2 + 1, self.coaches[a], self.coaches[b], a, b))
                 self.matches.append((cur.lastrowid, a, b))
 
-        for uid in (BETTOR, *self.coaches.values()):
+        for uid in (BETTOR, BETTOR_2, *self.coaches.values()):
             database.get_or_create_wallet(uid)
         with database.transaction() as conn:
             conn.cursor().execute("UPDATE user_wallets SET balance = 100000")
@@ -233,6 +235,24 @@ class TestPlacement(OutrightCase):
         self.assertTrue(ok, res)
         self.assertEqual(res["odd"], 7.5)
 
+    def test_cannot_bet_on_different_selection_in_same_market(self):
+        other_sel = self._selection(self.market, self.clubs[2])
+        ok1, res1 = database.place_outright_bet(BETTOR, self.sel["id"], 100)
+        self.assertTrue(ok1, res1)
+
+        # Ставка на другой исход в том же рынке отклоняется
+        ok2, res2 = database.place_outright_bet(BETTOR, other_sel["id"], 100)
+        self.assertFalse(ok2)
+        self.assertEqual(res2["error"], database.OUTRIGHT_ONE_SELECTION_ONLY_ERROR)
+        self.assertIn(self.sel["name"], res2["message"])
+
+        # Повторная ставка на тот же исход разрешена (в пределах лимита)
+        ok3, res3 = database.place_outright_bet(BETTOR, self.sel["id"], 100)
+        self.assertTrue(ok3, res3)
+
+        picks = database.get_user_open_outright_picks(BETTOR)
+        self.assertEqual(picks[self.market["id"]]["selection_id"], self.sel["id"])
+
 
 class TestSettlement(OutrightCase):
     def setUp(self):
@@ -245,16 +265,17 @@ class TestSettlement(OutrightCase):
         b = self._selection(self.market, self.clubs[1])
         ok, bet_a = database.place_outright_bet(BETTOR, a["id"], 100)
         self.assertTrue(ok)
-        ok, bet_b = database.place_outright_bet(BETTOR, b["id"], 100)
+        ok, bet_b = database.place_outright_bet(BETTOR_2, b["id"], 100)
         self.assertTrue(ok)
         start = self._balance(BETTOR)
         ok, res = database.settle_outright_market(self.market["id"], {a["id"]: 0.5})
         self.assertTrue(ok, res)
         self.assertEqual(self._balance(BETTOR) - start, int(round(100 * 0.5 * bet_a["odd"])))
-        bets = {x["id"]: x for x in database.get_user_outright_bets(BETTOR)}
-        self.assertEqual(bets[bet_a["bet_id"]]["status"], "won")
-        self.assertEqual(bets[bet_a["bet_id"]]["dead_heat_factor"], 0.5)
-        self.assertEqual(bets[bet_b["bet_id"]]["status"], "lost")
+        bets_a = {x["id"]: x for x in database.get_user_outright_bets(BETTOR)}
+        bets_b = {x["id"]: x for x in database.get_user_outright_bets(BETTOR_2)}
+        self.assertEqual(bets_a[bet_a["bet_id"]]["status"], "won")
+        self.assertEqual(bets_a[bet_a["bet_id"]]["dead_heat_factor"], 0.5)
+        self.assertEqual(bets_b[bet_b["bet_id"]]["status"], "lost")
 
     def test_settled_market_cannot_be_settled_again_or_repriced(self):
         a = self._selection(self.market, self.clubs[0])
@@ -283,7 +304,7 @@ class TestSettlement(OutrightCase):
         loser = self._selection(self.market, self.clubs[3])
         ok, bet = database.place_outright_bet(BETTOR, champion["id"], 100)
         self.assertTrue(ok)
-        self.assertTrue(database.place_outright_bet(BETTOR, loser["id"], 100)[0])
+        self.assertTrue(database.place_outright_bet(BETTOR_2, loser["id"], 100)[0])
         start = self._balance(BETTOR)
         self._finish_league()
         summary = outright_service.refresh_outrights()

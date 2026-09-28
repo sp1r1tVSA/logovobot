@@ -1,0 +1,595 @@
+"""
+handlers/club_smm.py
+
+Персональный SMM-центр для владельца клуба (главного админа @sp1r1tVSA / ID 1642770076).
+Генерация контента через Gemini (все доступные модели с ротацией), согласование черновика
+в ЛС с ботом и публикация в привязанный Telegram-канал клуба (текстом или с инфографикой).
+"""
+
+import asyncio
+import html
+import io
+import logging
+import re
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram.ext import ContextTypes, ConversationHandler, CommandHandler, CallbackQueryHandler, MessageHandler, filters
+
+import config
+import database
+from handlers.base import is_admin
+from services import club_smm_service
+from club_registry import resolve_team_name
+
+logger = logging.getLogger(__name__)
+
+# Состояния FSM ConversationHandler
+SMM_STATE_WAIT_PROMPT = 1
+SMM_STATE_WAIT_EDIT = 2
+SMM_STATE_WAIT_CHANNEL = 3
+
+CONFIG_CHANNEL_KEY = "my_club_channel"
+
+
+def is_smm_allowed(user_id: int | None) -> bool:
+    """Доступ строго для владельца клуба / главного администратора."""
+    if not user_id:
+        return False
+    if user_id == 1642770076:
+        return True
+    if user_id in getattr(config, "ADMIN_IDS", []):
+        return True
+    return is_admin(user_id)
+
+
+def get_target_channel() -> str | None:
+    """Возвращает сохраненный целевой канал из БД или config."""
+    db_val = database.get_config(CONFIG_CHANNEL_KEY)
+    if db_val and db_val.strip():
+        return db_val.strip()
+    cfg_val = getattr(config, "MY_CLUB_CHANNEL", "")
+    return cfg_val.strip() if cfg_val else None
+
+
+async def _resolve_user_club(user_id: int) -> str:
+    """Определяет клуб пользователя из базы, по умолчанию «Бешикташ»."""
+    team = await asyncio.to_thread(database.get_user_team, user_id)
+    if team:
+        return resolve_team_name(team) or team
+    return "Бешикташ"
+
+
+# ─── Главное меню SMM-центра ────────────────────────────────────────────────
+
+async def cmd_smm_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Точка входа по команде /club_post или /besiktas."""
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return
+
+    team_name = await _resolve_user_club(user.id)
+    channel = get_target_channel()
+    channel_display = f"<code>{html.escape(channel)}</code>" if channel else "<i>Не настроен</i>"
+
+    text = (
+        f"🦅 <b>SMM-центр ФК «{html.escape(team_name.upper())}»</b>\n\n"
+        f"Здесь вы можете генерировать посты для своего Telegram-канала с помощью ИИ "
+        f"на основе реальной статистики из базы данных.\n\n"
+        f"📢 <b>Канал публикации:</b> {channel_display}\n\n"
+        f"Выберите тип поста для подготовки черновика:"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🔥 Анонс матча", callback_data="smm_gen:matchday"),
+            InlineKeyboardButton("🏆 Итоги матча", callback_data="smm_gen:recap"),
+        ],
+        [
+            InlineKeyboardButton("📊 Таблица и форма", callback_data="smm_gen:standings"),
+            InlineKeyboardButton("🌟 Звезда клуба", callback_data="smm_gen:spotlight"),
+        ],
+        [
+            InlineKeyboardButton("✍️ Свой бриф / Голосовое", callback_data="smm_enter_prompt"),
+        ],
+        [
+            InlineKeyboardButton("⚙️ Настроить канал", callback_data="smm_cfg_channel"),
+            InlineKeyboardButton("« В кабинет", callback_data="menu_cabinet"),
+        ]
+    ]
+
+    markup = InlineKeyboardMarkup(keyboard)
+    if update.message:
+        await update.message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+    elif update.callback_query:
+        await update.callback_query.answer()
+        try:
+            await update.callback_query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            await update.effective_chat.send_message(text, parse_mode="HTML", reply_markup=markup)
+
+
+async def cb_smm_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Коллбэк возврата в меню SMM-центра."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+    await cmd_smm_hub(update, context)
+    return ConversationHandler.END
+
+
+# ─── Генерация черновика ────────────────────────────────────────────────────
+
+async def cb_smm_generate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Генерация поста выбранного типа и показ экрана предпросмотра."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return
+
+    post_type = query.data.split(":")[1] if ":" in query.data else "matchday"
+    team_name = await _resolve_user_club(user.id)
+
+    # Статус-заглушка
+    loading_text = "⏳ <b>ИИ анализирует турнирную статистику и пишет пост...</b>"
+    try:
+        await query.edit_message_text(loading_text, parse_mode="HTML")
+    except Exception:
+        pass
+
+    # Генерация в фоновом потоке
+    generated_text = await asyncio.to_thread(
+        club_smm_service.generate_club_post,
+        team_name=team_name,
+        post_type=post_type,
+    )
+
+    context.user_data["smm_draft"] = {
+        "text": generated_text,
+        "team_name": team_name,
+        "post_type": post_type,
+        "custom_brief": "",
+    }
+
+    await _show_draft_preview(update, context, generated_text)
+
+
+async def _show_draft_preview(update: Update, context: ContextTypes.DEFAULT_TYPE, draft_text: str) -> None:
+    """Показывает экран предпросмотра черновика с кнопками публикации и правки."""
+    channel = get_target_channel()
+    ch_label = f" ({channel})" if channel else " (⚠️ канал не задан)"
+
+    preview_message = (
+        f"📝 <b>Черновик для публикации:</b>\n"
+        f"━━━━━━━━━━━━━━━━━━━\n\n"
+        f"{draft_text}\n\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📢 <b>Канал:</b> {ch_label}"
+    )
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🚀 Опубликовать (Текст)", callback_data="smm_publish:text"),
+        ],
+        [
+            InlineKeyboardButton("🎨 С ИИ-фото (Gemini)", callback_data="smm_publish:ai_photo"),
+            InlineKeyboardButton("🏛 С карточкой клуба", callback_data="smm_publish:card"),
+        ],
+        [
+            InlineKeyboardButton("🔄 Другой вариант текста", callback_data="smm_regen"),
+            InlineKeyboardButton("✏️ Правка / Уточнить", callback_data="smm_enter_edit"),
+        ],
+        [
+            InlineKeyboardButton("« В меню SMM", callback_data="smm_hub")
+        ]
+    ]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    target_chat = update.effective_chat
+    query = update.callback_query
+
+    if query and query.message:
+        try:
+            await query.edit_message_text(preview_message, parse_mode="HTML", reply_markup=markup)
+            return
+        except Exception:
+            pass
+
+    if target_chat:
+        await target_chat.send_message(preview_message, parse_mode="HTML", reply_markup=markup)
+
+
+# ─── Регенерация и доработка ────────────────────────────────────────────────
+
+async def cb_smm_regenerate(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Генерирует альтернативный вариант текущего поста."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    draft = context.user_data.get("smm_draft")
+    if not draft:
+        await cb_smm_hub(update, context)
+        return
+
+    try:
+        await query.edit_message_text("🔄 <b>Генерирую новый вариант через другую модель Gemini...</b>", parse_mode="HTML")
+    except Exception:
+        pass
+
+    generated_text = await asyncio.to_thread(
+        club_smm_service.generate_club_post,
+        team_name=draft.get("team_name", "Бешикташ"),
+        post_type=draft.get("post_type", "matchday"),
+        custom_brief=draft.get("custom_brief", ""),
+    )
+
+    draft["text"] = generated_text
+    await _show_draft_preview(update, context, generated_text)
+
+
+# ─── FSM: Свой бриф / Голосовое сообщение ───────────────────────────────────
+
+async def start_custom_prompt_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос пользовательской темы или голосового сообщения."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    text = (
+        "🎙 <b>Свой бриф / Тема для поста</b>\n\n"
+        "Отправьте тему для поста текстом или запишите голосовое сообщение (аудиокружок/войс).\n\n"
+        "<i>Примеры:</i>\n"
+        "• «Напиши бодрый пост, как мы разгромили соперника в кубке»\n"
+        "• «Сделай акцент на сумасшедшем сейве вратаря и дерзкой игре Троссарда»\n"
+        "• «Пост-настрой перед принципиальным дерби»\n\n"
+        "Для отмены нажмите кнопку ниже."
+    )
+    keyboard = [[InlineKeyboardButton("« Отмена", callback_data="smm_hub")]]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if query and query.message:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    elif update.effective_chat:
+        await update.effective_chat.send_message(text, parse_mode="HTML", reply_markup=markup)
+
+    return SMM_STATE_WAIT_PROMPT
+
+
+async def handle_custom_prompt_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка текста или голосового сообщения с брифом."""
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return ConversationHandler.END
+
+    team_name = await _resolve_user_club(user.id)
+    msg = update.message
+    audio_bytes = None
+    custom_brief = ""
+
+    status_msg = await msg.reply_text("⏳ <b>ИИ слушает и создаёт клубный пост...</b>", parse_mode="HTML")
+
+    if msg.voice:
+        try:
+            voice_file = await msg.voice.get_file()
+            audio_bytes = bytes(await voice_file.download_as_bytearray())
+        except Exception as e:
+            logger.exception(f"Club SMM: Failed to download voice file: {e}")
+            await status_msg.edit_text("❌ Ошибка загрузки голосового сообщения. Попробуйте отправить текстом.")
+            return SMM_STATE_WAIT_PROMPT
+    elif msg.text:
+        custom_brief = msg.text.strip()
+
+    generated_text = await asyncio.to_thread(
+        club_smm_service.generate_club_post,
+        team_name=team_name,
+        post_type="custom",
+        custom_brief=custom_brief,
+        audio_bytes=audio_bytes,
+        audio_mime="audio/ogg" if audio_bytes else "audio/ogg",
+    )
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    context.user_data["smm_draft"] = {
+        "text": generated_text,
+        "team_name": team_name,
+        "post_type": "custom",
+        "custom_brief": custom_brief,
+    }
+
+    await _show_draft_preview(update, context, generated_text)
+    return ConversationHandler.END
+
+
+# ─── FSM: Правка и доработка черновика ───────────────────────────────────────
+
+async def start_edit_prompt_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос пожеланий по правке черновика."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    text = (
+        "✏️ <b>Доработка черновика</b>\n\n"
+        "Напишите текстом или надиктуйте голосом, что именно нужно исправить или добавить "
+        "(например: <i>«сделай короче»</i>, <i>«добавь больше огня и эмодзи»</i>, <i>«похвали тренера»</i>)."
+    )
+    keyboard = [[InlineKeyboardButton("« Назад к черновику", callback_data="smm_cancel_edit")]]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if query and query.message:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    return SMM_STATE_WAIT_EDIT
+
+
+async def handle_edit_prompt_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Применение правки к текущему черновику через Gemini."""
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return ConversationHandler.END
+
+    draft = context.user_data.get("smm_draft")
+    if not draft:
+        await cmd_smm_hub(update, context)
+        return ConversationHandler.END
+
+    msg = update.message
+    edit_brief = msg.text.strip() if msg.text else "Улучши динамику и стиль."
+
+    status_msg = await msg.reply_text("⏳ <b>Вношу правки в пост...</b>", parse_mode="HTML")
+
+    combined_brief = (
+        f"ТЕКУЩИЙ ЧЕРНОВИК:\n{draft.get('text', '')}\n\n"
+        f"ИНСТРУКЦИЯ ПО ПРАВКЕ:\n{edit_brief}"
+    )
+
+    generated_text = await asyncio.to_thread(
+        club_smm_service.generate_club_post,
+        team_name=draft.get("team_name", "Бешикташ"),
+        post_type="custom",
+        custom_brief=combined_brief,
+    )
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    draft["text"] = generated_text
+    await _show_draft_preview(update, context, generated_text)
+    return ConversationHandler.END
+
+
+async def cancel_edit_and_return(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отмена правки и возврат к предпросмотру."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+    draft = context.user_data.get("smm_draft")
+    if draft and draft.get("text"):
+        await _show_draft_preview(update, context, draft["text"])
+    else:
+        await cmd_smm_hub(update, context)
+    return ConversationHandler.END
+
+
+# ─── FSM: Настройка канала назначения ───────────────────────────────────────
+
+async def start_channel_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос целевого Telegram-канала."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    curr = get_target_channel()
+    curr_line = f"\nТекущий канал: <code>{html.escape(curr)}</code>\n" if curr else "\nКанал ещё не задан.\n"
+
+    text = (
+        f"⚙️ <b>Настройка канала для публикации</b>\n{curr_line}\n"
+        f"Отправьте юзернейм канала (например: <code>@besiktas_tg</code>) или его цифровой ID "
+        f"(например: <code>-1001234567890</code>).\n\n"
+        f"⚠️ <b>Важно:</b> Бот должен быть предварительно добавлен в канал как <b>Администратор</b> "
+        f"с правом публикации сообщений!"
+    )
+    keyboard = [[InlineKeyboardButton("« Отмена", callback_data="smm_hub")]]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if query and query.message:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    elif update.effective_chat:
+        await update.effective_chat.send_message(text, parse_mode="HTML", reply_markup=markup)
+
+    return SMM_STATE_WAIT_CHANNEL
+
+
+async def handle_channel_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сохранение и проверка доступности канала."""
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return ConversationHandler.END
+
+    raw = update.message.text.strip()
+    target = raw if raw.startswith(("@", "-100")) or raw.lstrip("-").isdigit() else f"@{raw}"
+
+    # Проверка прав бота в канале
+    try:
+        chat = await context.bot.get_chat(target)
+        bot_member = await chat.get_member(context.bot.id)
+        if bot_member.status not in ("administrator", "creator"):
+            await update.message.reply_text(
+                f"⚠️ Бот видит канал <b>{html.escape(chat.title)}</b>, но ещё не назначен администратором!\n"
+                f"Выдайте боту права администратора с разрешением на отправку сообщений и повторите попытку.",
+                parse_mode="HTML"
+            )
+            return SMM_STATE_WAIT_CHANNEL
+
+        # Успешная валидация
+        await asyncio.to_thread(database.set_config, CONFIG_CHANNEL_KEY, str(target))
+
+        await update.message.reply_text(
+            f"✅ <b>Канал успешно привязан!</b>\n\n"
+            f"• <b>Название:</b> {html.escape(chat.title)}\n"
+            f"• <b>ID/Username:</b> <code>{html.escape(str(target))}</code>\n\n"
+            f"Теперь посты из SMM-центра будут публиковаться напрямую сюда.",
+            parse_mode="HTML"
+        )
+        await cmd_smm_hub(update, context)
+        return ConversationHandler.END
+
+    except Exception as e:
+        logger.warning(f"Club SMM: Failed to verify channel {target}: {e}")
+        await update.message.reply_text(
+            f"❌ Не удалось получить доступ к каналу <code>{html.escape(target)}</code>.\n\n"
+            f"<b>Причина:</b> {html.escape(str(e))}\n\n"
+            f"Убедитесь, что бот добавлен в канал и у него есть права администратора. Попробуйте ещё раз или нажмите /cancel:",
+            parse_mode="HTML"
+        )
+        return SMM_STATE_WAIT_CHANNEL
+
+
+async def cmd_set_club_channel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Быстрая команда /set_club_channel @channel_name."""
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Использование: <code>/set_club_channel @username_канала</code> или <code>/set_club_channel -100xxxxxxxxxx</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    raw = context.args[0].strip()
+    target = raw if raw.startswith(("@", "-100")) or raw.lstrip("-").isdigit() else f"@{raw}"
+
+    try:
+        chat = await context.bot.get_chat(target)
+        await asyncio.to_thread(database.set_config, CONFIG_CHANNEL_KEY, str(target))
+        await update.message.reply_text(
+            f"✅ Канал <b>{html.escape(chat.title)}</b> (<code>{html.escape(str(target))}</code>) привязан для публикации постов клуба!",
+            parse_mode="HTML"
+        )
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка доступа к каналу: {html.escape(str(e))}", parse_mode="HTML")
+
+
+# ─── Публикация в канал ─────────────────────────────────────────────────────
+
+async def cb_smm_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Отправка поста в канал: текстом или с графической карточкой клуба."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return
+
+    channel = get_target_channel()
+    if not channel:
+        await query.answer("⚠️ Канал не настроен! Сначала привяжите канал через меню «⚙️ Настроить канал».", show_alert=True)
+        return
+
+    draft = context.user_data.get("smm_draft")
+    if not draft or not draft.get("text"):
+        await query.answer("⚠️ Черновик не найден. Сгенерируйте пост заново.", show_alert=True)
+        return
+
+    mode = query.data.split(":")[1] if ":" in query.data else "text"
+    text_content = draft["text"]
+    team_name = draft.get("team_name", "Бешикташ")
+
+    try:
+        await query.edit_message_text("🚀 <b>Публикую в канал...</b>", parse_mode="HTML")
+    except Exception:
+        pass
+
+    try:
+        sent_msg = None
+        if mode == "ai_photo":
+            post_type = draft.get("post_type", "matchday")
+            brief = draft.get("custom_brief", "")
+            buf = await asyncio.to_thread(club_smm_service.generate_club_ai_photo, team_name, post_type, brief)
+            caption = club_smm_service._fit_html(text_content, club_smm_service.CAPTION_MAX_CHARS)
+            if buf:
+                sent_msg = await context.bot.send_photo(
+                    chat_id=channel,
+                    photo=buf,
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+            else:
+                sent_msg = await context.bot.send_message(
+                    chat_id=channel,
+                    text=text_content,
+                    parse_mode="HTML"
+                )
+        elif mode in ("card", "media"):
+            buf = await asyncio.to_thread(club_smm_service.generate_club_smm_media, team_name)
+            caption = club_smm_service._fit_html(text_content, club_smm_service.CAPTION_MAX_CHARS)
+            if buf:
+                sent_msg = await context.bot.send_photo(
+                    chat_id=channel,
+                    photo=buf,
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+            else:
+                sent_msg = await context.bot.send_message(
+                    chat_id=channel,
+                    text=text_content,
+                    parse_mode="HTML"
+                )
+        else:
+            sent_msg = await context.bot.send_message(
+                chat_id=channel,
+                text=text_content,
+                parse_mode="HTML"
+            )
+
+        # Формирование прямой ссылки на пост
+        post_link = None
+        if channel.startswith("@"):
+            post_link = f"https://t.me/{channel.lstrip('@')}/{sent_msg.message_id}"
+        elif str(channel).startswith("-100"):
+            clean_id = str(channel)[4:]
+            post_link = f"https://t.me/c/{clean_id}/{sent_msg.message_id}"
+
+        success_text = f"✅ <b>Пост успешно опубликован в канале!</b>"
+        keyboard = []
+        if post_link:
+            keyboard.append([InlineKeyboardButton("🔗 Открыть пост в Telegram", url=post_link)])
+        keyboard.append([InlineKeyboardButton("« В меню SMM", callback_data="smm_hub")])
+
+        markup = InlineKeyboardMarkup(keyboard)
+        if query.message:
+            await query.edit_message_text(success_text, parse_mode="HTML", reply_markup=markup)
+
+    except Exception as e:
+        logger.exception(f"Club SMM: Failed to publish post to {channel}: {e}")
+        err_text = (
+            f"❌ <b>Ошибка при публикации в канал:</b>\n\n"
+            f"<code>{html.escape(str(e))}</code>\n\n"
+            f"Проверьте, что бот является администратором канала с правом отправки сообщений."
+        )
+        keyboard = [
+            [InlineKeyboardButton("« В меню SMM", callback_data="smm_hub")]
+        ]
+        if query.message:
+            await query.edit_message_text(err_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+
+async def cancel_smm_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Сброс FSM диалога."""
+    if update.callback_query:
+        await update.callback_query.answer()
+    await cmd_smm_hub(update, context)
+    return ConversationHandler.END

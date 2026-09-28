@@ -371,6 +371,10 @@ async def show_cabinet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ],
         [InlineKeyboardButton("« Назад в меню", callback_data="main_menu")]
     ]
+    if user.id == 1642770076 or (user.id in getattr(config, "ADMIN_IDS", [])) or is_admin(user.id):
+        keyboard.insert(0, [
+            InlineKeyboardButton("🦅 SMM-центр клуба (ИИ)", callback_data="smm_hub")
+        ])
     markup = InlineKeyboardMarkup(keyboard)
 
     target_chat_id = query.message.chat_id if query and query.message else (update.effective_chat.id if update.effective_chat else update.effective_user.id)
@@ -1638,11 +1642,31 @@ async def cb_request_admin_result(update: Update, context: ContextTypes.DEFAULT_
     rnd = m.get('round_number', '?')
     deadline = m.get('deadline', '—')
 
+    division_id = m.get('division_id')
+    if not division_id and m.get('round_number'):
+        try:
+            r = await asyncio.to_thread(database.get_round_by_number, m['round_number'])
+            if r and r.get('division_id'):
+                division_id = r['division_id']
+        except Exception:
+            pass
+
+    div_name = ""
+    if division_id:
+        try:
+            div = await asyncio.to_thread(database.get_division, division_id)
+            if div and div.get('name'):
+                div_name = div['name']
+        except Exception:
+            pass
+
     requester_name = query.from_user.full_name or query.from_user.username or str(user_id)
     requester_username = f"@{query.from_user.username}" if query.from_user.username else f"id{user_id}"
 
+    div_line = f"🛡 Дивизион: <b>{html.escape(div_name)}</b>\n" if div_name else ""
     admin_text = (
         f"📨 <b>Запрос на разрешение внесения результата</b>\n\n"
+        f"{div_line}"
         f"🏟 Матч #{match_id} | Тур {rnd}\n"
         f"🏠 {html.escape(team1)} (@{html.escape(nick1)}) vs {html.escape(team2)} (@{html.escape(nick2)}) ✈️\n"
         f"⏳ Дедлайн истёк: {html.escape(str(deadline))}\n\n"
@@ -1654,11 +1678,25 @@ async def cb_request_admin_result(update: Update, context: ContextTypes.DEFAULT_
         [InlineKeyboardButton("✅ Разрешить внесение", callback_data=f"cb_admin_approve_{match_id}_{user_id}")]
     ])
 
+    # Ищем админов дивизиона. Если у дивизиона есть свои админы — отправляем им.
+    # Если у дивизиона нет назначенных админов — fallback на глобальных (config.ADMIN_IDS).
+    target_admins: list[int] = []
+    if division_id:
+        try:
+            target_admins = list(await asyncio.to_thread(database.get_division_admins, division_id))
+        except Exception as e:
+            logger.warning(f"Failed to load admins for division {division_id}: {e}")
+            target_admins = []
+
+    if not target_admins:
+        from config import ADMIN_IDS
+        target_admins = [int(a) for a in (ADMIN_IDS or [])]
+
+    # Убираем дубликаты с сохранением порядка
+    seen: set[int] = set()
+    unique_admins = [a for a in target_admins if a and not (a in seen or seen.add(a))]
+
     sent_count = 0
-    from config import ADMIN_IDS
-    # Filter unique ADMIN_IDS in case of duplicates
-    unique_admins = list(set(ADMIN_IDS))
-    
     for admin_id in unique_admins:
         try:
             await context.bot.send_message(
@@ -1672,7 +1710,7 @@ async def cb_request_admin_result(update: Update, context: ContextTypes.DEFAULT_
             logger.warning(f"Could not notify admin {admin_id}: {e}")
 
     if sent_count > 0:
-        await query.answer("✅ Запрос отправлен администратору!\nКак только он одобрит — бот пришлёт вам уведомление.", show_alert=True)
+        await query.answer("✅ Запрос отправлен администратору дивизиона!\nКак только он одобрит — бот пришлёт вам уведомление.", show_alert=True)
         # Update button to prevent multiple clicks
         if query.message and query.message.reply_markup:
             keyboard = query.message.reply_markup.inline_keyboard
@@ -1690,7 +1728,7 @@ async def cb_request_admin_result(update: Update, context: ContextTypes.DEFAULT_
             except Exception as e:
                 pass
     else:
-        await query.answer("⚠️ Не удалось уведомить администраторов. Напишите напрямую @antonv2801.", show_alert=True)
+        await query.answer("⚠️ Не удалось уведомить администраторов дивизиона.", show_alert=True)
 
 
 async def cb_admin_approve_result(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1701,10 +1739,6 @@ async def cb_admin_approve_result(update: Update, context: ContextTypes.DEFAULT_
     await query.answer()
 
     admin_id = query.from_user.id
-    from config import ADMIN_IDS
-    if admin_id not in ADMIN_IDS:
-        await query.answer("⛔ Только администратор может одобрять запросы.", show_alert=True)
-        return
 
     # parse match_id and player_id from callback data: cb_admin_approve_{match_id}_{player_id}
     parts = query.data.replace("cb_admin_approve_", "").split("_")
@@ -1717,6 +1751,23 @@ async def cb_admin_approve_result(update: Update, context: ContextTypes.DEFAULT_
     m = await asyncio.to_thread(database.get_match, match_id)
     if not m:
         await query.answer("Матч не найден.", show_alert=True)
+        return
+
+    div_id = m.get('division_id')
+    if not div_id and m.get('round_number'):
+        try:
+            r = await asyncio.to_thread(database.get_round_by_number, m['round_number'])
+            if r and r.get('division_id'):
+                div_id = r['division_id']
+        except Exception:
+            pass
+
+    from handlers.base import is_global_admin
+    is_allowed = is_global_admin(admin_id) or (
+        div_id is not None and await asyncio.to_thread(database.is_division_admin, admin_id, div_id)
+    )
+    if not is_allowed:
+        await query.answer("⛔ Только администратор этого дивизиона может одобрять запросы.", show_alert=True)
         return
 
     if m['status'] != 'pending':

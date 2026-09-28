@@ -29,6 +29,7 @@ from services import outright_service
 TEST_BOT_TOKEN = "123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"
 
 BETTOR = 972001
+BETTOR_2 = 972002
 ADMIN = 972900
 COACH_BASE = 972100
 
@@ -61,7 +62,7 @@ def _seed() -> dict:
             cur.execute("UPDATE seasons SET status = 'finished'")
             cur.execute("INSERT INTO seasons (name, status) VALUES ('Outright API Season', 'active')")
             season = cur.lastrowid
-            for uid, name in ((BETTOR, "o_bettor"), (ADMIN, "o_admin")):
+            for uid, name in ((BETTOR, "o_bettor"), (BETTOR_2, "o_bettor2"), (ADMIN, "o_admin")):
                 cur.execute("INSERT OR IGNORE INTO users (telegram_id, username, role) VALUES (?, ?, 'user')",
                             (uid, name))
             for club, uid in coaches.items():
@@ -80,7 +81,7 @@ def _seed() -> dict:
                                          player1_id, player2_id, player1_team, player2_team, status)
                     VALUES (?, ?, ?, 'league', ?, ?, ?, ?, 'pending')
                 """, (div, season, n // 2 + 1, coaches[a], coaches[b], a, b))
-    for uid in (BETTOR, *coaches.values()):
+    for uid in (BETTOR, BETTOR_2, *coaches.values()):
         database.get_or_create_wallet(uid)
     return {"div": div, "season": season, "clubs": clubs, "coaches": coaches}
 
@@ -254,6 +255,27 @@ class TestPlacement(OutrightApiCase):
         self.assertEqual(status, 400)
         status, _ = await self._bet(sel, amount=1)
         self.assertEqual(status, 400)
+
+    async def test_betting_multiple_selections_in_same_market_returns_409(self):
+        sels = self._winner_market()["selections"]
+        status1, body1 = await self._bet(sels[0], 100)
+        self.assertEqual(status1, 200, body1)
+
+        # Доска теперь показывает выбранный исход и блокировку на остальных
+        market = await self._board_market()
+        self.assertEqual(market["chosen_selection_id"], sels[0]["id"])
+        chosen_sel = next(s for s in market["selections"] if s["id"] == sels[0]["id"])
+        self.assertTrue(chosen_sel["has_bet"])
+        self.assertIsNone(chosen_sel["locked"])
+
+        other_sel = next(s for s in market["selections"] if s["id"] == sels[1]["id"])
+        self.assertIsNotNone(other_sel["locked"])
+        self.assertIn(sels[0]["name"], other_sel["locked"])
+
+        # Попытка поставить на другой исход возвращает 409 OUTRIGHT_ONE_SELECTION_ONLY
+        status2, body2 = await self._bet(sels[1], 100)
+        self.assertEqual(status2, 409, body2)
+        self.assertEqual(body2["error"], database.OUTRIGHT_ONE_SELECTION_ONLY_ERROR)
 
 
 class TestDeadline(OutrightApiCase):
@@ -491,8 +513,8 @@ class TestPanel(OutrightApiCase):
     async def test_settle_pays_the_winner_and_notifies(self):
         market = self._winner_market()
         win_sel, lose_sel = market["selections"][0], market["selections"][1]
-        _, won = await self._bet(win_sel, 100)
-        _, lost = await self._bet(lose_sel, 100)
+        _, won = await self._bet(win_sel, 100, user_id=BETTOR)
+        _, lost = await self._bet(lose_sel, 100, user_id=BETTOR_2)
         before = database.get_wallet_balance(BETTOR)
 
         path = f"/api/admin/panel/outrights/{market['id']}/action"
@@ -663,15 +685,20 @@ class TestPanel(OutrightApiCase):
 
     # ─── helpers ───
 
-    def _notice_rows(self) -> list:
+    def _notice_rows(self, user_id: int | None = None) -> list:
         with database.transaction() as conn:
+            if user_id is not None:
+                return conn.execute(
+                    "SELECT source_event_id, title, body FROM notification_events "
+                    "WHERE user_id = ? AND source_event_id LIKE 'obet_%'", (user_id,),
+                ).fetchall()
             return conn.execute(
                 "SELECT source_event_id, title, body FROM notification_events "
-                "WHERE user_id = ? AND source_event_id LIKE 'obet_%'", (BETTOR,),
+                "WHERE source_event_id LIKE 'obet_%'",
             ).fetchall()
 
-    def _notices(self) -> dict:
-        return {r["source_event_id"]: r["title"] for r in self._notice_rows()}
+    def _notices(self, user_id: int | None = None) -> dict:
+        return {r["source_event_id"]: r["title"] for r in self._notice_rows(user_id)}
 
-    def _notice_bodies(self) -> dict:
-        return {r["source_event_id"]: f"{r['title']}\n{r['body']}" for r in self._notice_rows()}
+    def _notice_bodies(self, user_id: int | None = None) -> dict:
+        return {r["source_event_id"]: f"{r['title']}\n{r['body']}" for r in self._notice_rows(user_id)}

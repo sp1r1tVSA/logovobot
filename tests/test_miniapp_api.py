@@ -80,6 +80,7 @@ class TestMiniAppApi(AioHTTPTestCase):
             "min_bet", "max_bet", "max_payout",
             "max_open_exposure", "open_exposure",
             "max_open_bets", "open_bets",
+            "express_margin_pct",
         })
         self.assertTrue(0 < limits["min_bet"] <= limits["max_bet"])
         self.assertTrue(limits["min_bet"] <= limits["max_payout"] <= limits["max_open_exposure"])

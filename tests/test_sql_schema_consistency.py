@@ -23,7 +23,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SKIP_DIRS = {".claude", ".git", "tests", "venv", ".venv", "node_modules", "__pycache__"}
 
 # Scratch tables that exist only while a migration rebuilds the real one.
-MIGRATION_TEMP_TABLES = ("rounds_v3", "user_bets_migrate_cashed_out", "division_topics__migration")
+MIGRATION_TEMP_TABLES = ("rounds_v3", "user_bets_migrate_cashed_out", "division_topics__migration", "round_reminders_v2")
 
 STATEMENT = re.compile(r"\s*(SELECT|WITH|INSERT|UPDATE|DELETE|REPLACE)\b", re.I)
 

@@ -15766,8 +15766,13 @@ def get_division_admins(division_id: int) -> list[int]:
     """List all admin user_ids for a division."""
     with transaction() as conn:
         cursor = conn.cursor()
-        cursor.execute("SELECT user_id FROM division_admins WHERE division_id = ?", (division_id,))
-        return [r["user_id"] for r in cursor.fetchall()]
+        cursor.execute("""
+            SELECT user_id FROM division_admins WHERE division_id = ?
+            UNION
+            SELECT telegram_id AS user_id FROM users
+            WHERE role IN ('admin', 'division_admin') AND division_id = ? AND telegram_id IS NOT NULL
+        """, (division_id, division_id))
+        return [int(r["user_id"]) for r in cursor.fetchall() if r["user_id"]]
 
 
 def get_division_admins_detailed(division_id: int) -> list[dict]:
@@ -17518,6 +17523,7 @@ OUTRIGHT_MIN_BET = 10
 OUTRIGHT_REPRICING_ERROR = "OUTRIGHT_REPRICING"
 OUTRIGHT_OWN_SCOPE_ERROR = "OUTRIGHT_OWN_SCOPE"
 OUTRIGHT_BETTING_CLOSED_ERROR = "OUTRIGHT_BETTING_CLOSED"
+OUTRIGHT_ONE_SELECTION_ONLY_ERROR = "OUTRIGHT_ONE_SELECTION_ONLY"
 _OUTRIGHT_PLAYED = ("confirmed", "completed")
 
 
@@ -18359,6 +18365,25 @@ def place_outright_bet(
                            "message": f"Выигрыш по этому исходу не может превышать {max_payout:,} 🪙"
                                       + (f" — у вас уже есть ставки на {held:,} 🪙." if held else ".")}
 
+        cursor.execute("""
+            SELECT s.name
+            FROM outright_bets b
+            JOIN outright_selections s ON s.id = b.selection_id
+            WHERE b.user_id = ? AND b.market_id = ? AND b.status = 'pending' AND b.selection_id != ?
+            LIMIT 1
+        """, (user_id, sel["market_id"], selection_id))
+        other_pick = cursor.fetchone()
+        if other_pick:
+            other_name = other_pick["name"] if hasattr(other_pick, "keys") else other_pick[0]
+            return False, {
+                "error": OUTRIGHT_ONE_SELECTION_ONLY_ERROR,
+                "chosen_name": other_name,
+                "message": (
+                    f"На один вид долгосрочной ставки можно поставить только на один выбор. "
+                    f"У вас уже есть ставка на «{other_name}»."
+                ),
+            }
+
         cursor.execute("SELECT COUNT(*) FROM outright_bets WHERE user_id = ? AND status = 'pending'", (user_id,))
         open_count = int(cursor.fetchone()[0])
         if open_count >= MAX_OPEN_OUTRIGHT_BETS:
@@ -18430,6 +18455,28 @@ def count_user_open_outright_bets(user_id: int) -> int:
         cursor = conn.cursor()
         cursor.execute("SELECT COUNT(*) FROM outright_bets WHERE user_id = ? AND status = 'pending'", (user_id,))
         return int(cursor.fetchone()[0])
+
+
+def get_user_open_outright_picks(user_id: int) -> dict[int, dict]:
+    """Возвращает словарь {market_id: {'selection_id': int, 'name': str}} открытых долгосрочных ставок игрока."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT b.market_id, b.selection_id, s.name
+            FROM outright_bets b
+            JOIN outright_selections s ON s.id = b.selection_id
+            WHERE b.user_id = ? AND b.status = 'pending'
+            ORDER BY b.id ASC
+        """, (user_id,))
+        picks = {}
+        for row in cursor.fetchall():
+            m_id = row["market_id"]
+            if m_id not in picks:
+                picks[m_id] = {
+                    "selection_id": row["selection_id"],
+                    "name": row["name"],
+                }
+        return picks
 
 
 def get_user_freebets(user_id: int) -> list[dict]:

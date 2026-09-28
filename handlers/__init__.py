@@ -280,6 +280,25 @@ from handlers.admin_bets import (
     cb_admin_integrity_case,
     cb_admin_integrity_review,
 )
+from handlers.club_smm import (
+    cmd_smm_hub,
+    cb_smm_hub,
+    cb_smm_generate,
+    cb_smm_regenerate,
+    cb_smm_publish,
+    start_custom_prompt_input,
+    handle_custom_prompt_received,
+    start_edit_prompt_input,
+    handle_edit_prompt_received,
+    cancel_edit_and_return,
+    start_channel_setup,
+    handle_channel_received,
+    cmd_set_club_channel,
+    cancel_smm_flow,
+    SMM_STATE_WAIT_PROMPT,
+    SMM_STATE_WAIT_EDIT,
+    SMM_STATE_WAIT_CHANNEL,
+)
 from services.topic_cache import topic_cache
 
 
@@ -559,6 +578,43 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(show_club_stats, pattern="^cabinet_club_stats$"))
     app.add_handler(CallbackQueryHandler(show_my_squad, pattern="^cabinet_my_squad$"))
     app.add_handler(CallbackQueryHandler(show_player_card, pattern="^(player_card|pcard)_.+$"))
+
+    # 🦅 Personal Club SMM Center (for @sp1r1tVSA / admins)
+    app.add_handler(CommandHandler(["club_post", "besiktas", "smm_post"], cmd_smm_hub))
+    app.add_handler(CommandHandler(["set_club_channel", "club_channel"], cmd_set_club_channel))
+    app.add_handler(CallbackQueryHandler(cb_smm_hub, pattern="^smm_hub$"))
+    app.add_handler(CallbackQueryHandler(cb_smm_generate, pattern=r"^smm_gen:[\w_]+$"))
+    app.add_handler(CallbackQueryHandler(cb_smm_regenerate, pattern="^smm_regen$"))
+    app.add_handler(CallbackQueryHandler(cb_smm_publish, pattern=r"^smm_publish:(text|media|card|ai_photo)$"))
+
+    smm_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(start_custom_prompt_input, pattern="^smm_enter_prompt$"),
+            CallbackQueryHandler(start_edit_prompt_input, pattern="^smm_enter_edit$"),
+            CallbackQueryHandler(start_channel_setup, pattern="^smm_cfg_channel$"),
+        ],
+        states={
+            SMM_STATE_WAIT_PROMPT: [
+                MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, handle_custom_prompt_received)
+            ],
+            SMM_STATE_WAIT_EDIT: [
+                MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, handle_edit_prompt_received)
+            ],
+            SMM_STATE_WAIT_CHANNEL: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_channel_received)
+            ],
+        },
+        fallbacks=[
+            CallbackQueryHandler(cancel_edit_and_return, pattern="^smm_cancel_edit$"),
+            CallbackQueryHandler(cancel_smm_flow, pattern="^smm_hub$"),
+            CallbackQueryHandler(show_cabinet, pattern="^menu_cabinet$"),
+            CommandHandler("cancel", cancel_smm_flow),
+        ],
+        allow_reentry=True,
+        per_message=False,
+        conversation_timeout=300
+    )
+    app.add_handler(smm_conv)
 
 def _register_admin_handlers(app: Application) -> None:
     """Register administrator panel, tournament management, and dispute resolution handlers."""

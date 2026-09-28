@@ -391,6 +391,7 @@ class OutrightsView {
     if (won) tag = `<span class="ob-tag won">${s.settle_factor && s.settle_factor < 1 ? `делёж ×${Number(s.settle_factor).toFixed(2)}` : 'победа'}</span>`;
     else if (s.status === 'eliminated') tag = '<span class="ob-tag">выбыл</span>';
     else if (s.status === 'suspended') tag = '<span class="ob-tag">пауза</span>';
+    else if (s.has_bet) tag = '<span class="ob-tag pick">ваш выбор</span>';
 
     let button;
     if (canBet) {
@@ -577,6 +578,10 @@ class OutrightsView {
     const found = this.findSelection(selectionId);
     if (!found) return;
     const { market, selection } = found;
+    if (market.chosen_selection_id && market.chosen_selection_id !== selectionId) {
+      this.toast(`В этом рынке вы уже выбрали «${market.chosen_selection_name || 'другой исход'}»`);
+      return;
+    }
     this.sheet = {
       selectionId,
       odd: Number(selection.odds),
@@ -623,6 +628,9 @@ class OutrightsView {
     overlay.classList.add('active');
     this.renderFunding();
     this.updateSheetTotals();
+    if (selection.has_bet) {
+      this.sheetNotice('У вас уже есть ставка на этот исход. Новая ставка увеличит сумму пари.');
+    }
   }
 
   // Выбор оплаты: монеты или фрибет. Одинаковые по сумме фрибеты — одна
@@ -725,7 +733,7 @@ class OutrightsView {
         this.loadBoard();
       } else {
         errorEl.textContent = err.message || 'Ставка не принята.';
-        if (['MARKET_SUSPENDED', 'OUTRIGHT_OWN_SCOPE', 'OUTRIGHT_BETTING_CLOSED', 'INVALID_SELECTION'].includes(code)) this.loadBoard();
+        if (['MARKET_SUSPENDED', 'OUTRIGHT_OWN_SCOPE', 'OUTRIGHT_BETTING_CLOSED', 'INVALID_SELECTION', 'OUTRIGHT_ONE_SELECTION_ONLY'].includes(code)) this.loadBoard();
         if (code === 'FREEBET_UNAVAILABLE') {
           // Фрибет уже потрачен в другой вкладке — убираем его из листа.
           await this.loadBoard();

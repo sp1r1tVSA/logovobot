@@ -45,6 +45,7 @@ _ERROR_STATUS = {
     database.OUTRIGHT_REPRICING_ERROR: 409,
     database.OUTRIGHT_OWN_SCOPE_ERROR: 403,
     database.OUTRIGHT_BETTING_CLOSED_ERROR: 409,
+    database.OUTRIGHT_ONE_SELECTION_ONLY_ERROR: 409,
     "LOGOVO_LOCKDOWN": 403,
     "BETTING_BANNED": 403,
     "BETTING_PAUSED": 403,
@@ -69,7 +70,7 @@ def _user(request: web.Request) -> tuple[int | None, web.Response | None]:
     return int(user_info["id"]), None
 
 
-def _selection_payload(sel: dict, lock: str | None) -> dict:
+def _selection_payload(sel: dict, lock: str | None, has_bet: bool = False) -> dict:
     return {
         "id": sel["id"],
         "key": sel["selection_key"],
@@ -81,15 +82,23 @@ def _selection_payload(sel: dict, lock: str | None) -> dict:
         "status": sel["status"],
         "settle_factor": sel.get("settle_factor"),
         "locked": lock,
+        "has_bet": has_bet,
     }
 
 
-def _market_payload(market: dict, coach: dict | None) -> dict:
+def _market_payload(market: dict, coach: dict | None, user_picks: dict | None = None) -> dict:
     market_lock = database.outright_lock_reason(coach, market)
+    pick = (user_picks or {}).get(market["id"])
     selections = []
     for sel in market["selections"]:
         lock = market_lock or database.outright_lock_reason(coach, market, sel)
-        selections.append(_selection_payload(sel, lock))
+        has_bet = False
+        if pick:
+            if pick["selection_id"] == sel["id"]:
+                has_bet = True
+            elif not lock:
+                lock = f"Уже выбрано: {pick['name']}"
+        selections.append(_selection_payload(sel, lock, has_bet))
     return {
         "id": market["id"],
         "type": market["market_type"],
@@ -101,6 +110,8 @@ def _market_payload(market: dict, coach: dict | None) -> dict:
         "settled_at": market.get("settled_at"),
         "void_reason": market.get("void_reason"),
         "locked": market_lock,
+        "chosen_selection_id": pick["selection_id"] if pick else None,
+        "chosen_selection_name": pick["name"] if pick else None,
         "selections": selections,
     }
 
@@ -130,11 +141,12 @@ def _market_closing(market: dict, deadline: dict, cup_closed: bool) -> dict:
 def _load_board(user_id: int) -> dict:
     markets = database.get_outright_markets()
     coach = database.get_outright_coach_scope(user_id)
+    user_picks = database.get_user_open_outright_picks(user_id)
     divisions = [{"id": d["id"], "name": d["name"]} for d in database.get_divisions()]
     deadline = _bets_deadline()
     cup_closed = database.is_general_cup_outright_closed()
     return {
-        "markets": [{**_market_payload(m, coach), **_market_closing(m, deadline, cup_closed)} for m in markets],
+        "markets": [{**_market_payload(m, coach, user_picks), **_market_closing(m, deadline, cup_closed)} for m in markets],
         "divisions": divisions,
         "coach": coach,
         "open_bets": database.count_user_open_outright_bets(user_id),

@@ -5417,6 +5417,7 @@ span.team-logo-fallback {
 }
 .ob-tag.won { background: var(--accent-gold-light); color: var(--accent-gold); }
 .ob-tag.gift { background: var(--color-success-bg); color: var(--color-success); }
+.ob-tag.pick { background: var(--accent-gold-light); color: var(--accent-gold); border: 1px solid rgba(212, 169, 78, 0.35); }
 .ob-odd {
   flex-shrink: 0;
   min-width: 58px;

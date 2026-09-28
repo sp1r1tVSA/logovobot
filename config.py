@@ -58,6 +58,73 @@ def _get_gemini_chat_models() -> list[str]:
 
 GEMINI_MODELS = _get_gemini_models()
 GEMINI_CHAT_MODELS = _get_gemini_chat_models()
+
+def _get_gemini_smm_keys() -> list[str]:
+    keys_raw = os.getenv("GEMINI_SMM_API_KEY", "")
+    keys = [k.strip() for k in keys_raw.split(",") if k.strip()]
+    if not keys:
+        return _get_gemini_chat_keys() or _get_gemini_api_keys()
+    return keys
+
+GEMINI_SMM_API_KEYS = _get_gemini_smm_keys()
+GEMINI_SMM_API_KEY = GEMINI_SMM_API_KEYS[0] if GEMINI_SMM_API_KEYS else ""
+
+def _get_gemini_smm_models() -> list[str]:
+    raw = os.getenv("GEMINI_SMM_MODELS", "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return [
+        "gemini-2.5-flash",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-3.5-flash-lite",
+        "gemini-3.1-flash-lite",
+        "gemini-3.8-flash",
+    ]
+
+GEMINI_SMM_MODELS = _get_gemini_smm_models()
+MY_CLUB_CHANNEL = os.getenv("MY_CLUB_CHANNEL", "").strip()
+
+def _get_openrouter_smm_models() -> list[str]:
+    raw = os.getenv("OPENROUTER_SMM_MODELS", "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return [
+        "meta-llama/llama-3.3-70b-instruct:free",
+        "qwen/qwen-2.5-72b-instruct:free",
+        "mistralai/mistral-small-24b-instruct-2501:free",
+        "deepseek/deepseek-r1:free",
+        "google/gemini-2.0-flash-exp:free",
+    ]
+
+OPENROUTER_SMM_MODELS = _get_openrouter_smm_models()
+
+NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
+
+def _get_nvidia_smm_models() -> list[str]:
+    raw = os.getenv("NVIDIA_SMM_MODELS", "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return [
+        "meta/llama-3.3-70b-instruct",
+        "deepseek-ai/deepseek-r1",
+        "qwen/qwen2.5-72b-instruct",
+        "mistralai/mistral-large-2-instruct",
+    ]
+
+NVIDIA_SMM_MODELS = _get_nvidia_smm_models()
+
+def _get_gemini_image_models() -> list[str]:
+    raw = os.getenv("GEMINI_IMAGE_MODELS", "").strip()
+    if raw:
+        return [m.strip() for m in raw.split(",") if m.strip()]
+    return [
+        "gemini-3.1-flash-image",
+        "gemini-2.5-flash-image",
+        "imagen-3.0-generate-002",
+    ]
+
+GEMINI_IMAGE_MODELS = _get_gemini_image_models()
 # ─── OpenRouter: ИИ-прогноз во вкладке панели Logovo.bet ──────────────────────
 # Без ключа вкладка работает по вероятностям линии. OPENROUTER_MODEL — одна
 # модель или несколько через запятую: бесплатные (:free и stealth/*) пропадают
