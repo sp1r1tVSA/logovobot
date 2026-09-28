@@ -41,17 +41,33 @@ CAPTION_MAX_CHARS = 450
 _openrouter_model_idx = 0
 _openrouter_lock = threading.Lock()
 
+DEPRECATED_OPENROUTER_MODELS = {
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "qwen/qwen-2.5-72b-instruct:free",
+    "mistralai/mistral-small-24b-instruct-2501:free",
+    "deepseek/deepseek-r1:free",
+}
+
+_dead_openrouter_models: set[str] = set(DEPRECATED_OPENROUTER_MODELS)
+
+GUARANTEED_OPENROUTER_MODELS = [
+    "openrouter/free",
+    "qwen/qwen3.8-27b:free",
+    "google/gemma-4-31b-it:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "google/gemma-4-26b-a4b-it:free",
+]
+
 def get_ordered_openrouter_models() -> list[str]:
-    """Возвращает список бесплатных моделей OpenRouter с ротацией Round-Robin."""
-    models = getattr(config, "OPENROUTER_SMM_MODELS", [
-        "openrouter/free",
-        "qwen/qwen3.8-27b:free",
-        "google/gemma-4-31b-it:free",
-        "nvidia/nemotron-3.5-lightning:free",
-        "google/gemma-4-26b-a4b-it:free",
-    ])
+    """Возвращает список актуальных бесплатных моделей OpenRouter с ротацией Round-Robin."""
+    raw_models = getattr(config, "OPENROUTER_SMM_MODELS", []) or GUARANTEED_OPENROUTER_MODELS
+    # Отсеиваем устаревшие и заведомо вернувшие 404 модели
+    models = [m for m in raw_models if m not in _dead_openrouter_models]
     if not models:
-        return ["openrouter/free"]
+        models = [m for m in GUARANTEED_OPENROUTER_MODELS if m not in _dead_openrouter_models]
+    if not models:
+        models = ["openrouter/free"]
+
     global _openrouter_model_idx
     with _openrouter_lock:
         idx = _openrouter_model_idx % len(models)
@@ -405,11 +421,50 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
                 clean = text.replace("**", "").replace("#", "")
                 return clean.strip(), model
         except urllib.error.HTTPError as e:
-            logger.warning(f"OpenRouter SMM: model '{model}' HTTP {e.code}, trying next free model...")
+            if e.code == 404:
+                _dead_openrouter_models.add(model)
+                logger.warning(f"OpenRouter SMM: model '{model}' HTTP 404 (disabled from roster), trying next free model...")
+            else:
+                logger.warning(f"OpenRouter SMM: model '{model}' HTTP {e.code}, trying next free model...")
             continue
         except Exception as e:
             logger.warning(f"OpenRouter SMM: model '{model}' failed: {e}")
             continue
+
+    # Резервная попытка через мета-модель openrouter/free, если все остальные вернули ошибки
+    if "openrouter/free" not in models and "openrouter/free" not in _dead_openrouter_models:
+        logger.info("OpenRouter SMM: attempting guaranteed fallback to 'openrouter/free'...")
+        payload = {
+            "model": "openrouter/free",
+            "messages": [
+                {"role": "system", "content": system_text},
+                {"role": "user", "content": user_text},
+            ],
+            "temperature": 0.8,
+            "max_tokens": max_tokens,
+        }
+        body = json.dumps(payload).encode("utf-8")
+        req = urllib.request.Request(
+            f"{base_url}/chat/completions",
+            data=body,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+                "HTTP-Referer": "https://logovobot.ru",
+                "X-Title": "Logovobot Club SMM",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=25) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+            choice = data["choices"][0]
+            msg = choice.get("message", {})
+            text = msg.get("content") or msg.get("reasoning") or ""
+            if text and len(text.strip()) > 40:
+                clean = text.replace("**", "").replace("#", "")
+                return clean.strip(), "openrouter/free"
+        except Exception as e:
+            logger.warning(f"OpenRouter SMM: fallback 'openrouter/free' failed: {e}")
 
     return None, None
 
