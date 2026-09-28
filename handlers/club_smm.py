@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 SMM_STATE_WAIT_PROMPT = 1
 SMM_STATE_WAIT_EDIT = 2
 SMM_STATE_WAIT_CHANNEL = 3
+SMM_STATE_WAIT_STAGE = 4
 
 CONFIG_CHANNEL_KEY = "my_club_channel"
 
@@ -106,7 +107,8 @@ async def cmd_smm_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             InlineKeyboardButton("🌟 Звезда клуба", callback_data="smm_gen:spotlight"),
         ],
         [
-            InlineKeyboardButton("✍️ Свой бриф / Голосовое", callback_data="smm_enter_prompt"),
+            InlineKeyboardButton("🗓 Тур / Кубок", callback_data="smm_choose_stage"),
+            InlineKeyboardButton("✍️ Свой бриф / Голос", callback_data="smm_enter_prompt"),
         ],
         [
             InlineKeyboardButton("⚙️ Настроить канал", callback_data="smm_cfg_channel"),
@@ -169,6 +171,134 @@ async def cb_smm_generate(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         "team_name": team_name,
         "post_type": post_type,
         "custom_brief": "",
+    }
+
+    await _show_draft_preview(update, context, generated_text)
+
+
+async def cb_smm_choose_stage(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Отображение меню выбора конкретного тура чемпионата или кубковой стадии клуба."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return ConversationHandler.END
+
+    team_name = await _resolve_user_club(user.id)
+    data = await asyncio.to_thread(club_smm_service.get_club_stages_and_rounds, team_name)
+    cup_stages = data.get("cup_stages", [])
+    league_rounds = data.get("league_rounds", [])
+
+    keyboard = []
+
+    # 1. Кубковые стадии (если есть)
+    if cup_stages:
+        cup_row = []
+        for st in cup_stages:
+            stage_name = st["stage"]
+            score = st.get("score_series")
+            status = st.get("status")
+            if status == "completed":
+                btn_text = f"🏆 {stage_name} ({score} ✅)"
+            elif status == "in_progress":
+                btn_text = f"🏆 {stage_name} ({score} ⏳)"
+            else:
+                btn_text = f"🏆 {stage_name} (⏳)"
+            cup_row.append(InlineKeyboardButton(btn_text, callback_data=f"smm_stage:cup:{stage_name}"))
+            if len(cup_row) == 2:
+                keyboard.append(cup_row)
+                cup_row = []
+        if cup_row:
+            keyboard.append(cup_row)
+
+    # 2. Туры чемпионата (по 2 в строке)
+    rnd_row = []
+    for r in league_rounds:
+        rnd = r["round"]
+        score = r.get("score")
+        status = r.get("status")
+        if status == "completed":
+            btn_text = f"Тур {rnd} ({score} ✅)"
+        else:
+            btn_text = f"Тур {rnd} (⏳)"
+        rnd_row.append(InlineKeyboardButton(btn_text, callback_data=f"smm_stage:league:{rnd}"))
+        if len(rnd_row) == 2:
+            keyboard.append(rnd_row)
+            rnd_row = []
+    if rnd_row:
+        keyboard.append(rnd_row)
+
+    # Кнопка ручного ввода тура/стадии
+    keyboard.append([
+        InlineKeyboardButton("✏️ Ввести номер тура / стадию", callback_data="smm_enter_stage")
+    ])
+    keyboard.append([
+        InlineKeyboardButton("« В меню SMM", callback_data="smm_hub")
+    ])
+
+    markup = InlineKeyboardMarkup(keyboard)
+    text = (
+        f"🗓 <b>Выбор тура или стадии кубка для ФК «{html.escape(team_name.upper())}»</b>\n\n"
+        f"Выберите завершённый матч для победного обзора или предстоящий для анонса битвы. "
+        f"ИИ автоматически подтянет счёт, авторов голов, MVP и создаст пост строго в один абзац.\n\n"
+        f"Также вы можете ввести номер тура вручную."
+    )
+
+    if query and query.message:
+        try:
+            await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+        except Exception:
+            await update.effective_chat.send_message(text, parse_mode="HTML", reply_markup=markup)
+    elif update.effective_chat:
+        await update.effective_chat.send_message(text, parse_mode="HTML", reply_markup=markup)
+
+    return ConversationHandler.END
+
+
+async def cb_smm_stage_selected(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Генерация поста для выбранного тура лиги или стадии кубка."""
+    query = update.callback_query
+    if not query:
+        return
+    await query.answer()
+
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return
+
+    parts = query.data.split(":")
+    if len(parts) < 3:
+        return
+    stage_type = parts[1]  # 'league' or 'cup'
+    stage_val = parts[2]
+
+    team_name = await _resolve_user_club(user.id)
+    round_number = int(stage_val) if stage_type == "league" and stage_val.isdigit() else None
+    cup_stage = stage_val if stage_type == "cup" else None
+    stage_label = f"стадии кубка {cup_stage}" if cup_stage else f"тура {round_number}"
+
+    loading_text = f"⏳ <b>ИИ анализирует статистику {stage_label} и пишет пост...</b>"
+    try:
+        await query.edit_message_text(loading_text, parse_mode="HTML")
+    except Exception:
+        pass
+
+    generated_text = await asyncio.to_thread(
+        club_smm_service.generate_stage_post,
+        team_name=team_name,
+        round_number=round_number,
+        cup_stage=cup_stage,
+    )
+
+    context.user_data["smm_draft"] = {
+        "text": generated_text,
+        "team_name": team_name,
+        "post_type": "stage",
+        "round_number": round_number,
+        "cup_stage": cup_stage,
+        "custom_brief": f"Кубок {cup_stage}" if cup_stage else f"Тур {round_number}",
     }
 
     await _show_draft_preview(update, context, generated_text)
@@ -237,12 +367,21 @@ async def cb_smm_regenerate(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     except Exception:
         pass
 
-    generated_text = await asyncio.to_thread(
-        club_smm_service.generate_club_post,
-        team_name=draft.get("team_name", "Бешикташ"),
-        post_type=draft.get("post_type", "matchday"),
-        custom_brief=draft.get("custom_brief", ""),
-    )
+    post_type = draft.get("post_type", "matchday")
+    if post_type == "stage":
+        generated_text = await asyncio.to_thread(
+            club_smm_service.generate_stage_post,
+            team_name=draft.get("team_name", "Бешикташ"),
+            round_number=draft.get("round_number"),
+            cup_stage=draft.get("cup_stage"),
+        )
+    else:
+        generated_text = await asyncio.to_thread(
+            club_smm_service.generate_club_post,
+            team_name=draft.get("team_name", "Бешикташ"),
+            post_type=post_type,
+            custom_brief=draft.get("custom_brief", ""),
+        )
 
     draft["text"] = generated_text
     await _show_draft_preview(update, context, generated_text)
@@ -319,6 +458,99 @@ async def handle_custom_prompt_received(update: Update, context: ContextTypes.DE
         "team_name": team_name,
         "post_type": "custom",
         "custom_brief": custom_brief,
+    }
+
+    await _show_draft_preview(update, context, generated_text)
+    return ConversationHandler.END
+
+
+# ─── FSM: Ручной ввод тура / стадии кубка ───────────────────────────────────
+
+async def start_stage_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос номера тура или стадии кубка вручную."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    text = (
+        "✏️ <b>Ручной ввод тура или стадии кубка</b>\n\n"
+        "Отправьте номер тура (например: <code>5</code>) "
+        "или стадию кубка (например: <code>1/64</code>, <code>1/8</code>, <code>финал</code>).\n\n"
+        "ИИ автоматически найдёт данные матча в базе и создаст ёмкий пост в один абзац."
+    )
+    keyboard = [[InlineKeyboardButton("« Назад к выбору", callback_data="smm_choose_stage")]]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if query and query.message:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    elif update.effective_chat:
+        await update.effective_chat.send_message(text, parse_mode="HTML", reply_markup=markup)
+
+    return SMM_STATE_WAIT_STAGE
+
+
+async def handle_stage_input_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка ручного ввода тура или стадии кубка."""
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return ConversationHandler.END
+
+    team_name = await _resolve_user_club(user.id)
+    msg = update.message
+    raw = (msg.text or "").strip().lower()
+
+    round_number = None
+    cup_stage = None
+
+    if any(k in raw for k in ("кубок", "cup", "финал", "1/")):
+        if "1/64" in raw:
+            cup_stage = "1/64"
+        elif "1/32" in raw:
+            cup_stage = "1/32"
+        elif "1/16" in raw:
+            cup_stage = "1/16"
+        elif "1/8" in raw:
+            cup_stage = "1/8"
+        elif "1/4" in raw:
+            cup_stage = "1/4"
+        elif "1/2" in raw or "полуфинал" in raw:
+            cup_stage = "1/2"
+        elif "финал" in raw:
+            cup_stage = "Финал"
+        else:
+            cup_stage = raw.replace("кубок", "").strip() or "1/64"
+    else:
+        digits = re.findall(r"\d+", raw)
+        if digits:
+            round_number = int(digits[0])
+        else:
+            await msg.reply_text(
+                "⚠️ Не удалось распознать номер тура или стадию. Введите, например: <code>3</code> или <code>1/8</code>:",
+                parse_mode="HTML"
+            )
+            return SMM_STATE_WAIT_STAGE
+
+    status_msg = await msg.reply_text("⏳ <b>ИИ анализирует турнирные данные и создаёт пост...</b>", parse_mode="HTML")
+
+    generated_text = await asyncio.to_thread(
+        club_smm_service.generate_stage_post,
+        team_name=team_name,
+        round_number=round_number,
+        cup_stage=cup_stage,
+    )
+
+    try:
+        await status_msg.delete()
+    except Exception:
+        pass
+
+    context.user_data["smm_draft"] = {
+        "text": generated_text,
+        "team_name": team_name,
+        "post_type": "stage",
+        "round_number": round_number,
+        "cup_stage": cup_stage,
+        "custom_brief": f"Кубок {cup_stage}" if cup_stage else f"Тур {round_number}",
     }
 
     await _show_draft_preview(update, context, generated_text)
@@ -535,6 +767,8 @@ async def cb_smm_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         if mode == "ai_photo":
             post_type = draft.get("post_type", "matchday")
             brief = draft.get("custom_brief", "")
+            if post_type == "stage":
+                brief = brief or (f"Кубок {draft.get('cup_stage')}" if draft.get("cup_stage") else f"Тур {draft.get('round_number')}")
             buf = await asyncio.to_thread(club_smm_service.generate_club_ai_photo, team_name, post_type, brief)
             caption = club_smm_service._fit_html(text_content, club_smm_service.CAPTION_MAX_CHARS)
             if buf:

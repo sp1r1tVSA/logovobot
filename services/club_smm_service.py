@@ -584,6 +584,12 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
             "dramatic stadium background, motion blur, intense determination, cinematic sports photography" if is_besiktas else
             f"Action sports portrait of a star football player for {canon}, dynamic strike, stadium lights, cinematic"
         )
+    elif post_type == "stage":
+        prompt = (
+            f"Epic action football matchday sports poster for Besiktas JK, {custom_brief or 'tournament stage battle'}, "
+            f"black and white team colors, majestic eagle, dramatic stadium lights, modern sports art, 4k" if is_besiktas else
+            f"Epic action football match poster for {canon}, {custom_brief or 'tournament stage battle'}, dramatic stadium lights, 4k"
+        )
     else:  # standings / default
         prompt = (
             "Artistic 3D emblem of a black and white eagle rising over a football arena, neon stadium glow, "
@@ -744,3 +750,289 @@ def generate_club_smm_media(team_name: str) -> io.BytesIO | None:
     except Exception as e:
         logger.exception(f"Club SMM: Failed to generate club card media: {e}")
         return None
+
+
+# ─── Посты по конкретным турам лиги и стадиям кубка ─────────────────────────
+
+def get_club_stages_and_rounds(team_name: str) -> dict:
+    """
+    Возвращает список всех сыгранных и предстоящих кубковых стадий и туров лиги для данного клуба.
+    """
+    canon = resolve_team_name(team_name) or team_name
+    cup_stages = []
+    league_rounds = []
+
+    with database.transaction() as conn:
+        cursor = conn.cursor()
+
+        # 1. Кубковые матчи клуба
+        cursor.execute("""
+            SELECT id, cup_stage, player1_team, player2_team, player1_score, player2_score, status
+            FROM matches
+            WHERE (player1_team = ? OR player2_team = ?) AND tournament_type = 'cup'
+            ORDER BY id ASC
+        """, (canon, canon))
+        cup_matches = cursor.fetchall()
+
+        stages_dict = {}
+        for m in cup_matches:
+            st = m["cup_stage"] or "Кубок"
+            if st not in stages_dict:
+                stages_dict[st] = []
+            stages_dict[st].append(m)
+
+        for st, m_list in stages_dict.items():
+            first = m_list[0]
+            is_p1 = teams_match(first["player1_team"], canon)
+            opp = first["player2_team"] if is_p1 else first["player1_team"]
+            all_done = all(m["status"] in ("confirmed", "completed") for m in m_list)
+            any_done = any(m["status"] in ("confirmed", "completed") for m in m_list)
+
+            my_wins = 0
+            opp_wins = 0
+            scores = []
+            for m in m_list:
+                if m["status"] in ("confirmed", "completed"):
+                    p1_sc = m["player1_score"] or 0
+                    p2_sc = m["player2_score"] or 0
+                    p1_is_me = teams_match(m["player1_team"], canon)
+                    my_sc = p1_sc if p1_is_me else p2_sc
+                    opp_sc = p2_sc if p1_is_me else p1_sc
+                    scores.append(f"{my_sc}:{opp_sc}")
+                    if my_sc > opp_sc:
+                        my_wins += 1
+                    elif opp_sc > my_sc:
+                        opp_wins += 1
+
+            status_label = "completed" if all_done else ("in_progress" if any_done else "pending")
+            cup_stages.append({
+                "stage": st,
+                "opponent": opp,
+                "status": status_label,
+                "score_series": f"{my_wins}:{opp_wins}" if any_done else None,
+                "match_scores": scores,
+                "match_count": len(m_list),
+            })
+
+        # 2. Туры лиги
+        cursor.execute("""
+            SELECT id, round_number, player1_team, player2_team, player1_score, player2_score, status
+            FROM matches
+            WHERE (player1_team = ? OR player2_team = ?) AND tournament_type = 'league'
+            ORDER BY round_number ASC, id ASC
+        """, (canon, canon))
+        for m in cursor.fetchall():
+            rnd = m["round_number"]
+            is_p1 = teams_match(m["player1_team"], canon)
+            opp = m["player2_team"] if is_p1 else m["player1_team"]
+            done = m["status"] in ("confirmed", "completed")
+            my_sc = m["player1_score"] if is_p1 else m["player2_score"]
+            opp_sc = m["player2_score"] if is_p1 else m["player1_score"]
+            league_rounds.append({
+                "round": rnd,
+                "opponent": opp,
+                "status": "completed" if done else "pending",
+                "score": f"{my_sc}:{opp_sc}" if done else None,
+            })
+
+    return {"cup_stages": cup_stages, "league_rounds": league_rounds}
+
+
+def get_stage_or_round_payload(team_name: str, round_number: int | None = None, cup_stage: str | None = None) -> dict:
+    """
+    Извлекает подробные данные матча(ей) для конкретного тура лиги или стадии кубка.
+    """
+    canon = resolve_team_name(team_name) or team_name
+    base_payload = get_club_smm_payload(canon)
+
+    matches_data = []
+    with database.transaction() as conn:
+        cursor = conn.cursor()
+        if cup_stage:
+            cursor.execute("""
+                SELECT id, round_number, tournament_type, cup_stage, player1_team, player2_team,
+                       player1_score, player2_score, status, mvp_player, match_date, match_time
+                FROM matches
+                WHERE (player1_team = ? OR player2_team = ?)
+                  AND tournament_type = 'cup'
+                  AND cup_stage = ?
+                ORDER BY id ASC
+            """, (canon, canon, str(cup_stage)))
+        else:
+            cursor.execute("""
+                SELECT id, round_number, tournament_type, cup_stage, player1_team, player2_team,
+                       player1_score, player2_score, status, mvp_player, match_date, match_time
+                FROM matches
+                WHERE (player1_team = ? OR player2_team = ?)
+                  AND tournament_type = 'league'
+                  AND round_number = ?
+                ORDER BY id ASC
+            """, (canon, canon, int(round_number or 1)))
+
+        m_rows = cursor.fetchall()
+        for r in m_rows:
+            m_id = r["id"]
+            is_p1 = teams_match(r["player1_team"], canon)
+            my_score = r["player1_score"] if is_p1 else r["player2_score"]
+            opp_score = r["player2_score"] if is_p1 else r["player1_score"]
+            opponent = r["player2_team"] if is_p1 else r["player1_team"]
+
+            cursor.execute("""
+                SELECT team_name, player_name, event_type, count
+                FROM match_events
+                WHERE match_id = ?
+            """, (m_id,))
+            events = cursor.fetchall()
+            my_goals, my_assists = [], []
+            for ev in events:
+                p_name = ev["player_name"]
+                cnt = ev["count"] or 1
+                if teams_match(ev["team_name"], canon):
+                    if ev["event_type"] == "goal":
+                        my_goals.append(f"{p_name} ({cnt})" if cnt > 1 else p_name)
+                    elif ev["event_type"] == "assist":
+                        my_assists.append(f"{p_name} ({cnt})" if cnt > 1 else p_name)
+
+            matches_data.append({
+                "match_id": m_id,
+                "is_home": is_p1,
+                "opponent": opponent,
+                "my_score": my_score,
+                "opp_score": opp_score,
+                "status": r["status"],
+                "mvp_player": r["mvp_player"],
+                "club_goals": my_goals,
+                "club_assists": my_assists,
+                "date": r["match_date"],
+                "time": r["match_time"],
+            })
+
+    target_type = "cup" if cup_stage else "league"
+    target_name = f"Кубок, стадия {cup_stage}" if cup_stage else f"Тур {round_number}"
+
+    return {
+        "club": base_payload.get("club", {}),
+        "manager": base_payload.get("manager"),
+        "division": base_payload.get("division"),
+        "target_type": target_type,
+        "target_name": target_name,
+        "round_number": round_number,
+        "cup_stage": cup_stage,
+        "matches": matches_data,
+        "standings": base_payload.get("standings"),
+    }
+
+
+def generate_stage_post(
+    team_name: str,
+    round_number: int | None = None,
+    cup_stage: str | None = None,
+    for_caption: bool = False,
+) -> str:
+    """
+    Генерирует пост строго в 1 абзац о конкретном туре лиги или стадии кубка.
+    """
+    canon = resolve_team_name(team_name) or team_name
+    stage_payload = get_stage_or_round_payload(canon, round_number, cup_stage)
+    system_text = _build_system_instruction(stage_payload)
+
+    target_name = stage_payload["target_name"]
+    matches = stage_payload["matches"]
+    club_name = stage_payload["club"].get("name", "Бешикташ")
+    emojis = stage_payload["club"].get("emojis", "🦅⚪⚫")
+    hashtags = " ".join(stage_payload["club"].get("hashtags", ["#Besiktas", "#ЛоговоФифарей"]))
+
+    if not matches:
+        return f"{emojis} <b>{target_name.upper()}</b>\n\nМатчи {club_name} на этой стадии не найдены в расписании.\n\n{hashtags}"
+
+    all_done = all(m["status"] in ("confirmed", "completed") for m in matches)
+    any_done = any(m["status"] in ("confirmed", "completed") for m in matches)
+    first_m = matches[0]
+    opp = first_m["opponent"]
+
+    if cup_stage:
+        if all_done:
+            my_wins = sum(1 for m in matches if (m["my_score"] or 0) > (m["opp_score"] or 0))
+            opp_wins = sum(1 for m in matches if (m["opp_score"] or 0) > (m["my_score"] or 0))
+            passed = my_wins > opp_wins
+            outcome_str = f"Победа в серии {my_wins}:{opp_wins}! Выход в следующий раунд!" if passed else f"Итог серии {my_wins}:{opp_wins}."
+            games_str = ", ".join(f"{m['my_score']}:{m['opp_score']}" for m in matches)
+            all_scorers = []
+            for m in matches:
+                all_scorers.extend(m["club_goals"])
+            scorers_str = ", ".join(dict.fromkeys(all_scorers)) or "команда"
+            task_text = (
+                f"ЗАДАЧА: Напиши КОРОТКИЙ победный/боевой обзор кубковой стадии {cup_stage} против {opp} СТРОГО В ОДИН АБЗАЦ!\n"
+                f"Факты: серия завершена со счётом {my_wins}:{opp_wins} (игры: {games_str}). {outcome_str} Голы: {scorers_str}.\n"
+                "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Заголовок -> ОДИН плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги."
+            )
+        elif any_done:
+            task_text = (
+                f"ЗАДАЧА: Напиши КОРОТКИЙ пост о ходе кубковой серии {cup_stage} против {opp} СТРОГО В ОДИН АБЗАЦ!\n"
+                f"Факты: серия продолжается, сыграно матчей: {len(matches)}.\n"
+                "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Заголовок -> ОДИН плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги."
+            )
+        else:
+            task_text = (
+                f"ЗАДАЧА: Напиши КОРОТКИЙ боевой анонс кубковой битвы стадии {cup_stage} против {opp} СТРОГО В ОДИН АБЗАЦ!\n"
+                f"Факты: предстоит серия на вылет за кубковый трофей.\n"
+                "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Заголовок -> ОДИН плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги."
+            )
+    else:
+        # Тур чемпионата
+        m = first_m
+        if m["status"] in ("confirmed", "completed"):
+            res = "победа" if (m["my_score"] or 0) > (m["opp_score"] or 0) else ("ничья" if m["my_score"] == m["opp_score"] else "поражение")
+            scorers_str = ", ".join(m["club_goals"]) or "команда"
+            mvp_str = f", MVP матча: {m['mvp_player']}" if m.get("mvp_player") else ""
+            task_text = (
+                f"ЗАДАЧА: Напиши КОРОТКИЙ обзор сыгранного Тура {round_number} против {opp} СТРОГО В ОДИН АБЗАЦ!\n"
+                f"Факты: результат — {res}, счёт {m['my_score']}:{m['opp_score']}. Авторы голов: {scorers_str}{mvp_str}.\n"
+                "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Заголовок -> ОДИН плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги."
+            )
+        else:
+            task_text = (
+                f"ЗАДАЧА: Напиши КОРОТКИЙ боевой анонс предстоящего Тура {round_number} против {opp} СТРОГО В ОДИН АБЗАЦ!\n"
+                f"Факты: важнейшая встреча в борьбе за очки турнирной таблицы.\n"
+                "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Заголовок -> ОДИН плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги."
+            )
+
+    user_text = f"{task_text}\n\nДАННЫЕ (JSON):\n{json.dumps(stage_payload, ensure_ascii=False)}"
+    limit = CAPTION_MAX_CHARS if for_caption else POST_MAX_CHARS
+    max_tokens = 220 if for_caption else 350
+
+    # 1. OpenRouter
+    text, model_name = _call_openrouter_text(system_text, user_text, max_tokens)
+    if text:
+        logger.info(f"Club SMM stage text generated via OpenRouter ({model_name})")
+        return _fit_html(text, limit)
+
+    # 2. Gemini
+    text, model_name = _call_gemini_text(system_text, user_text, max_tokens)
+    if text:
+        logger.info(f"Club SMM stage text generated via Gemini ({model_name})")
+        return _fit_html(text, limit)
+
+    # 3. Fallback
+    if cup_stage and all_done:
+        return (
+            f"{emojis} <b>КУБОК: ИТОГИ СТАДИИ {cup_stage}</b>\n\n"
+            f"Кубковое противостояние против «{opp}» завершилось! Черно-белые сражались на каждом сантиметре поля "
+            f"и показали несгибаемый характер орлов. Двигаемся дальше за трофеем!\n\n"
+            f"{hashtags} #Кубок"
+        )
+    elif not cup_stage and first_m["status"] in ("confirmed", "completed"):
+        m = first_m
+        return (
+            f"{emojis} <b>ИТОГИ ТУРА {round_number}</b>\n\n"
+            f"Финальный свисток в матче против «{opp}» зафиксировал счёт {m['my_score']}:{m['opp_score']}. "
+            f"Парни @sp1r1tVSA отдали все силы ради победы. Продолжаем сезон и готовимся к новым сражениям!\n\n"
+            f"{hashtags} #Тур{round_number}"
+        )
+    else:
+        return (
+            f"{emojis} <b>{target_name.upper()}: ВРЕМЯ БИТВЫ!</b>\n\n"
+            f"Готовимся к ответственному противостоянию против «{opp}»! Выходим на поле максимально заряженными "
+            f"и нацеленными исключительно на положительный результат. Вперёд, Орлы!\n\n"
+            f"{hashtags}"
+        )

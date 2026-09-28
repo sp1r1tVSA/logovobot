@@ -213,3 +213,64 @@ class TestChannelNormalization(unittest.TestCase):
         self.assertEqual(normalize_telegram_channel("-1001234567890"), "-1001234567890")
         self.assertEqual(normalize_telegram_channel("1234567890"), "-1001234567890")
 
+
+class TestStageAndRoundPosts(unittest.TestCase):
+    def setUp(self):
+        self._clean()
+        with database.transaction() as conn:
+            c = conn.cursor()
+            c.execute("""
+                INSERT INTO matches (round_number, tournament_type, cup_stage, player1_team, player2_team,
+                                     player1_score, player2_score, status, mvp_player, match_date, match_time)
+                VALUES (1, 'league', NULL, 'Бешикташ', 'Галатасарай', 2, 1, 'confirmed', 'Trossard', '2026-09-28', '19:00')
+            """)
+            c.execute("""
+                INSERT INTO matches (round_number, tournament_type, cup_stage, player1_team, player2_team,
+                                     player1_score, player2_score, status, mvp_player, match_date, match_time)
+                VALUES (-1, 'cup', '1/64', 'Бешикташ', 'Фенербахче', 3, 2, 'confirmed', 'Rafa Silva', '2026-09-28', '21:00')
+            """)
+
+    def tearDown(self):
+        self._clean()
+
+    def _clean(self):
+        with database.transaction() as conn:
+            conn.cursor().execute("DELETE FROM matches WHERE player1_team = 'Бешикташ' OR player2_team = 'Бешикташ'")
+
+    def test_get_club_stages_and_rounds(self):
+        data = club_smm_service.get_club_stages_and_rounds("Бешикташ")
+        cup_stages = data["cup_stages"]
+        league_rounds = data["league_rounds"]
+        self.assertTrue(any(st["stage"] == "1/64" for st in cup_stages))
+        self.assertTrue(any(r["round"] == 1 for r in league_rounds))
+
+    def test_get_stage_or_round_payload(self):
+        payload_league = club_smm_service.get_stage_or_round_payload("Бешикташ", round_number=1)
+        self.assertEqual(payload_league["round_number"], 1)
+        self.assertEqual(payload_league["target_type"], "league")
+        self.assertEqual(len(payload_league["matches"]), 1)
+        self.assertEqual(payload_league["matches"][0]["opponent"], "Галатасарай")
+
+        payload_cup = club_smm_service.get_stage_or_round_payload("Бешикташ", cup_stage="1/64")
+        self.assertEqual(payload_cup["cup_stage"], "1/64")
+        self.assertEqual(payload_cup["target_type"], "cup")
+        self.assertEqual(len(payload_cup["matches"]), 1)
+        self.assertEqual(payload_cup["matches"][0]["opponent"], "Фенербахче")
+
+    def test_generate_stage_post_fallback(self):
+        with patch("services.club_smm_service._call_openrouter_text", return_value=(None, None)), \
+             patch("services.club_smm_service._call_gemini_text", return_value=(None, None)):
+            post_league = club_smm_service.generate_stage_post("Бешикташ", round_number=1)
+            self.assertIn("ИТОГИ ТУРА 1", post_league)
+            self.assertIn("2:1", post_league)
+
+            post_cup = club_smm_service.generate_stage_post("Бешикташ", cup_stage="1/64")
+            self.assertIn("КУБОК: ИТОГИ СТАДИИ 1/64", post_cup)
+
+    def test_generate_stage_post_with_ai(self):
+        fake_ai_text = "🦅 <b>Огненный триумф в Туре 1!</b>\n\nБешикташ вырывает победу 2:1 у соперника! #Besiktas"
+        with patch("services.club_smm_service._call_openrouter_text", return_value=(fake_ai_text, "openrouter/free")):
+            post = club_smm_service.generate_stage_post("Бешикташ", round_number=1)
+            self.assertIn("Огненный триумф в Туре 1!", post)
+
+

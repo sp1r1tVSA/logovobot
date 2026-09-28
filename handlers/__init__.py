@@ -295,9 +295,14 @@ from handlers.club_smm import (
     handle_channel_received,
     cmd_set_club_channel,
     cancel_smm_flow,
+    cb_smm_choose_stage,
+    cb_smm_stage_selected,
+    start_stage_input,
+    handle_stage_input_received,
     SMM_STATE_WAIT_PROMPT,
     SMM_STATE_WAIT_EDIT,
     SMM_STATE_WAIT_CHANNEL,
+    SMM_STATE_WAIT_STAGE,
 )
 from services.topic_cache import topic_cache
 
@@ -583,17 +588,23 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CommandHandler(["club_post", "besiktas", "smm_post"], cmd_smm_hub))
     app.add_handler(CommandHandler(["set_club_channel", "club_channel"], cmd_set_club_channel))
     app.add_handler(CallbackQueryHandler(cb_smm_hub, pattern="^smm_hub$"))
+    app.add_handler(CallbackQueryHandler(cb_smm_choose_stage, pattern="^smm_choose_stage$"))
+    app.add_handler(CallbackQueryHandler(cb_smm_stage_selected, pattern=r"^smm_stage:(league|cup):.+$"))
     app.add_handler(CallbackQueryHandler(cb_smm_generate, pattern=r"^smm_gen:[\w_]+$"))
     app.add_handler(CallbackQueryHandler(cb_smm_regenerate, pattern="^smm_regen$"))
     app.add_handler(CallbackQueryHandler(cb_smm_publish, pattern=r"^smm_publish:(text|media|card|ai_photo)$"))
 
     smm_conv = ConversationHandler(
         entry_points=[
+            CallbackQueryHandler(start_stage_input, pattern="^smm_enter_stage$"),
             CallbackQueryHandler(start_custom_prompt_input, pattern="^smm_enter_prompt$"),
             CallbackQueryHandler(start_edit_prompt_input, pattern="^smm_enter_edit$"),
             CallbackQueryHandler(start_channel_setup, pattern="^smm_cfg_channel$"),
         ],
         states={
+            SMM_STATE_WAIT_STAGE: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_stage_input_received)
+            ],
             SMM_STATE_WAIT_PROMPT: [
                 MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, handle_custom_prompt_received)
             ],
@@ -605,6 +616,7 @@ def _register_cabinet_handlers(app: Application) -> None:
             ],
         },
         fallbacks=[
+            CallbackQueryHandler(cb_smm_choose_stage, pattern="^smm_choose_stage$"),
             CallbackQueryHandler(cancel_edit_and_return, pattern="^smm_cancel_edit$"),
             CallbackQueryHandler(cancel_smm_flow, pattern="^smm_hub$"),
             CallbackQueryHandler(show_cabinet, pattern="^menu_cabinet$"),
