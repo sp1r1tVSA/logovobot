@@ -322,7 +322,7 @@ async def _show_draft_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
             InlineKeyboardButton("🚀 Опубликовать (Текст)", callback_data="smm_publish:text"),
         ],
         [
-            InlineKeyboardButton("🎨 С ИИ-фото (Flux)", callback_data="smm_publish:ai_photo"),
+            InlineKeyboardButton("🎨 С ИИ-фото (Gemini)", callback_data="smm_publish:ai_photo"),
             InlineKeyboardButton("🏛 С карточкой клуба", callback_data="smm_publish:card"),
         ],
         [

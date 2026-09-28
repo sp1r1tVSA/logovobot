@@ -108,6 +108,7 @@ def _get_gemini_image_models() -> list[str]:
     return [
         "gemini-3.1-flash-image",
         "gemini-2.5-flash-image",
+        "gemini-3-pro-image",
         "imagen-3.0-generate-002",
     ]
 

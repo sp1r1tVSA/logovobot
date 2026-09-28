@@ -158,26 +158,40 @@ class TestClubSmmMultiProviderText(unittest.TestCase):
             self.assertIn("Матчдэй от Llama 3.3", text)
             self.assertIsNotNone(model)
 
-    @patch("urllib.request.urlopen")
-    def test_free_ai_image_generation(self, mock_urlopen):
-        fake_img = b"\x89PNG\r\n\x1a\n" + b"A" * 6000
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = fake_img
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
-
-        buf = club_smm_service._call_free_ai_image("Besiktas poster 4k")
-        self.assertIsNotNone(buf)
-        self.assertEqual(buf.read(), fake_img)
-
-
 class TestClubSmmGeminiImageMock(unittest.TestCase):
-    @patch("services.club_smm_service._call_free_ai_image", return_value=None)
     @patch("services.club_smm_service.get_ordered_gemini_keys", return_value=["test_api_key"])
     @patch("services.ai.ai_recognizer._get_gemini_opener")
-    def test_generate_club_ai_photo(self, mock_opener_fn, mock_keys, mock_free_ai):
+    def test_generate_club_ai_photo_generate_images(self, mock_opener_fn, mock_keys):
         fake_image_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest_image_bytes"
         fake_b64 = base64.b64encode(fake_image_bytes).decode("utf-8")
+        fake_response = {
+            "generatedImages": [{
+                "image": {
+                    "imageBytes": fake_b64,
+                }
+            }]
+        }
+        mock_resp = MagicMock()
+        mock_resp.read.return_value = json.dumps(fake_response).encode("utf-8")
+        mock_resp.__enter__.return_value = mock_resp
+
+        mock_opener = MagicMock()
+        mock_opener.open.return_value = mock_resp
+        mock_opener_fn.return_value = mock_opener
+
+        buf = club_smm_service.generate_club_ai_photo("Бешикташ", post_type="matchday")
+        self.assertIsNotNone(buf)
+        self.assertEqual(buf.getvalue(), fake_image_bytes)
+
+    @patch("services.club_smm_service.get_ordered_gemini_keys", return_value=["test_api_key"])
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    def test_generate_club_ai_photo_generate_content(self, mock_opener_fn, mock_keys):
+        fake_image_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest_image_bytes"
+        fake_b64 = base64.b64encode(fake_image_bytes).decode("utf-8")
+        # First call (generateImages) fails with 404, second call (generateContent) succeeds
+        mock_resp_err = MagicMock()
+        mock_resp_err.read.return_value = b"{}"
+
         fake_response = {
             "candidates": [{
                 "content": {
@@ -190,12 +204,12 @@ class TestClubSmmGeminiImageMock(unittest.TestCase):
                 }
             }]
         }
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(fake_response).encode("utf-8")
-        mock_resp.__enter__.return_value = mock_resp
+        mock_resp_ok = MagicMock()
+        mock_resp_ok.read.return_value = json.dumps(fake_response).encode("utf-8")
+        mock_resp_ok.__enter__.return_value = mock_resp_ok
 
         mock_opener = MagicMock()
-        mock_opener.open.return_value = mock_resp
+        mock_opener.open.side_effect = [Exception("generateImages 404"), mock_resp_ok]
         mock_opener_fn.return_value = mock_opener
 
         buf = club_smm_service.generate_club_ai_photo("Бешикташ", post_type="matchday")
