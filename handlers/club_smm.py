@@ -41,13 +41,31 @@ def is_smm_allowed(user_id: int | None) -> bool:
     return is_admin(user_id)
 
 
+def normalize_telegram_channel(raw_input: str) -> str:
+    """Нормализует ввод канала (URL, username, @username, ID) в формат для Telegram API."""
+    text = (raw_input or "").strip().strip("\"'")
+    if not text:
+        return ""
+    # 1. Если передан URL: https://t.me/username или t.me/username
+    if "t.me/" in text:
+        part = text.split("t.me/")[-1].split("?")[0].split("/")[0].strip()
+        part = part.lstrip("@").lstrip("+")
+        if part:
+            return f"@{part}"
+    # 2. Если это ID чата (-100... или просто цифры)
+    if text.lstrip("-").isdigit():
+        return text if text.startswith("-") else f"-100{text}"
+    # 3. Юзернейм с @ или без
+    return text if text.startswith("@") else f"@{text}"
+
+
 def get_target_channel() -> str | None:
     """Возвращает сохраненный целевой канал из БД или config."""
     db_val = database.get_config(CONFIG_CHANNEL_KEY)
     if db_val and db_val.strip():
-        return db_val.strip()
+        return normalize_telegram_channel(db_val.strip())
     cfg_val = getattr(config, "MY_CLUB_CHANNEL", "")
-    return cfg_val.strip() if cfg_val else None
+    return normalize_telegram_channel(cfg_val.strip()) if cfg_val else None
 
 
 async def _resolve_user_club(user_id: int) -> str:
@@ -415,7 +433,7 @@ async def handle_channel_received(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
 
     raw = update.message.text.strip()
-    target = raw if raw.startswith(("@", "-100")) or raw.lstrip("-").isdigit() else f"@{raw}"
+    target = normalize_telegram_channel(raw)
 
     # Проверка прав бота в канале
     try:
@@ -467,7 +485,7 @@ async def cmd_set_club_channel(update: Update, context: ContextTypes.DEFAULT_TYP
         return
 
     raw = context.args[0].strip()
-    target = raw if raw.startswith(("@", "-100")) or raw.lstrip("-").isdigit() else f"@{raw}"
+    target = normalize_telegram_channel(raw)
 
     try:
         chat = await context.bot.get_chat(target)

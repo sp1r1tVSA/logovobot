@@ -200,3 +200,16 @@ class TestClubSmmGeminiImageMock(unittest.TestCase):
         buf = club_smm_service.generate_club_ai_photo("Бешикташ", post_type="matchday")
         self.assertIsNotNone(buf)
         self.assertEqual(buf.getvalue(), fake_image_bytes)
+
+
+class TestChannelNormalization(unittest.TestCase):
+    def test_normalize_channel_inputs(self):
+        from handlers.club_smm import normalize_telegram_channel
+        self.assertEqual(normalize_telegram_channel("https://t.me/BESIKTASLOGOVOFIFAREI"), "@BESIKTASLOGOVOFIFAREI")
+        self.assertEqual(normalize_telegram_channel("http://t.me/BESIKTASLOGOVOFIFAREI"), "@BESIKTASLOGOVOFIFAREI")
+        self.assertEqual(normalize_telegram_channel("t.me/BESIKTASLOGOVOFIFAREI"), "@BESIKTASLOGOVOFIFAREI")
+        self.assertEqual(normalize_telegram_channel("@BESIKTASLOGOVOFIFAREI"), "@BESIKTASLOGOVOFIFAREI")
+        self.assertEqual(normalize_telegram_channel("BESIKTASLOGOVOFIFAREI"), "@BESIKTASLOGOVOFIFAREI")
+        self.assertEqual(normalize_telegram_channel("-1001234567890"), "-1001234567890")
+        self.assertEqual(normalize_telegram_channel("1234567890"), "-1001234567890")
+
