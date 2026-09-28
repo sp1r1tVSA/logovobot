@@ -357,14 +357,47 @@ PROMPT_TEXT = """
 """
 
 def clean_json_response(raw_text: str) -> str:
-    """Очищает ответ модели от возможных markdown-тегов ```json ... ``` и извлекает чистый JSON."""
+    """Очищает ответ модели от возможных markdown-тегов ```json ... ``` и извлекает чистый JSON.
+
+    Использует посимвольный обход со счётчиком глубины вместо жадного регекса
+    ``{[\\s\\S]*}``, который ломается, когда модель возвращает строки со
+    скобками внутри значений (например, названия клубов типа «Real (B)»).
+    """
     text = raw_text.strip()
+    # Strip markdown fences
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
     text = re.sub(r"\s*```$", "", text)
-    match = re.search(r'(\{[\s\S]*\})', text)
-    if match:
-        return match.group(1).strip()
-    return text.strip()
+
+    # Walk character-by-character to find the first balanced { ... } block,
+    # correctly skipping braces that appear inside JSON string literals.
+    start = text.find('{')
+    if start == -1:
+        return text.strip()
+
+    depth = 0
+    in_string = False
+    escape_next = False
+    for i, ch in enumerate(text[start:], start=start):
+        if escape_next:
+            escape_next = False
+            continue
+        if ch == '\\' and in_string:
+            escape_next = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == '{':
+            depth += 1
+        elif ch == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1].strip()
+
+    # Fallback: return everything from the first '{' (best-effort)
+    return text[start:].strip()
 
 
 def validate_and_sanitize_match_events(m: dict) -> None:
@@ -713,7 +746,15 @@ def recognize_match_screenshots_bytes(
                     if not text_content and parts:
                         text_content = parts[-1].get("text", "")
                     clean_text = clean_json_response(text_content)
-                    parsed_data = json.loads(clean_text)
+                    try:
+                        parsed_data = json.loads(clean_text)
+                    except json.JSONDecodeError as json_err:
+                        snippet = clean_text[:200].replace('\n', ' ')
+                        logger.warning(
+                            f"Gemini model '{m_name}' returned unparseable JSON "
+                            f"({json_err}); snippet: {snippet!r} — trying next model"
+                        )
+                        continue
 
                     if not isinstance(parsed_data, dict):
                         logger.warning(f"Gemini model '{m_name}' returned non-dict JSON: {parsed_data}")

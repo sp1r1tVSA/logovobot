@@ -295,6 +295,23 @@ class TestCleanJsonResponse(unittest.TestCase):
         raw = '```json\n{"matches": [{"team1": "X"}]}\n```'
         self.assertEqual(clean_json_response(raw), '{"matches": [{"team1": "X"}]}')
 
+    def test_brace_inside_string_value(self):
+        # Regression: club name with parentheses must not confuse the extractor.
+        # Old greedy regex produced truncated JSON; balanced-brace walker returns valid JSON.
+        import json as _json
+        raw = '{"team1": "Real (B)", "team2": "Chelsea", "left_score": 2, "right_score": 0}'
+        result = clean_json_response(raw)
+        parsed = _json.loads(result)  # must not raise
+        self.assertEqual(parsed["team1"], "Real (B)")
+
+    def test_prose_wrapping_json_with_brace_in_string(self):
+        # Prose before/after + brace inside a string value — both issues at once.
+        import json as _json
+        raw = 'Результат:\n{"team1": "Barca {B}", "left_score": 1, "right_score": 0}\nГотово.'
+        result = clean_json_response(raw)
+        parsed = _json.loads(result)
+        self.assertEqual(parsed["team1"], "Barca {B}")
+
 
 class TestGroundTruthScreenshotRows(unittest.TestCase):
     """
