@@ -660,6 +660,13 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
             f"Artistic 3D emblem of soccer club {canon} in arena, {soccer_guard}, championship atmosphere, cinematic 4k"
         )
 
+    # 1. Приоритет: Бесплатный и неограниченный нейросетевой арт (Flux)
+    logger.info("Club SMM: Attempting Free AI Image generation (Flux)...")
+    free_buf = _call_free_ai_image(prompt)
+    if free_buf:
+        return free_buf
+
+    # 2. Резерв: Google Gemini Image (если есть платный ключ с квотой на изображения)
     keys = get_ordered_gemini_keys()
     models = getattr(config, "GEMINI_IMAGE_MODELS", [
         "gemini-3.1-flash-image",
@@ -673,7 +680,7 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
 
     for model in models:
         for key in keys:
-            # 1. Попытка через generateContent (gemini-3.1-flash-image / gemini-2.5-flash-image)
+            # Попытка через generateContent (gemini-3.1-flash-image / gemini-2.5-flash-image)
             if "imagen" not in model:
                 url = f"{base_url}/v1beta/models/{model}:generateContent?key={key}"
                 payload = {
@@ -702,7 +709,7 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
                     logger.warning(f"Gemini Image generateContent '{model}' failed: {e}")
                     continue
 
-            # 2. Попытка через :predict (imagen-3.0-generate-002)
+            # Попытка через :predict (imagen-3.0-generate-002)
             else:
                 url = f"{base_url}/v1beta/models/{model}:predict?key={key}"
                 payload = {
@@ -727,12 +734,6 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
                 except Exception as e:
                     logger.warning(f"Gemini Image predict '{model}' failed: {e}")
                     continue
-
-    # 3. Бесплатный нейросетевой арт (Flux)
-    logger.info("Gemini Image unavailable or no quota. Attempting Free AI Image (Flux)...")
-    free_buf = _call_free_ai_image(prompt)
-    if free_buf:
-        return free_buf
 
     logger.warning("All AI Image generation methods unavailable. Falling back to club card graphic.")
     return generate_club_smm_media(team_name)

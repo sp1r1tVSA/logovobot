@@ -172,9 +172,10 @@ class TestClubSmmMultiProviderText(unittest.TestCase):
 
 
 class TestClubSmmGeminiImageMock(unittest.TestCase):
+    @patch("services.club_smm_service._call_free_ai_image", return_value=None)
     @patch("services.club_smm_service.get_ordered_gemini_keys", return_value=["test_api_key"])
     @patch("services.ai.ai_recognizer._get_gemini_opener")
-    def test_generate_club_ai_photo(self, mock_opener_fn, mock_keys):
+    def test_generate_club_ai_photo(self, mock_opener_fn, mock_keys, mock_free_ai):
         fake_image_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest_image_bytes"
         fake_b64 = base64.b64encode(fake_image_bytes).decode("utf-8")
         fake_response = {
