@@ -51,6 +51,7 @@ DEPRECATED_OPENROUTER_MODELS = {
 _dead_openrouter_models: set[str] = set(DEPRECATED_OPENROUTER_MODELS)
 
 GUARANTEED_OPENROUTER_MODELS = [
+    "stealth/space-bunny-alpha",
     "openrouter/free",
     "qwen/qwen3.8-27b:free",
     "google/gemma-4-31b-it:free",

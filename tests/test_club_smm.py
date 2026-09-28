@@ -288,4 +288,10 @@ class TestStageAndRoundPosts(unittest.TestCase):
             post = club_smm_service.generate_stage_post("Бешикташ", round_number=1)
             self.assertIn("Огненный триумф в Туре 1!", post)
 
+    def test_openrouter_models_include_space_bunny(self):
+        models = config._get_openrouter_smm_models()
+        self.assertIn("stealth/space-bunny-alpha", models)
+        self.assertEqual(models[0], "stealth/space-bunny-alpha")
+        self.assertIn("stealth/space-bunny-alpha", club_smm_service.GUARANTEED_OPENROUTER_MODELS)
+
 

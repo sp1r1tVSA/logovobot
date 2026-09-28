@@ -90,6 +90,7 @@ def _get_openrouter_smm_models() -> list[str]:
     if raw:
         return [m.strip() for m in raw.split(",") if m.strip()]
     return [
+        "stealth/space-bunny-alpha",
         "openrouter/free",
         "qwen/qwen3.8-27b:free",
         "google/gemma-4-31b-it:free",
