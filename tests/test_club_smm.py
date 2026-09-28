@@ -2,12 +2,12 @@
 tests/test_club_smm.py
 
 Unit tests for Personal Club SMM center:
-- OpenRouter, NVIDIA and Gemini free models configuration and rotation
+- OpenRouter and Gemini free models configuration and rotation
 - HTML sanitizing and tag fitting
 - Fallback post formatting
 - Data extraction payload structure
-- Text generation via OpenRouter, NVIDIA and Gemini
-- Image generation via Gemini Image API
+- Text generation via OpenRouter and Gemini
+- Free AI Image generation and Gemini Image fallback
 - Permission guards and channel configuration
 """
 
@@ -29,10 +29,10 @@ class TestClubSmmConfig(unittest.TestCase):
             models = config._get_openrouter_smm_models()
             self.assertEqual(models, ["meta-llama/llama-3.3-70b-instruct:free", "qwen/qwen-2.5-72b-instruct:free"])
 
-    def test_nvidia_models_parsing(self):
-        with patch.dict("os.environ", {"NVIDIA_SMM_MODELS": "meta/llama-3.3-70b-instruct, qwen/qwen2.5-72b-instruct"}):
-            models = config._get_nvidia_smm_models()
-            self.assertEqual(models, ["meta/llama-3.3-70b-instruct", "qwen/qwen2.5-72b-instruct"])
+    def test_gemini_smm_models_parsing(self):
+        with patch.dict("os.environ", {"GEMINI_SMM_MODELS": "gemini-3.1-flash-lite, gemini-3.5-flash-lite"}):
+            models = config._get_gemini_smm_models()
+            self.assertEqual(models, ["gemini-3.1-flash-lite", "gemini-3.5-flash-lite"])
 
     def test_gemini_image_models_parsing(self):
         with patch.dict("os.environ", {"GEMINI_IMAGE_MODELS": "gemini-3.1-flash-image, imagen-3.0-generate-002"}):
@@ -159,23 +159,16 @@ class TestClubSmmMultiProviderText(unittest.TestCase):
             self.assertIsNotNone(model)
 
     @patch("urllib.request.urlopen")
-    def test_nvidia_text_generation(self, mock_urlopen):
-        fake_response = {
-            "choices": [{
-                "message": {
-                    "content": "🦅 <b>Отчёт от NVIDIA Qwen 2.5!</b>\n\nБешикташ победил 2:1! #Besiktas"
-                }
-            }]
-        }
+    def test_free_ai_image_generation(self, mock_urlopen):
+        fake_img = b"\x89PNG\r\n\x1a\n" + b"A" * 6000
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(fake_response).encode("utf-8")
+        mock_resp.read.return_value = fake_img
         mock_resp.__enter__.return_value = mock_resp
         mock_urlopen.return_value = mock_resp
 
-        with patch.object(config, "NVIDIA_API_KEY", "nvapi-fake-key"):
-            text, model = club_smm_service._call_nvidia_text("System", "User", 1500)
-            self.assertIn("Отчёт от NVIDIA Qwen", text)
-            self.assertIsNotNone(model)
+        buf = club_smm_service._call_free_ai_image("Besiktas poster 4k")
+        self.assertIsNotNone(buf)
+        self.assertEqual(buf.read(), fake_img)
 
 
 class TestClubSmmGeminiImageMock(unittest.TestCase):

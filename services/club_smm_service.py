@@ -5,10 +5,10 @@ services/club_smm_service.py
 
 Архитектура:
   1. ТЕКСТ ПОСТОВ: Бесплатные модели OpenRouter (Llama 3.3 70B, Qwen 2.5 72B,
-     Mistral Small 24B, DeepSeek R1) и NVIDIA NIM с ротацией и автоматическим
-     фолбэком на Gemini и шаблонную аналитику.
-  2. ГЕНЕРАЦИЯ ФОТО / АРТОВ: Модели Gemini Image (gemini-3.1-flash-image,
-     gemini-2.5-flash-image, imagen-3.0) + фолбэк на графическую карточку клуба.
+     Mistral Small 24B, DeepSeek R1) с ротацией и автоматическим фолбэком
+     на бесплатные Gemini (Flash Lite 500 RPD) и шаблонную аналитику.
+  2. ГЕНЕРАЦИЯ ФОТО / АРТОВ: Бесплатный Flux AI (Pollinations) + Gemini Image
+     + фолбэк на графическую карточку клуба (Pillow Retina).
   3. ДАННЫЕ: Актуальная статистика из SQLite (положение в дивизионе, форма,
      последний и предстоящий матчи, авторы голов/ассистов, MVP).
 """
@@ -58,25 +58,6 @@ def get_ordered_openrouter_models() -> list[str]:
         _openrouter_model_idx += 1
         return models[idx:] + models[:idx]
 
-
-_nvidia_model_idx = 0
-_nvidia_lock = threading.Lock()
-
-def get_ordered_nvidia_models() -> list[str]:
-    """Возвращает список моделей NVIDIA NIM с ротацией Round-Robin."""
-    models = getattr(config, "NVIDIA_SMM_MODELS", [
-        "meta/llama-3.3-70b-instruct",
-        "deepseek-ai/deepseek-r1",
-        "qwen/qwen2.5-72b-instruct",
-        "mistralai/mistral-large-2-instruct",
-    ])
-    if not models:
-        return ["meta/llama-3.3-70b-instruct"]
-    global _nvidia_model_idx
-    with _nvidia_lock:
-        idx = _nvidia_model_idx % len(models)
-        _nvidia_model_idx += 1
-        return models[idx:] + models[:idx]
 
 
 _gemini_key_idx = 0
@@ -447,50 +428,6 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
     return None, None
 
 
-# ─── Провайдер 2: NVIDIA NIM (build.nvidia.com) ─────────────────────────────
-
-def _call_nvidia_text(system_text: str, user_text: str, max_tokens: int) -> tuple[str | None, str | None]:
-    """Генерация текста через бесплатный API NVIDIA NIM."""
-    api_key = getattr(config, "NVIDIA_API_KEY", "").strip()
-    if not api_key:
-        return None, None
-
-    base_url = "https://integrate.api.nvidia.com/v1"
-    models = get_ordered_nvidia_models()
-
-    for model in models:
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_text},
-                {"role": "user", "content": user_text},
-            ],
-            "temperature": 0.8,
-            "max_tokens": max_tokens,
-        }
-        body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{base_url}/chat/completions",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            choice = data["choices"][0]
-            text = choice.get("message", {}).get("content", "")
-            if text and len(text.strip()) > 40:
-                clean = text.replace("**", "").replace("#", "")
-                return clean.strip(), model
-        except Exception as e:
-            logger.warning(f"NVIDIA SMM: model '{model}' failed: {e}")
-            continue
-
-    return None, None
-
 
 # ─── Провайдер 3: Gemini Fallback для текста ────────────────────────────────
 
@@ -559,9 +496,8 @@ def generate_club_post(
     Генерирует текст поста.
     Цепочка исполнения:
       1. Бесплатные модели OpenRouter (Llama 3.3 70B, Qwen 2.5 72B, Mistral, DeepSeek)
-      2. NVIDIA NIM (Llama 3.3, Qwen 2.5)
-      3. Резерв Gemini
-      4. Шаблонный аналитический пост из базы данных
+      2. Бесплатные модели Gemini (Flash Lite 500 RPD)
+      3. Шаблонный аналитический пост из базы данных
     """
     payload = get_club_smm_payload(team_name)
     system_text = _build_system_instruction(payload)
@@ -577,16 +513,10 @@ def generate_club_post(
         logger.info(f"Club SMM text generated via OpenRouter ({model_name})")
         return _fit_html(text, limit)
 
-    # 2. Пробуем NVIDIA NIM
-    text, model_name = _call_nvidia_text(system_text, user_text, max_tokens)
-    if text:
-        logger.info(f"Club SMM text generated via NVIDIA ({model_name})")
-        return _fit_html(text, limit)
-
-    # 3. Резерв: Gemini
+    # 2. Резерв: Gemini (бесплатные Flash Lite модели с квотой 500 запросов/день)
     text, model_name = _call_gemini_text(system_text, user_text, max_tokens, audio_bytes=audio_bytes)
     if text:
-        logger.info(f"Club SMM text generated via Gemini fallback ({model_name})")
+        logger.info(f"Club SMM text generated via Gemini ({model_name})")
         return _fit_html(text, limit)
 
     # 4. Фолбэк на шаблонную аналитику

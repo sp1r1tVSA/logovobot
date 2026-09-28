@@ -99,20 +99,7 @@ def _get_openrouter_smm_models() -> list[str]:
 
 OPENROUTER_SMM_MODELS = _get_openrouter_smm_models()
 
-NVIDIA_API_KEY = os.getenv("NVIDIA_API_KEY", "").strip()
 
-def _get_nvidia_smm_models() -> list[str]:
-    raw = os.getenv("NVIDIA_SMM_MODELS", "").strip()
-    if raw:
-        return [m.strip() for m in raw.split(",") if m.strip()]
-    return [
-        "meta/llama-3.3-70b-instruct",
-        "deepseek-ai/deepseek-r1",
-        "qwen/qwen2.5-72b-instruct",
-        "mistralai/mistral-large-2-instruct",
-    ]
-
-NVIDIA_SMM_MODELS = _get_nvidia_smm_models()
 
 def _get_gemini_image_models() -> list[str]:
     raw = os.getenv("GEMINI_IMAGE_MODELS", "").strip()
