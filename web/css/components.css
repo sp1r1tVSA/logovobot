@@ -4622,11 +4622,66 @@ span.team-logo-fallback {
   color: var(--text-primary);
 }
 .adm-subtitle { font-size: 0.78rem; color: var(--text-muted); }
-.adm-tabs { margin-bottom: 14px; overflow-x: auto; scrollbar-width: none; }
-.adm-tabs::-webkit-scrollbar { display: none; }
-/* Вкладок больше, чем влезает в телефон: листаются, а не режутся многоточием. */
-.adm-tabs .mc-tab-btn { white-space: nowrap; flex: 1 0 auto; padding-left: 10px; padding-right: 10px; }
-.adm-div-pills { margin-bottom: 8px; }
+
+/* Вкладки и дивизионы админа: горизонтальная прокрутка с аккуратной полосой прокрутки */
+.adm-tabs {
+  margin-bottom: 14px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(245, 176, 39, 0.45) rgba(255, 255, 255, 0.08);
+  -webkit-overflow-scrolling: touch;
+  padding-bottom: 6px;
+}
+.adm-tabs::-webkit-scrollbar {
+  height: 5px;
+}
+.adm-tabs::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  margin: 0 4px;
+}
+.adm-tabs::-webkit-scrollbar-thumb {
+  background: rgba(245, 176, 39, 0.45);
+  border-radius: 4px;
+  transition: background 0.2s ease;
+}
+.adm-tabs::-webkit-scrollbar-thumb:hover,
+.adm-tabs::-webkit-scrollbar-thumb:active {
+  background: var(--accent-gold);
+}
+.adm-tabs .mc-tab-btn {
+  white-space: nowrap;
+  flex: 1 0 auto;
+  padding-left: 10px;
+  padding-right: 10px;
+}
+.adm-div-pills {
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(245, 176, 39, 0.45) rgba(255, 255, 255, 0.08);
+  -webkit-overflow-scrolling: touch;
+}
+.adm-div-pills::-webkit-scrollbar {
+  height: 5px;
+}
+.adm-div-pills::-webkit-scrollbar-track {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  margin: 0 4px;
+}
+.adm-div-pills::-webkit-scrollbar-thumb {
+  background: rgba(245, 176, 39, 0.45);
+  border-radius: 4px;
+  transition: background 0.2s ease;
+}
+.adm-div-pills::-webkit-scrollbar-thumb:hover,
+.adm-div-pills::-webkit-scrollbar-thumb:active {
+  background: var(--accent-gold);
+}
 .adm-empty {
   padding: 32px 12px;
   text-align: center;

@@ -339,6 +339,23 @@ export class AdminPanel {
     // Вкладки листаются по горизонтали — текущая не должна оказаться за краем.
     const active = this.root.querySelector('.adm-tabs .active');
     if (active) active.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    const activeDiv = this.root.querySelector('.adm-div-pills .active');
+    if (activeDiv) activeDiv.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+
+    // Прокрутка колёсиком мыши по горизонтали для удобства на десктопе
+    [this.root.querySelector('.adm-tabs'), this.root.querySelector('.adm-div-pills')].forEach(el => {
+      if (!el) return;
+      el.addEventListener('wheel', (e) => {
+        if (e.deltaY && !e.deltaX && el.scrollWidth > el.clientWidth) {
+          const canLeft = e.deltaY < 0 && el.scrollLeft > 0;
+          const canRight = e.deltaY > 0 && el.scrollLeft < (el.scrollWidth - el.clientWidth - 1);
+          if (canLeft || canRight) {
+            e.preventDefault();
+            el.scrollLeft += e.deltaY;
+          }
+        }
+      }, { passive: false });
+    });
     this.renderPauseBanner();
   }
 
@@ -2076,6 +2093,7 @@ export class AdminPanel {
     if ((el = t('[data-adm-tab]'))) {
       this.tab = el.dataset.admTab;
       this.root.querySelectorAll('[data-adm-tab]').forEach(b => b.classList.toggle('active', b === el));
+      el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
       tgBridge.hapticImpact('light');
       this.loadTab();
     } else if ((el = t('[data-adm-betban]'))) {
@@ -2097,6 +2115,7 @@ export class AdminPanel {
     } else if ((el = t('[data-adm-division]'))) {
       this.divisionId = el.dataset.admDivision ? Number(el.dataset.admDivision) : null;
       this.root.querySelectorAll('[data-adm-division]').forEach(b => b.classList.toggle('active', b === el));
+      el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
       this.loadTab();
     } else if (t('[data-adm-refresh]')) {
       api.cache.clear();
