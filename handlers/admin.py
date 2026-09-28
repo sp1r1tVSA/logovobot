@@ -137,6 +137,73 @@ async def _ensure_super_admin(update: Update) -> bool:
     return True
 
 
+async def _is_division_one_admin(user_id: int) -> bool:
+    """True if user is global admin or admin of the 1st division."""
+    if not user_id:
+        return False
+    if is_global_admin(user_id):
+        return True
+    try:
+        if await asyncio.to_thread(database.is_division_one_admin, user_id):
+            return True
+    except Exception:
+        pass
+    # In case get_admin_divisions was mocked in tests or has div 1
+    try:
+        admin_divs = await asyncio.to_thread(database.get_admin_divisions, user_id)
+        admin_div_ids = {d["id"] for d in admin_divs if isinstance(d, dict) and "id" in d}
+        div1 = await asyncio.to_thread(database.get_division_by_code, "DIV_1")
+        div1_id = div1["id"] if div1 else 1
+        if div1_id in admin_div_ids or 1 in admin_div_ids:
+            return True
+        for d in admin_divs:
+            if isinstance(d, dict) and (d.get("code") == "DIV_1" or d.get("sort_order") == 1):
+                return True
+    except Exception:
+        pass
+    return False
+
+
+async def _ensure_club_bind_access(update: Update, div_id: int | None = None) -> bool:
+    """
+    Проверка прав на привязку клубов:
+    - Супер-админ и админ 1-го дивизиона имеют доступ ко всем дивизионам (и к хабу).
+    - Админ конкретного дивизиона имеет доступ только к своему дивизиону.
+    """
+    user = update.effective_user
+    if not user:
+        return False
+    if is_global_admin(user.id):
+        return True
+    if await _is_division_one_admin(user.id):
+        return True
+    if div_id is not None:
+        divisions = await asyncio.to_thread(database.get_admin_divisions, user.id)
+        if div_id in [d["id"] for d in divisions if isinstance(d, dict) and "id" in d]:
+            return True
+        await _deny_access(update, "⛔ У вас нет прав на этот дивизион")
+        return False
+    await _deny_access(update, "⛔ Раздел доступен только администраторам первого дивизиона или супер-админам")
+    return False
+
+
+async def _ensure_league_players_access(update: Update) -> bool:
+    """
+    Проверка прав на управление участниками лиги:
+    - Супер-админ и админ 1-го дивизиона имеют доступ.
+    - Остальные пользователи — отказ в доступе.
+    """
+    user = update.effective_user
+    if not user:
+        return False
+    if is_global_admin(user.id):
+        return True
+    if await _is_division_one_admin(user.id):
+        return True
+    await _deny_access(update, "⛔ Раздел доступен только администраторам первого дивизиона или супер-админам")
+    return False
+
+
 def _division_home_cb(user_id: int, div_id: int) -> str:
     """
     Куда ведёт «Назад в дивизион» с общих экранов: супер-админа — в карточку
@@ -300,13 +367,17 @@ async def show_division_admin_panel(update: Update, context: ContextTypes.DEFAUL
     div = await asyncio.to_thread(database.get_division, div_id)
     div_name = div["name"] if div else f"#{div_id}"
 
+    is_div1_admin = await _is_division_one_admin(user.id)
+    bind_cb = "admin_bind_hub" if is_div1_admin else f"admin_bind_div:{div_id}"
     keyboard = [
         [InlineKeyboardButton("⚔️ Управление матчами", callback_data=f"admin_div_manage_matches:{div_id}")],
         [InlineKeyboardButton("📋 Составы команд", callback_data=f"admin_roster_div:{div_id}")],
-        [InlineKeyboardButton("🔗 Привязка клубов", callback_data=f"admin_bind_div:{div_id}")],
+        [InlineKeyboardButton("🔗 Привязка клубов", callback_data=bind_cb)],
         [InlineKeyboardButton("📢 Рассылка задолженностей", callback_data=f"admin_div_debts_menu:{div_id}")],
         [InlineKeyboardButton("👥 Выдача варнов", callback_data=f"admin_div_manage_players:{div_id}")],
     ]
+    if is_div1_admin:
+        keyboard.append([InlineKeyboardButton("👥 Управление участниками лиги", callback_data="admin_manage_players")])
 
     my_divisions = await asyncio.to_thread(database.get_admin_divisions, user.id)
     if len(my_divisions) > 1:
@@ -1035,7 +1106,7 @@ ADMIN_EXPECT_DIV_TOPIC_ID = 232
 async def admin_manage_players_info(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show participant management hub menu."""
     query = update.callback_query
-    if not query or not is_admin(query.from_user.id):
+    if not query or not await _ensure_league_players_access(update):
         return
     await query.answer()
     
@@ -1057,7 +1128,7 @@ async def admin_manage_players_info(update: Update, context: ContextTypes.DEFAUL
 async def admin_div_players_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Hub menu showing participant counts by division and allowing filtered listing."""
     query = update.callback_query
-    if not query or not is_admin(query.from_user.id):
+    if not query or not await _ensure_league_players_access(update):
         return
     await query.answer()
 
@@ -1132,7 +1203,7 @@ def _div_player_buttons(page_players: list[dict]) -> list[list[InlineKeyboardBut
 async def admin_list_div_players(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show paginated list of players filtered by division."""
     query = update.callback_query
-    if not query or not is_admin(query.from_user.id):
+    if not query or not await _ensure_league_players_access(update):
         return
     await query.answer()
 
@@ -3588,7 +3659,11 @@ async def admin_add_player_start(update: Update, context: ContextTypes.DEFAULT_T
     """Start player creation flow."""
     query = update.callback_query
     user_id = query.from_user.id if query else update.effective_user.id
-    if not is_admin(user_id):
+    if not await _is_division_one_admin(user_id):
+        if query:
+            await query.answer("⛔ Раздел доступен только администраторам первого дивизиона или супер-админам", show_alert=True)
+        elif update.message:
+            await update.message.reply_text("⛔ Раздел доступен только администраторам первого дивизиона или супер-админам")
         return ConversationHandler.END
     if query:
         await query.answer()
@@ -3823,7 +3898,11 @@ async def admin_import_players_start(update: Update, context: ContextTypes.DEFAU
     """Start players multiline import flow."""
     query = update.callback_query
     user_id = query.from_user.id if query else update.effective_user.id
-    if not is_admin(user_id):
+    if not await _is_division_one_admin(user_id):
+        if query:
+            await query.answer("⛔ Раздел доступен только администраторам первого дивизиона или супер-админам", show_alert=True)
+        elif update.message:
+            await update.message.reply_text("⛔ Раздел доступен только администраторам первого дивизиона или супер-админам")
         return ConversationHandler.END
     if query:
         await query.answer()
@@ -4418,14 +4497,12 @@ ADMIN_EXPECT_SINGLE_PLAYER = 202
 @admin_only
 async def admin_manage_players_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Show the interactive player management menu."""
+    if not await _ensure_league_players_access(update):
+        return
+
     query = update.callback_query
     if query:
         await query.answer()
-    
-    user_id = query.from_user.id if query else update.effective_user.id
-    if not is_admin(user_id):
-        if query: await query.answer("⛔ Доступ запрещён", show_alert=True)
-        return
 
     users = await asyncio.to_thread(database.list_users)
     total_count = len(users)
@@ -4438,6 +4515,7 @@ async def admin_manage_players_menu(update: Update, context: ContextTypes.DEFAUL
 
     keyboard = [
         [InlineKeyboardButton("📋 Список участников", callback_data="admin_list_players_page_0")],
+        [InlineKeyboardButton("🏆 Дивизионы и участники", callback_data="admin_div_players_menu")],
         [InlineKeyboardButton("➕ Добавить игрока", callback_data="admin_add_player_start")],
         [InlineKeyboardButton("📥 Массовый импорт (списком)", callback_data="admin_import_players_start")],
         [InlineKeyboardButton("🔄 Сбросить варны (новый сезон)", callback_data="admin_reset_season_warns")],
@@ -4455,7 +4533,7 @@ async def admin_manage_players_menu(update: Update, context: ContextTypes.DEFAUL
 async def admin_list_players_page(update: Update, context: ContextTypes.DEFAULT_TYPE, page: int | None = None) -> None:
     """Paginated list of players with inline buttons for each player."""
     query = update.callback_query
-    if not query or not is_admin(query.from_user.id):
+    if not query or not await _ensure_league_players_access(update):
         return
     await query.answer()
 
@@ -4572,7 +4650,7 @@ async def admin_view_player(update: Update, context: ContextTypes.DEFAULT_TYPE, 
         else:
             back_text = "« К списку участников"
         keyboard.append([InlineKeyboardButton(back_text, callback_data=back_cb)])
-    elif p_div_id and not is_global_admin(query.from_user.id):
+    elif p_div_id and not is_global_admin(query.from_user.id) and not await _is_division_one_admin(query.from_user.id):
         keyboard.append([InlineKeyboardButton("« К участникам дивизиона", callback_data=f"admin_div_players:{p_div_id}:0")])
     else:
         keyboard.append([InlineKeyboardButton("« К списку участников", callback_data="admin_list_players_page_0")])
@@ -4738,7 +4816,17 @@ def _bind_origin(data: str) -> str:
 
 def _bind_back_cb(update: Update, div_id: int, origin: str) -> str:
     """Куда ведёт «Назад» с экрана клубов дивизиона."""
-    return "admin_bind_hub" if origin else _div_home_cb(update, div_id)
+    if origin:
+        return "admin_bind_hub"
+    user = update.effective_user
+    if user and not is_global_admin(user.id):
+        try:
+            admin_divs = database.get_admin_divisions(user.id)
+            if div_id not in [d["id"] for d in admin_divs if isinstance(d, dict) and "id" in d]:
+                return "admin_bind_hub"
+        except Exception:
+            pass
+    return _div_home_cb(update, div_id)
 
 
 async def _bind_all_users() -> list[dict]:
@@ -4844,9 +4932,9 @@ async def _bind_render_division(
 
 @admin_only
 async def admin_bind_hub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Супер-админ: выбор дивизиона для привязки клубов."""
+    """Супер-админ или админ 1-го дивизиона: выбор дивизиона для привязки клубов."""
     query = update.callback_query
-    if not query or not await _ensure_super_admin(update):
+    if not query or not await _ensure_club_bind_access(update):
         return
 
     owners = _club_owner_labels(await _bind_all_users())
@@ -4884,7 +4972,7 @@ async def admin_bind_division(update: Update, context: ContextTypes.DEFAULT_TYPE
         return
 
     div_id = _bind_parse(query.data)[0]
-    if not await _ensure_division_access(update, div_id):
+    if not await _ensure_club_bind_access(update, div_id):
         return
 
     await _bind_render_division(update, context, div_id, _bind_origin(query.data))
@@ -4899,7 +4987,7 @@ async def admin_bind_club_card(update: Update, context: ContextTypes.DEFAULT_TYP
 
     div_id, club_idx, page = _bind_parse(query.data)
     origin = _bind_origin(query.data)
-    if not await _ensure_division_access(update, div_id):
+    if not await _ensure_club_bind_access(update, div_id):
         return
 
     teams = await asyncio.to_thread(database.get_division_teams, div_id)
@@ -4974,7 +5062,7 @@ async def admin_bind_execute(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     div_id, club_idx, player_id = _bind_parse(query.data)
     origin = _bind_origin(query.data)
-    if not await _ensure_division_access(update, div_id):
+    if not await _ensure_club_bind_access(update, div_id):
         return
 
     teams = await asyncio.to_thread(database.get_division_teams, div_id)
@@ -5012,7 +5100,7 @@ async def admin_bind_free_confirm(update: Update, context: ContextTypes.DEFAULT_
 
     div_id, club_idx = _bind_parse(query.data)
     origin = _bind_origin(query.data)
-    if not await _ensure_division_access(update, div_id):
+    if not await _ensure_club_bind_access(update, div_id):
         return
 
     teams = await asyncio.to_thread(database.get_division_teams, div_id)
@@ -5052,7 +5140,7 @@ async def admin_bind_free_execute(update: Update, context: ContextTypes.DEFAULT_
 
     div_id, club_idx = _bind_parse(query.data)
     origin = _bind_origin(query.data)
-    if not await _ensure_division_access(update, div_id):
+    if not await _ensure_club_bind_access(update, div_id):
         return
 
     teams = await asyncio.to_thread(database.get_division_teams, div_id)
@@ -7879,7 +7967,7 @@ async def admin_amnesty_execute(update: Update, context: ContextTypes.DEFAULT_TY
 async def admin_reset_season_warns(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Reset all warns for all players (new season)."""
     query = update.callback_query
-    if not query:
+    if not query or not await _ensure_league_players_access(update):
         return
     try:
         await query.answer()

@@ -22,6 +22,10 @@ from handlers.admin import (
     _build_debts_summary,
     _club_owner_labels,
     _post_or_update_debts_for_division,
+    show_division_admin_panel,
+    admin_manage_players_menu,
+    admin_list_players_page,
+    admin_div_players_menu,
 )
 
 
@@ -440,6 +444,7 @@ class TestClubBindingScreen(unittest.IsolatedAsyncioTestCase):
         self.free_coach_id = 99931
         self.owner_id = 99932
         self.homeless_id = 99933
+        self.div_one_id = database.get_division_by_code("DIV_1")["id"]
         self.div_five_id = database.get_division_by_code("DIV_5")["id"]
         self.div_four_id = database.get_division_by_code("DIV_4")["id"]
         self.teams = database.get_division_teams(self.div_five_id)
@@ -633,6 +638,259 @@ class TestClubBindingScreen(unittest.IsolatedAsyncioTestCase):
             await admin_bind_division(update, context)
 
         query.edit_message_text.assert_not_called()
+
+    async def test_division_one_admin_can_open_foreign_division(self):
+        """Админ 1-го дивизиона имеет право открывать привязку клубов любого дивизиона."""
+        update, query = self._update(f"admin_bind_div:{self.div_four_id}")
+        context = MagicMock()
+        context.user_data = {}
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_one_id, "code": "DIV_1"}]):
+            await admin_bind_division(update, context)
+
+        query.edit_message_text.assert_called_once()
+        text = query.edit_message_text.call_args[0][0]
+        self.assertIn("Привязка клубов", text)
+
+    async def test_division_one_admin_can_open_hub(self):
+        """Админ 1-го дивизиона имеет доступ к хабу привязки всех дивизионов."""
+        update, query = self._update("admin_bind_hub")
+        context = MagicMock()
+        context.user_data = {}
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_one_id, "code": "DIV_1"}]):
+            await admin_bind_hub(update, context)
+
+        query.edit_message_text.assert_called_once()
+        text = query.edit_message_text.call_args[0][0]
+        self.assertIn("Привязка клубов", text)
+
+    async def test_non_division_one_admin_cannot_open_hub(self):
+        """Админ 5-го дивизиона не имеет доступа к хабу привязки."""
+        update, query = self._update("admin_bind_hub")
+        context = MagicMock()
+        context.user_data = {}
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_five_id, "code": "DIV_5"}]):
+            await admin_bind_hub(update, context)
+
+        query.edit_message_text.assert_not_called()
+
+    async def test_division_one_admin_can_bind_and_free_in_foreign_division(self):
+        """Админ 1-го дивизиона может назначать и освобождать клубы в чужом дивизионе."""
+        idx = self.teams.index(self.free_club)
+        update, query = self._update(f"admin_bind_set:{self.div_five_id}:{idx}:{self.free_coach_id}")
+        context = MagicMock()
+        context.user_data = {}
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_one_id, "code": "DIV_1"}]), \
+             patch("handlers.admin._post_or_update_debts_in_warns", new=AsyncMock()):
+            await admin_bind_execute(update, context)
+
+        self.assertEqual(database.get_user(self.free_coach_id)["team_name"], self.free_club)
+
+        # Теперь освобождаем
+        update_free, query_free = self._update(f"admin_bind_free_ok:{self.div_five_id}:{idx}")
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_one_id, "code": "DIV_1"}]), \
+             patch("handlers.admin._post_or_update_debts_in_warns", new=AsyncMock()):
+            await admin_bind_free_execute(update_free, context)
+
+        self.assertIsNone(database.get_user(self.free_coach_id)["team_name"])
+
+    async def test_division_panel_bind_button_routes_to_hub_for_div1_admin(self):
+        """В панели админа 1-го дивизиона кнопка привязки ведёт в хаб, для других — в свой дивизион."""
+        update = MagicMock()
+        update.effective_user.id = self.admin_id
+        update.callback_query = None
+        context = MagicMock()
+
+        # Для админа 1-го дивизиона
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_one_id, "code": "DIV_1"}]), \
+             patch("handlers.admin._send_panel", new=AsyncMock()) as send_mock:
+            await show_division_admin_panel(update, context, div_id=self.div_one_id)
+            markup = send_mock.call_args[0][3]
+            cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+            self.assertIn("admin_bind_hub", cbs)
+
+        # Для админа 5-го дивизиона
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_five_id, "code": "DIV_5"}]), \
+             patch("handlers.admin._send_panel", new=AsyncMock()) as send_mock:
+            await show_division_admin_panel(update, context, div_id=self.div_five_id)
+            markup = send_mock.call_args[0][3]
+            cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+            self.assertIn(f"admin_bind_div:{self.div_five_id}", cbs)
+            self.assertNotIn("admin_bind_hub", cbs)
+
+    def test_database_can_manage_club_bindings_helper(self):
+        """Проверка прав на уровне repository helper."""
+        with patch("config.ADMIN_IDS", [self.admin_id]):
+            self.assertTrue(database.can_manage_club_bindings(self.admin_id))
+        u_div1 = 99941
+        u_div5 = 99942
+        with database.transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO users (telegram_id, role, division_id) VALUES (?, 'division_admin', ?)",
+                         (u_div1, self.div_one_id))
+            conn.execute("INSERT OR REPLACE INTO users (telegram_id, role, division_id) VALUES (?, 'division_admin', ?)",
+                         (u_div5, self.div_five_id))
+            conn.execute("INSERT OR REPLACE INTO division_admins (division_id, user_id, created_at) VALUES (?, ?, datetime('now', '+3 hours'))",
+                         (self.div_one_id, u_div1))
+            conn.execute("INSERT OR REPLACE INTO division_admins (division_id, user_id, created_at) VALUES (?, ?, datetime('now', '+3 hours'))",
+                         (self.div_five_id, u_div5))
+
+        try:
+            self.assertTrue(database.is_division_one_admin(u_div1))
+            self.assertFalse(database.is_division_one_admin(u_div5))
+
+            self.assertTrue(database.can_manage_club_bindings(u_div1, None))
+            self.assertTrue(database.can_manage_club_bindings(u_div1, self.div_five_id))
+
+            self.assertFalse(database.can_manage_club_bindings(u_div5, None))
+            self.assertFalse(database.can_manage_club_bindings(u_div5, self.div_one_id))
+            self.assertTrue(database.can_manage_club_bindings(u_div5, self.div_five_id))
+        finally:
+            with database.transaction() as conn:
+                conn.execute("DELETE FROM division_admins WHERE user_id IN (?, ?)", (u_div1, u_div5))
+                conn.execute("DELETE FROM users WHERE telegram_id IN (?, ?)", (u_div1, u_div5))
+
+    async def test_division_panel_manage_players_button_for_div1_admin(self):
+        """В панели админа 1-го дивизиона есть кнопка 'admin_manage_players', а для других дивизионов её нет."""
+        update = MagicMock()
+        update.effective_user.id = self.admin_id
+        update.callback_query = None
+        context = MagicMock()
+
+        # Для админа 1-го дивизиона
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_one_id, "code": "DIV_1"}]), \
+             patch("handlers.admin._send_panel", new=AsyncMock()) as send_mock:
+            await show_division_admin_panel(update, context, div_id=self.div_one_id)
+            markup = send_mock.call_args[0][3]
+            cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+            self.assertIn("admin_manage_players", cbs)
+
+        # Для админа 5-го дивизиона
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_five_id, "code": "DIV_5"}]), \
+             patch("handlers.admin._send_panel", new=AsyncMock()) as send_mock:
+            await show_division_admin_panel(update, context, div_id=self.div_five_id)
+            markup = send_mock.call_args[0][3]
+            cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+            self.assertNotIn("admin_manage_players", cbs)
+
+    async def test_division_one_admin_can_access_manage_players_menu(self):
+        """Админ 1-го дивизиона может открыть меню управления игроками лиги."""
+        update, query = self._update("admin_manage_players")
+        context = MagicMock()
+        context.user_data = {}
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_one_id, "code": "DIV_1"}]):
+            await admin_manage_players_menu(update, context)
+
+        query.edit_message_text.assert_called_once()
+        text = query.edit_message_text.call_args[0][0]
+        self.assertIn("Управление игроками лиги", text)
+        markup = query.edit_message_text.call_args[1]["reply_markup"]
+        cbs = [b.callback_data for row in markup.inline_keyboard for b in row]
+        self.assertIn("admin_list_players_page_0", cbs)
+        self.assertIn("admin_div_players_menu", cbs)
+
+    async def test_non_division_one_admin_cannot_access_manage_players_menu(self):
+        """Админ 5-го дивизиона не имеет доступа к меню управления игроками лиги."""
+        update, query = self._update("admin_manage_players")
+        context = MagicMock()
+        context.user_data = {}
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_five_id, "code": "DIV_5"}]):
+            await admin_manage_players_menu(update, context)
+
+        query.edit_message_text.assert_not_called()
+
+    async def test_division_one_admin_can_view_players_page_and_div_players(self):
+        """Админ 1-го дивизиона может открывать список участников и просмотр по дивизионам."""
+        update, query = self._update("admin_list_players_page_0")
+        context = MagicMock()
+        context.user_data = {}
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_one_id, "code": "DIV_1"}]):
+            await admin_list_players_page(update, context, page=0)
+
+        query.edit_message_text.assert_called_once()
+        self.assertIn("Список участников лиги", query.edit_message_text.call_args[0][0])
+
+        update_div, query_div = self._update("admin_div_players_menu")
+        with patch("handlers.base.is_admin", return_value=True), \
+             patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin.is_global_admin", return_value=False), \
+             patch("handlers.admin.database.get_admin_divisions",
+                   return_value=[{"id": self.div_one_id, "code": "DIV_1"}]):
+            await admin_div_players_menu(update_div, context)
+
+        query_div.edit_message_text.assert_called_once()
+        self.assertIn("Распределение участников по дивизионам", query_div.edit_message_text.call_args[0][0])
+
+    def test_database_can_manage_league_players_helper(self):
+        """Проверка прав can_manage_league_players на уровне database."""
+        with patch("config.ADMIN_IDS", [self.admin_id]):
+            self.assertTrue(database.can_manage_league_players(self.admin_id))
+        u_div1 = 99951
+        u_div5 = 99952
+        with database.transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO users (telegram_id, role, division_id) VALUES (?, 'division_admin', ?)",
+                         (u_div1, self.div_one_id))
+            conn.execute("INSERT OR REPLACE INTO users (telegram_id, role, division_id) VALUES (?, 'division_admin', ?)",
+                         (u_div5, self.div_five_id))
+            conn.execute("INSERT OR REPLACE INTO division_admins (division_id, user_id, created_at) VALUES (?, ?, datetime('now', '+3 hours'))",
+                         (self.div_one_id, u_div1))
+            conn.execute("INSERT OR REPLACE INTO division_admins (division_id, user_id, created_at) VALUES (?, ?, datetime('now', '+3 hours'))",
+                         (self.div_five_id, u_div5))
+
+        try:
+            self.assertTrue(database.can_manage_league_players(u_div1))
+            self.assertFalse(database.can_manage_league_players(u_div5))
+        finally:
+            with database.transaction() as conn:
+                conn.execute("DELETE FROM division_admins WHERE user_id IN (?, ?)", (u_div1, u_div5))
+                conn.execute("DELETE FROM users WHERE telegram_id IN (?, ?)", (u_div1, u_div5))
+
 
 
 class TestDivisionCodeDrivesTheRoster(unittest.IsolatedAsyncioTestCase):

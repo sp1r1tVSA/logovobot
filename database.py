@@ -15728,6 +15728,71 @@ def is_division_admin(user_id: int, division_id: int) -> bool:
     return False
 
 
+def is_division_one_admin(user_id: int) -> bool:
+    """
+    Check if user is allowed to administer the 1st division (or is global admin).
+    Finds Division 1 by code 'DIV_1', id=1, or sort_order=1.
+    """
+    if not user_id:
+        return False
+    from config import ADMIN_IDS
+    if user_id in ADMIN_IDS:
+        return True
+
+    div1 = get_division_by_code("DIV_1")
+    if div1 and is_division_admin(user_id, div1["id"]):
+        return True
+    if is_division_admin(user_id, 1):
+        return True
+
+    divs = get_divisions()
+    if divs:
+        for d in divs:
+            if d.get("code") == "DIV_1" or d.get("sort_order") == 1 or d.get("id") == 1:
+                if is_division_admin(user_id, d["id"]):
+                    return True
+
+    return False
+
+
+def can_manage_club_bindings(user_id: int, division_id: int | None = None) -> bool:
+    """
+    Check if user is allowed to manage club bindings.
+    - Global admin: can manage all divisions.
+    - Admin of 1st division: can manage all divisions (division_id=None or any division_id).
+    - Admin of division X: can manage division X only.
+    """
+    if not user_id:
+        return False
+    from config import ADMIN_IDS
+    if user_id in ADMIN_IDS:
+        return True
+
+    if is_division_one_admin(user_id):
+        return True
+
+    if division_id is not None:
+        return is_division_admin(user_id, division_id)
+
+    return False
+
+
+def can_manage_league_players(user_id: int) -> bool:
+    """
+    Check if user is allowed to manage league participants.
+    - Global admin: can manage all.
+    - Admin of 1st division: can manage all.
+    - Other users: denied.
+    """
+    if not user_id:
+        return False
+    from config import ADMIN_IDS
+    if user_id in ADMIN_IDS:
+        return True
+
+    return is_division_one_admin(user_id)
+
+
 def add_division_admin(division_id: int, user_id: int) -> None:
     """Grant division admin privileges to a user."""
     with transaction() as conn:
