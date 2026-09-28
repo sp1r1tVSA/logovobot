@@ -618,38 +618,46 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
     canon = resolve_team_name(team_name) or team_name
     is_besiktas = "бешикташ" in canon.lower() or "besiktas" in canon.lower()
 
+    soccer_guard = "European soccer association football, classic round soccer ball, green grass pitch, no helmets, no rugby, no american football pads"
+
     if custom_prompt:
-        prompt = f"Dynamic football poster, {custom_prompt}, professional sports media photography, 4k"
+        prompt = (
+            f"Epic European soccer matchday poster for Besiktas JK, {custom_prompt}, "
+            f"majestic black eagle, black and white club colors, roaring soccer stadium floodlights, "
+            f"{soccer_guard}, dynamic sports media photography, 4k" if is_besiktas else
+            f"Epic European soccer match poster for {canon}, {custom_prompt}, "
+            f"stadium floodlights, {soccer_guard}, dynamic sports graphics, 4k"
+        )
     elif post_type == "recap":
         prompt = (
-            "Epic football match victory celebration poster for Besiktas JK with black and white colors, "
-            "majestic eagle crest with glowing eyes, cheering stadium in Istanbul at night, golden confetti, "
-            "dramatic stadium floodlights, highly detailed, photorealistic 8k" if is_besiktas else
-            f"Epic football match victory celebration poster for {canon}, players cheering, stadium floodlights, dramatic atmosphere, 8k"
+            "Epic European soccer match victory celebration poster for Besiktas JK with black and white colors, "
+            "majestic black eagle crest with glowing eyes, cheering soccer stadium in Istanbul at night, golden confetti, "
+            f"green grass pitch, {soccer_guard}, dramatic stadium floodlights, highly detailed, photorealistic 8k" if is_besiktas else
+            f"Epic European soccer match victory celebration poster for {canon}, players cheering on green grass, stadium floodlights, {soccer_guard}, 8k"
         )
     elif post_type == "matchday":
         prompt = (
-            "Action matchday football poster for Besiktas JK, majestic black and white eagle soaring over roaring stadium, "
-            "dramatic smoke, night game lights, dynamic angle, modern sports graphics style, 4k" if is_besiktas else
-            f"Action matchday football poster for {canon}, stadium under lights, dramatic smoke, sports graphics, 4k"
+            "Epic European soccer matchday poster for Besiktas JK, majestic black eagle soaring over roaring soccer stadium, "
+            f"green grass pitch, {soccer_guard}, dramatic smoke, night game lights, dynamic angle, modern sports graphics style, 4k" if is_besiktas else
+            f"Epic European soccer matchday poster for {canon}, soccer stadium under lights, {soccer_guard}, dramatic smoke, sports graphics, 4k"
         )
     elif post_type == "spotlight":
         prompt = (
-            "Action sports portrait of a football forward striker in black and white kit striking a soccer ball, "
-            "dramatic stadium background, motion blur, intense determination, cinematic sports photography" if is_besiktas else
-            f"Action sports portrait of a star football player for {canon}, dynamic strike, stadium lights, cinematic"
+            "Action sports portrait of a European soccer player in black and white kit kicking a round soccer ball on grass, "
+            f"dramatic soccer arena background, motion blur, {soccer_guard}, cinematic sports photography, 4k" if is_besiktas else
+            f"Action sports portrait of a soccer player for {canon}, kicking soccer ball on pitch, {soccer_guard}, stadium lights, cinematic 4k"
         )
     elif post_type == "stage":
         prompt = (
-            f"Epic action football matchday sports poster for Besiktas JK, {custom_brief or 'tournament stage battle'}, "
-            f"black and white team colors, majestic eagle, dramatic stadium lights, modern sports art, 4k" if is_besiktas else
-            f"Epic action football match poster for {canon}, {custom_brief or 'tournament stage battle'}, dramatic stadium lights, 4k"
+            f"Epic European soccer tournament stage poster for Besiktas JK, {custom_prompt or 'playoff battle'}, "
+            f"black and white team colors, majestic black eagle, roaring stadium floodlights, {soccer_guard}, modern sports art, 4k" if is_besiktas else
+            f"Epic European soccer tournament poster for {canon}, {custom_prompt or 'playoff battle'}, {soccer_guard}, dramatic stadium lights, 4k"
         )
     else:  # standings / default
         prompt = (
-            "Artistic 3D emblem of a black and white eagle rising over a football arena, neon stadium glow, "
-            "cinematic championship atmosphere, high end sports banner" if is_besiktas else
-            f"Artistic 3D emblem of football club {canon} in arena, championship atmosphere, cinematic"
+            "Artistic 3D emblem of a majestic black eagle rising over a European soccer stadium arena, green grass pitch, "
+            f"neon stadium glow, {soccer_guard}, cinematic championship atmosphere, high end sports banner, 4k" if is_besiktas else
+            f"Artistic 3D emblem of soccer club {canon} in arena, {soccer_guard}, championship atmosphere, cinematic 4k"
         )
 
     keys = get_ordered_gemini_keys()
