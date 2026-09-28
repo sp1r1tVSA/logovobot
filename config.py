@@ -120,6 +120,7 @@ def _get_openrouter_image_models() -> list[str]:
     if raw:
         return [m.strip() for m in raw.split(",") if m.strip()]
     return [
+        "inclusionai/ming-image-0.1-design",
         "recraft/recraft-v4.1-flash",
         "black-forest-labs/flux.2-klein-4b",
         "sourceful/riverflow-v2.5-fast",

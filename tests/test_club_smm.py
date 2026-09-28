@@ -314,7 +314,7 @@ class TestClubSmmOpenRouterImage(unittest.TestCase):
             buf, model = club_smm_service._call_openrouter_image("epic soccer match")
             self.assertIsNotNone(buf)
             self.assertEqual(buf.getvalue(), fake_image_bytes)
-            self.assertEqual(model, "recraft/recraft-v4.1-flash")
+            self.assertEqual(model, "inclusionai/ming-image-0.1-design")
 
     @patch("urllib.request.urlopen")
     def test_call_openrouter_image_url(self, mock_urlopen):
@@ -338,7 +338,7 @@ class TestClubSmmOpenRouterImage(unittest.TestCase):
             buf, model = club_smm_service._call_openrouter_image("epic soccer match")
             self.assertIsNotNone(buf)
             self.assertEqual(buf.getvalue(), fake_image_bytes)
-            self.assertEqual(model, "recraft/recraft-v4.1-flash")
+            self.assertEqual(model, "inclusionai/ming-image-0.1-design")
 
     @patch("services.club_smm_service._call_openrouter_image")
     def test_generate_club_ai_photo_prefers_openrouter(self, mock_or_img):
@@ -351,7 +351,8 @@ class TestClubSmmOpenRouterImage(unittest.TestCase):
 
     def test_openrouter_image_models_config(self):
         models = config._get_openrouter_image_models()
+        self.assertIn("inclusionai/ming-image-0.1-design", models)
+        self.assertEqual(models[0], "inclusionai/ming-image-0.1-design")
         self.assertIn("recraft/recraft-v4.1-flash", models)
-        self.assertEqual(models[0], "recraft/recraft-v4.1-flash")
 
 

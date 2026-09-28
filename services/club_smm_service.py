@@ -582,6 +582,7 @@ def _call_openrouter_image(prompt: str) -> tuple[io.BytesIO | None, str | None]:
         return None, None
 
     models = getattr(config, "OPENROUTER_IMAGE_MODELS", [
+        "inclusionai/ming-image-0.1-design",
         "recraft/recraft-v4.1-flash",
         "black-forest-labs/flux.2-klein-4b",
         "sourceful/riverflow-v2.5-fast",
@@ -595,9 +596,10 @@ def _call_openrouter_image(prompt: str) -> tuple[io.BytesIO | None, str | None]:
         payload = {
             "model": model,
             "prompt": prompt,
-            "aspect_ratio": "1:1",
             "n": 1,
         }
+        if "ming" not in model:
+            payload["aspect_ratio"] = "1:1"
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
             url,
