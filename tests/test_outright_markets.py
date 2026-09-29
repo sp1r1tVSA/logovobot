@@ -431,5 +431,104 @@ class TestCupMarket(OutrightCase):
         self.assertEqual(self._selection(market, self.clubs[0])["status"], "won")
 
 
+class TestLeagueTopScorerCupsIntegration(OutrightCase):
+    def test_league_top_scorer_aggregates_division_and_both_cups(self):
+        # 1. League match goal (Round 1)
+        self._confirm(0, 2, 0, scorer=(self.matches[0][1], "Никола Влашич", 2))
+
+        # 2. General cup match goal
+        database.create_cup_series("1/8", [(self.matches[0][1], self.clubs[2])], season_id=self.season)
+        with database.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM cup_series WHERE team1_name = ?", (self.matches[0][1],))
+            cs_gen_id = cur.fetchone()[0]
+        m_gen_id = database.create_cup_series_match(cs_gen_id, game_num=1)
+        with database.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE matches SET status = 'confirmed', player1_score = 3, player2_score = 0 WHERE id = ?",
+                        (m_gen_id,))
+            cur.execute("INSERT INTO match_events (match_id, team_name, player_name, event_type, count) "
+                        "VALUES (?, ?, 'Никола Влашич', 'goal', 3)", (m_gen_id, self.matches[0][1]))
+
+        # 3. Division cup match goal
+        database.create_cup_series("1/4", [(self.matches[0][1], self.clubs[3])],
+                                   division_id=self.div, season_id=self.season)
+        with database.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT cs.id FROM cup_series cs
+                JOIN cup_stages st ON st.id = cs.stage_id
+                WHERE cs.team1_name = ? AND st.division_id = ?
+            """, (self.matches[0][1], self.div))
+            cs_div_id = cur.fetchone()[0]
+        m_div_id = database.create_cup_series_match(cs_div_id, game_num=1)
+        with database.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE matches SET status = 'confirmed', player1_score = 1, player2_score = 0 WHERE id = ?",
+                        (m_div_id,))
+            cur.execute("INSERT INTO match_events (match_id, team_name, player_name, event_type, count) "
+                        "VALUES (?, ?, 'Никола Влашич', 'goal', 1)", (m_div_id, self.matches[0][1]))
+
+        # Check division top scorer totals: strictly league goals (2 goals)
+        div_totals = database.get_outright_scorer_totals(division_id=self.div, season_id=self.season)
+        vlasic_div = next(t for t in div_totals if "Влашич" in t["player_name"])
+        self.assertEqual(vlasic_div["goals"], 2)
+
+        # Check league top scorer totals: 2 (league) + 3 (general cup) + 1 (division cup) = 6 goals!
+        league_totals = database.get_outright_scorer_totals(division_id=None, season_id=self.season)
+        vlasic_league = next(t for t in league_totals if "Влашич" in t["player_name"])
+        self.assertEqual(vlasic_league["goals"], 6)
+        self.assertEqual(vlasic_league["division_id"], self.div)
+
+        # Refresh outright markets and verify selections
+        outright_service.refresh_outrights()
+        league_market = self._market("league_top_scorer", "LEAGUE")
+        self.assertIsNotNone(league_market)
+        sel = self._selection(league_market, "Никола Влашич")
+        self.assertEqual(sel["division_id"], self.div)
+        self.assertGreater(sel["probability"], 0.5)
+
+    def test_cup_only_scorer_assigned_proper_division(self):
+        database.create_cup_series("1/8", [(self.clubs[1], self.clubs[2])], season_id=self.season)
+        with database.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("SELECT id FROM cup_series WHERE team1_name = ?", (self.clubs[1],))
+            cs_id = cur.fetchone()[0]
+        m_id = database.create_cup_series_match(cs_id, game_num=1)
+        with database.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute("UPDATE matches SET status = 'confirmed', player1_score = 4, player2_score = 0 WHERE id = ?",
+                        (m_id,))
+            cur.execute("INSERT INTO match_events (match_id, team_name, player_name, event_type, count) "
+                        "VALUES (?, ?, 'Кубковый Снайпер', 'goal', 4)", (m_id, self.clubs[1]))
+
+        # Division market: player has 0 league goals, so not present in division_top_scorer
+        div_totals = database.get_outright_scorer_totals(division_id=self.div, season_id=self.season)
+        self.assertFalse(any(t["player_name"] == "Кубковый Снайпер" for t in div_totals))
+
+        # League market: player present with 4 goals and correctly attributed division
+        league_totals = database.get_outright_scorer_totals(division_id=None, season_id=self.season)
+        p = next(t for t in league_totals if t["player_name"] == "Кубковый Снайпер")
+        self.assertEqual(p["goals"], 4)
+        self.assertEqual(p["division_id"], self.div)
+
+    def test_league_top_scorer_does_not_settle_while_cup_is_in_progress(self):
+        self._confirm(0, 3, 0, scorer=(self.matches[0][1], "Никола Влашич", 3))
+        self._finish_league()
+
+        # General cup has a bracket and is active (not finished)
+        database.create_cup_series("1/8", [(self.clubs[0], self.clubs[1])], season_id=self.season)
+        outright_service.refresh_outrights()
+
+        # Division winner settles
+        div_winner = self._winner_market()
+        self.assertEqual(div_winner["status"], "settled")
+
+        # League top scorer MUST NOT settle because cup is still in progress
+        league_scorer = self._market("league_top_scorer", "LEAGUE")
+        self.assertEqual(league_scorer["status"], "open")
+
+
 if __name__ == "__main__":
     unittest.main()
+

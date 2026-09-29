@@ -56,6 +56,9 @@ class DivisionSnapshot:
     debts: list[dict] = field(default_factory=list)
     escalated: int = 0
     escalating_soon: int = 0
+    frozen_debts: int = 0
+    urgent_debts: int = 0
+    top_debtors: list[tuple[str, int]] = field(default_factory=list)
     warned: list[dict] = field(default_factory=list)
     at_limit: list[dict] = field(default_factory=list)
 
@@ -131,13 +134,32 @@ def build_snapshots(
             (dict(d) for d in debts if _div_of(d) == div_id),
             key=lambda d: (-float(d.get("hours_overdue") or 0), d.get("round_number") or 0),
         )
+        debt_team_counts: dict[str, int] = {}
         for debt in snap.debts:
-            if is_escalated(debt):
+            is_esc = is_escalated(debt)
+            is_frz = bool(debt.get("is_extended"))
+            if is_esc:
                 snap.escalated += 1
+                if not is_frz:
+                    snap.urgent_debts += 1
             elif float(debt.get("hours_to_escalation") or 0) <= ESCALATION_SOON_HOURS:
                 snap.escalating_soon += 1
 
+            if is_frz:
+                snap.frozen_debts += 1
+
+            t1 = debt.get("player1_team")
+            t2 = debt.get("player2_team")
+            if t1:
+                debt_team_counts[t1] = debt_team_counts.get(t1, 0) + 1
+            if t2:
+                debt_team_counts[t2] = debt_team_counts.get(t2, 0) + 1
+
+        snap.top_debtors = sorted(debt_team_counts.items(), key=lambda x: -x[1])
+
         snap.warned = [dict(u) for u in warned_users if _div_of(u) == div_id]
+        for u in snap.warned:
+            u["debt_count"] = debt_team_counts.get(u.get("team_name"), 0)
         snap.at_limit = [u for u in snap.warned if int(u["warn_count"]) >= max_warns - 1]
         snapshots.append(snap)
     return snapshots
@@ -183,9 +205,11 @@ def _player(username: Any, team: Any) -> str:
 
 def _round_line(r: RoundProgress, now: _dt.datetime) -> str:
     icon = PHASE_ICONS.get(r.phase, "•")
+    left = r.total - r.played
+    left_str = f" · осталось {left}" if left > 0 else " · все сыграны"
     return (
         f"{icon} Тур {r.number} · {r.played}/{r.total} {progress_bar(r.played, r.total)}"
-        f" · {_deadline_note(r, now)}"
+        f"{left_str} · {_deadline_note(r, now)}"
     )
 
 
@@ -204,8 +228,12 @@ def _rounds_block(snap: DivisionSnapshot, now: _dt.datetime) -> list[str]:
 def _discipline_line(snap: DivisionSnapshot, max_warns: int) -> str:
     if snap.debts:
         extra = []
-        if snap.escalated:
+        if snap.urgent_debts:
+            extra.append(f"⚡ {snap.urgent_debts} на вердикте")
+        elif snap.escalated:
             extra.append(f"⚡ {snap.escalated} эскал.")
+        if snap.frozen_debts:
+            extra.append(f"❄️ {snap.frozen_debts} заморож.")
         if snap.escalating_soon:
             extra.append(f"⏳ {snap.escalating_soon} скоро")
         debts = f"🧾 Долги: {len(snap.debts)}" + (f" ({', '.join(extra)})" if extra else "")
@@ -222,9 +250,11 @@ def _discipline_line(snap: DivisionSnapshot, max_warns: int) -> str:
 
 def _season_line(snap: DivisionSnapshot) -> str:
     pct = round(100 * snap.season_played / snap.season_total) if snap.season_total else 0
+    rem = max(0, snap.season_total - snap.season_played)
+    rem_str = f" · осталось {rem}" if snap.season_total else ""
     return (
         f"📊 Сезон: {snap.season_played}/{snap.season_total} матчей ({pct}%)"
-        f" · закрыто туров {snap.rounds_closed}/{snap.rounds_total}"
+        f" · закрыто туров {snap.rounds_closed}/{snap.rounds_total}{rem_str}"
     )
 
 
@@ -234,7 +264,13 @@ def attention_items(snapshots: Iterable[DivisionSnapshot], max_warns: int) -> li
     for snap in snapshots:
         tag = f"<b>{html.escape(snap.name)}</b>"
         if snap.escalated:
-            items.append(f"⚡ {tag}: эскалировано долгов — {snap.escalated}")
+            label = f"эскалировано долгов — {snap.escalated}"
+            if snap.frozen_debts and snap.urgent_debts:
+                items.append(f"⚡ {tag}: {label} ({snap.urgent_debts} ждут вердикта, {snap.frozen_debts} заморожено ❄️)")
+            elif snap.frozen_debts and not snap.urgent_debts:
+                items.append(f"⚡ {tag}: {label} (все {snap.frozen_debts} заморожены ❄️)")
+            else:
+                items.append(f"⚡ {tag}: {label}")
     for snap in snapshots:
         tag = f"<b>{html.escape(snap.name)}</b>"
         for u in snap.at_limit:
@@ -298,7 +334,21 @@ def render_division(snap: DivisionSnapshot, now: _dt.datetime, max_warns: int) -
 
     lines.append("")
     if snap.debts:
-        lines.append(f"<b>🧾 Долги ({len(snap.debts)})</b>")
+        summary_tags = []
+        if snap.urgent_debts:
+            summary_tags.append(f"⚡ {snap.urgent_debts} на вердикте")
+        if snap.frozen_debts:
+            summary_tags.append(f"❄️ {snap.frozen_debts} заморожено")
+        regular_count = len(snap.debts) - snap.urgent_debts - snap.frozen_debts
+        if regular_count > 0:
+            summary_tags.append(f"⏳ {regular_count} на отыгрыше")
+        extra_str = f" ({' · '.join(summary_tags)})" if summary_tags else ""
+        lines.append(f"<b>🧾 Долги ({len(snap.debts)}){extra_str}</b>")
+
+        if snap.top_debtors:
+            top_strs = [f"{html.escape(t)} ({cnt})" for t, cnt in snap.top_debtors[:5]]
+            lines.append(f"👥 <b>Главные должники:</b> {', '.join(top_strs)}")
+
         lines.extend(_debt_line(d) for d in snap.debts[:MAX_DEBT_LINES])
         if len(snap.debts) > MAX_DEBT_LINES:
             lines.append(f"…и ещё {len(snap.debts) - MAX_DEBT_LINES} — полный список в «Долги дивизиона»")
@@ -309,8 +359,28 @@ def render_division(snap: DivisionSnapshot, now: _dt.datetime, max_warns: int) -
     if snap.warned:
         lines.append(f"<b>⚠️ Варны ({len(snap.warned)})</b>")
         for u in snap.warned:
-            icon = "🟥" if int(u["warn_count"]) >= max_warns - 1 else "🟧"
-            lines.append(f"{icon} {_player(u.get('username'), u.get('team_name'))} — {u['warn_count']}/{max_warns}")
+            cnt = int(u.get("warn_count") or 0)
+            icon = "🟥" if cnt >= max_warns - 1 else "🟧"
+            line = f"{icon} {_player(u.get('username'), u.get('team_name'))} — {cnt}/{max_warns}"
+            extra = []
+            debt_cnt = u.get("debt_count", 0)
+            if debt_cnt:
+                extra.append(f"{debt_cnt} долг." if debt_cnt > 1 else "1 долг")
+            if cnt >= max_warns:
+                extra.append("🚨 лимит исчерпан!")
+            elif cnt >= max_warns - 1:
+                extra.append("⚠️ 1 до кика")
+            if extra:
+                line += f" ({', '.join(extra)})"
+            lines.append(line)
     else:
         lines.append("⚠️ Варнов нет")
+
+    lines.append("")
+    lines.append(
+        "💡 <b>Памятка по статусам:</b>\n"
+        "• ⚡ <i>эскалирован</i> — срок истёк, ждёт вердикта админа (ТП 1:0/0:1 или ТН 0:0)\n"
+        "• ❄️ <i>заморожен</i> — матч продлён админом (санкции и таймер на паузе)\n"
+        "• ⏳ <i>эскалация через</i> — регламентный срок на самостоятельную игру"
+    )
     return "\n".join(lines)

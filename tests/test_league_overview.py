@@ -94,6 +94,23 @@ class TestBuildSnapshots(unittest.TestCase):
         self.assertEqual(len(snap.warned), 3)
         self.assertEqual({u["username"] for u in snap.at_limit}, {"a", "c"})
 
+    def test_build_snapshots_categorizes_frozen_urgent_and_top_debtors(self):
+        debts = [
+            {"division_id": 1, "player1_team": "Валенсия", "player2_team": "Ланс",
+             "hours_overdue": 60, "hours_to_escalation": -12, "is_extended": 1},
+            {"division_id": 1, "player1_team": "Хоффенхайм", "player2_team": "Сельта",
+             "hours_overdue": 50, "hours_to_escalation": -2, "is_extended": 0},
+            {"division_id": 1, "player1_team": "Валенсия", "player2_team": "Сельта",
+             "hours_overdue": 20, "hours_to_escalation": 10, "is_extended": 0},
+        ]
+        warned = [{"division_id": 1, "username": "v", "team_name": "Валенсия", "warn_count": 2}]
+        snap = ovw.build_snapshots(self.DIVS[:1], _rows(warned=warned), debts, NOW, MAX_WARNS)[0]
+        self.assertEqual(snap.escalated, 2)
+        self.assertEqual(snap.frozen_debts, 1)
+        self.assertEqual(snap.urgent_debts, 1)
+        self.assertEqual(snap.top_debtors[0], ("Валенсия", 2))
+        self.assertEqual(snap.warned[0]["debt_count"], 2)
+
 
 class TestRender(unittest.TestCase):
     def _snap(self, **kw):
@@ -153,6 +170,32 @@ class TestRender(unittest.TestCase):
         self.assertIn("⚡ Тур 2: Бетис (@a) — Порту · 51 ч · эскалирован", text)
         self.assertIn("⏳ Тур 3: A (@x) — B (@y) · 40 ч · эскалация через 8 ч · ❄️ заморожен", text)
         self.assertIn("🟧 Порту (@b) — 1/4", text)
+
+    def test_render_division_detailed_breakdown_and_legend(self):
+        debt = {"round_number": 2, "player1_team": "Валенсия", "p1_username": "v", "player2_team": "Ланс",
+                "p2_username": "l", "hours_overdue": 60, "hours_to_escalation": -12, "is_extended": 1}
+        soon = {"round_number": 3, "player1_team": "Валенсия", "p1_username": "v", "player2_team": "Сельта",
+                "p2_username": "c", "hours_overdue": 37, "hours_to_escalation": 10, "is_extended": 0}
+        snap = self._snap(
+            active_rounds=[ovw.RoundProgress(1, "open", NOW + datetime.timedelta(hours=5), 4, 8)],
+            season_played=4, season_total=16, rounds_closed=0, rounds_total=2,
+            debts=[debt, soon],
+            frozen_debts=1, urgent_debts=0, escalating_soon=1,
+            top_debtors=[("Валенсия", 2), ("Ланс", 1), ("Сельта", 1)],
+            warned=[{"username": "v", "team_name": "Валенсия", "warn_count": 3, "debt_count": 2}],
+            at_limit=[{"username": "v", "team_name": "Валенсия", "warn_count": 3}],
+        )
+        text = ovw.render_division(snap, NOW, MAX_WARNS)
+        self.assertIn("осталось 4", text)
+        self.assertIn("осталось 12", text)
+        self.assertIn("1 заморожено", text)
+        self.assertIn("1 на отыгрыше", text)
+        self.assertIn("Главные должники:", text)
+        self.assertIn("Валенсия (2)", text)
+        self.assertIn("Валенсия (@v) — 3/4 (2 долг., ⚠️ 1 до кика)", text)
+        self.assertIn("Памятка по статусам:", text)
+        self.assertIn("<i>эскалирован</i> — срок истёк", text)
+        self.assertIn("<i>заморожен</i> — матч продлён", text)
 
     def test_time_left(self):
         self.assertEqual(ovw.time_left(datetime.timedelta(days=2, hours=5, minutes=10)), "2 д 5 ч")

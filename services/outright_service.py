@@ -32,7 +32,7 @@ from services.poisson_odds import calculate_match_lambdas
 logger = logging.getLogger(__name__)
 
 # Меняется при любой правке модели — все рынки пересчитаются на следующем прогоне.
-MODEL_VERSION = 1
+MODEL_VERSION = 2
 
 REFRESH_INTERVAL_SECONDS = 120
 
@@ -245,6 +245,32 @@ def price_top_scorer(ctx: _Context, division_id: int | None, fingerprint: str,
             key = database.outright_club_key(club)
             remaining[key] = remaining.get(key, 0) + n
 
+    if division_id is None:
+        with database.transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                SELECT player1_team, player2_team
+                FROM matches
+                WHERE status = 'confirmed'
+                  AND (tournament_type = 'cup' OR round_number = -1)
+                  AND (season_id = ? OR season_id IS NULL)
+                  AND COALESCE(is_series_header, 0) = 0
+            """, (ctx.season_id,))
+            for row in cursor.fetchall():
+                for team in (row["player1_team"], row["player2_team"]):
+                    if team:
+                        ck = database.outright_club_key(team)
+                        played[ck] = played.get(ck, 0) + 1
+
+        for cup_div in [None] + [d["id"] for d in ctx.divisions]:
+            for st in database.get_outright_cup_bracket(cup_div, ctx.season_id):
+                for s in st["series"]:
+                    if s.get("status") != "finished" and not s.get("winner_name"):
+                        for team in (s.get("team1_name"), s.get("team2_name")):
+                            if team:
+                                ck = database.outright_club_key(team)
+                                remaining[ck] = remaining.get(ck, 0) + 2
+
     players = []
     for t in totals:
         club_key = t["key"].split("|", 1)[0]
@@ -403,6 +429,18 @@ def _price(ctx: _Context, spec: dict, fp: str, market: dict | None) -> tuple[lis
     return price_top_scorer(ctx, spec["division_id"], fp, keys), None
 
 
+def _cups_finished(ctx: _Context) -> bool:
+    """Все ли кубки сезона (общий и дивизионов), у которых есть сетка, завершены."""
+    for cup_div in [None] + [d["id"] for d in ctx.divisions]:
+        stages = database.get_outright_cup_bracket(cup_div, ctx.season_id)
+        if not stages:
+            continue
+        final = next((s for s in stages if s["stage"] == "final"), None)
+        if not final or not cup_winner_factors(final):
+            return False
+    return True
+
+
 def _auto_settle(ctx: _Context, spec: dict) -> bool:
     market = next((m for m in database.get_outright_markets(ctx.season_id)
                    if m["market_type"] == spec["type"] and m["scope_key"] == spec["scope"]), None)
@@ -419,6 +457,8 @@ def _auto_settle(ctx: _Context, spec: dict) -> bool:
         factors = cup_winner_factors(final)
     else:
         if not all(_league_finished(ctx, d) for d in _scorer_scope(ctx, spec["division_id"])):
+            return False
+        if spec["type"] == "league_top_scorer" and not _cups_finished(ctx):
             return False
         factors = top_scorer_factors(ctx, spec["division_id"],
                                      {s["selection_key"] for s in market["selections"]})

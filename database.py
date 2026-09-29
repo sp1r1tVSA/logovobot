@@ -17769,40 +17769,73 @@ def get_outright_league_fixtures(division_id: int, season_id: int | None = None)
 def get_outright_scorer_totals(division_id: int | None = None, season_id: int | None = None) -> list[dict]:
     """Голы игроков в лиге сезона для рынков бомбардира.
 
-    Тот же отбор и та же склейка написаний, что у `get_top_scorers`, только без
-    LIMIT и с ключом исхода: `key` = «клуб|игрок». Игрок, у которого клуб не
-    распознан, в рынок не попадает — ставку на него нечем было бы рассчитать.
+    Для дивизиона (division_id is not None) — только подтверждённые матчи чемпионата этого дивизиона.
+    Для всей лиги (division_id is None) — собираются голы из чемпионата (всех дивизионов),
+    кубков дивизионов и общего кубка сезона.
     """
     s_id = _resolve_season_id(season_id)
     with transaction() as conn:
         cursor = conn.cursor()
-        cursor.execute("""
-            SELECT me.player_name, me.team_name, m.division_id, SUM(me.count) AS total_goals
-            FROM match_events me
-            JOIN matches m ON me.match_id = m.id
-            WHERE me.event_type = 'goal'
-              AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
-              AND m.round_number > 0
-              AND m.status = 'confirmed'
-              AND (m.season_id = ? OR m.season_id IS NULL)
-              AND (? IS NULL OR m.division_id = ?)
-            GROUP BY me.player_name, me.team_name, m.division_id
-        """, (s_id, division_id, division_id))
+        if division_id is not None:
+            cursor.execute("""
+                SELECT me.player_name, me.team_name, m.division_id, SUM(me.count) AS total_goals
+                FROM match_events me
+                JOIN matches m ON me.match_id = m.id
+                WHERE me.event_type = 'goal'
+                  AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
+                  AND m.round_number > 0
+                  AND m.status = 'confirmed'
+                  AND (m.season_id = ? OR m.season_id IS NULL)
+                  AND m.division_id = ?
+                GROUP BY me.player_name, me.team_name, m.division_id
+            """, (s_id, division_id))
+        else:
+            cursor.execute("""
+                SELECT me.player_name, me.team_name, m.division_id, SUM(me.count) AS total_goals
+                FROM match_events me
+                JOIN matches m ON me.match_id = m.id
+                WHERE me.event_type = 'goal'
+                  AND m.status = 'confirmed'
+                  AND (m.season_id = ? OR m.season_id IS NULL)
+                  AND (
+                      ((m.tournament_type IS NULL OR m.tournament_type = 'league') AND m.round_number > 0)
+                      OR
+                      ((m.tournament_type = 'cup' OR m.cup_series_id IS NOT NULL) AND COALESCE(m.is_series_header, 0) = 0)
+                  )
+                GROUP BY me.player_name, me.team_name, m.division_id
+            """, (s_id,))
         rows = cursor.fetchall()
         fold = _player_folder(cursor)
+        club_div_cache: dict[str, int | None] = {}
+
+        def _get_club_div(team_name: str) -> int | None:
+            if team_name not in club_div_cache:
+                club_div_cache[team_name] = get_team_division_id(team_name, season_id=s_id)
+            return club_div_cache[team_name]
+
         merged: dict[str, dict] = {}
         for r in rows:
             club_key, player_key, name = fold(r["team_name"], r["player_name"])
             if not club_key or not player_key:
                 continue
             key = f"{club_key}|{player_key}"
+            team = (r["team_name"] or "").strip()
+            canon = resolve_team_name(team) or team
+            raw_div = r["division_id"]
+            div_id = raw_div if (raw_div is not None and raw_div > 0) else _get_club_div(canon)
             entry = merged.get(key)
             if entry is None:
-                team = (r["team_name"] or "").strip()
-                merged[key] = {"key": key, "player_name": name, "team_name": resolve_team_name(team) or team,
-                               "division_id": r["division_id"], "goals": int(r["total_goals"] or 0)}
+                merged[key] = {
+                    "key": key,
+                    "player_name": name,
+                    "team_name": canon,
+                    "division_id": div_id,
+                    "goals": int(r["total_goals"] or 0),
+                }
             else:
                 entry["goals"] += int(r["total_goals"] or 0)
+                if (entry.get("division_id") is None or entry.get("division_id") == 0) and div_id:
+                    entry["division_id"] = div_id
     return sorted(merged.values(), key=lambda e: (-e["goals"], e["player_name"]))
 
 
@@ -17824,18 +17857,34 @@ def _outright_league_fp(cursor, season_id: int, division_id: int | None) -> str:
 
 
 def _outright_goals_fp(cursor, season_id: int, division_id: int | None) -> str:
-    cursor.execute("""
-        SELECT COUNT(*) AS n, TOTAL(me.count) AS goals,
-               TOTAL(me.id * me.count + LENGTH(me.player_name) * 7 + LENGTH(me.team_name)) AS h
-        FROM match_events me
-        JOIN matches m ON m.id = me.match_id
-        WHERE me.event_type = 'goal'
-          AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
-          AND m.round_number > 0
-          AND m.status = 'confirmed'
-          AND (m.season_id = ? OR m.season_id IS NULL)
-          AND (? IS NULL OR m.division_id = ?)
-    """, (season_id, division_id, division_id))
+    if division_id is not None:
+        cursor.execute("""
+            SELECT COUNT(*) AS n, TOTAL(me.count) AS goals,
+                   TOTAL(me.id * me.count + LENGTH(me.player_name) * 7 + LENGTH(me.team_name)) AS h
+            FROM match_events me
+            JOIN matches m ON m.id = me.match_id
+            WHERE me.event_type = 'goal'
+              AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
+              AND m.round_number > 0
+              AND m.status = 'confirmed'
+              AND (m.season_id = ? OR m.season_id IS NULL)
+              AND m.division_id = ?
+        """, (season_id, division_id))
+    else:
+        cursor.execute("""
+            SELECT COUNT(*) AS n, TOTAL(me.count) AS goals,
+                   TOTAL(me.id * me.count + LENGTH(me.player_name) * 7 + LENGTH(me.team_name)) AS h
+            FROM match_events me
+            JOIN matches m ON m.id = me.match_id
+            WHERE me.event_type = 'goal'
+              AND m.status = 'confirmed'
+              AND (m.season_id = ? OR m.season_id IS NULL)
+              AND (
+                  ((m.tournament_type IS NULL OR m.tournament_type = 'league') AND m.round_number > 0)
+                  OR
+                  ((m.tournament_type = 'cup' OR m.cup_series_id IS NOT NULL) AND COALESCE(m.is_series_header, 0) = 0)
+              )
+        """, (season_id,))
     r = cursor.fetchone()
     return f"G{r['n']}:{int(r['goals'] or 0)}:{int(r['h'] or 0)}"
 
@@ -17886,6 +17935,21 @@ def _outright_cup_fp(cursor, season_id: int, cup_division: int | None) -> str:
     return "C" + "|".join(parts)
 
 
+def _outright_all_cups_fp(cursor, season_id: int) -> str:
+    cursor.execute("""
+        SELECT COUNT(*) AS n,
+               TOTAL(COALESCE(cs.team1_wins, 0) * 31 + COALESCE(cs.team2_wins, 0)) AS score_h,
+               TOTAL(CASE WHEN cs.winner_name IS NOT NULL THEN LENGTH(cs.winner_name) * 17 ELSE 0 END) AS win_h,
+               TOTAL(CASE WHEN m.status = 'confirmed' THEN m.id * 13 + COALESCE(m.player1_score, 0) * 7 + COALESCE(m.player2_score, 0) ELSE 0 END) AS match_h
+        FROM cup_stages st
+        LEFT JOIN cup_series cs ON cs.stage_id = st.id
+        LEFT JOIN matches m ON m.cup_series_id = cs.id AND COALESCE(m.is_series_header, 0) = 0
+        WHERE st.season_id = ?
+    """, (season_id,))
+    r = cursor.fetchone()
+    return f"CUPALL:{r['n']}:{int(r['score_h'] or 0)}:{int(r['win_h'] or 0)}:{int(r['match_h'] or 0)}"
+
+
 def _outright_state_fingerprint(cursor, season_id: int, market_type: str, division_id: int | None) -> str:
     """Отпечаток состояния, от которого зависит цена рынка.
 
@@ -17898,7 +17962,11 @@ def _outright_state_fingerprint(cursor, season_id: int, market_type: str, divisi
     elif market_type == "division_top_scorer":
         raw = _outright_league_fp(cursor, season_id, division_id) + _outright_goals_fp(cursor, season_id, division_id)
     elif market_type == "league_top_scorer":
-        raw = _outright_league_fp(cursor, season_id, None) + _outright_goals_fp(cursor, season_id, None)
+        raw = (
+            _outright_league_fp(cursor, season_id, None)
+            + _outright_goals_fp(cursor, season_id, None)
+            + _outright_all_cups_fp(cursor, season_id)
+        )
     elif market_type == "cup_winner":
         raw = _outright_cup_fp(cursor, season_id, division_id)
     else:
