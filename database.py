@@ -17376,7 +17376,13 @@ def get_cabinet_matches(
             where_parts.append("(m.tournament_type IS NULL OR m.tournament_type = 'league' OR m.tournament_type = '')")
 
         if only_open:
-            where_parts.append("(r.is_open = 1 OR cs.is_open = 1)")
+            where_parts.append("""
+                (
+                    ((m.tournament_type = 'cup' OR m.round_number = -1) AND (cs.is_open = 1 OR cs.is_open IS NULL))
+                    OR
+                    (COALESCE(m.tournament_type, 'league') != 'cup' AND m.round_number > 0 AND r.is_open = 1)
+                )
+            """)
 
         query = f"""
             SELECT

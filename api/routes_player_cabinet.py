@@ -143,7 +143,7 @@ async def handle_get_cabinet_matches(request: web.Request) -> web.Response:
         if tour_filter not in ("league", "cup"):
             tour_filter = None
 
-        matches = await asyncio.to_thread(database.get_cabinet_matches, user_id, 100, False, tour_filter)
+        matches = await asyncio.to_thread(database.get_cabinet_matches, user_id, 100, True, tour_filter)
         recent = await asyncio.to_thread(database.get_cabinet_recent_matches, user_id, 100, tour_filter)
     except Exception as e:
         logger.error(f"cabinet/matches failed for {user_id}: {e}")

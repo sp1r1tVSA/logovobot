@@ -451,7 +451,7 @@ class TestPlayerCabinetApi(AioHTTPTestCase):
                 )
                 cup_match_id = c.lastrowid
 
-            # Без фильтра — должны вернуться ВСЕ матчи: тур 1 (активный + на выезде), закрытый тур 2, и кубковый
+            # Без фильтра — должны вернуться активные матчи открытого тура и кубковый матч (закрытый тур 2 скрыт)
             resp = await self.client.request(
                 "GET", "/api/cabinet/matches", headers=self._headers(self.owner_id)
             )
@@ -459,16 +459,14 @@ class TestPlayerCabinetApi(AioHTTPTestCase):
             data = await resp.json()
             match_ids = [m["id"] for m in data["matches"]]
             self.assertIn(self.active_match_id, match_ids)
-            self.assertIn(closed_match_id, match_ids)
+            self.assertNotIn(closed_match_id, match_ids)
             self.assertIn(cup_match_id, match_ids)
 
-            # Проверяем атрибут round_is_open
             by_id = {m["id"]: m for m in data["matches"]}
             self.assertTrue(by_id[self.active_match_id]["round_is_open"])
-            self.assertFalse(by_id[closed_match_id]["round_is_open"])
             self.assertEqual(by_id[cup_match_id]["tournament_type"], "cup")
 
-            # Фильтр tournament_type=league
+            # Фильтр tournament_type=league: только открытый тур лиги, закрытый тур 2 и кубок скрыты
             resp_league = await self.client.request(
                 "GET", "/api/cabinet/matches?tournament_type=league", headers=self._headers(self.owner_id)
             )
@@ -476,7 +474,7 @@ class TestPlayerCabinetApi(AioHTTPTestCase):
             data_league = await resp_league.json()
             league_ids = [m["id"] for m in data_league["matches"]]
             self.assertIn(self.active_match_id, league_ids)
-            self.assertIn(closed_match_id, league_ids)
+            self.assertNotIn(closed_match_id, league_ids)
             self.assertNotIn(cup_match_id, league_ids)
 
             # Фильтр tournament_type=cup
