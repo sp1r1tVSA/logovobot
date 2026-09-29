@@ -301,10 +301,15 @@ from handlers.club_smm import (
     cb_smm_stage_selected,
     start_stage_input,
     handle_stage_input_received,
+    start_photo_input,
+    handle_custom_photo_received,
+    handle_photo_input_invalid,
+    cb_smm_remove_photo,
     SMM_STATE_WAIT_PROMPT,
     SMM_STATE_WAIT_EDIT,
     SMM_STATE_WAIT_CHANNEL,
     SMM_STATE_WAIT_STAGE,
+    SMM_STATE_WAIT_PHOTO,
 )
 from services.topic_cache import topic_cache
 
@@ -598,13 +603,15 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(cb_smm_stage_selected, pattern=r"^smm_stage:(league|cup):.+$"))
     app.add_handler(CallbackQueryHandler(cb_smm_generate, pattern=r"^smm_gen:[\w_]+$"))
     app.add_handler(CallbackQueryHandler(cb_smm_regenerate, pattern="^smm_regen$"))
-    app.add_handler(CallbackQueryHandler(cb_smm_publish, pattern=r"^smm_publish:(text|media|card|ai_photo)$"))
+    app.add_handler(CallbackQueryHandler(cb_smm_publish, pattern=r"^smm_publish:(text|media|card|ai_photo|custom_photo)$"))
+    app.add_handler(CallbackQueryHandler(cb_smm_remove_photo, pattern="^smm_remove_photo$"))
 
     smm_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(start_stage_input, pattern="^smm_enter_stage$"),
             CallbackQueryHandler(start_custom_prompt_input, pattern="^smm_enter_prompt$"),
             CallbackQueryHandler(start_edit_prompt_input, pattern="^smm_enter_edit$"),
+            CallbackQueryHandler(start_photo_input, pattern="^smm_enter_photo$"),
             CallbackQueryHandler(start_channel_setup, pattern="^smm_cfg_channel$"),
         ],
         states={
@@ -617,13 +624,17 @@ def _register_cabinet_handlers(app: Application) -> None:
             SMM_STATE_WAIT_EDIT: [
                 MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, handle_edit_prompt_received)
             ],
+            SMM_STATE_WAIT_PHOTO: [
+                MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_custom_photo_received),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, handle_photo_input_invalid),
+            ],
             SMM_STATE_WAIT_CHANNEL: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_channel_received)
             ],
         },
         fallbacks=[
             CallbackQueryHandler(cb_smm_choose_stage, pattern="^smm_choose_stage$"),
-            CallbackQueryHandler(cancel_edit_and_return, pattern="^smm_cancel_edit$"),
+            CallbackQueryHandler(cancel_edit_and_return, pattern=r"^(smm_cancel_edit|smm_cancel_photo)$"),
             CallbackQueryHandler(cancel_smm_flow, pattern="^smm_hub$"),
             CallbackQueryHandler(show_cabinet, pattern="^menu_cabinet$"),
             CommandHandler("cancel", cancel_smm_flow),

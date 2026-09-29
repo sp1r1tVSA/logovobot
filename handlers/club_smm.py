@@ -27,6 +27,7 @@ SMM_STATE_WAIT_PROMPT = 1
 SMM_STATE_WAIT_EDIT = 2
 SMM_STATE_WAIT_CHANNEL = 3
 SMM_STATE_WAIT_STAGE = 4
+SMM_STATE_WAIT_PHOTO = 5
 
 CONFIG_CHANNEL_KEY = "my_club_channel"
 
@@ -309,30 +310,63 @@ async def _show_draft_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
     channel = get_target_channel()
     ch_label = f" ({channel})" if channel else " (⚠️ канал не задан)"
 
+    draft = context.user_data.get("smm_draft") or {}
+    has_photo = bool(draft.get("custom_photo_id"))
+    photo_line = "\n🖼 <b>Своё фото:</b> прикреплено ✅" if has_photo else ""
+
     preview_message = (
         f"📝 <b>Черновик для публикации:</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n\n"
         f"{draft_text}\n\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📢 <b>Канал:</b> {ch_label}"
+        f"{photo_line}"
     )
 
-    keyboard = [
-        [
-            InlineKeyboardButton("🚀 Опубликовать (Текст)", callback_data="smm_publish:text"),
-        ],
-        [
-            InlineKeyboardButton("🎨 С ИИ-фото (Gemini)", callback_data="smm_publish:ai_photo"),
-            InlineKeyboardButton("🏛 С карточкой клуба", callback_data="smm_publish:card"),
-        ],
-        [
-            InlineKeyboardButton("🔄 Другой вариант текста", callback_data="smm_regen"),
-            InlineKeyboardButton("✏️ Правка / Уточнить", callback_data="smm_enter_edit"),
-        ],
-        [
-            InlineKeyboardButton("« В меню SMM", callback_data="smm_hub")
+    if has_photo:
+        keyboard = [
+            [
+                InlineKeyboardButton("🚀 Опубликовать (со своим фото)", callback_data="smm_publish:custom_photo"),
+            ],
+            [
+                InlineKeyboardButton("🎨 С ИИ-фото (Gemini)", callback_data="smm_publish:ai_photo"),
+                InlineKeyboardButton("🏛 С карточкой клуба", callback_data="smm_publish:card"),
+            ],
+            [
+                InlineKeyboardButton("📷 Заменить фото", callback_data="smm_enter_photo"),
+                InlineKeyboardButton("❌ Убрать своё фото", callback_data="smm_remove_photo"),
+            ],
+            [
+                InlineKeyboardButton("🚀 Опубликовать (Текст)", callback_data="smm_publish:text"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Другой вариант текста", callback_data="smm_regen"),
+                InlineKeyboardButton("✏️ Правка / Уточнить", callback_data="smm_enter_edit"),
+            ],
+            [
+                InlineKeyboardButton("« В меню SMM", callback_data="smm_hub")
+            ]
         ]
-    ]
+    else:
+        keyboard = [
+            [
+                InlineKeyboardButton("🚀 Опубликовать (Текст)", callback_data="smm_publish:text"),
+            ],
+            [
+                InlineKeyboardButton("🎨 С ИИ-фото (Gemini)", callback_data="smm_publish:ai_photo"),
+                InlineKeyboardButton("🏛 С карточкой клуба", callback_data="smm_publish:card"),
+            ],
+            [
+                InlineKeyboardButton("📷 Прикрепить своё фото", callback_data="smm_enter_photo"),
+            ],
+            [
+                InlineKeyboardButton("🔄 Другой вариант текста", callback_data="smm_regen"),
+                InlineKeyboardButton("✏️ Правка / Уточнить", callback_data="smm_enter_edit"),
+            ],
+            [
+                InlineKeyboardButton("« В меню SMM", callback_data="smm_hub")
+            ]
+        ]
     markup = InlineKeyboardMarkup(keyboard)
 
     target_chat = update.effective_chat
@@ -636,6 +670,85 @@ async def cancel_edit_and_return(update: Update, context: ContextTypes.DEFAULT_T
     return ConversationHandler.END
 
 
+# ─── FSM: Прикрепление своего фото ──────────────────────────────────────────
+
+async def start_photo_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Запрос пользовательского фото для публикации."""
+    query = update.callback_query
+    if query:
+        await query.answer()
+
+    text = (
+        "📷 <b>Прикрепление своего фото к посту</b>\n\n"
+        "Отправьте фотографию или изображение сюда в чат.\n\n"
+        "Она будет прикреплена к посту и опубликована в канале вместе с готовым текстом."
+    )
+    keyboard = [[InlineKeyboardButton("« Назад к черновику", callback_data="smm_cancel_photo")]]
+    markup = InlineKeyboardMarkup(keyboard)
+
+    if query and query.message:
+        await query.edit_message_text(text, parse_mode="HTML", reply_markup=markup)
+    elif update.effective_chat:
+        await update.effective_chat.send_message(text, parse_mode="HTML", reply_markup=markup)
+    return SMM_STATE_WAIT_PHOTO
+
+
+async def handle_custom_photo_received(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка полученного фото от пользователя."""
+    user = update.effective_user
+    if not user or not is_smm_allowed(user.id):
+        return ConversationHandler.END
+
+    draft = context.user_data.get("smm_draft")
+    if not draft:
+        await cmd_smm_hub(update, context)
+        return ConversationHandler.END
+
+    msg = update.message
+    file_id = None
+    if msg.photo:
+        file_id = msg.photo[-1].file_id
+    elif msg.document and msg.document.mime_type and msg.document.mime_type.startswith("image/"):
+        file_id = msg.document.file_id
+
+    if not file_id:
+        await msg.reply_text("⚠️ Пожалуйста, отправьте именно фото или изображение.", parse_mode="HTML")
+        return SMM_STATE_WAIT_PHOTO
+
+    draft["custom_photo_id"] = file_id
+
+    await msg.reply_text("✅ <b>Фото успешно прикреплено к черновику!</b>", parse_mode="HTML")
+    await _show_draft_preview(update, context, draft.get("text", ""))
+    return ConversationHandler.END
+
+
+async def handle_photo_input_invalid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Пользователь прислал текст вместо фото."""
+    keyboard = [[InlineKeyboardButton("« Назад к черновику", callback_data="smm_cancel_photo")]]
+    if update.message:
+        await update.message.reply_text(
+            "⚠️ Ожидается фото. Отправьте картинку или нажмите кнопку отмены:",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    return SMM_STATE_WAIT_PHOTO
+
+
+async def cb_smm_remove_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Удаляет прикреплённое фото из черновика."""
+    query = update.callback_query
+    if query:
+        await query.answer("Фото откреплено от черновика")
+
+    draft = context.user_data.get("smm_draft")
+    if draft and "custom_photo_id" in draft:
+        del draft["custom_photo_id"]
+
+    if draft and draft.get("text"):
+        await _show_draft_preview(update, context, draft["text"])
+    else:
+        await cb_smm_hub(update, context)
+
+
 # ─── FSM: Настройка канала назначения ───────────────────────────────────────
 
 async def start_channel_setup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -782,6 +895,22 @@ async def cb_smm_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 sent_msg = await context.bot.send_photo(
                     chat_id=channel,
                     photo=buf,
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+            else:
+                sent_msg = await context.bot.send_message(
+                    chat_id=channel,
+                    text=text_content,
+                    parse_mode="HTML"
+                )
+        elif mode == "custom_photo":
+            photo_id = draft.get("custom_photo_id")
+            caption = club_smm_service._fit_html(text_content, club_smm_service.CAPTION_MAX_CHARS)
+            if photo_id:
+                sent_msg = await context.bot.send_photo(
+                    chat_id=channel,
+                    photo=photo_id,
                     caption=caption,
                     parse_mode="HTML"
                 )

@@ -390,3 +390,105 @@ class TestClubSmmOpenRouterImage(unittest.TestCase):
         self.assertIn("recraft/recraft-v4.1-flash", models)
 
 
+class TestClubSmmCustomPhoto(unittest.IsolatedAsyncioTestCase):
+    async def test_show_draft_preview_keyboard_without_photo(self):
+        from unittest.mock import AsyncMock
+        update = MagicMock()
+        update.effective_chat.send_message = AsyncMock()
+        query = MagicMock()
+        query.edit_message_text = AsyncMock()
+        update.callback_query = query
+        context = MagicMock()
+        context.user_data = {"smm_draft": {"text": "Test post", "team_name": "Бешикташ"}}
+
+        await club_smm._show_draft_preview(update, context, "Test post")
+        query.edit_message_text.assert_awaited_once()
+        args, kwargs = query.edit_message_text.call_args
+        markup = kwargs["reply_markup"]
+        all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+        self.assertIn("smm_enter_photo", all_callbacks)
+        self.assertNotIn("smm_publish:custom_photo", all_callbacks)
+
+    async def test_show_draft_preview_keyboard_with_photo(self):
+        from unittest.mock import AsyncMock
+        update = MagicMock()
+        query = MagicMock()
+        query.edit_message_text = AsyncMock()
+        update.callback_query = query
+        context = MagicMock()
+        context.user_data = {
+            "smm_draft": {
+                "text": "Test post",
+                "team_name": "Бешикташ",
+                "custom_photo_id": "file_12345"
+            }
+        }
+
+        await club_smm._show_draft_preview(update, context, "Test post")
+        query.edit_message_text.assert_awaited_once()
+        args, kwargs = query.edit_message_text.call_args
+        markup = kwargs["reply_markup"]
+        all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+        self.assertIn("smm_publish:custom_photo", all_callbacks)
+        self.assertIn("smm_remove_photo", all_callbacks)
+        self.assertIn("smm_enter_photo", all_callbacks)
+        self.assertIn("🖼 <b>Своё фото:</b> прикреплено ✅", args[0])
+
+    async def test_remove_photo_removes_custom_photo_id(self):
+        from unittest.mock import AsyncMock
+        update = MagicMock()
+        query = MagicMock()
+        query.answer = AsyncMock()
+        update.callback_query = query
+        context = MagicMock()
+        context.user_data = {
+            "smm_draft": {
+                "text": "Test post",
+                "team_name": "Бешикташ",
+                "custom_photo_id": "file_12345"
+            }
+        }
+
+        with patch.object(club_smm, "_show_draft_preview", new_callable=AsyncMock) as mock_preview:
+            await club_smm.cb_smm_remove_photo(update, context)
+            self.assertNotIn("custom_photo_id", context.user_data["smm_draft"])
+            mock_preview.assert_awaited_once()
+
+    async def test_publish_custom_photo(self):
+        from unittest.mock import AsyncMock
+        update = MagicMock()
+        query = MagicMock()
+        query.data = "smm_publish:custom_photo"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        update.callback_query = query
+        user = MagicMock()
+        user.id = 999
+        update.effective_user = user
+
+        context = MagicMock()
+        context.bot.send_photo = AsyncMock()
+        sent_mock = MagicMock()
+        sent_mock.message_id = 42
+        context.bot.send_photo.return_value = sent_mock
+
+        context.user_data = {
+            "smm_draft": {
+                "text": "Post with my own photo",
+                "team_name": "Бешикташ",
+                "custom_photo_id": "photo_file_xyz"
+            }
+        }
+
+        with patch.object(club_smm, "is_smm_allowed", return_value=True), \
+             patch.object(club_smm, "get_target_channel", return_value="@test_channel"):
+            await club_smm.cb_smm_publish(update, context)
+
+            context.bot.send_photo.assert_awaited_once()
+            _, kwargs = context.bot.send_photo.call_args
+            self.assertEqual(kwargs["chat_id"], "@test_channel")
+            self.assertEqual(kwargs["photo"], "photo_file_xyz")
+            self.assertIn("Post with my own photo", kwargs["caption"])
+
+
+
