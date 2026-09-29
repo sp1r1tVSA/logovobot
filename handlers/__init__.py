@@ -305,6 +305,7 @@ from handlers.club_smm import (
     handle_custom_photo_received,
     handle_photo_input_invalid,
     cb_smm_remove_photo,
+    cb_smm_attach_match_photos,
     SMM_STATE_WAIT_PROMPT,
     SMM_STATE_WAIT_EDIT,
     SMM_STATE_WAIT_CHANNEL,
@@ -603,8 +604,9 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(cb_smm_stage_selected, pattern=r"^smm_stage:(league|cup):.+$"))
     app.add_handler(CallbackQueryHandler(cb_smm_generate, pattern=r"^smm_gen:[\w_]+$"))
     app.add_handler(CallbackQueryHandler(cb_smm_regenerate, pattern="^smm_regen$"))
-    app.add_handler(CallbackQueryHandler(cb_smm_publish, pattern=r"^smm_publish:(text|media|card|ai_photo|custom_photo)$"))
+    app.add_handler(CallbackQueryHandler(cb_smm_publish, pattern=r"^smm_publish:(text|media|card|ai_photo|custom_photo|match_photos)$"))
     app.add_handler(CallbackQueryHandler(cb_smm_remove_photo, pattern="^smm_remove_photo$"))
+    app.add_handler(CallbackQueryHandler(cb_smm_attach_match_photos, pattern="^smm_attach_match_photos$"))
 
     smm_conv = ConversationHandler(
         entry_points=[

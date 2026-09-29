@@ -490,5 +490,184 @@ class TestClubSmmCustomPhoto(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(kwargs["photo"], "photo_file_xyz")
             self.assertIn("Post with my own photo", kwargs["caption"])
 
+    async def test_show_draft_preview_keyboard_with_single_match_photo(self):
+        from unittest.mock import AsyncMock
+        update = MagicMock()
+        query = MagicMock()
+        query.edit_message_text = AsyncMock()
+        update.callback_query = query
+        context = MagicMock()
+        context.user_data = {
+            "smm_draft": {
+                "text": "Recap text",
+                "team_name": "Бешикташ",
+                "match_photos": ["match_photo_1"],
+                "photo_mode": "match",
+            }
+        }
+
+        await club_smm._show_draft_preview(update, context, "Recap text")
+        query.edit_message_text.assert_awaited_once()
+        args, kwargs = query.edit_message_text.call_args
+        markup = kwargs["reply_markup"]
+        all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+        self.assertIn("smm_publish:match_photos", all_callbacks)
+        self.assertIn("smm_remove_photo", all_callbacks)
+        self.assertIn("smm_enter_photo", all_callbacks)
+        self.assertIn("🖼 <b>Скрин матча:</b> прикреплён ✅", args[0])
+
+    async def test_show_draft_preview_keyboard_with_multiple_match_photos(self):
+        from unittest.mock import AsyncMock
+        update = MagicMock()
+        query = MagicMock()
+        query.edit_message_text = AsyncMock()
+        update.callback_query = query
+        context = MagicMock()
+        context.user_data = {
+            "smm_draft": {
+                "text": "Recap text",
+                "team_name": "Бешикташ",
+                "match_photos": ["match_photo_1", "match_photo_2"],
+                "photo_mode": "match",
+            }
+        }
+
+        await club_smm._show_draft_preview(update, context, "Recap text")
+        query.edit_message_text.assert_awaited_once()
+        args, kwargs = query.edit_message_text.call_args
+        markup = kwargs["reply_markup"]
+        all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+        self.assertIn("smm_publish:match_photos", all_callbacks)
+        self.assertIn("smm_remove_photo", all_callbacks)
+        self.assertIn("🖼 <b>Скрины матчей:</b> прикреплено (2 шт.) ✅", args[0])
+
+    async def test_attach_match_photos_callback(self):
+        from unittest.mock import AsyncMock
+        update = MagicMock()
+        query = MagicMock()
+        query.answer = AsyncMock()
+        update.callback_query = query
+        context = MagicMock()
+        context.user_data = {
+            "smm_draft": {
+                "text": "Recap text",
+                "team_name": "Бешикташ",
+                "match_photos": ["match_photo_1"],
+                "photo_mode": "none",
+            }
+        }
+
+        with patch.object(club_smm, "_show_draft_preview", new_callable=AsyncMock) as mock_preview:
+            await club_smm.cb_smm_attach_match_photos(update, context)
+            self.assertEqual(context.user_data["smm_draft"]["photo_mode"], "match")
+            mock_preview.assert_awaited_once()
+
+    async def test_publish_match_single_photo(self):
+        from unittest.mock import AsyncMock
+        update = MagicMock()
+        query = MagicMock()
+        query.data = "smm_publish:match_photos"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        update.callback_query = query
+        user = MagicMock()
+        user.id = 999
+        update.effective_user = user
+
+        context = MagicMock()
+        context.bot.send_photo = AsyncMock()
+        sent_mock = MagicMock()
+        sent_mock.message_id = 101
+        context.bot.send_photo.return_value = sent_mock
+
+        context.user_data = {
+            "smm_draft": {
+                "text": "Recap with match screen",
+                "team_name": "Бешикташ",
+                "match_photos": ["match_photo_single"],
+                "photo_mode": "match",
+            }
+        }
+
+        with patch.object(club_smm, "is_smm_allowed", return_value=True), \
+             patch.object(club_smm, "get_target_channel", return_value="@test_channel"):
+            await club_smm.cb_smm_publish(update, context)
+
+            context.bot.send_photo.assert_awaited_once()
+            _, kwargs = context.bot.send_photo.call_args
+            self.assertEqual(kwargs["chat_id"], "@test_channel")
+            self.assertEqual(kwargs["photo"], "match_photo_single")
+            self.assertIn("Recap with match screen", kwargs["caption"])
+
+    async def test_publish_match_multiple_photos_album(self):
+        from unittest.mock import AsyncMock
+        update = MagicMock()
+        query = MagicMock()
+        query.data = "smm_publish:match_photos"
+        query.answer = AsyncMock()
+        query.edit_message_text = AsyncMock()
+        update.callback_query = query
+        user = MagicMock()
+        user.id = 999
+        update.effective_user = user
+
+        context = MagicMock()
+        context.bot.send_media_group = AsyncMock()
+        msg1 = MagicMock()
+        msg1.message_id = 201
+        context.bot.send_media_group.return_value = [msg1]
+
+        context.user_data = {
+            "smm_draft": {
+                "text": "Recap of series",
+                "team_name": "Бешикташ",
+                "match_photos": ["screen_game1", "screen_game2"],
+                "photo_mode": "match",
+            }
+        }
+
+        with patch.object(club_smm, "is_smm_allowed", return_value=True), \
+             patch.object(club_smm, "get_target_channel", return_value="@test_channel"):
+            await club_smm.cb_smm_publish(update, context)
+
+            context.bot.send_media_group.assert_awaited_once()
+            _, kwargs = context.bot.send_media_group.call_args
+            self.assertEqual(kwargs["chat_id"], "@test_channel")
+            media = kwargs["media"]
+            self.assertEqual(len(media), 2)
+            self.assertEqual(media[0].media, "screen_game1")
+            self.assertEqual(media[1].media, "screen_game2")
+            self.assertIn("Recap of series", media[0].caption)
+            self.assertIsNone(media[1].caption)
+
+
+class TestDatabaseMatchPhotos(unittest.TestCase):
+    def test_get_last_match_photos_and_stage_photos(self):
+        with database.transaction() as conn:
+            cursor = conn.cursor()
+            # Clear or insert test matches
+            cursor.execute("""
+                INSERT INTO matches (round_number, player1_team, player2_team, player1_score, player2_score, status, photo_id, tournament_type)
+                VALUES (1, 'Бешикташ', 'Галатасарай', 2, 1, 'confirmed', 'photo_besiktas_1', 'league')
+            """)
+            cursor.execute("""
+                INSERT INTO matches (round_number, player1_team, player2_team, player1_score, player2_score, status, photo_id, tournament_type, cup_stage, cup_series_id, game_num_in_series)
+                VALUES (-1, 'Бешикташ', 'Фенербахче', 3, 0, 'confirmed', 'photo_cup_g1', 'cup', '1/4', 'series_cup_99', 1)
+            """)
+            cursor.execute("""
+                INSERT INTO matches (round_number, player1_team, player2_team, player1_score, player2_score, status, photo_id, tournament_type, cup_stage, cup_series_id, game_num_in_series)
+                VALUES (-1, 'Фенербахче', 'Бешикташ', 1, 2, 'confirmed', 'photo_cup_g2', 'cup', '1/4', 'series_cup_99', 2)
+            """)
+
+        photos = database.get_last_match_photos("Бешикташ")
+        self.assertEqual(photos, ["photo_cup_g1", "photo_cup_g2"])
+
+        stage_photos = database.get_stage_match_photos("Бешикташ", round_number=1)
+        self.assertEqual(stage_photos, ["photo_besiktas_1"])
+
+        cup_photos = database.get_stage_match_photos("Бешикташ", cup_stage="1/4")
+        self.assertEqual(cup_photos, ["photo_cup_g1", "photo_cup_g2"])
+
+
 
 

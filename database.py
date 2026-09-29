@@ -5551,6 +5551,80 @@ def get_team_squad_photo(team_name: str) -> str | None:
         row = cursor.fetchone()
         return row[0] if row and row[0] else None
 
+
+def get_last_match_photos(team_name: str) -> list[str]:
+    """Retrieve screenshot photo_id(s) for the team's most recent completed match or cup series."""
+    canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
+    if not canon:
+        return []
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, tournament_type, cup_stage, cup_series_id, photo_id
+            FROM matches
+            WHERE (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?)
+                   OR player1_team = ? OR player2_team = ?)
+              AND status IN ('confirmed', 'completed')
+            ORDER BY id DESC LIMIT 1
+        """, (canon, canon, team_name.strip(), team_name.strip()))
+        m = cursor.fetchone()
+        if not m:
+            return []
+
+        series_id = m["cup_series_id"]
+        if series_id:
+            cursor.execute("""
+                SELECT photo_id FROM matches
+                WHERE cup_series_id = ?
+                  AND status IN ('confirmed', 'completed')
+                  AND photo_id IS NOT NULL AND photo_id != ''
+                ORDER BY game_num_in_series ASC, id ASC
+            """, (series_id,))
+            rows = cursor.fetchall()
+            photos = [r["photo_id"] for r in rows if r["photo_id"]]
+            if photos:
+                return list(dict.fromkeys(photos))
+
+        if m["photo_id"]:
+            return [m["photo_id"]]
+        return []
+
+
+def get_stage_match_photos(team_name: str, round_number: int | None = None, cup_stage: str | None = None) -> list[str]:
+    """Retrieve screenshot photo_id(s) for a specific round or cup stage of the team."""
+    canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
+    if not canon:
+        return []
+    with transaction() as conn:
+        cursor = conn.cursor()
+        if cup_stage:
+            cursor.execute("""
+                SELECT photo_id FROM matches
+                WHERE (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?)
+                       OR player1_team = ? OR player2_team = ?)
+                  AND tournament_type = 'cup'
+                  AND cup_stage = ?
+                  AND status IN ('confirmed', 'completed')
+                  AND photo_id IS NOT NULL AND photo_id != ''
+                ORDER BY game_num_in_series ASC, id ASC
+            """, (canon, canon, team_name.strip(), team_name.strip(), str(cup_stage)))
+        elif round_number is not None:
+            cursor.execute("""
+                SELECT photo_id FROM matches
+                WHERE (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?)
+                       OR player1_team = ? OR player2_team = ?)
+                  AND tournament_type = 'league'
+                  AND round_number = ?
+                  AND status IN ('confirmed', 'completed')
+                  AND photo_id IS NOT NULL AND photo_id != ''
+                ORDER BY id ASC
+            """, (canon, canon, team_name.strip(), team_name.strip(), int(round_number)))
+        else:
+            return []
+        rows = cursor.fetchall()
+        return list(dict.fromkeys(r["photo_id"] for r in rows if r["photo_id"]))
+
+
 def save_squad_players(team_name: str, player_names: list) -> int:
     """Save or add players to a club squad."""
     return add_squad(team_name, player_names)

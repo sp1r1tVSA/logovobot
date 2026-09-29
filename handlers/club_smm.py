@@ -167,11 +167,17 @@ async def cb_smm_generate(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         post_type=post_type,
     )
 
+    match_photos = []
+    if post_type == "recap":
+        match_photos = await asyncio.to_thread(database.get_last_match_photos, team_name)
+
     context.user_data["smm_draft"] = {
         "text": generated_text,
         "team_name": team_name,
         "post_type": post_type,
         "custom_brief": "",
+        "match_photos": match_photos,
+        "photo_mode": "match" if match_photos else "none",
     }
 
     await _show_draft_preview(update, context, generated_text)
@@ -293,6 +299,13 @@ async def cb_smm_stage_selected(update: Update, context: ContextTypes.DEFAULT_TY
         cup_stage=cup_stage,
     )
 
+    stage_photos = await asyncio.to_thread(
+        database.get_stage_match_photos,
+        team_name,
+        round_number=round_number,
+        cup_stage=cup_stage,
+    )
+
     context.user_data["smm_draft"] = {
         "text": generated_text,
         "team_name": team_name,
@@ -300,6 +313,8 @@ async def cb_smm_stage_selected(update: Update, context: ContextTypes.DEFAULT_TY
         "round_number": round_number,
         "cup_stage": cup_stage,
         "custom_brief": f"Кубок {cup_stage}" if cup_stage else f"Тур {round_number}",
+        "match_photos": stage_photos,
+        "photo_mode": "match" if stage_photos else "none",
     }
 
     await _show_draft_preview(update, context, generated_text)
@@ -311,8 +326,34 @@ async def _show_draft_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
     ch_label = f" ({channel})" if channel else " (⚠️ канал не задан)"
 
     draft = context.user_data.get("smm_draft") or {}
-    has_photo = bool(draft.get("custom_photo_id"))
-    photo_line = "\n🖼 <b>Своё фото:</b> прикреплено ✅" if has_photo else ""
+    match_photos = draft.get("match_photos") or []
+    custom_photo_id = draft.get("custom_photo_id")
+    photo_mode = draft.get("photo_mode")
+    if not photo_mode:
+        if custom_photo_id:
+            photo_mode = "custom"
+        elif match_photos:
+            photo_mode = "match"
+        else:
+            photo_mode = "none"
+
+    if photo_mode == "match" and match_photos:
+        if len(match_photos) == 1:
+            photo_line = "\n🖼 <b>Скрин матча:</b> прикреплён ✅"
+            publish_photo_btn = InlineKeyboardButton("🚀 Опубликовать (со скрином матча)", callback_data="smm_publish:match_photos")
+            remove_photo_btn = InlineKeyboardButton("❌ Убрать скриншот", callback_data="smm_remove_photo")
+        else:
+            photo_line = f"\n🖼 <b>Скрины матчей:</b> прикреплено ({len(match_photos)} шт.) ✅"
+            publish_photo_btn = InlineKeyboardButton("🚀 Опубликовать (со скринами матчей)", callback_data="smm_publish:match_photos")
+            remove_photo_btn = InlineKeyboardButton("❌ Убрать скрины", callback_data="smm_remove_photo")
+    elif photo_mode == "custom" and custom_photo_id:
+        photo_line = "\n🖼 <b>Своё фото:</b> прикреплено ✅"
+        publish_photo_btn = InlineKeyboardButton("🚀 Опубликовать (со своим фото)", callback_data="smm_publish:custom_photo")
+        remove_photo_btn = InlineKeyboardButton("❌ Убрать своё фото", callback_data="smm_remove_photo")
+    else:
+        photo_line = ""
+        publish_photo_btn = None
+        remove_photo_btn = None
 
     preview_message = (
         f"📝 <b>Черновик для публикации:</b>\n"
@@ -323,50 +364,61 @@ async def _show_draft_preview(update: Update, context: ContextTypes.DEFAULT_TYPE
         f"{photo_line}"
     )
 
-    if has_photo:
-        keyboard = [
-            [
-                InlineKeyboardButton("🚀 Опубликовать (со своим фото)", callback_data="smm_publish:custom_photo"),
-            ],
-            [
-                InlineKeyboardButton("🎨 С ИИ-фото (Gemini)", callback_data="smm_publish:ai_photo"),
-                InlineKeyboardButton("🏛 С карточкой клуба", callback_data="smm_publish:card"),
-            ],
-            [
-                InlineKeyboardButton("📷 Заменить фото", callback_data="smm_enter_photo"),
-                InlineKeyboardButton("❌ Убрать своё фото", callback_data="smm_remove_photo"),
-            ],
-            [
-                InlineKeyboardButton("🚀 Опубликовать (Текст)", callback_data="smm_publish:text"),
-            ],
-            [
-                InlineKeyboardButton("🔄 Другой вариант текста", callback_data="smm_regen"),
-                InlineKeyboardButton("✏️ Правка / Уточнить", callback_data="smm_enter_edit"),
-            ],
-            [
-                InlineKeyboardButton("« В меню SMM", callback_data="smm_hub")
-            ]
-        ]
+    keyboard = []
+    if photo_mode == "match" and match_photos:
+        keyboard.append([publish_photo_btn])
+        keyboard.append([
+            InlineKeyboardButton("🎨 С ИИ-фото (Gemini)", callback_data="smm_publish:ai_photo"),
+            InlineKeyboardButton("🏛 С карточкой клуба", callback_data="smm_publish:card"),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("📷 Своё фото", callback_data="smm_enter_photo"),
+            remove_photo_btn,
+        ])
+        keyboard.append([
+            InlineKeyboardButton("🚀 Опубликовать (Текст)", callback_data="smm_publish:text"),
+        ])
+    elif photo_mode == "custom" and custom_photo_id:
+        keyboard.append([publish_photo_btn])
+        keyboard.append([
+            InlineKeyboardButton("🎨 С ИИ-фото (Gemini)", callback_data="smm_publish:ai_photo"),
+            InlineKeyboardButton("🏛 С карточкой клуба", callback_data="smm_publish:card"),
+        ])
+        custom_row = []
+        if match_photos:
+            m_lbl = "📸 Скрин матча" if len(match_photos) == 1 else f"📸 Скрины матчей ({len(match_photos)})"
+            custom_row.append(InlineKeyboardButton(m_lbl, callback_data="smm_attach_match_photos"))
+        else:
+            custom_row.append(InlineKeyboardButton("📷 Заменить фото", callback_data="smm_enter_photo"))
+        custom_row.append(remove_photo_btn)
+        keyboard.append(custom_row)
+        keyboard.append([
+            InlineKeyboardButton("🚀 Опубликовать (Текст)", callback_data="smm_publish:text"),
+        ])
     else:
-        keyboard = [
-            [
-                InlineKeyboardButton("🚀 Опубликовать (Текст)", callback_data="smm_publish:text"),
-            ],
-            [
-                InlineKeyboardButton("🎨 С ИИ-фото (Gemini)", callback_data="smm_publish:ai_photo"),
-                InlineKeyboardButton("🏛 С карточкой клуба", callback_data="smm_publish:card"),
-            ],
-            [
-                InlineKeyboardButton("📷 Прикрепить своё фото", callback_data="smm_enter_photo"),
-            ],
-            [
-                InlineKeyboardButton("🔄 Другой вариант текста", callback_data="smm_regen"),
-                InlineKeyboardButton("✏️ Правка / Уточнить", callback_data="smm_enter_edit"),
-            ],
-            [
-                InlineKeyboardButton("« В меню SMM", callback_data="smm_hub")
-            ]
-        ]
+        keyboard.append([
+            InlineKeyboardButton("🚀 Опубликовать (Текст)", callback_data="smm_publish:text"),
+        ])
+        if match_photos:
+            m_lbl = "📸 Прикрепить скрин матча" if len(match_photos) == 1 else f"📸 Прикрепить скрины матчей ({len(match_photos)})"
+            keyboard.append([
+                InlineKeyboardButton(m_lbl, callback_data="smm_attach_match_photos")
+            ])
+        keyboard.append([
+            InlineKeyboardButton("🎨 С ИИ-фото (Gemini)", callback_data="smm_publish:ai_photo"),
+            InlineKeyboardButton("🏛 С карточкой клуба", callback_data="smm_publish:card"),
+        ])
+        keyboard.append([
+            InlineKeyboardButton("📷 Прикрепить своё фото", callback_data="smm_enter_photo"),
+        ])
+
+    keyboard.append([
+        InlineKeyboardButton("🔄 Другой вариант текста", callback_data="smm_regen"),
+        InlineKeyboardButton("✏️ Правка / Уточнить", callback_data="smm_enter_edit"),
+    ])
+    keyboard.append([
+        InlineKeyboardButton("« В меню SMM", callback_data="smm_hub")
+    ])
     markup = InlineKeyboardMarkup(keyboard)
 
     target_chat = update.effective_chat
@@ -583,6 +635,13 @@ async def handle_stage_input_received(update: Update, context: ContextTypes.DEFA
     except Exception:
         pass
 
+    stage_photos = await asyncio.to_thread(
+        database.get_stage_match_photos,
+        team_name,
+        round_number=round_number,
+        cup_stage=cup_stage,
+    )
+
     context.user_data["smm_draft"] = {
         "text": generated_text,
         "team_name": team_name,
@@ -590,6 +649,8 @@ async def handle_stage_input_received(update: Update, context: ContextTypes.DEFA
         "round_number": round_number,
         "cup_stage": cup_stage,
         "custom_brief": f"Кубок {cup_stage}" if cup_stage else f"Тур {round_number}",
+        "match_photos": stage_photos,
+        "photo_mode": "match" if stage_photos else "none",
     }
 
     await _show_draft_preview(update, context, generated_text)
@@ -716,6 +777,7 @@ async def handle_custom_photo_received(update: Update, context: ContextTypes.DEF
         return SMM_STATE_WAIT_PHOTO
 
     draft["custom_photo_id"] = file_id
+    draft["photo_mode"] = "custom"
 
     await msg.reply_text("✅ <b>Фото успешно прикреплено к черновику!</b>", parse_mode="HTML")
     await _show_draft_preview(update, context, draft.get("text", ""))
@@ -734,17 +796,46 @@ async def handle_photo_input_invalid(update: Update, context: ContextTypes.DEFAU
 
 
 async def cb_smm_remove_photo(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Удаляет прикреплённое фото из черновика."""
+    """Удаляет прикреплённое фото/скриншот из черновика."""
     query = update.callback_query
     if query:
         await query.answer("Фото откреплено от черновика")
 
     draft = context.user_data.get("smm_draft")
-    if draft and "custom_photo_id" in draft:
-        del draft["custom_photo_id"]
+    if draft:
+        draft["photo_mode"] = "none"
+        draft.pop("custom_photo_id", None)
 
     if draft and draft.get("text"):
         await _show_draft_preview(update, context, draft["text"])
+    else:
+        await cb_smm_hub(update, context)
+
+
+async def cb_smm_attach_match_photos(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Прикрепляет скриншоты матча из базы данных к черновику."""
+    query = update.callback_query
+    if query:
+        await query.answer("Скриншот(ы) матча прикреплены к посту")
+
+    draft = context.user_data.get("smm_draft")
+    if draft:
+        draft["photo_mode"] = "match"
+        if not draft.get("match_photos"):
+            team_name = draft.get("team_name")
+            if team_name:
+                post_type = draft.get("post_type")
+                if post_type == "stage":
+                    draft["match_photos"] = await asyncio.to_thread(
+                        database.get_stage_match_photos,
+                        team_name,
+                        round_number=draft.get("round_number"),
+                        cup_stage=draft.get("cup_stage"),
+                    )
+                else:
+                    draft["match_photos"] = await asyncio.to_thread(database.get_last_match_photos, team_name)
+
+        await _show_draft_preview(update, context, draft.get("text", ""))
     else:
         await cb_smm_hub(update, context)
 
@@ -898,6 +989,37 @@ async def cb_smm_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                     caption=caption,
                     parse_mode="HTML"
                 )
+            else:
+                sent_msg = await context.bot.send_message(
+                    chat_id=channel,
+                    text=text_content,
+                    parse_mode="HTML"
+                )
+        elif mode == "match_photos":
+            photos = draft.get("match_photos") or []
+            caption = club_smm_service._fit_html(text_content, club_smm_service.CAPTION_MAX_CHARS)
+            if len(photos) == 1:
+                sent_msg = await context.bot.send_photo(
+                    chat_id=channel,
+                    photo=photos[0],
+                    caption=caption,
+                    parse_mode="HTML"
+                )
+            elif len(photos) > 1:
+                from telegram import InputMediaPhoto
+                media = [
+                    InputMediaPhoto(
+                        media=p_id,
+                        caption=caption if i == 0 else None,
+                        parse_mode="HTML" if i == 0 else None
+                    )
+                    for i, p_id in enumerate(photos[:10])
+                ]
+                sent_messages = await context.bot.send_media_group(
+                    chat_id=channel,
+                    media=media
+                )
+                sent_msg = sent_messages[0] if sent_messages else None
             else:
                 sent_msg = await context.bot.send_message(
                     chat_id=channel,
