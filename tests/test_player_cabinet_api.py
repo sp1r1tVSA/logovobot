@@ -370,3 +370,201 @@ class TestPlayerCabinetApi(AioHTTPTestCase):
             json={"match_id": 999999999, "action": "propose", "proposed_time": "19:30"},
         )
         self.assertEqual(resp.status, 404)
+
+    async def test_overview_with_cup_and_total_summary(self):
+        """7. Обзор клуба включает кубковую сводку и суммарную статистику по всем турнирам."""
+        cup_match_id = None
+        try:
+            with database.transaction() as conn:
+                c = conn.cursor()
+                c.execute(
+                    "INSERT INTO matches (round_number, player1_id, player2_id, player1_team, player2_team, "
+                    "player1_score, player2_score, status, division_id, season_id, tournament_type, played_at) "
+                    "VALUES (-1, ?, ?, ?, ?, 3, 0, 'confirmed', ?, ?, 'cup', CURRENT_TIMESTAMP)",
+                    (self.owner_id, self.stranger_id, self.owner_team, self.stranger_team,
+                     self.division_id, self.season_id),
+                )
+                cup_match_id = c.lastrowid
+
+            resp = await self.client.request(
+                "GET", "/api/cabinet/overview", headers=self._headers(self.owner_id)
+            )
+            self.assertEqual(resp.status, 200)
+            data = await resp.json()
+
+            # Проверяем блок кубка
+            self.assertIn("cup", data)
+            cup = data["cup"]
+            self.assertTrue(cup["has_cup"])
+            self.assertEqual(cup["played"], 1)
+            self.assertEqual(cup["wins"], 1)
+            self.assertEqual(cup["losses"], 0)
+            self.assertEqual(cup["goals_scored"], 3)
+            self.assertEqual(cup["goals_conceded"], 0)
+            self.assertEqual(cup["goal_diff"], 3)
+
+            # Проверяем суммарный блок (1 матч лиги 4:1 + 1 матч кубка 3:0 = 2 победы, 7:1)
+            self.assertIn("total", data)
+            total = data["total"]
+            self.assertEqual(total["played"], 2)
+            self.assertEqual(total["wins"], 2)
+            self.assertEqual(total["draws"], 0)
+            self.assertEqual(total["losses"], 0)
+            self.assertEqual(total["goals_scored"], 7)
+            self.assertEqual(total["goals_conceded"], 1)
+            self.assertEqual(total["goal_diff"], 6)
+            self.assertEqual(total["winrate"], 100)
+        finally:
+            if cup_match_id:
+                with database.transaction() as conn:
+                    conn.cursor().execute("DELETE FROM matches WHERE id = ?", (cup_match_id,))
+
+    async def test_matches_includes_all_rounds_and_tournament_filter(self):
+        """8. Кабинет отдаёт все туры (не только открытые) и фильтрует по tournament_type."""
+        closed_match_id = None
+        cup_match_id = None
+        try:
+            with database.transaction() as conn:
+                c = conn.cursor()
+                # Закрытый тур 2
+                c.execute(
+                    "INSERT INTO rounds (round_number, is_open, deadline, division_id, season_id) "
+                    "VALUES (2, 0, ?, ?, ?)",
+                    ("05.01.2030 20:00", self.division_id, self.season_id),
+                )
+                c.execute(
+                    "INSERT INTO matches (round_number, player1_id, player2_id, player1_team, player2_team, "
+                    "status, division_id, season_id, tournament_type) "
+                    "VALUES (2, ?, ?, ?, ?, 'pending', ?, ?, 'league')",
+                    (self.owner_id, self.stranger_id, self.owner_team, self.stranger_team,
+                     self.division_id, self.season_id),
+                )
+                closed_match_id = c.lastrowid
+
+                # Предстоящий кубковый матч
+                c.execute(
+                    "INSERT INTO matches (round_number, player1_id, player2_id, player1_team, player2_team, "
+                    "status, division_id, season_id, tournament_type, cup_stage) "
+                    "VALUES (-1, ?, ?, ?, ?, 'pending', ?, ?, 'cup', '1/8 финала')",
+                    (self.owner_id, self.rival_id, self.owner_team, self.rival_team,
+                     self.division_id, self.season_id),
+                )
+                cup_match_id = c.lastrowid
+
+            # Без фильтра — должны вернуться ВСЕ матчи: тур 1 (активный + на выезде), закрытый тур 2, и кубковый
+            resp = await self.client.request(
+                "GET", "/api/cabinet/matches", headers=self._headers(self.owner_id)
+            )
+            self.assertEqual(resp.status, 200)
+            data = await resp.json()
+            match_ids = [m["id"] for m in data["matches"]]
+            self.assertIn(self.active_match_id, match_ids)
+            self.assertIn(closed_match_id, match_ids)
+            self.assertIn(cup_match_id, match_ids)
+
+            # Проверяем атрибут round_is_open
+            by_id = {m["id"]: m for m in data["matches"]}
+            self.assertTrue(by_id[self.active_match_id]["round_is_open"])
+            self.assertFalse(by_id[closed_match_id]["round_is_open"])
+            self.assertEqual(by_id[cup_match_id]["tournament_type"], "cup")
+
+            # Фильтр tournament_type=league
+            resp_league = await self.client.request(
+                "GET", "/api/cabinet/matches?tournament_type=league", headers=self._headers(self.owner_id)
+            )
+            self.assertEqual(resp_league.status, 200)
+            data_league = await resp_league.json()
+            league_ids = [m["id"] for m in data_league["matches"]]
+            self.assertIn(self.active_match_id, league_ids)
+            self.assertIn(closed_match_id, league_ids)
+            self.assertNotIn(cup_match_id, league_ids)
+
+            # Фильтр tournament_type=cup
+            resp_cup = await self.client.request(
+                "GET", "/api/cabinet/matches?tournament_type=cup", headers=self._headers(self.owner_id)
+            )
+            self.assertEqual(resp_cup.status, 200)
+            data_cup = await resp_cup.json()
+            cup_ids = [m["id"] for m in data_cup["matches"]]
+            self.assertIn(cup_match_id, cup_ids)
+            self.assertNotIn(self.active_match_id, cup_ids)
+            self.assertNotIn(closed_match_id, cup_ids)
+        finally:
+            with database.transaction() as conn:
+                c = conn.cursor()
+                if closed_match_id:
+                    c.execute("DELETE FROM matches WHERE id = ?", (closed_match_id,))
+                if cup_match_id:
+                    c.execute("DELETE FROM matches WHERE id = ?", (cup_match_id,))
+                c.execute("DELETE FROM rounds WHERE division_id = ? AND round_number = 2", (self.division_id,))
+
+    async def test_squad_by_tournament_scopes(self):
+        """9. Состав клуба возвращает предрассчитанные срезы all/league/cup и фильтрацию."""
+        cup_match_id = None
+        try:
+            with database.transaction() as conn:
+                c = conn.cursor()
+                c.execute(
+                    "INSERT INTO matches (round_number, player1_id, player2_id, player1_team, player2_team, "
+                    "player1_score, player2_score, status, division_id, season_id, tournament_type, played_at) "
+                    "VALUES (-1, ?, ?, ?, ?, 2, 0, 'confirmed', ?, ?, 'cup', CURRENT_TIMESTAMP)",
+                    (self.owner_id, self.rival_id, self.owner_team, self.rival_team,
+                     self.division_id, self.season_id),
+                )
+                cup_match_id = c.lastrowid
+
+            # Добавляем кубковые голы: плеймейкер забил 2 в кубке
+            database.save_match_events(
+                cup_match_id,
+                [
+                    (self.owner_team, self.playmaker, "goal", 2),
+                    (self.owner_team, self.striker, "assist", 1),
+                ],
+                team_name=self.owner_team,
+            )
+
+            # Запрос состава по умолчанию (scope = all)
+            resp = await self.client.request(
+                "GET", "/api/cabinet/squad", headers=self._headers(self.owner_id)
+            )
+            self.assertEqual(resp.status, 200)
+            data = await resp.json()
+
+            # Должен присутствовать словарь by_tournament
+            self.assertIn("by_tournament", data)
+            by_tour = data["by_tournament"]
+            self.assertIn("all", by_tour)
+            self.assertIn("league", by_tour)
+            self.assertIn("cup", by_tour)
+
+            # В 'all': striker: 3 гола (лига) + 0 (кубок) = 3; playmaker: 1 гол (лига) + 2 (кубок) = 3
+            all_players = {p["player_name"]: p for p in by_tour["all"]["players"]}
+            self.assertEqual(all_players[self.striker]["goals"], 3)
+            self.assertEqual(all_players[self.playmaker]["goals"], 3)
+
+            # В 'league': striker: 3 гола; playmaker: 1 гол
+            league_players = {p["player_name"]: p for p in by_tour["league"]["players"]}
+            self.assertEqual(league_players[self.striker]["goals"], 3)
+            self.assertEqual(league_players[self.playmaker]["goals"], 1)
+
+            # В 'cup': striker: 0 голов; playmaker: 2 гола
+            cup_players = {p["player_name"]: p for p in by_tour["cup"]["players"]}
+            self.assertEqual(cup_players[self.striker]["goals"], 0)
+            self.assertEqual(cup_players[self.playmaker]["goals"], 2)
+            self.assertEqual(cup_players[self.striker]["assists"], 1)
+
+            # Проверяем query param ?tournament_type=cup
+            resp_cup = await self.client.request(
+                "GET", "/api/cabinet/squad?tournament_type=cup", headers=self._headers(self.owner_id)
+            )
+            self.assertEqual(resp_cup.status, 200)
+            data_cup = await resp_cup.json()
+            q_cup_players = {p["player_name"]: p for p in data_cup["players"]}
+            self.assertEqual(q_cup_players[self.playmaker]["goals"], 2)
+            self.assertEqual(q_cup_players[self.striker]["goals"], 0)
+        finally:
+            if cup_match_id:
+                with database.transaction() as conn:
+                    c = conn.cursor()
+                    c.execute("DELETE FROM match_events WHERE match_id = ?", (cup_match_id,))
+                    c.execute("DELETE FROM matches WHERE id = ?", (cup_match_id,))

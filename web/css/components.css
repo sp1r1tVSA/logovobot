@@ -2255,12 +2255,99 @@ img.team-logo-img + .team-logo-fallback {
   white-space: nowrap;
 }
 
+/* --- Срезы статистики клуба --- */
+.club-stats-pills {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 14px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  position: relative;
+  z-index: 1;
+}
+
+.club-stats-pills::-webkit-scrollbar {
+  display: none;
+}
+
+.club-pill {
+  padding: 5px 12px;
+  border-radius: var(--radius-full);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition-fast);
+}
+
+.club-pill:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff;
+}
+
+.club-pill:active {
+  transform: scale(0.96);
+}
+
+.club-pill.active {
+  background: linear-gradient(135deg, rgba(245, 176, 39, 0.25) 0%, rgba(245, 176, 39, 0.12) 100%);
+  border-color: rgba(245, 176, 39, 0.55);
+  color: var(--accent-gold);
+  box-shadow: 0 0 10px rgba(245, 176, 39, 0.25);
+}
+
+/* Кубковая серия в героическом блоке */
+.club-series-pill {
+  margin-top: 10px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.09);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  position: relative;
+  z-index: 1;
+}
+
+.club-series-stage {
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: var(--accent-gold);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.club-series-opp {
+  font-size: 0.76rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.club-series-score {
+  font-family: 'Outfit', 'Inter', sans-serif;
+  font-size: 0.88rem;
+  font-weight: 900;
+  color: var(--accent-gold);
+  white-space: nowrap;
+}
+
 /* --- KPI-строка --- */
 .club-kpi-row {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 6px;
-  margin-top: 14px;
+  margin-top: 10px;
   position: relative;
   z-index: 1;
 }
@@ -2454,6 +2541,72 @@ img.team-logo-img + .team-logo-fallback {
   line-height: 1.5;
 }
 
+/* --- Фильтры вкладки «Мой клуб» --- */
+.club-filters-container {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.club-filter-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  padding-bottom: 2px;
+}
+
+.club-filter-row::-webkit-scrollbar {
+  display: none;
+}
+
+.club-filter-chip {
+  padding: 6px 14px;
+  border-radius: var(--radius-full);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary);
+  font-family: 'Inter', sans-serif;
+  font-size: 0.74rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: var(--transition-fast);
+}
+
+.club-filter-chip:hover {
+  background: rgba(255, 255, 255, 0.08);
+  color: #fff;
+}
+
+.club-filter-chip:active {
+  transform: scale(0.96);
+}
+
+.club-filter-chip.active {
+  background: linear-gradient(135deg, rgba(245, 176, 39, 0.22) 0%, rgba(245, 176, 39, 0.1) 100%);
+  border-color: rgba(245, 176, 39, 0.5);
+  color: var(--accent-gold);
+  box-shadow: 0 0 10px rgba(245, 176, 39, 0.2);
+}
+
+.club-filter-chip.sub {
+  padding: 4px 10px;
+  font-size: 0.7rem;
+  background: rgba(255, 255, 255, 0.03);
+  border-color: rgba(255, 255, 255, 0.07);
+}
+
+.club-filter-chip.sub.active {
+  background: rgba(56, 189, 248, 0.16);
+  border-color: rgba(56, 189, 248, 0.45);
+  color: #38bdf8;
+  box-shadow: 0 0 8px rgba(56, 189, 248, 0.2);
+}
+
 /* --- Карточка матча --- */
 .club-match-card {
   background: var(--bg-glass);
@@ -2537,6 +2690,12 @@ img.team-logo-img + .team-logo-fallback {
 .club-badge.finished {
   background: rgba(255, 255, 255, 0.05);
   border-color: rgba(255, 255, 255, 0.12);
+  color: var(--text-muted);
+}
+
+.club-badge.upcoming {
+  background: rgba(148, 163, 184, 0.08);
+  border-color: rgba(148, 163, 184, 0.22);
   color: var(--text-muted);
 }
 
@@ -5418,6 +5577,25 @@ span.team-logo-fallback {
 .ob-tag.won { background: var(--accent-gold-light); color: var(--accent-gold); }
 .ob-tag.gift { background: var(--color-success-bg); color: var(--color-success); }
 .ob-tag.pick { background: var(--accent-gold-light); color: var(--accent-gold); border: 1px solid rgba(212, 169, 78, 0.35); }
+.ob-sel-goals {
+  flex-shrink: 0;
+  font-size: 0.68rem;
+  font-weight: 600;
+  padding: 1px 6px;
+  border-radius: var(--radius-full);
+  background: rgba(245, 176, 39, 0.12);
+  border: 1px solid rgba(245, 176, 39, 0.25);
+  color: var(--accent-gold);
+  line-height: 1.3;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+}
+.ob-sel.done .ob-sel-goals {
+  background: var(--bg-tertiary);
+  border-color: transparent;
+  color: var(--text-muted);
+  opacity: 0.6;
+}
 .ob-odd {
   flex-shrink: 0;
   min-width: 58px;

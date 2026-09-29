@@ -224,6 +224,13 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
             logger.exception(f"Error matching squad in draft: {e}")
             await status_msg.edit_text("❌ Ошибка при сопоставлении состава. Возможно, игроки не зарегистрированы.")
             return
+
+        from services.external_squad_lookup import find_new_goal_action_players
+        new_players = await asyncio.to_thread(
+            find_new_goal_action_players,
+            h_goals, a_goals, h_assists, a_assists,
+            home_team, away_team,
+        )
             
         mvp_player = await asyncio.to_thread(
             resolve_mvp_player_name, m_info.get("mvp_player"), home_team, away_team
@@ -318,11 +325,21 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
             "mvp_player": mvp_player,
             "reporter_id": user_id,
             "photo_id": photo_file_ids[idx] if idx < len(photo_file_ids) else (photo_file_ids[0] if photo_file_ids else None),
-            "division_id": cur_match.get("division_id") or division_id
+            "division_id": cur_match.get("division_id") or division_id,
+            "new_players": new_players,
         })
 
     import uuid
     draft_uuid = str(uuid.uuid4())[:8]
+
+    all_new_players = []
+    seen_np_keys = set()
+    for g in prepared_games:
+        for np in g.get("new_players", []):
+            k = (np["player_name"], np["team_name"])
+            if k not in seen_np_keys:
+                seen_np_keys.add(k)
+                all_new_players.append(np)
 
     is_multi = len(prepared_games) > 1
     # Одна игра — все присланные скрины её (счёт, голы, статистика), и в пост
@@ -352,7 +369,8 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
             "reporter_id": g["reporter_id"],
             "photo_id": g["photo_id"],
             "division_id": g.get("division_id"),
-            "games": prepared_games
+            "games": prepared_games,
+            "pending_new_players": all_new_players,
         }
         group_text = build_formatted_match_post(
             round_number=g["round_number"],
@@ -375,7 +393,8 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
     else:
         draft_data = {
             "is_multi": True,
-            "games": prepared_games
+            "games": prepared_games,
+            "pending_new_players": all_new_players,
         }
         
         post_lines = ["📝 <b>ЧЕРНОВИК РЕЗУЛЬТАТОВ МАТЧЕЙ</b>\n"]
@@ -412,12 +431,17 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
         post_lines.append("\n⏳ <i>Ожидает подтверждения администратором...</i>")
         group_text = "\n".join(post_lines)
 
-    dropped_games = len(matches_list) - len(prepared_games)
     if dropped_games > 0:
         group_text += (
             f"\n\n⚠️ <i>ИИ распознал игр: {len(matches_list)}, "
             f"но свободных матчей в расписании только {len(prepared_games)}. "
             f"Лишние игры не занесены.</i>"
+        )
+
+    if all_new_players:
+        group_text += (
+            f"\n\n🔍 <i>Обнаружены новые игроки: "
+            f"{', '.join([html.escape(p['player_name']) for p in all_new_players])}</i>"
         )
 
     if "drafts" not in context.bot_data:
@@ -457,6 +481,42 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
         else:
             kwargs["text"] = group_text
             await context.bot.send_message(**kwargs)
+
+        if all_new_players:
+            thread_id = update.effective_message.message_thread_id if update.effective_message and update.effective_message.is_topic_message else None
+            for idx, np in enumerate(all_new_players):
+                msg_lines = [
+                    f"🔍 <b>Обнаружен новый игрок команды {html.escape(np['team_name'])}:</b>",
+                    f"👤 <b>{html.escape(np['player_name'])}</b>" + (f" (в отчёте: <i>{html.escape(np['raw_name'])}</i>)" if np['raw_name'] != np['player_name'] else ""),
+                    f"📍 Позиция: <b>{html.escape(np['position'])}</b>",
+                ]
+                actions = []
+                if np.get("goals"):
+                    actions.append(f"⚽ Голы: {np['goals']}")
+                if np.get("assists"):
+                    actions.append(f"🎯 Ассисты: {np['assists']}")
+                if actions:
+                    msg_lines.append(" | ".join(actions))
+                if np.get("source"):
+                    msg_lines.append(f"🌐 <i>Источник: {html.escape(np['source'])}</i>")
+                msg_lines.append("\nВнести игрока в официальный состав команды в базе данных?")
+
+                np_keyboard = [
+                    [
+                        InlineKeyboardButton("➕ Внести в состав", callback_data=f"draft_add_player_{draft_uuid}_{idx}"),
+                        InlineKeyboardButton("⏭️ Пропустить", callback_data=f"draft_skip_player_{draft_uuid}_{idx}"),
+                    ]
+                ]
+                try:
+                    await context.bot.send_message(
+                        chat_id=update.effective_chat.id,
+                        message_thread_id=thread_id,
+                        text="\n".join(msg_lines),
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(np_keyboard),
+                    )
+                except Exception as e:
+                    logger.warning(f"Failed to send draft new player prompt: {e}")
     except Exception as e:
         logger.exception("Failed to send draft preview")
 
@@ -718,3 +778,123 @@ async def cb_draft_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             await query.message.reply_text(new_caption, parse_mode="HTML")
     else:
         await query.edit_message_text(text=new_caption, parse_mode="HTML")
+
+
+async def cb_draft_add_player(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Add a newly detected goal action player in draft into squad_players."""
+    query = update.callback_query
+    if not query:
+        return
+
+    data_parts = query.data.replace("draft_add_player_", "").split("_")
+    if len(data_parts) != 2:
+        await query.answer("Неверные данные", show_alert=True)
+        return
+    draft_uuid, idx_str = data_parts[0], data_parts[1]
+    try:
+        idx = int(idx_str)
+    except ValueError:
+        await query.answer("Неверный индекс", show_alert=True)
+        return
+
+    drafts = context.bot_data.get("drafts", {})
+    draft = drafts.get(draft_uuid)
+    if not draft:
+        draft = await asyncio.to_thread(database.get_draft, draft_uuid)
+        if draft:
+            if "drafts" not in context.bot_data:
+                context.bot_data["drafts"] = {}
+            context.bot_data["drafts"][draft_uuid] = draft
+
+    if not draft:
+        await query.answer("Черновик устарел или не найден.", show_alert=True)
+        return
+
+    user_id = query.from_user.id
+    can_manage = await _can_manage_draft(user_id, draft)
+    is_part = False
+    for g in draft.get("games", [draft]):
+        if user_id in (g.get("player1_id"), g.get("player2_id"), g.get("reporter_id")):
+            is_part = True
+            break
+    if not (can_manage or is_part or is_admin(user_id)):
+        await query.answer("⛔ Вносить игроков могут только участники матча или администраторы!", show_alert=True)
+        return
+
+    pending = draft.get("pending_new_players") or []
+    if idx >= len(pending):
+        await query.answer("Игрок уже обработан.", show_alert=True)
+        return
+
+    p_info = pending[idx]
+    team_name = p_info["team_name"]
+    player_name = p_info["player_name"]
+    pos = p_info["position"]
+    raw_name = p_info.get("raw_name", player_name)
+
+    # Add to squad
+    await asyncio.to_thread(
+        database.add_squad,
+        team_name,
+        [{"player_name": player_name, "position": pos}]
+    )
+
+    # Update names in draft events
+    if raw_name != player_name:
+        for g in draft.get("games", [draft]):
+            events = g.get("events") or []
+            new_events = []
+            for ev in events:
+                if len(ev) >= 4 and ev[0] == team_name and ev[1] == raw_name:
+                    new_events.append((ev[0], player_name, ev[2], ev[3]))
+                else:
+                    new_events.append(ev)
+            g["events"] = new_events
+            for k in ("h_goals", "a_goals", "h_assists", "a_assists"):
+                d = g.get(k)
+                if isinstance(d, dict) and raw_name in d:
+                    d[player_name] = d.pop(raw_name)
+
+        await asyncio.to_thread(database.save_draft, draft_uuid, draft)
+
+    user_str = f"@{query.from_user.username}" if query.from_user.username else (query.from_user.first_name or "Участник")
+    await query.answer(f"Игрок {player_name} добавлен в состав {team_name}!")
+    await query.edit_message_text(
+        text=f"✅ Игрок <b>{html.escape(player_name)}</b> (позиция: <b>{html.escape(pos)}</b>) добавлен в состав команды <b>{html.escape(team_name)}</b> пользователем {html.escape(user_str)}.",
+        parse_mode="HTML",
+    )
+
+
+async def cb_draft_skip_player(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Skip adding new player in draft."""
+    query = update.callback_query
+    if not query:
+        return
+
+    data_parts = query.data.replace("draft_skip_player_", "").split("_")
+    if len(data_parts) != 2:
+        await query.answer()
+        return
+    draft_uuid, idx_str = data_parts[0], data_parts[1]
+    try:
+        idx = int(idx_str)
+    except ValueError:
+        await query.answer()
+        return
+
+    drafts = context.bot_data.get("drafts", {})
+    draft = drafts.get(draft_uuid)
+    if not draft:
+        draft = await asyncio.to_thread(database.get_draft, draft_uuid)
+
+    p_name = "Игрок"
+    if draft and "pending_new_players" in draft:
+        pending = draft["pending_new_players"]
+        if idx < len(pending):
+            p_name = pending[idx].get("player_name", "Игрок")
+
+    await query.answer("Пропущено")
+    await query.edit_message_text(
+        text=f"⏭️ Добавление игрока <b>{html.escape(p_name)}</b> в состав пропущено.",
+        parse_mode="HTML",
+    )

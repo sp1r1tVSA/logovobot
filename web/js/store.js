@@ -54,7 +54,13 @@ class StateStore {
       myClub: { overview: null, matches: [], squad: [] },
       myClubRecent: [],
       myClubSquadMeta: { top_scorer: null, top_assistant: null, top_mvp: null },
+      myClubSquadByTournament: null,
       myClubSubTab: 'matches', // 'matches' | 'squad' | 'history'
+      myClubStatsScope: 'league', // 'league' | 'cup' | 'total'
+      myClubMatchesFilter: 'all', // 'all' | 'league' | 'cup'
+      myClubMatchesStatusFilter: 'all', // 'all' | 'upcoming' | 'completed'
+      myClubHistoryFilter: 'all', // 'all' | 'league' | 'cup'
+      myClubSquadFilter: 'all', // 'all' | 'league' | 'cup'
       myClubLoading: false,
       // Sports Intelligence State (LIVE-центр удалён)
       oddsMovers: [],
@@ -229,15 +235,62 @@ class StateStore {
     this.notify();
   }
 
+  setMyClubStatsScope(scope) {
+    this.state.myClubStatsScope = scope || 'league';
+    this.notify();
+  }
+
   setMyClubMatches(matches, recent = null) {
     this.state.myClub.matches = matches || [];
     if (recent) this.state.myClubRecent = recent;
     this.notify();
   }
 
-  setMyClubSquad(players, topScorer = null, topAssistant = null, topMvp = null) {
+  setMyClubMatchesFilter(filter) {
+    this.state.myClubMatchesFilter = filter || 'all';
+    this.notify();
+  }
+
+  setMyClubMatchesStatusFilter(statusFilter) {
+    this.state.myClubMatchesStatusFilter = statusFilter || 'all';
+    this.notify();
+  }
+
+  setMyClubHistoryFilter(filter) {
+    this.state.myClubHistoryFilter = filter || 'all';
+    this.notify();
+  }
+
+  setMyClubSquad(players, topScorer = null, topAssistant = null, topMvp = null, byTournament = null) {
     this.state.myClub.squad = players || [];
     this.state.myClubSquadMeta = { top_scorer: topScorer, top_assistant: topAssistant, top_mvp: topMvp };
+    if (byTournament) {
+      this.state.myClubSquadByTournament = byTournament;
+    }
+    const currentFilter = this.state.myClubSquadFilter || 'all';
+    if (currentFilter !== 'all' && this.state.myClubSquadByTournament && this.state.myClubSquadByTournament[currentFilter]) {
+      const scoped = this.state.myClubSquadByTournament[currentFilter];
+      this.state.myClub.squad = scoped.players || [];
+      this.state.myClubSquadMeta = {
+        top_scorer: scoped.top_scorer,
+        top_assistant: scoped.top_assistant,
+        top_mvp: scoped.top_mvp
+      };
+    }
+    this.notify();
+  }
+
+  setMyClubSquadFilter(filter) {
+    this.state.myClubSquadFilter = filter || 'all';
+    if (this.state.myClubSquadByTournament && this.state.myClubSquadByTournament[this.state.myClubSquadFilter]) {
+      const scoped = this.state.myClubSquadByTournament[this.state.myClubSquadFilter];
+      this.state.myClub.squad = scoped.players || [];
+      this.state.myClubSquadMeta = {
+        top_scorer: scoped.top_scorer,
+        top_assistant: scoped.top_assistant,
+        top_mvp: scoped.top_mvp
+      };
+    }
     this.notify();
   }
 

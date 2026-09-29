@@ -2338,8 +2338,8 @@ export class UIRenderer {
     }
   }
 
-  /** Баннер клуба + дисциплина. */
-  static renderMyClubView(overview) {
+  /** Баннер клуба + дисциплина + срезы статистики (дивизион / кубок / всего). */
+  static renderMyClubView(overview, statsScope = 'league') {
     this.updateNavClubIcon(overview);
     const heroEl = document.getElementById('my-club-hero-container');
     if (!heroEl) return;
@@ -2368,6 +2368,8 @@ export class UIRenderer {
 
     const club = overview.club || {};
     const t = overview.tournament || {};
+    const cup = overview.cup || {};
+    const total = overview.total || {};
     const discipline = overview.discipline || { warns: 0, limit: 0 };
 
     const teamName = club.team_name || 'Мой клуб';
@@ -2385,6 +2387,56 @@ export class UIRenderer {
       return `<span class="club-form-dot ${cls}">${label}</span>`;
     }).join('');
 
+    let statsContentHtml = '';
+    if (statsScope === 'cup') {
+      const cupDiff = (cup.goal_diff || 0) > 0 ? `+${cup.goal_diff}` : `${cup.goal_diff || 0}`;
+      const series = cup.series;
+      const seriesBadge = series ? `
+        <div class="club-series-pill">
+          <span class="club-series-stage">${escapeHtml(series.stage || 'Кубок')}</span>
+          <span class="club-series-opp">vs ${escapeHtml(series.opponent || 'Соперник')}</span>
+          <span class="club-series-score gold">${escapeHtml(series.score || '0 : 0')}</span>
+        </div>
+      ` : '';
+
+      statsContentHtml = `
+        <div class="club-kpi-row">
+          <div class="club-kpi"><span class="club-kpi-label">Игр</span><span class="club-kpi-value gold">${cup.played || 0}</span></div>
+          <div class="club-kpi"><span class="club-kpi-label">В / П</span><span class="club-kpi-value">${cup.wins || 0} / ${cup.losses || 0}</span></div>
+          <div class="club-kpi"><span class="club-kpi-label">Мячи</span><span class="club-kpi-value">${cup.goals_scored || 0}:${cup.goals_conceded || 0} <span class="club-kpi-sub">(${cupDiff})</span></span></div>
+          <div class="club-kpi"><span class="club-kpi-label">Статус</span><span class="club-kpi-value">${cup.status === 'won' ? 'Победа 🏆' : (cup.status === 'eliminated' ? 'Выбыл' : (cup.has_cup ? 'В игре' : '—'))}</span></div>
+        </div>
+        ${seriesBadge}
+      `;
+    } else if (statsScope === 'total') {
+      const totalDiff = (total.goal_diff || 0) > 0 ? `+${total.goal_diff}` : `${total.goal_diff || 0}`;
+      statsContentHtml = `
+        <div class="club-kpi-row">
+          <div class="club-kpi"><span class="club-kpi-label">Всего игр</span><span class="club-kpi-value gold">${total.played || 0}</span></div>
+          <div class="club-kpi"><span class="club-kpi-label">В / Н / П</span><span class="club-kpi-value">${total.wins || 0} / ${total.draws || 0} / ${total.losses || 0}</span></div>
+          <div class="club-kpi"><span class="club-kpi-label">Мячи</span><span class="club-kpi-value">${total.goals_scored || 0}:${total.goals_conceded || 0} <span class="club-kpi-sub">(${totalDiff})</span></span></div>
+          <div class="club-kpi"><span class="club-kpi-label">Винрейт</span><span class="club-kpi-value gold">${total.winrate || 0}%</span></div>
+        </div>
+      `;
+    } else {
+      // Default: league
+      statsContentHtml = `
+        <div class="club-kpi-row">
+          <div class="club-kpi"><span class="club-kpi-label">Очки</span><span class="club-kpi-value gold">${t.points || 0}</span></div>
+          <div class="club-kpi"><span class="club-kpi-label">Игр</span><span class="club-kpi-value">${t.played || 0}</span></div>
+          <div class="club-kpi"><span class="club-kpi-label">В / Н / П</span><span class="club-kpi-value">${t.wins || 0} / ${t.draws || 0} / ${t.losses || 0}</span></div>
+          <div class="club-kpi"><span class="club-kpi-label">Мячи</span><span class="club-kpi-value">${t.goals_scored || 0}:${t.goals_conceded || 0} <span class="club-kpi-sub">(${diff})</span></span></div>
+        </div>
+
+        ${formHtml ? `
+          <div class="club-form-row">
+            <span class="club-form-caption">Форма</span>
+            <div class="club-form-dots">${formHtml}</div>
+          </div>
+        ` : ''}
+      `;
+    }
+
     heroEl.innerHTML = `
       <div class="club-hero">
         <div class="club-hero-top">
@@ -2399,19 +2451,13 @@ export class UIRenderer {
           </div>
         </div>
 
-        <div class="club-kpi-row">
-          <div class="club-kpi"><span class="club-kpi-label">Очки</span><span class="club-kpi-value gold">${t.points || 0}</span></div>
-          <div class="club-kpi"><span class="club-kpi-label">Игр</span><span class="club-kpi-value">${t.played || 0}</span></div>
-          <div class="club-kpi"><span class="club-kpi-label">В / Н / П</span><span class="club-kpi-value">${t.wins || 0} / ${t.draws || 0} / ${t.losses || 0}</span></div>
-          <div class="club-kpi"><span class="club-kpi-label">Мячи</span><span class="club-kpi-value">${t.goals_scored || 0}:${t.goals_conceded || 0} <span class="club-kpi-sub">(${diff})</span></span></div>
+        <div class="club-stats-pills">
+          <button class="club-pill ${statsScope === 'league' ? 'active' : ''}" data-stats-scope="league">🏆 Дивизион</button>
+          <button class="club-pill ${statsScope === 'cup' ? 'active' : ''}" data-stats-scope="cup">🏅 Кубок</button>
+          <button class="club-pill ${statsScope === 'total' ? 'active' : ''}" data-stats-scope="total">📊 Всего</button>
         </div>
 
-        ${formHtml ? `
-          <div class="club-form-row">
-            <span class="club-form-caption">Форма</span>
-            <div class="club-form-dots">${formHtml}</div>
-          </div>
-        ` : ''}
+        ${statsContentHtml}
 
         <div class="club-discipline ${warnLevel}">
           <span class="club-discipline-label">Дисциплина</span>
@@ -2440,6 +2486,9 @@ export class UIRenderer {
     if (match.status === 'reported') {
       return { cls: 'reported', text: 'Результат на проверке' };
     }
+    if (match.round_is_open === false) {
+      return { cls: 'upcoming', text: 'Тур ещё не открыт' };
+    }
     return { cls: 'pending', text: 'Ожидает игры' };
   }
 
@@ -2453,8 +2502,9 @@ export class UIRenderer {
       ? `<div class="club-match-score">${match.my_score} : ${match.opp_score}</div>`
       : '';
 
-    const canAccept = showActions && match.time_status === 'proposed' && !match.proposed_by_me;
-    const actionsHtml = showActions ? `
+    const canAccept = showActions && match.round_is_open !== false && match.time_status === 'proposed' && !match.proposed_by_me;
+    const canPropose = showActions && match.round_is_open !== false;
+    const actionsHtml = showActions && canPropose ? `
       <div class="club-match-actions">
         <button class="btn-club-secondary btn-propose-time"
                 data-match-id="${match.id}"
@@ -2499,30 +2549,68 @@ export class UIRenderer {
     `;
   }
 
-  /** Активные матчи игрока. */
-  static renderMyClubMatches(matches, isLoading = false) {
+  /** Все матчи клуба с фильтрами по турнирам и статусу. */
+  static renderMyClubMatches(matches, recent = [], filter = 'all', statusFilter = 'all', isLoading = false) {
     const el = document.getElementById('my-club-matches-container');
     if (!el) return;
 
-    if (isLoading && (!matches || matches.length === 0)) {
+    if (isLoading && (!matches || matches.length === 0) && (!recent || recent.length === 0)) {
       el.innerHTML = `<div class="club-placeholder">Загрузка матчей...</div>`;
       return;
     }
 
-    if (!matches || matches.length === 0) {
+    const filterTournament = (list) => {
+      if (!list) return [];
+      if (filter === 'cup') return list.filter(m => m.is_cup || m.tournament_type === 'cup');
+      if (filter === 'league') return list.filter(m => !m.is_cup && m.tournament_type !== 'cup');
+      return list;
+    };
+
+    const filteredUpcoming = filterTournament(matches || []);
+    const filteredRecent = filterTournament(recent || []);
+
+    let displayList = [];
+    if (statusFilter === 'upcoming') {
+      displayList = filteredUpcoming;
+    } else if (statusFilter === 'completed') {
+      displayList = filteredRecent;
+    } else {
+      // Все матчи клуба: предстоящие и сыгранные
+      displayList = [...filteredUpcoming, ...filteredRecent];
+    }
+
+    const totalCount = filteredUpcoming.length + filteredRecent.length;
+    const filtersHtml = `
+      <div class="club-filters-container">
+        <div class="club-filter-row">
+          <button class="club-filter-chip ${filter === 'all' ? 'active' : ''}" data-matches-filter="all">⚡ Все турниры</button>
+          <button class="club-filter-chip ${filter === 'league' ? 'active' : ''}" data-matches-filter="league">🏆 Дивизион</button>
+          <button class="club-filter-chip ${filter === 'cup' ? 'active' : ''}" data-matches-filter="cup">🏅 Кубок</button>
+        </div>
+        <div class="club-filter-row secondary">
+          <button class="club-filter-chip sub ${statusFilter === 'all' ? 'active' : ''}" data-matches-status-filter="all">Все (${totalCount})</button>
+          <button class="club-filter-chip sub ${statusFilter === 'upcoming' ? 'active' : ''}" data-matches-status-filter="upcoming">Предстоящие (${filteredUpcoming.length})</button>
+          <button class="club-filter-chip sub ${statusFilter === 'completed' ? 'active' : ''}" data-matches-status-filter="completed">Сыгранные (${filteredRecent.length})</button>
+        </div>
+      </div>
+    `;
+
+    if (displayList.length === 0) {
       el.innerHTML = `
+        ${filtersHtml}
         <div class="club-placeholder">
-          Активных матчей нет — ждём открытия следующего тура. ⚽
+          Матчей по выбранному фильтру не найдено. ⚽
         </div>
       `;
       return;
     }
 
-    el.innerHTML = matches.map(m => UIRenderer._clubMatchCard(m)).join('');
+    const cardsHtml = displayList.map(m => UIRenderer._clubMatchCard(m, { showActions: m.status !== 'confirmed' })).join('');
+    el.innerHTML = `${filtersHtml}<div class="club-matches-list">${cardsHtml}</div>`;
   }
 
-  /** Последние сыгранные матчи клуба. */
-  static renderMyClubHistory(recent, isLoading = false) {
+  /** Сыгранные матчи клуба с фильтрами по турнирам. */
+  static renderMyClubHistory(recent, filter = 'all', isLoading = false) {
     const el = document.getElementById('my-club-history-container');
     if (!el) return;
 
@@ -2531,16 +2619,36 @@ export class UIRenderer {
       return;
     }
 
-    if (!recent || recent.length === 0) {
-      el.innerHTML = `<div class="club-placeholder">Сыгранных матчей пока нет.</div>`;
+    const filtered = (recent || []).filter(m => {
+      if (filter === 'cup') return m.is_cup || m.tournament_type === 'cup';
+      if (filter === 'league') return !m.is_cup && m.tournament_type !== 'cup';
+      return true;
+    });
+
+    const filtersHtml = `
+      <div class="club-filters-container">
+        <div class="club-filter-row">
+          <button class="club-filter-chip ${filter === 'all' ? 'active' : ''}" data-history-filter="all">⚡ Все турниры</button>
+          <button class="club-filter-chip ${filter === 'league' ? 'active' : ''}" data-history-filter="league">🏆 Дивизион</button>
+          <button class="club-filter-chip ${filter === 'cup' ? 'active' : ''}" data-history-filter="cup">🏅 Кубок</button>
+        </div>
+      </div>
+    `;
+
+    if (filtered.length === 0) {
+      el.innerHTML = `
+        ${filtersHtml}
+        <div class="club-placeholder">Сыгранных матчей по выбранному турниру пока нет.</div>
+      `;
       return;
     }
 
-    el.innerHTML = recent.map(m => UIRenderer._clubMatchCard(m, { showActions: false })).join('');
+    const cardsHtml = filtered.map(m => UIRenderer._clubMatchCard(m, { showActions: false })).join('');
+    el.innerHTML = `${filtersHtml}<div class="club-matches-list">${cardsHtml}</div>`;
   }
 
-  /** Состав клуба с личной статистикой. */
-  static renderMyClubSquad(players, meta = {}, isLoading = false) {
+  /** Состав клуба с личной статистикой и фильтрами по турнирам. */
+  static renderMyClubSquad(players, meta = {}, filter = 'all', isLoading = false) {
     const el = document.getElementById('my-club-squad-container');
     if (!el) return;
 
@@ -2549,8 +2657,19 @@ export class UIRenderer {
       return;
     }
 
+    const filtersHtml = `
+      <div class="club-filters-container">
+        <div class="club-filter-row">
+          <button class="club-filter-chip ${filter === 'all' ? 'active' : ''}" data-squad-filter="all">⚡ Все турниры</button>
+          <button class="club-filter-chip ${filter === 'league' ? 'active' : ''}" data-squad-filter="league">🏆 Дивизион</button>
+          <button class="club-filter-chip ${filter === 'cup' ? 'active' : ''}" data-squad-filter="cup">🏅 Кубок</button>
+        </div>
+      </div>
+    `;
+
     if (!players || players.length === 0) {
       el.innerHTML = `
+        ${filtersHtml}
         <div class="club-placeholder">
           Состав клуба ещё не заполнен. Он появится после первой заявки состава в боте.
         </div>
@@ -2607,6 +2726,7 @@ export class UIRenderer {
     }).join('');
 
     el.innerHTML = `
+      ${filtersHtml}
       ${leadersHtml}
       <div class="club-squad-list">${rowsHtml}</div>
       <div class="club-squad-note">

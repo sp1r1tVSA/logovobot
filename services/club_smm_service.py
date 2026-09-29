@@ -161,6 +161,52 @@ def _trim_to_last_sentence(text: str) -> str:
     return text.rstrip(" ,;:—-") + "…"
 
 
+_META_REASONING_PATTERNS = [
+    r"^нужно\s+(?:ответить|написать|составить)",
+    r"^задача:\s*написать",
+    r"^требования:\s*",
+    r"^пользователь\s+(?:просит|хочет|задал)",
+    r"^главный\s+принцип:\s*",
+    r"^в\s+задаче\s+явно",
+    r"^(?:let's\s+think|i\s+need\s+to|the\s+user\s+wants|here\s+is\s+my\s+reasoning)",
+    r"^мысли:\s*",
+    r"^рассуждения:\s*",
+]
+
+def _is_meta_reasoning(text: str) -> bool:
+    """Проверяет, не является ли текст утекшими рассуждениями / цепочкой мыслей модели."""
+    if not text or not isinstance(text, str):
+        return False
+    lowered = text.strip().lower()
+    for pattern in _META_REASONING_PATTERNS:
+        if re.search(pattern, lowered, flags=re.MULTILINE):
+            return True
+    return False
+
+
+def _clean_smm_text(raw_text: str | None) -> str:
+    """
+    Очищает текст от блоков рассуждений (<think>, <thought>, <reasoning>),
+    markdown-символов жирности (**) и markdown-заголовков (# Заголовок),
+    сохраняя клубные хэштеги (#Besiktas).
+    """
+    if not raw_text or not isinstance(raw_text, str):
+        return ""
+    # 1. Удаляем закрытые блоки рассуждений
+    cleaned = re.sub(r"<(?:think|thought|reasoning)>.*?</(?:think|thought|reasoning)>", "", raw_text, flags=re.S | re.I)
+    # 2. Удаляем незакрытый блок рассуждений, если модель прервалась по токенам
+    cleaned = re.sub(r"<(?:think|thought|reasoning)>.*$", "", cleaned, flags=re.S | re.I)
+    # 3. Убираем markdown жирный шрифт (**)
+    cleaned = cleaned.replace("**", "")
+    # 4. Убираем markdown заголовки (# Заголовок), сохраняя хэштеги (#Besiktas)
+    lines = []
+    for line in cleaned.splitlines():
+        stripped_line = re.sub(r"^#{1,6}\s+", "", line)
+        lines.append(stripped_line)
+    cleaned = "\n".join(lines)
+    return cleaned.strip()
+
+
 # ─── Сбор данных клуба из SQLite ───────────────────────────────────────────
 
 def get_club_smm_payload(team_name: str) -> dict:
@@ -309,74 +355,79 @@ def get_club_smm_payload(team_name: str) -> dict:
 _SMM_BASE_INSTRUCTION = (
     "Ты — персональный пресс-атташе и SMM-менеджер футбольного клуба {club_name} в турнире «Логово Фифарей».\n"
     "Твой канал посвящён нашему клубу, его матчам, победам, игрокам и борьбе за трофеи.\n"
-    "Главный тренер команды: {manager_name}.\n\n"
-    "ГЛАВНОЕ ПРАВИЛО — КРАТКОСТЬ (СТРОГО ОДИН АБЗАЦ):\n"
-    "- Текст поста должен быть максимально ёмким, лаконичным и состоять СТРОГО ИЗ ОДНОГО АБЗАЦА (3-4 коротких энергичных предложения, до 350-400 символов)!\n"
-    "- Категорически ЗАПРЕЩЕНО писать длинные простыни текста, рассуждения и списки с пунктами.\n"
-    "- СТРУКТУРА ПОСТА: Заголовок (1 строка) -> ОДИН плотный абзац с фактами и эмоциями -> Хэштеги.\n\n"
+    "Главный тренер команды: {manager_name}.\n"
+    "{user_context}\n"
+    "СТРУКТУРА И ОБЪЁМ ПОСТА (СТРОГО):\n"
+    "- 1 строка: яркий заголовок с эмодзи {club_emojis}.\n"
+    "- Основной текст: ровно ОДИН плотный энергичный абзац (3-4 коротких предложения, суммарно около 300-400 символов). "
+    "Никаких длинных сочинений, списков, пунктов или рассуждений.\n"
+    "- В конце: 2-3 хэштега через пробел (например: {club_hashtags}).\n\n"
     "ТОНАЛЬНОСТЬ И СТИЛЬ:\n"
     "- Боевой, страстный, фанатский, энергичный дух («Вперёд, Орлы!», «Только победа!»).\n"
-    "- Живой спортивный язык (без канцелярита и скучных отчётов).\n"
-    "- Обязательно используй клубные эмодзи {club_emojis}.\n"
-    "- В конце добавь 2-3 клубных хэштега (например: {club_hashtags}).\n\n"
-    "ФОРМАТИРОВАНИЕ (СТРОГО):\n"
+    "- Живой спортивный язык без канцелярита.\n"
+    "- Обязательно используй клубные эмодзи {club_emojis}.\n\n"
+    "ФОРМАТИРОВАНИЕ:\n"
     "- Используй ТОЛЬКО Telegram HTML: <b>жирный</b>, <i>курсив</i>, <code>код</code>. "
     "Никакого Markdown! Запрещены символы ** и решётки # в качестве заголовков.\n"
     "- Достоверность: используй ТОЛЬКО те цифры, авторов голов, счёта и соперников, которые переданы в JSON. "
     "Ничего не выдумывай от себя.\n"
+    "- СТРОГО: выдавай СРАЗУ готовый текст поста для Telegram-канала без каких-либо служебных пояснений, мыслей и вступительных слов.\n"
 )
 
 
 def _build_system_instruction(payload: dict) -> str:
     club = payload.get("club", {})
     mgr = payload.get("manager") or {}
-    mgr_name = f"@{mgr['username']}" if mgr.get("username") else (mgr.get("name") or "@sp1r1tVSA")
+    req_user = payload.get("request_user", "")
+    mgr_name = f"@{mgr['username']}" if mgr.get("username") else (mgr.get("name") or req_user or "@sp1r1tVSA")
     hashtags = " ".join(club.get("hashtags", ["#ЛоговоФифарей"]))
+    user_ctx = f"Пользователь / тренер: {req_user}." if req_user else ""
 
     return _SMM_BASE_INSTRUCTION.format(
         club_name=club.get("name", "Бешикташ"),
         manager_name=mgr_name,
         club_emojis=club.get("emojis", "🦅⚪⚫"),
         club_hashtags=hashtags,
+        user_context=user_ctx,
     )
 
 
 def _get_task_instruction(post_type: str, custom_brief: str = "", for_caption: bool = False) -> str:
-    length_rule = (
-        "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Текст поста должен состоять РОВНО ИЗ ОДНОГО ЁМКОГО АБЗАЦА (3-4 коротких предложения, до 350-400 символов)! "
-        "Никаких длинных сочинений. Только Заголовок (1 строка) -> Один абзац сути -> Хэштеги."
+    format_rule = (
+        "ТРЕБОВАНИЕ К ФОРМАТУ: 1 строка заголовок -> 1 плотный абзац (3-4 предложения, до 350-400 символов) -> хэштеги. "
+        "Пиши сразу готовый текст поста."
     )
 
     if post_type == "matchday":
         return (
-            "ЗАДАЧА: Напиши КОРОТКИЙ анонс MATCHDAY строго в ОДИН АБЗАЦ!\n"
-            "Суть: соперник, турнир, важность победы и боевой призыв к болельщикам.\n"
-            f"{length_rule}"
+            "ЗАДАЧА: Напиши короткий боевой анонс MATCHDAY.\n"
+            "Суть: соперник, турнир, важность победы и призыв поддержать орлов.\n"
+            f"{format_rule}"
         )
     elif post_type == "recap":
         return (
-            "ЗАДАЧА: Напиши КОРОТКИЕ итоги последнего матча строго в ОДИН АБЗАЦ!\n"
+            "ЗАДАЧА: Напиши короткие итоги последнего матча.\n"
             "Суть: итоговый счёт, кто забил/MVP и победные эмоции команды.\n"
-            f"{length_rule}"
+            f"{format_rule}"
         )
     elif post_type == "standings":
         return (
-            "ЗАДАЧА: Напиши КОРОТКИЙ обзор таблицы и формы команды строго в ОДИН АБЗАЦ!\n"
-            "Суть: место в дивизионе, набранные очки, серия побед/форма и настрой рвать дальше.\n"
-            f"{length_rule}"
+            "ЗАДАЧА: Напиши короткий обзор таблицы и формы команды.\n"
+            "Суть: место в дивизионе, очки, серия/форма и настрой рвать дальше.\n"
+            f"{format_rule}"
         )
     elif post_type == "spotlight":
         return (
-            "ЗАДАЧА: Напиши КОРОТКИЙ пост о лидере команды строго в ОДИН АБЗАЦ!\n"
-            "Суть: имя звезды клуба, его голы/ассисты и ключевое влияние на победы.\n"
-            f"{length_rule}"
+            "ЗАДАЧА: Напиши короткий пост о лидере команды.\n"
+            "Суть: имя звезды клуба, голы/ассисты и влияние на игру.\n"
+            f"{format_rule}"
         )
     else:  # custom
-        brief_text = f"ТЕМА ОТ ТРЕНЕРА:\n{custom_brief}\n\n" if custom_brief else ""
+        brief_text = f"ТЕМА ПОСТА ОТ ТРЕНЕРА:\n{custom_brief}\n\n" if custom_brief else ""
         return (
-            "ЗАДАЧА: Напиши КОРОТКИЙ клубный пост по теме тренера строго в ОДИН АБЗАЦ!\n"
+            "ЗАДАЧА: Напиши короткий клубный пост для публикации по теме тренера.\n"
             f"{brief_text}"
-            f"{length_rule}"
+            f"{format_rule}"
         )
 
 
@@ -390,6 +441,7 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
 
     base_url = getattr(config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
     models = get_ordered_openrouter_models()
+    budget_tokens = max(max_tokens, 1500)
 
     for model in models:
         payload = {
@@ -399,7 +451,8 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
                 {"role": "user", "content": user_text},
             ],
             "temperature": 0.8,
-            "max_tokens": max_tokens,
+            "max_tokens": budget_tokens,
+            "reasoning": {"effort": "none", "exclude": True},
         }
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -417,10 +470,15 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
                 data = json.loads(resp.read().decode("utf-8"))
             choice = data["choices"][0]
             msg = choice.get("message", {})
-            text = msg.get("content") or msg.get("reasoning") or ""
-            if text and len(text.strip()) > 40:
-                clean = text.replace("**", "").replace("#", "")
+            # Берем исключительно content, ни в коем случае не reasoning
+            raw_text = msg.get("content") or ""
+            clean = _clean_smm_text(raw_text)
+            if clean and len(clean.strip()) > 30 and not _is_meta_reasoning(clean):
                 return clean.strip(), model
+            else:
+                logger.warning(
+                    f"OpenRouter SMM: model '{model}' returned empty or reasoning-only content (len={len(clean)}). Trying next..."
+                )
         except urllib.error.HTTPError as e:
             if e.code == 404:
                 _dead_openrouter_models.add(model)
@@ -442,7 +500,8 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
                 {"role": "user", "content": user_text},
             ],
             "temperature": 0.8,
-            "max_tokens": max_tokens,
+            "max_tokens": budget_tokens,
+            "reasoning": {"effort": "none", "exclude": True},
         }
         body = json.dumps(payload).encode("utf-8")
         req = urllib.request.Request(
@@ -460,9 +519,9 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
                 data = json.loads(resp.read().decode("utf-8"))
             choice = data["choices"][0]
             msg = choice.get("message", {})
-            text = msg.get("content") or msg.get("reasoning") or ""
-            if text and len(text.strip()) > 40:
-                clean = text.replace("**", "").replace("#", "")
+            raw_text = msg.get("content") or ""
+            clean = _clean_smm_text(raw_text)
+            if clean and len(clean.strip()) > 30 and not _is_meta_reasoning(clean):
                 return clean.strip(), "openrouter/free"
         except Exception as e:
             logger.warning(f"OpenRouter SMM: fallback 'openrouter/free' failed: {e}")
@@ -483,6 +542,7 @@ def _call_gemini_text(system_text: str, user_text: str, max_tokens: int, audio_b
     opener = _get_gemini_opener()
     base_url = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
     models = getattr(config, "GEMINI_SMM_MODELS", ["gemini-2.5-flash", "gemini-3.5-flash-lite"])
+    budget_tokens = max(max_tokens, 1500)
 
     user_parts = []
     if audio_bytes:
@@ -497,7 +557,11 @@ def _call_gemini_text(system_text: str, user_text: str, max_tokens: int, audio_b
     payload = {
         "system_instruction": {"parts": [{"text": system_text}]},
         "contents": [{"role": "user", "parts": user_parts}],
-        "generationConfig": {"temperature": 0.8, "maxOutputTokens": max_tokens},
+        "generationConfig": {
+            "temperature": 0.8,
+            "maxOutputTokens": budget_tokens,
+            "thinkingConfig": {"thinkingBudget": 0},
+        },
     }
     body = json.dumps(payload).encode("utf-8")
 
@@ -511,13 +575,19 @@ def _call_gemini_text(system_text: str, user_text: str, max_tokens: int, audio_b
             try:
                 with opener.open(req, timeout=25) as resp:
                     res = json.loads(resp.read().decode("utf-8"))
-                candidate = res.get("candidates", [{}])[0]
+                if not res.get("candidates"):
+                    continue
+                candidate = res["candidates"][0]
+                # Отфильтровываем служебные блоки мыслей (thought)
                 parts = candidate.get("content", {}).get("parts", [])
-                text = "".join(p.get("text", "") for p in parts if not p.get("thought")).strip()
-                if not text and parts:
-                    text = parts[-1].get("text", "").strip()
-                if text:
-                    return text.replace("**", "").replace("#", ""), model
+                text_parts = [p.get("text", "") for p in parts if not p.get("thought")]
+                text = "".join(text_parts).strip()
+                if not text:
+                    logger.warning(f"Gemini SMM: model '{model}' generated only thoughts, skipping...")
+                    continue
+                clean = _clean_smm_text(text)
+                if clean and len(clean.strip()) > 30 and not _is_meta_reasoning(clean):
+                    return clean.strip(), model
             except urllib.error.HTTPError as e:
                 logger.warning(f"Gemini SMM: model '{model}' HTTP {e.code}, trying next...")
                 continue
@@ -537,6 +607,7 @@ def generate_club_post(
     audio_bytes: bytes = None,
     audio_mime: str = "audio/ogg",
     for_caption: bool = False,
+    user_name: str = "",
 ) -> str:
     """
     Генерирует текст поста.
@@ -546,6 +617,8 @@ def generate_club_post(
       3. Шаблонный аналитический пост из базы данных
     """
     payload = get_club_smm_payload(team_name)
+    if user_name:
+        payload["request_user"] = user_name
     system_text = _build_system_instruction(payload)
     task_text = _get_task_instruction(post_type, custom_brief, for_caption)
     user_text = f"{task_text}\n\nАКТУАЛЬНЫЕ ДАННЫЕ КЛУБА (JSON):\n{json.dumps(payload, ensure_ascii=False)}"
@@ -567,7 +640,7 @@ def generate_club_post(
 
     # 4. Фолбэк на шаблонную аналитику
     logger.warning("Club SMM: All AI providers failed. Using database stats template.")
-    return _build_fallback_post(payload, post_type, for_caption)
+    return _build_fallback_post(payload, post_type, for_caption, custom_brief=custom_brief)
 
 
 # ─── Генерация фото через OpenRouter Image API ──────────────────────────────
@@ -716,7 +789,7 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
 
 # ─── Фолбэк на шаблонную аналитику ──────────────────────────────────────────
 
-def _build_fallback_post(payload: dict, post_type: str, for_caption: bool = False) -> str:
+def _build_fallback_post(payload: dict, post_type: str, for_caption: bool = False, custom_brief: str = "") -> str:
     """Шаблонный аналитический пост из базы данных."""
     club = payload.get("club", {})
     canon = club.get("name", "Бешикташ")
@@ -725,6 +798,16 @@ def _build_fallback_post(payload: dict, post_type: str, for_caption: bool = Fals
     st = payload.get("standings") or {}
     last_m = payload.get("last_match")
     next_m = payload.get("next_match")
+
+    if post_type == "custom" and custom_brief:
+        clean_brief = custom_brief.replace("\n", " ").strip()
+        return (
+            f"{emojis} <b>КЛУБНЫЕ НОВОСТИ: {canon.upper()}</b>\n\n"
+            f"⚡ {clean_brief}! «Чёрные орлы» открывают новую главу в турнире «Логово Фифарей». "
+            f"Впереди тактическая перезагрузка, максимальная концентрация на победах и бескомпромиссная битва "
+            f"за высшие места в таблице. Болельщики, только вперёд!\n\n"
+            f"{hashtags}"
+        )
 
     if post_type == "recap" and last_m:
         res_emoji = "✅ ПОБЕДА!" if last_m["result"] == "win" else ("🤝 НИЧЬЯ" if last_m["result"] == "draw" else "⚡ РЕЗУЛЬТАТ")
@@ -1001,21 +1084,21 @@ def generate_stage_post(
                 all_scorers.extend(m["club_goals"])
             scorers_str = ", ".join(dict.fromkeys(all_scorers)) or "команда"
             task_text = (
-                f"ЗАДАЧА: Напиши КОРОТКИЙ победный/боевой обзор кубковой стадии {cup_stage} против {opp} СТРОГО В ОДИН АБЗАЦ!\n"
+                f"ЗАДАЧА: Напиши КОРОТКИЙ победный/боевой обзор кубковой стадии {cup_stage} против {opp}!\n"
                 f"Факты: серия завершена со счётом {my_wins}:{opp_wins} (игры: {games_str}). {outcome_str} Голы: {scorers_str}.\n"
-                "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Заголовок -> ОДИН плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги."
+                "ТРЕБОВАНИЕ К ФОРМАТУ: Заголовок (1 строка) -> 1 плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги. Пиши сразу готовый текст поста."
             )
         elif any_done:
             task_text = (
-                f"ЗАДАЧА: Напиши КОРОТКИЙ пост о ходе кубковой серии {cup_stage} против {opp} СТРОГО В ОДИН АБЗАЦ!\n"
+                f"ЗАДАЧА: Напиши КОРОТКИЙ пост о ходе кубковой серии {cup_stage} против {opp}!\n"
                 f"Факты: серия продолжается, сыграно матчей: {len(matches)}.\n"
-                "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Заголовок -> ОДИН плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги."
+                "ТРЕБОВАНИЕ К ФОРМАТУ: Заголовок (1 строка) -> 1 плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги. Пиши сразу готовый текст поста."
             )
         else:
             task_text = (
-                f"ЗАДАЧА: Напиши КОРОТКИЙ боевой анонс кубковой битвы стадии {cup_stage} против {opp} СТРОГО В ОДИН АБЗАЦ!\n"
+                f"ЗАДАЧА: Напиши КОРОТКИЙ боевой анонс кубковой битвы стадии {cup_stage} против {opp}!\n"
                 f"Факты: предстоит серия на вылет за кубковый трофей.\n"
-                "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Заголовок -> ОДИН плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги."
+                "ТРЕБОВАНИЕ К ФОРМАТУ: Заголовок (1 строка) -> 1 плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги. Пиши сразу готовый текст поста."
             )
     else:
         # Тур чемпионата
@@ -1025,15 +1108,15 @@ def generate_stage_post(
             scorers_str = ", ".join(m["club_goals"]) or "команда"
             mvp_str = f", MVP матча: {m['mvp_player']}" if m.get("mvp_player") else ""
             task_text = (
-                f"ЗАДАЧА: Напиши КОРОТКИЙ обзор сыгранного Тура {round_number} против {opp} СТРОГО В ОДИН АБЗАЦ!\n"
+                f"ЗАДАЧА: Напиши КОРОТКИЙ обзор сыгранного Тура {round_number} против {opp}!\n"
                 f"Факты: результат — {res}, счёт {m['my_score']}:{m['opp_score']}. Авторы голов: {scorers_str}{mvp_str}.\n"
-                "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Заголовок -> ОДИН плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги."
+                "ТРЕБОВАНИЕ К ФОРМАТУ: Заголовок (1 строка) -> 1 плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги. Пиши сразу готовый текст поста."
             )
         else:
             task_text = (
-                f"ЗАДАЧА: Напиши КОРОТКИЙ боевой анонс предстоящего Тура {round_number} против {opp} СТРОГО В ОДИН АБЗАЦ!\n"
+                f"ЗАДАЧА: Напиши КОРОТКИЙ боевой анонс предстоящего Тура {round_number} против {opp}!\n"
                 f"Факты: важнейшая встреча в борьбе за очки турнирной таблицы.\n"
-                "ТРЕБОВАНИЕ К ОБЪЁМУ (СТРОГО): Заголовок -> ОДИН плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги."
+                "ТРЕБОВАНИЕ К ФОРМАТУ: Заголовок (1 строка) -> 1 плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги. Пиши сразу готовый текст поста."
             )
 
     user_text = f"{task_text}\n\nДАННЫЕ (JSON):\n{json.dumps(stage_payload, ensure_ascii=False)}"

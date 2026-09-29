@@ -158,63 +158,97 @@ class TestClubSmmMultiProviderText(unittest.TestCase):
             self.assertIn("Матчдэй от Llama 3.3", text)
             self.assertIsNotNone(model)
 
-class TestClubSmmGeminiImageMock(unittest.TestCase):
+    def test_clean_smm_text_strips_think_tags(self):
+        raw = "<think>Нужно написать пост про тренера\nШаг 1: анализ</think>🦅 <b>Новая эра Бешикташа!</b>\n\nВперёд к победам! #Besiktas"
+        clean = club_smm_service._clean_smm_text(raw)
+        self.assertNotIn("think", clean)
+        self.assertNotIn("анализ", clean)
+        self.assertIn("🦅 <b>Новая эра Бешикташа!</b>", clean)
+        self.assertIn("#Besiktas", clean)
+
+    def test_clean_smm_text_strips_unclosed_think_tag(self):
+        raw = "<think>Нужно ответить пользователю на русском. Задача: написать короткий клубный пост"
+        clean = club_smm_service._clean_smm_text(raw)
+        self.assertEqual(clean, "")
+
+    def test_is_meta_reasoning_detects_chain_of_thought(self):
+        leaked_cot = (
+            "Нужно ответить пользователю на русском. Задача: написать короткий клубный пост "
+            "по теме тренера строго в один абзац. Требования: структура: Заголовок -> один плотный абзац."
+        )
+        self.assertTrue(club_smm_service._is_meta_reasoning(leaked_cot))
+
+        valid_post = (
+            "🦅 <b>ОФИЦИАЛЬНО: НОВЫЙ ТРЕНЕР «БЕШИКТАША»!</b>\n\n"
+            "Клуб объявляет о назначении нового рулевого. Впереди великие победы! #Besiktas"
+        )
+        self.assertFalse(club_smm_service._is_meta_reasoning(valid_post))
+
+    @patch("urllib.request.urlopen")
+    def test_openrouter_skips_reasoning_only_response(self, mock_urlopen):
+        # 1-я модель возвращает только reasoning без content
+        resp1 = {
+            "choices": [{
+                "message": {
+                    "content": "",
+                    "reasoning": "Нужно ответить пользователю на русском. Задача: написать пост..."
+                }
+            }]
+        }
+        # 2-я модель возвращает нормальный content
+        resp2 = {
+            "choices": [{
+                "message": {
+                    "content": "🦅 <b>Орлы взлетают!</b>\n\nТолько вперёд, только победа! #Besiktas"
+                }
+            }]
+        }
+        mock_r1 = MagicMock()
+        mock_r1.read.return_value = json.dumps(resp1).encode("utf-8")
+        mock_r1.__enter__.return_value = mock_r1
+
+        mock_r2 = MagicMock()
+        mock_r2.read.return_value = json.dumps(resp2).encode("utf-8")
+        mock_r2.__enter__.return_value = mock_r2
+
+        mock_urlopen.side_effect = [mock_r1, mock_r2]
+
+        with patch.object(config, "OPENROUTER_API_KEY", "fake_openrouter_key"):
+            text, model = club_smm_service._call_openrouter_text("System", "User", 1500)
+            self.assertIsNotNone(text)
+            self.assertNotIn("Нужно ответить", text)
+            self.assertIn("Орлы взлетают!", text)
+
     @patch("services.club_smm_service.get_ordered_gemini_keys", return_value=["test_api_key"])
     @patch("services.ai.ai_recognizer._get_gemini_opener")
-    def test_generate_club_ai_photo_generate_images(self, mock_opener_fn, mock_keys):
-        fake_image_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest_image_bytes"
-        fake_b64 = base64.b64encode(fake_image_bytes).decode("utf-8")
-        fake_response = {
-            "generatedImages": [{
-                "image": {
-                    "imageBytes": fake_b64,
+    def test_gemini_skips_thought_only_candidate(self, mock_opener_fn, mock_keys):
+        resp_data = {
+            "candidates": [{
+                "content": {
+                    "parts": [
+                        {"thought": True, "text": "Размышления модели: нужно составить пост..."}
+                    ]
                 }
             }]
         }
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(fake_response).encode("utf-8")
+        mock_resp.read.return_value = json.dumps(resp_data).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
-
         mock_opener = MagicMock()
         mock_opener.open.return_value = mock_resp
         mock_opener_fn.return_value = mock_opener
 
+        text, model = club_smm_service._call_gemini_text("System", "User", 1500)
+        self.assertIsNone(text)
+
+
+class TestClubSmmVisualFallback(unittest.TestCase):
+    @patch("services.club_smm_service._call_openrouter_image", return_value=(None, None))
+    def test_generate_club_ai_photo_falls_back_to_pillow(self, mock_or_img):
         buf = club_smm_service.generate_club_ai_photo("Бешикташ", post_type="matchday")
         self.assertIsNotNone(buf)
-        self.assertEqual(buf.getvalue(), fake_image_bytes)
-
-    @patch("services.club_smm_service.get_ordered_gemini_keys", return_value=["test_api_key"])
-    @patch("services.ai.ai_recognizer._get_gemini_opener")
-    def test_generate_club_ai_photo_generate_content(self, mock_opener_fn, mock_keys):
-        fake_image_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRtest_image_bytes"
-        fake_b64 = base64.b64encode(fake_image_bytes).decode("utf-8")
-        # First call (generateImages) fails with 404, second call (generateContent) succeeds
-        mock_resp_err = MagicMock()
-        mock_resp_err.read.return_value = b"{}"
-
-        fake_response = {
-            "candidates": [{
-                "content": {
-                    "parts": [{
-                        "inlineData": {
-                            "mimeType": "image/png",
-                            "data": fake_b64,
-                        }
-                    }]
-                }
-            }]
-        }
-        mock_resp_ok = MagicMock()
-        mock_resp_ok.read.return_value = json.dumps(fake_response).encode("utf-8")
-        mock_resp_ok.__enter__.return_value = mock_resp_ok
-
-        mock_opener = MagicMock()
-        mock_opener.open.side_effect = [Exception("generateImages 404"), mock_resp_ok]
-        mock_opener_fn.return_value = mock_opener
-
-        buf = club_smm_service.generate_club_ai_photo("Бешикташ", post_type="matchday")
-        self.assertIsNotNone(buf)
-        self.assertEqual(buf.getvalue(), fake_image_bytes)
+        # Pillow retina PNG
+        self.assertTrue(buf.getvalue().startswith(b"\x89PNG\r\n\x1a\n"))
 
 
 class TestChannelNormalization(unittest.TestCase):

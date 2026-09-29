@@ -32,7 +32,7 @@ from services.poisson_odds import calculate_match_lambdas
 logger = logging.getLogger(__name__)
 
 # Меняется при любой правке модели — все рынки пересчитаются на следующем прогоне.
-MODEL_VERSION = 2
+MODEL_VERSION = 3
 
 REFRESH_INTERVAL_SECONDS = 120
 
@@ -310,6 +310,7 @@ def price_top_scorer(ctx: _Context, division_id: int | None, fingerprint: str,
             "model_odds": engine.price(p),
             "eliminated": dead or p <= 0,
             "sort_order": order,
+            "goals": int(t["goals"]),
         })
     selections.append({
         "key": database.OUTRIGHT_OTHER_KEY,

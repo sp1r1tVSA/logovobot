@@ -9473,7 +9473,9 @@ def _fold_player_rows(cursor: sqlite3.Cursor, rows, fields: tuple[str, ...]) -> 
     return list(merged.values())
 
 
-def _club_player_event_totals(cursor: sqlite3.Cursor, canon: str, roster: list[str], season_id: int) -> list[dict]:
+def _club_player_event_totals(
+    cursor: sqlite3.Cursor, canon: str, roster: list[str], season_id: int, tournament_type: str | None = None
+) -> list[dict]:
     """Season goals/assists of one club's players, each spelling folded onto its squad name.
 
     Events keep the name as it was recognized, so one footballer can sit under
@@ -9481,7 +9483,13 @@ def _club_player_event_totals(cursor: sqlite3.Cursor, canon: str, roster: list[s
     him twice. A spelling that stands for no squad player is kept, merged only
     with spellings of the same normalized key.
     """
-    cursor.execute("""
+    where_extra = ""
+    if tournament_type == "cup":
+        where_extra = " AND m.tournament_type = 'cup'"
+    elif tournament_type == "league":
+        where_extra = " AND (m.tournament_type IS NULL OR m.tournament_type = 'league' OR m.tournament_type = '')"
+
+    cursor.execute(f"""
         SELECT
             me.player_name, me.team_name,
             COALESCE(SUM(CASE WHEN me.event_type = 'goal' THEN me.count ELSE 0 END), 0) AS goals,
@@ -9490,6 +9498,7 @@ def _club_player_event_totals(cursor: sqlite3.Cursor, canon: str, roster: list[s
         JOIN matches m ON me.match_id = m.id
         WHERE m.status = 'confirmed'
           AND (m.season_id = ? OR m.season_id IS NULL)
+          {where_extra}
         GROUP BY me.team_name, me.player_name
         ORDER BY MIN(me.id) ASC
     """, (season_id,))
@@ -17301,13 +17310,16 @@ def _shape_cabinet_match(row: sqlite3.Row | dict, team_name: str, telegram_id: i
     has_photo = bool(d.get("photo_id"))
     # У кубковой игры round_number = -1: подписывать её надо этапом и номером игры.
     is_cup = match_is_cup(d)
+    round_is_open = bool(d["round_is_open"]) if d.get("round_is_open") is not None else True
     return {
         "id": d.get("id"),
         "round_number": d.get("round_number"),
+        "tournament_type": "cup" if is_cup else "league",
         "is_cup": is_cup,
         "cup_stage": d.get("cup_stage") if is_cup else None,
         "game_num": d.get("game_num_in_series") if is_cup else None,
         "deadline": None,  # заполняется вызывающим из rounds
+        "round_is_open": round_is_open,
         "opponent_team": opponent_team,
         "opponent_user": opponent_user,
         "is_home": bool(is_home),
@@ -17338,7 +17350,9 @@ def _attach_round_deadlines(matches: list[dict], division_id: int | None) -> Non
         m["deadline"] = cache[r_num]
 
 
-def get_cabinet_matches(telegram_id: int, limit: int = 20) -> list[dict]:
+def get_cabinet_matches(
+    telegram_id: int, limit: int = 100, only_open: bool = True, tournament_type: str | None = None
+) -> list[dict]:
     """Active (unplayed / reported / disputed) matches of a coach's club."""
     with transaction() as conn:
         cursor = conn.cursor()
@@ -17349,35 +17363,55 @@ def get_cabinet_matches(telegram_id: int, limit: int = 20) -> list[dict]:
         team = u_row["team_name"]
         div_id = u_row["division_id"] if "division_id" in u_row.keys() else None
 
-        cursor.execute(
-            """
+        where_parts = [
+            "(LOWER(m.player1_team) = LOWER(?) OR LOWER(m.player2_team) = LOWER(?))",
+            "m.status IN (?, ?, ?)",
+            "COALESCE(m.is_series_header, 0) = 0",
+        ]
+        params: list = [team, team, *CABINET_ACTIVE_MATCH_STATUSES]
+
+        if tournament_type == "cup":
+            where_parts.append("m.tournament_type = 'cup'")
+        elif tournament_type == "league":
+            where_parts.append("(m.tournament_type IS NULL OR m.tournament_type = 'league' OR m.tournament_type = '')")
+
+        if only_open:
+            where_parts.append("(r.is_open = 1 OR cs.is_open = 1)")
+
+        query = f"""
             SELECT
                 m.id, m.round_number, m.status, m.photo_id,
-                m.tournament_type, m.cup_stage, m.game_num_in_series,
+                COALESCE(m.tournament_type, 'league') AS tournament_type,
+                m.cup_stage, m.game_num_in_series,
                 m.player1_team, m.player2_team, m.player1_score, m.player2_score,
                 m.proposed_time, m.proposed_by, COALESCE(m.time_status, 'none') AS time_status,
-                u1.username AS player1_username, u2.username AS player2_username
+                u1.username AS player1_username, u2.username AS player2_username,
+                r.is_open AS round_is_open, r.deadline AS round_deadline
             FROM matches m
-            JOIN rounds r ON m.round_number = r.round_number
+            LEFT JOIN rounds r ON m.round_number = r.round_number
                 AND COALESCE(m.division_id, 1) = COALESCE(r.division_id, 1)
                 AND (m.season_id = r.season_id OR m.season_id IS NULL)
+            LEFT JOIN cup_stages cs ON m.stage_id = cs.id
             LEFT JOIN users u1 ON LOWER(m.player1_team) = LOWER(u1.team_name)
             LEFT JOIN users u2 ON LOWER(m.player2_team) = LOWER(u2.team_name)
-            WHERE (LOWER(m.player1_team) = LOWER(?) OR LOWER(m.player2_team) = LOWER(?))
-              AND m.status IN (?, ?, ?)
-              AND r.is_open = 1
-            ORDER BY m.round_number ASC, m.id ASC
+            WHERE {" AND ".join(where_parts)}
+            ORDER BY
+                CASE WHEN m.tournament_type = 'cup' THEN 1 ELSE 0 END ASC,
+                CASE WHEN m.round_number > 0 THEN m.round_number ELSE 999 END ASC,
+                m.id ASC
             LIMIT ?
-            """,
-            (team, team, *CABINET_ACTIVE_MATCH_STATUSES, limit)
-        )
+        """
+        params.append(limit)
+        cursor.execute(query, params)
         matches = [_shape_cabinet_match(row, team, telegram_id) for row in cursor.fetchall()]
 
     _attach_round_deadlines(matches, div_id)
     return matches
 
 
-def get_cabinet_recent_matches(telegram_id: int, limit: int = 5) -> list[dict]:
+def get_cabinet_recent_matches(
+    telegram_id: int, limit: int = 100, tournament_type: str | None = None
+) -> list[dict]:
     """Most recently finished (confirmed) matches of a coach's club."""
     with transaction() as conn:
         cursor = conn.cursor()
@@ -17388,46 +17422,54 @@ def get_cabinet_recent_matches(telegram_id: int, limit: int = 5) -> list[dict]:
         team = u_row["team_name"]
         div_id = u_row["division_id"] if "division_id" in u_row.keys() else None
 
-        cursor.execute(
-            """
+        where_parts = [
+            "(LOWER(m.player1_team) = LOWER(?) OR LOWER(m.player2_team) = LOWER(?))",
+            "m.status = 'confirmed'",
+            "COALESCE(m.is_series_header, 0) = 0",
+        ]
+        params: list = [team, team]
+
+        if tournament_type == "cup":
+            where_parts.append("m.tournament_type = 'cup'")
+        elif tournament_type == "league":
+            where_parts.append("(m.tournament_type IS NULL OR m.tournament_type = 'league' OR m.tournament_type = '')")
+
+        query = f"""
             SELECT
                 m.id, m.round_number, m.status, m.photo_id,
-                m.tournament_type, m.cup_stage, m.game_num_in_series,
+                COALESCE(m.tournament_type, 'league') AS tournament_type,
+                m.cup_stage, m.game_num_in_series,
                 m.player1_team, m.player2_team, m.player1_score, m.player2_score,
                 m.proposed_time, m.proposed_by, COALESCE(m.time_status, 'none') AS time_status,
-                u1.username AS player1_username, u2.username AS player2_username
+                u1.username AS player1_username, u2.username AS player2_username,
+                r.is_open AS round_is_open, r.deadline AS round_deadline
             FROM matches m
+            LEFT JOIN rounds r ON m.round_number = r.round_number
+                AND COALESCE(m.division_id, 1) = COALESCE(r.division_id, 1)
+                AND (m.season_id = r.season_id OR m.season_id IS NULL)
             LEFT JOIN users u1 ON LOWER(m.player1_team) = LOWER(u1.team_name)
             LEFT JOIN users u2 ON LOWER(m.player2_team) = LOWER(u2.team_name)
-            WHERE (LOWER(m.player1_team) = LOWER(?) OR LOWER(m.player2_team) = LOWER(?))
-              AND m.status = 'confirmed'
+            WHERE {" AND ".join(where_parts)}
             ORDER BY m.played_at DESC, m.id DESC
             LIMIT ?
-            """,
-            (team, team, limit)
-        )
+        """
+        params.append(limit)
+        cursor.execute(query, params)
         matches = [_shape_cabinet_match(row, team, telegram_id) for row in cursor.fetchall()]
 
     _attach_round_deadlines(matches, div_id)
     return matches
 
 
-def get_cabinet_squad_stats(team_name: str) -> dict:
-    """Club roster with per-player goal/assist totals from confirmed matches.
-
-    Отличается от `get_club_squad_stats` (её использует бот-кабинет и карточка
-    клуба): здесь добавлены позиции и лидеры клуба, а ответ — словарь, а не
-    список, поэтому это отдельная функция, а не замена существующей.
-
-    Жёлтые/красные карточки в схеме не хранятся: `match_events.event_type`
-    ограничен CHECK ('goal', 'assist'), а в `squad_players` карточных колонок нет.
-    Поля отдаются нулями, чтобы контракт API оставался стабильным.
-
-    Голы и ассисты считает тот же `_club_player_event_totals`, что и карточка
-    клуба: сезон активный, а разные написания одного игрока ('Emegha' из OCR и
-    'EMEGA' из заявки) сводятся к имени из состава. Корона сводится так же.
-    """
-    empty = {"players": [], "top_scorer": None, "top_assistant": None, "top_mvp": None}
+def get_cabinet_squad_stats(team_name: str, tournament_type: str | None = None) -> dict:
+    """Club roster with per-player goal/assist totals from confirmed matches."""
+    empty = {
+        "players": [],
+        "top_scorer": None,
+        "top_assistant": None,
+        "top_mvp": None,
+        "tournament_type": tournament_type or "all",
+    }
     if not team_name:
         return empty
 
@@ -17440,20 +17482,22 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
     with transaction() as conn:
         cursor = conn.cursor()
         squad_names = [p["player_name"] for p in roster if p.get("player_name")]
-        event_totals = _club_player_event_totals(cursor, canon, squad_names, season_id)
+        event_totals = _club_player_event_totals(cursor, canon, squad_names, season_id, tournament_type=tournament_type)
 
         # 👑 Награды «Игрок матча» во всех подтверждённых матчах клуба.
-        # Корона могла достаться сопернику, поэтому принадлежность проверяется
-        # прямо в запросе: имя должно быть либо в событиях этого клуба в том же
-        # матче, либо в его заявленном составе. Имя, не подошедшее ни одному
-        # клубу, не засчитывается никому — это надёжнее, чем отдать корону
-        # тёзке из другой команды.
+        mvp_extra = ""
+        if tournament_type == "cup":
+            mvp_extra = " AND m.tournament_type = 'cup'"
+        elif tournament_type == "league":
+            mvp_extra = " AND (m.tournament_type IS NULL OR m.tournament_type = 'league' OR m.tournament_type = '')"
+
         cursor.execute(
-            """
+            f"""
             SELECT TRIM(m.mvp_player) AS player_name, COUNT(*) AS total
             FROM matches m
             WHERE m.status = 'confirmed'
               AND (m.season_id = ? OR m.season_id IS NULL)
+              {mvp_extra}
               AND m.mvp_player IS NOT NULL
               AND TRIM(m.mvp_player) <> ''
               AND (LOWER(TRIM(m.player1_team)) = LOWER(TRIM(?))
@@ -17479,8 +17523,7 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
     def _key(name: str) -> str:
         return normalize_player_name_key(name) or name.strip().lower()
 
-    # Одна строка на игрока, ключ — нормализованное имя. Порядок: заявка, затем
-    # бомбардиры, распознанные OCR раньше, чем состав попал в squad_players.
+    # Одна строка на игрока, ключ — нормализованное имя.
     by_key: dict[str, dict] = {}
 
     def _row(name: str, position: str | None = None) -> dict:
@@ -17502,9 +17545,6 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
         row["goals"] += t["goals"]
         row["assists"] += t["assists"]
 
-    # Корона сводится к тем же строкам: сперва к имени из заявки, затем к
-    # написанию из событий. Игрока без очков и вне заявки (вратарь, защитник)
-    # она всё равно показывает — без своей строки его награда исчезла бы.
     known_names = [r["player_name"] for r in by_key.values()]
     for mvp_name, total in raw_mvps.items():
         name = (
@@ -17533,7 +17573,135 @@ def get_cabinet_squad_stats(team_name: str) -> dict:
         "top_scorer": top_scorer,
         "top_assistant": top_assistant,
         "top_mvp": top_mvp,
+        "tournament_type": tournament_type or "all",
     }
+
+
+def get_cabinet_squad_all_scopes(team_name: str) -> dict:
+    """Club roster with stats scoped by tournament (all, league, cup)."""
+    stats_all = get_cabinet_squad_stats(team_name, tournament_type=None)
+    stats_league = get_cabinet_squad_stats(team_name, tournament_type="league")
+    stats_cup = get_cabinet_squad_stats(team_name, tournament_type="cup")
+    return {
+        **stats_all,
+        "by_tournament": {
+            "all": stats_all,
+            "league": stats_league,
+            "cup": stats_cup,
+        },
+    }
+
+
+def get_club_cup_summary(team_name: str, season_id: int | None = None) -> dict:
+    """Cup summary for club cabinet: series progress, games played, wins, losses, goals."""
+    empty = {
+        "has_cup": False,
+        "stage": None,
+        "status": "none",
+        "series": None,
+        "played": 0,
+        "wins": 0,
+        "losses": 0,
+        "draws": 0,
+        "goals_scored": 0,
+        "goals_conceded": 0,
+        "goal_diff": 0,
+    }
+    if not team_name:
+        return empty
+    canon = resolve_team_name(team_name) or team_name.strip()
+    act = get_active_season()
+    s_id = season_id or (act["id"] if act else 1)
+
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT cs.id, cs.stage, cs.series_num, cs.team1_name, cs.team2_name,
+                   cs.team1_wins, cs.team2_wins, cs.winner_name, cs.status,
+                   st.stage AS stage_name
+            FROM cup_series cs
+            LEFT JOIN cup_stages st ON cs.stage_id = st.id
+            WHERE (st.season_id = ? OR st.season_id IS NULL)
+              AND (LOWER(cs.team1_name) = LOWER(?) OR LOWER(cs.team2_name) = LOWER(?))
+            ORDER BY cs.id DESC
+            LIMIT 1
+        """, (s_id, canon, canon))
+        c_row = cursor.fetchone()
+
+        series_info = None
+        has_cup = False
+        stage_label = None
+        series_status = "none"
+
+        if c_row:
+            has_cup = True
+            is_t1 = teams_match(c_row["team1_name"], canon)
+            opp_name = c_row["team2_name"] if is_t1 else c_row["team1_name"]
+            my_wins = int(c_row["team1_wins"] if is_t1 else c_row["team2_wins"] or 0)
+            opp_wins = int(c_row["team2_wins"] if is_t1 else c_row["team1_wins"] or 0)
+            stage_label = c_row["stage_name"] or c_row["stage"] or "Кубок"
+            winner = c_row["winner_name"]
+            is_winner = bool(winner and teams_match(winner, canon))
+            is_eliminated = bool(winner and not teams_match(winner, canon))
+            if is_winner:
+                series_status = "won"
+            elif is_eliminated:
+                series_status = "eliminated"
+            else:
+                series_status = "active"
+
+            series_info = {
+                "series_id": c_row["id"],
+                "stage": stage_label,
+                "opponent": opp_name,
+                "my_wins": my_wins,
+                "opp_wins": opp_wins,
+                "score": f"{my_wins} : {opp_wins}",
+                "status": series_status,
+                "is_winner": is_winner,
+                "is_eliminated": is_eliminated,
+            }
+
+        cursor.execute("""
+            SELECT
+                COUNT(*) AS played,
+                SUM(CASE WHEN (LOWER(player1_team) = LOWER(?) AND player1_score > player2_score)
+                           OR (LOWER(player2_team) = LOWER(?) AND player2_score > player1_score) THEN 1 ELSE 0 END) AS wins,
+                SUM(CASE WHEN (LOWER(player1_team) = LOWER(?) AND player1_score < player2_score)
+                           OR (LOWER(player2_team) = LOWER(?) AND player2_score < player1_score) THEN 1 ELSE 0 END) AS losses,
+                SUM(CASE WHEN LOWER(player1_team) = LOWER(?) THEN player1_score ELSE player2_score END) AS goals_scored,
+                SUM(CASE WHEN LOWER(player1_team) = LOWER(?) THEN player2_score ELSE player1_score END) AS goals_conceded
+            FROM matches
+            WHERE (tournament_type = 'cup' OR round_number = -1 OR (cup_series_id IS NOT NULL AND cup_series_id > 0))
+              AND status = 'confirmed'
+              AND (season_id = ? OR season_id IS NULL)
+              AND (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?))
+              AND COALESCE(is_series_header, 0) = 0
+        """, (canon, canon, canon, canon, canon, canon, s_id, canon, canon))
+        m_row = cursor.fetchone()
+        cup_played = int(m_row["played"] or 0) if m_row else 0
+        cup_wins = int(m_row["wins"] or 0) if m_row else 0
+        cup_losses = int(m_row["losses"] or 0) if m_row else 0
+        cup_scored = int(m_row["goals_scored"] or 0) if m_row else 0
+        cup_conceded = int(m_row["goals_conceded"] or 0) if m_row else 0
+        cup_diff = cup_scored - cup_conceded
+
+        if cup_played > 0:
+            has_cup = True
+
+        return {
+            "has_cup": has_cup,
+            "stage": stage_label,
+            "status": series_status,
+            "series": series_info,
+            "played": cup_played,
+            "wins": cup_wins,
+            "losses": cup_losses,
+            "draws": 0,
+            "goals_scored": cup_scored,
+            "goals_conceded": cup_conceded,
+            "goal_diff": cup_diff,
+        }
 
 
 def save_draft(draft_uuid: str, draft_data: dict) -> None:
@@ -17636,10 +17804,15 @@ def _ensure_outrights(cursor: sqlite3.Cursor) -> None:
                 CHECK(status IN ('active', 'suspended', 'eliminated', 'won', 'lost')),
             settle_factor REAL,
             sort_order INTEGER NOT NULL DEFAULT 0,
+            goals INTEGER,
             updated_at TIMESTAMP,
             UNIQUE(market_id, selection_key)
         )
     """)
+    try:
+        cursor.execute("ALTER TABLE outright_selections ADD COLUMN goals INTEGER DEFAULT NULL")
+    except sqlite3.OperationalError:
+        pass
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS outright_bets (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -18085,16 +18258,17 @@ def sync_outright_market(
             prob = float(sel.get("probability") or 0.0)
             model_odds = float(sel["model_odds"])
             eliminated = bool(sel.get("eliminated"))
+            goals = sel.get("goals")
             cur = existing.get(key)
             if cur is None:
                 cursor.execute("""
                     INSERT INTO outright_selections
                         (market_id, selection_key, name, team_name, division_id, probability,
-                         model_odds, odds_value, status, sort_order, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
+                         model_odds, odds_value, status, sort_order, goals, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
                 """, (market_id, key, sel["name"], sel.get("team_name"), sel.get("division_id"), prob,
                       model_odds, model_odds, "eliminated" if eliminated else "active",
-                      int(sel.get("sort_order") or 0)))
+                      int(sel.get("sort_order") or 0), goals))
                 if not eliminated:
                     _record_outright_price(cursor, cursor.lastrowid, model_odds, prob)
                 continue
@@ -18106,10 +18280,10 @@ def sync_outright_market(
             cursor.execute("""
                 UPDATE outright_selections
                 SET name = ?, team_name = ?, division_id = ?, probability = ?, model_odds = ?,
-                    odds_value = ?, status = ?, sort_order = ?, updated_at = datetime('now', '+3 hours')
+                    odds_value = ?, status = ?, sort_order = ?, goals = ?, updated_at = datetime('now', '+3 hours')
                 WHERE id = ?
             """, (sel["name"], sel.get("team_name"), sel.get("division_id"), prob, model_odds,
-                  odds_value, status, int(sel.get("sort_order") or 0), cur["id"]))
+                  odds_value, status, int(sel.get("sort_order") or 0), goals, cur["id"]))
             if status == "active" and abs(odds_value - float(cur["odds_value"] or 0)) > 0.001:
                 _record_outright_price(cursor, cur["id"], odds_value, prob)
 

@@ -181,6 +181,29 @@ class TestBoard(OutrightApiCase):
             self.assertIsNone(sel["locked"])
         self.assertAlmostEqual(sum(s["probability"] for s in market["selections"]), 1.0, places=2)
 
+    async def test_board_top_scorer_includes_goals(self):
+        with database.transaction() as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT id, player1_team FROM matches WHERE division_id = ? AND season_id = ? LIMIT 1",
+                (self.ctx["div"], self.ctx["season"])
+            )
+            m_row = cur.fetchone()
+            cur.execute("UPDATE matches SET status = 'confirmed', player1_score = 3, player2_score = 0 WHERE id = ?",
+                        (m_row["id"],))
+            cur.execute(
+                "INSERT INTO match_events (match_id, team_name, player_name, event_type, count) "
+                "VALUES (?, ?, 'Снайпер Тест', 'goal', 3)",
+                (m_row["id"], m_row["player1_team"])
+            )
+        outright_service.refresh_outrights()
+        status, body = await self._call("GET", "/api/outrights")
+        self.assertEqual(status, 200)
+        scorer_market = next(m for m in body["markets"]
+                             if m["type"] == "division_top_scorer" and m["division_id"] == self.ctx["div"])
+        sniper = next(s for s in scorer_market["selections"] if s["name"] == "Снайпер Тест")
+        self.assertEqual(sniper["goals"], 3)
+
     async def test_coach_sees_their_own_division_locked(self):
         coach = self.ctx["coaches"][self.ctx["clubs"][0]]
         market = await self._board_market(coach)

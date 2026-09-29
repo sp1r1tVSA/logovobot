@@ -71,7 +71,7 @@ def _user(request: web.Request) -> tuple[int | None, web.Response | None]:
 
 
 def _selection_payload(sel: dict, lock: str | None, has_bet: bool = False) -> dict:
-    return {
+    payload = {
         "id": sel["id"],
         "key": sel["selection_key"],
         "name": sel["name"],
@@ -84,11 +84,33 @@ def _selection_payload(sel: dict, lock: str | None, has_bet: bool = False) -> di
         "locked": lock,
         "has_bet": has_bet,
     }
+    if sel.get("goals") is not None:
+        payload["goals"] = int(sel["goals"])
+    return payload
 
 
 def _market_payload(market: dict, coach: dict | None, user_picks: dict | None = None) -> dict:
     market_lock = database.outright_lock_reason(coach, market)
     pick = (user_picks or {}).get(market["id"])
+    mtype = market.get("market_type", "")
+    if mtype in ("division_top_scorer", "league_top_scorer"):
+        missing = any(
+            s.get("goals") is None and s.get("selection_key") != database.OUTRIGHT_OTHER_KEY
+            for s in market.get("selections", [])
+        )
+        if missing:
+            try:
+                totals = database.get_outright_scorer_totals(
+                    division_id=market.get("division_id") if mtype == "division_top_scorer" else None,
+                    season_id=market.get("season_id"),
+                )
+                totals_map = {t["key"]: t["goals"] for t in totals}
+                for s in market.get("selections", []):
+                    if s.get("goals") is None and s.get("selection_key") in totals_map:
+                        s["goals"] = totals_map[s["selection_key"]]
+            except Exception as e:
+                logger.warning("Could not backfill goals for market %s: %s", market.get("id"), e)
+
     selections = []
     for sel in market["selections"]:
         lock = market_lock or database.outright_lock_reason(coach, market, sel)

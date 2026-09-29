@@ -376,11 +376,14 @@ async def cb_smm_regenerate(update: Update, context: ContextTypes.DEFAULT_TYPE) 
             cup_stage=draft.get("cup_stage"),
         )
     else:
+        user = update.effective_user
+        user_display = f"@{user.username}" if (user and user.username) else (user.first_name if user else "")
         generated_text = await asyncio.to_thread(
             club_smm_service.generate_club_post,
             team_name=draft.get("team_name", "Бешикташ"),
             post_type=post_type,
             custom_brief=draft.get("custom_brief", ""),
+            user_name=user_display,
         )
 
     draft["text"] = generated_text
@@ -439,6 +442,7 @@ async def handle_custom_prompt_received(update: Update, context: ContextTypes.DE
     elif msg.text:
         custom_brief = msg.text.strip()
 
+    user_display = f"@{user.username}" if user.username else (user.first_name or "")
     generated_text = await asyncio.to_thread(
         club_smm_service.generate_club_post,
         team_name=team_name,
@@ -446,6 +450,7 @@ async def handle_custom_prompt_received(update: Update, context: ContextTypes.DE
         custom_brief=custom_brief,
         audio_bytes=audio_bytes,
         audio_mime="audio/ogg" if audio_bytes else "audio/ogg",
+        user_name=user_display,
     )
 
     try:
@@ -599,11 +604,13 @@ async def handle_edit_prompt_received(update: Update, context: ContextTypes.DEFA
         f"ИНСТРУКЦИЯ ПО ПРАВКЕ:\n{edit_brief}"
     )
 
+    user_display = f"@{user.username}" if (user and user.username) else (user.first_name if user else "")
     generated_text = await asyncio.to_thread(
         club_smm_service.generate_club_post,
         team_name=draft.get("team_name", "Бешикташ"),
         post_type="custom",
         custom_brief=combined_brief,
+        user_name=user_display,
     )
 
     try:

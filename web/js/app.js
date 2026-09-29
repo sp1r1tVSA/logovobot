@@ -82,15 +82,15 @@ class AppController {
         this.renderBlock('profile', [state.user, state.progression, state.myStats, state.achievements],
           () => UIRenderer.renderProfile(state.user, state.progression, state.myStats, state.achievements));
       } else if (view === 'my_club') {
-        this.renderBlock('myClubHero', [myClub.overview],
-          () => UIRenderer.renderMyClubView(myClub.overview));
+        this.renderBlock('myClubHero', [myClub.overview, state.myClubStatsScope],
+          () => UIRenderer.renderMyClubView(myClub.overview, state.myClubStatsScope));
         if (!myClub.overview || myClub.overview.registered) {
-          this.renderBlock('myClubMatches', [myClub.matches, state.myClubLoading],
-            () => UIRenderer.renderMyClubMatches(myClub.matches, state.myClubLoading));
-          this.renderBlock('myClubHistory', [state.myClubRecent, state.myClubLoading],
-            () => UIRenderer.renderMyClubHistory(state.myClubRecent, state.myClubLoading));
-          this.renderBlock('myClubSquad', [myClub.squad, state.myClubSquadMeta, state.myClubLoading],
-            () => UIRenderer.renderMyClubSquad(myClub.squad, state.myClubSquadMeta, state.myClubLoading));
+          this.renderBlock('myClubMatches', [myClub.matches, state.myClubRecent, state.myClubMatchesFilter, state.myClubMatchesStatusFilter, state.myClubLoading],
+            () => UIRenderer.renderMyClubMatches(myClub.matches, state.myClubRecent, state.myClubMatchesFilter, state.myClubMatchesStatusFilter, state.myClubLoading));
+          this.renderBlock('myClubHistory', [state.myClubRecent, state.myClubHistoryFilter, state.myClubLoading],
+            () => UIRenderer.renderMyClubHistory(state.myClubRecent, state.myClubHistoryFilter, state.myClubLoading));
+          this.renderBlock('myClubSquad', [myClub.squad, state.myClubSquadMeta, state.myClubSquadFilter, state.myClubLoading],
+            () => UIRenderer.renderMyClubSquad(myClub.squad, state.myClubSquadMeta, state.myClubSquadFilter, state.myClubLoading));
           this.renderBlock('myClubSubTab', [state.myClubSubTab],
             () => UIRenderer.renderMyClubSubTab(state.myClubSubTab));
         } else {
@@ -408,7 +408,13 @@ class AppController {
         store.setMyClubMatches(matchesRes.matches || [], matchesRes.recent || []);
       }
       if (squadRes && squadRes.status === 'ok') {
-        store.setMyClubSquad(squadRes.players || [], squadRes.top_scorer, squadRes.top_assistant, squadRes.top_mvp);
+        store.setMyClubSquad(
+          squadRes.players || [],
+          squadRes.top_scorer,
+          squadRes.top_assistant,
+          squadRes.top_mvp,
+          squadRes.by_tournament
+        );
       }
     } catch (e) {
       console.warn("Could not load My Club data:", e);
@@ -1306,7 +1312,45 @@ class AppController {
       });
     });
 
-    // 18c. My Club — согласование времени матча
+    // 18c. My Club — фильтры статистики, матчей и состава
+    document.addEventListener('click', (e) => {
+      const statsPill = e.target.closest('.club-pill[data-stats-scope]');
+      if (statsPill) {
+        store.setMyClubStatsScope(statsPill.dataset.statsScope);
+        tgBridge.hapticImpact('light');
+        return;
+      }
+
+      const matchFilter = e.target.closest('.club-filter-chip[data-matches-filter]');
+      if (matchFilter) {
+        store.setMyClubMatchesFilter(matchFilter.dataset.matchesFilter);
+        tgBridge.hapticImpact('light');
+        return;
+      }
+
+      const matchStatusFilter = e.target.closest('.club-filter-chip[data-matches-status-filter]');
+      if (matchStatusFilter) {
+        store.setMyClubMatchesStatusFilter(matchStatusFilter.dataset.matchesStatusFilter);
+        tgBridge.hapticImpact('light');
+        return;
+      }
+
+      const historyFilter = e.target.closest('.club-filter-chip[data-history-filter]');
+      if (historyFilter) {
+        store.setMyClubHistoryFilter(historyFilter.dataset.historyFilter);
+        tgBridge.hapticImpact('light');
+        return;
+      }
+
+      const squadFilter = e.target.closest('.club-filter-chip[data-squad-filter]');
+      if (squadFilter) {
+        store.setMyClubSquadFilter(squadFilter.dataset.squadFilter);
+        tgBridge.hapticImpact('light');
+        return;
+      }
+    });
+
+    // 18d. My Club — согласование времени матча
     document.addEventListener('click', async (e) => {
       const proposeBtn = e.target.closest('.btn-propose-time');
       if (proposeBtn) {

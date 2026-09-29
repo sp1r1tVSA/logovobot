@@ -49,8 +49,8 @@ async def handle_get_cabinet_overview(request: web.Request) -> web.Response:
     """
     GET /api/cabinet/overview
     Карточка клуба: команда, дивизион, место в таблице, очки, В/Н/П, голы,
-    дисциплина (предупреждения). Незарегистрированный игрок получает
-    registered = false и пустой блок клуба.
+    дисциплина (предупреждения), кубковые и общие показатели. Незарегистрированный
+    игрок получает registered = false и пустой блок клуба.
     """
     user_info, err = _auth(request)
     if err is not None:
@@ -69,13 +69,47 @@ async def handle_get_cabinet_overview(request: web.Request) -> web.Response:
     user_row = await asyncio.to_thread(database.get_user, user_id)
     user = dict(user_row) if user_row else {}
 
+    team_name = summary.get("team_name")
+    cup_summary = await asyncio.to_thread(database.get_club_cup_summary, team_name)
+
+    tour_stats = {
+        "position": summary.get("position"),
+        "total_teams": summary.get("total_teams", 0),
+        "points": summary.get("points", 0),
+        "played": summary.get("played", 0),
+        "wins": summary.get("wins", 0),
+        "draws": summary.get("draws", 0),
+        "losses": summary.get("losses", 0),
+        "goals_scored": summary.get("goals_scored", 0),
+        "goals_conceded": summary.get("goals_conceded", 0),
+        "goal_diff": summary.get("goal_diff", 0),
+        "form": summary.get("form", []),
+    }
+
+    total_played = tour_stats["played"] + cup_summary.get("played", 0)
+    total_wins = tour_stats["wins"] + cup_summary.get("wins", 0)
+    total_draws = tour_stats["draws"]
+    total_losses = tour_stats["losses"] + cup_summary.get("losses", 0)
+    total_scored = tour_stats["goals_scored"] + cup_summary.get("goals_scored", 0)
+    total_conceded = tour_stats["goals_conceded"] + cup_summary.get("goals_conceded", 0)
+    total_stats = {
+        "played": total_played,
+        "wins": total_wins,
+        "draws": total_draws,
+        "losses": total_losses,
+        "goals_scored": total_scored,
+        "goals_conceded": total_conceded,
+        "goal_diff": total_scored - total_conceded,
+        "winrate": round((total_wins / total_played) * 100, 1) if total_played > 0 else 0,
+    }
+
     return web.json_response({
         "status": "ok",
         "registered": True,
         "telegram_id": user_id,
         "username": user.get("username") or user_info.get("username"),
         "club": {
-            "team_name": summary.get("team_name"),
+            "team_name": team_name,
             "division_id": summary.get("division_id"),
             "division_name": summary.get("division_name"),
         },
@@ -83,26 +117,17 @@ async def handle_get_cabinet_overview(request: web.Request) -> web.Response:
             "warns": int(user.get("warn_count") or 0),
             "limit": config.MAX_WARNS_LIMIT,
         },
-        "tournament": {
-            "position": summary.get("position"),
-            "total_teams": summary.get("total_teams", 0),
-            "points": summary.get("points", 0),
-            "played": summary.get("played", 0),
-            "wins": summary.get("wins", 0),
-            "draws": summary.get("draws", 0),
-            "losses": summary.get("losses", 0),
-            "goals_scored": summary.get("goals_scored", 0),
-            "goals_conceded": summary.get("goals_conceded", 0),
-            "goal_diff": summary.get("goal_diff", 0),
-            "form": summary.get("form", []),
-        },
+        "tournament": tour_stats,
+        "cup": cup_summary,
+        "total": total_stats,
     })
 
 
 async def handle_get_cabinet_matches(request: web.Request) -> web.Response:
     """
     GET /api/cabinet/matches
-    Активные матчи игрока (текущий тур и долги) плюс последние сыгранные матчи клуба.
+    Все предстоящие и несыгранные матчи клуба (лига + кубок) плюс сыгранные матчи клуба.
+    Поддерживает фильтр ?tournament_type=all|league|cup.
     """
     user_info, err = _auth(request)
     if err is not None:
@@ -114,8 +139,12 @@ async def handle_get_cabinet_matches(request: web.Request) -> web.Response:
         if not team_name:
             return web.json_response({"status": "ok", "registered": False, "matches": [], "recent": []})
 
-        matches = await asyncio.to_thread(database.get_cabinet_matches, user_id, MAX_ACTIVE_MATCHES)
-        recent = await asyncio.to_thread(database.get_cabinet_recent_matches, user_id, MAX_RECENT_MATCHES)
+        tour_filter = request.query.get("tournament_type")
+        if tour_filter not in ("league", "cup"):
+            tour_filter = None
+
+        matches = await asyncio.to_thread(database.get_cabinet_matches, user_id, 100, False, tour_filter)
+        recent = await asyncio.to_thread(database.get_cabinet_recent_matches, user_id, 100, tour_filter)
     except Exception as e:
         logger.error(f"cabinet/matches failed for {user_id}: {e}")
         return web.json_response({"status": "error", "error": "internal_error"}, status=500)
@@ -124,6 +153,7 @@ async def handle_get_cabinet_matches(request: web.Request) -> web.Response:
         "status": "ok",
         "registered": True,
         "team_name": team_name,
+        "tournament_type": tour_filter or "all",
         "matches": matches,
         "recent": recent,
     })
@@ -133,7 +163,7 @@ async def handle_get_cabinet_squad(request: web.Request) -> web.Response:
     """
     GET /api/cabinet/squad
     Состав клуба с индивидуальной статистикой (голы, ассисты, награды MVP)
-    и лидерами клуба.
+    и лидерами клуба, со срезами по дивизиону и кубку.
     """
     user_info, err = _auth(request)
     if err is not None:
@@ -146,10 +176,12 @@ async def handle_get_cabinet_squad(request: web.Request) -> web.Response:
             return web.json_response({
                 "status": "ok", "registered": False,
                 "players": [], "top_scorer": None, "top_assistant": None,
-                "top_mvp": None
+                "top_mvp": None, "by_tournament": {}
             })
 
-        squad = await asyncio.to_thread(database.get_cabinet_squad_stats, team_name)
+        requested_tour = request.query.get("tournament_type")
+        squad_bundle = await asyncio.to_thread(database.get_cabinet_squad_all_scopes, team_name)
+        active_stats = squad_bundle.get("by_tournament", {}).get(requested_tour) or squad_bundle
     except Exception as e:
         logger.error(f"cabinet/squad failed for {user_id}: {e}")
         return web.json_response({"status": "error", "error": "internal_error"}, status=500)
@@ -158,10 +190,12 @@ async def handle_get_cabinet_squad(request: web.Request) -> web.Response:
         "status": "ok",
         "registered": True,
         "team_name": team_name,
-        "players": squad.get("players", []),
-        "top_scorer": squad.get("top_scorer"),
-        "top_assistant": squad.get("top_assistant"),
-        "top_mvp": squad.get("top_mvp"),
+        "tournament_type": requested_tour or "all",
+        "players": active_stats.get("players", []),
+        "top_scorer": active_stats.get("top_scorer"),
+        "top_assistant": active_stats.get("top_assistant"),
+        "top_mvp": active_stats.get("top_mvp"),
+        "by_tournament": squad_bundle.get("by_tournament", {}),
     })
 
 

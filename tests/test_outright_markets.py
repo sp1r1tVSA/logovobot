@@ -486,6 +486,7 @@ class TestLeagueTopScorerCupsIntegration(OutrightCase):
         self.assertIsNotNone(league_market)
         sel = self._selection(league_market, "Никола Влашич")
         self.assertEqual(sel["division_id"], self.div)
+        self.assertEqual(sel["goals"], 6)
         self.assertGreater(sel["probability"], 0.5)
 
     def test_cup_only_scorer_assigned_proper_division(self):

@@ -48,6 +48,15 @@ const pct = (p) => {
   return v >= 10 ? Math.round(v).toString() : (Math.round(v * 10) / 10).toString();
 };
 const fmtOdd = (o) => Number(o || 0).toFixed(2);
+const goalsLabel = (n) => {
+  const num = Number(n || 0);
+  const mod10 = num % 10;
+  const mod100 = num % 100;
+  let word = 'голов';
+  if (mod10 === 1 && mod100 !== 11) word = 'гол';
+  else if ([2, 3, 4].includes(mod10) && ![12, 13, 14].includes(mod100)) word = 'гола';
+  return `${num} ${word}`;
+};
 const coins = (n) => `${Math.round(Number(n) || 0).toLocaleString('ru-RU')} 🪙`;
 const freebetTotal = (list) => coins(list.reduce((acc, f) => acc + Number(f.amount || 0), 0));
 // Фрибеты по сумме: {id самого старого, amount, count}. Список уже отсортирован по id.
@@ -393,6 +402,10 @@ class OutrightsView {
     else if (s.status === 'suspended') tag = '<span class="ob-tag">пауза</span>';
     else if (s.has_bet) tag = '<span class="ob-tag pick">ваш выбор</span>';
 
+    const goalsBadge = isScorer && s.key !== '__other__' && s.goals != null
+      ? `<span class="ob-sel-goals" title="Забито голов: ${s.goals}">⚽ ${escapeHtml(goalsLabel(s.goals))}</span>`
+      : '';
+
     let button;
     if (canBet) {
       button = `
@@ -409,7 +422,7 @@ class OutrightsView {
         <span class="ob-rank">${idx + 1}</span>
         <span class="ob-sel-logo">${logo}</span>
         <div class="ob-sel-main">
-          <div class="ob-sel-name"><span>${escapeHtml(s.name)}</span>${tag}</div>
+          <div class="ob-sel-name"><span>${escapeHtml(s.name)}</span>${goalsBadge}${tag}</div>
           ${sub}
           <div class="ob-sel-bar">${pillBar(barPct, { highlight: idx === 0 && !done, muted: done })}<span class="ob-sel-pct">${pct(s.probability)}%</span></div>
         </div>
@@ -593,6 +606,9 @@ class OutrightsView {
     const minBet = this.board?.min_bet || 10;
     const balance = Math.floor(Number(store.state.user?.balance || 0));
     const preset = Math.min(Math.max(minBet, 100), Math.max(minBet, balance));
+    const isScorer = market.type?.endsWith('top_scorer');
+    const goalsNote = isScorer && selection.key !== '__other__' && selection.goals != null
+      ? `⚽ ${escapeHtml(goalsLabel(selection.goals))} · ` : '';
     overlay.querySelector('.ob-sheet').innerHTML = `
       <div class="ob-sheet-head">
         <span class="mono-label">${escapeHtml(market.title)}</span>
@@ -602,7 +618,7 @@ class OutrightsView {
         <span class="ob-sel-logo">${selection.team_name ? renderTeamLogoHtml(selection.team_name, 34) : ''}</span>
         <div class="ob-sheet-pick-main">
           <div class="ob-sheet-name">${escapeHtml(selection.name)}</div>
-          <div class="ob-sel-sub">шанс по модели ${pct(selection.probability)}%</div>
+          <div class="ob-sel-sub">${goalsNote}шанс по модели ${pct(selection.probability)}%</div>
         </div>
         <div class="ob-sheet-odd">${fmtOdd(selection.odds)}</div>
       </div>

@@ -2950,6 +2950,15 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 is_single_timeline=is_single_timeline,
             )
 
+            from services.external_squad_lookup import find_new_goal_action_players
+            new_players = await asyncio.to_thread(
+                find_new_goal_action_players,
+                h_goals, a_goals, h_assists, a_assists,
+                home_team, away_team,
+            )
+            if new_players:
+                context.user_data["pending_new_players"] = new_players
+
             if is_side1_home:
                 h_score = int(ai_res.get("left_score", ai_res.get("home_score", sum(h_goals.values()))))
                 a_score = int(ai_res.get("right_score", ai_res.get("away_score", sum(a_goals.values()))))
@@ -3012,6 +3021,37 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
             photo_to_show = photos_list[0] if photos_list else context.user_data.get("report_photo_id")
             await context.bot.send_photo(chat_id=user_id, photo=photo_to_show, caption=text, parse_mode="HTML", reply_markup=markup)
+
+            if new_players:
+                for idx, np in enumerate(new_players):
+                    msg_lines = [
+                        f"🔍 <b>Обнаружен новый игрок команды {safe_escape(np['team_name'])}:</b>\n",
+                        f"👤 <b>{safe_escape(np['player_name'])}</b>" + (f" (в отчёте: <i>{safe_escape(np['raw_name'])}</i>)" if np['raw_name'] != np['player_name'] else ""),
+                        f"📍 Позиция: <b>{safe_escape(np['position'])}</b>",
+                    ]
+                    actions = []
+                    if np.get("goals"):
+                        actions.append(f"⚽ Голы: {np['goals']}")
+                    if np.get("assists"):
+                        actions.append(f"🎯 Ассисты: {np['assists']}")
+                    if actions:
+                        msg_lines.append(" | ".join(actions))
+                    if np.get("source"):
+                        msg_lines.append(f"🌐 <i>Источник: {safe_escape(np['source'])}</i>")
+                    msg_lines.append("\nВнести игрока в официальный состав команды в базе данных?")
+
+                    np_keyboard = [
+                        [
+                            InlineKeyboardButton("➕ Внести в состав", callback_data=f"cb_add_new_player_{match_id}_{idx}"),
+                            InlineKeyboardButton("⏭️ Пропустить", callback_data=f"cb_skip_new_player_{match_id}_{idx}"),
+                        ]
+                    ]
+                    await context.bot.send_message(
+                        chat_id=user_id,
+                        text="\n".join(msg_lines),
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup(np_keyboard),
+                    )
         else:
             context.user_data["report_photo_id"] = photos_list[0] if photos_list else context.user_data.get("report_photo_id")
             context.user_data.pop("report_mvp_player", None)
@@ -3035,6 +3075,83 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
                 await status_msg.delete()
             except Exception:
                 pass
+
+
+async def cb_add_new_player(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Add a newly detected goal action player into squad_players upon user confirmation."""
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data.replace("cb_add_new_player_", "")
+    parts = data.split("_")
+    if len(parts) != 2:
+        await safe_query_answer(query)
+        return
+    try:
+        match_id = int(parts[0])
+        idx = int(parts[1])
+    except ValueError:
+        await safe_query_answer(query)
+        return
+
+    pending = context.user_data.get("pending_new_players") or []
+    if idx >= len(pending):
+        await safe_query_answer(query, "Игрок уже обработан или данные устарели.", show_alert=True)
+        return
+
+    p_info = pending[idx]
+    team_name = p_info["team_name"]
+    player_name = p_info["player_name"]
+    pos = p_info["position"]
+    raw_name = p_info.get("raw_name", player_name)
+
+    # Add to squad
+    await asyncio.to_thread(
+        database.add_squad,
+        team_name,
+        [{"player_name": player_name, "position": pos}],
+    )
+
+    # Update names in context.user_data so the confirmed match events use canonical spelling
+    if raw_name != player_name:
+        for dict_key in ("home_goals_count", "away_goals_count", "home_assists_count", "away_assists_count"):
+            d = context.user_data.get(dict_key)
+            if isinstance(d, dict) and raw_name in d:
+                d[player_name] = d.pop(raw_name)
+
+    await safe_query_answer(query, f"Игрок {player_name} добавлен в состав!")
+    await query.edit_message_text(
+        text=f"✅ Игрок <b>{safe_escape(player_name)}</b> (позиция: <b>{safe_escape(pos)}</b>) успешно внесён в состав команды <b>{safe_escape(team_name)}</b>.",
+        parse_mode="HTML",
+    )
+
+
+async def cb_skip_new_player(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Skip adding a newly detected player to the squad database."""
+    query = update.callback_query
+    if not query:
+        return
+
+    data = query.data.replace("cb_skip_new_player_", "")
+    parts = data.split("_")
+    idx = -1
+    if len(parts) == 2:
+        try:
+            idx = int(parts[1])
+        except ValueError:
+            pass
+
+    pending = context.user_data.get("pending_new_players") or []
+    p_name = "Игрок"
+    if 0 <= idx < len(pending):
+        p_name = pending[idx].get("player_name", "Игрок")
+
+    await safe_query_answer(query, "Пропущено")
+    await query.edit_message_text(
+        text=f"⏭️ Добавление игрока <b>{safe_escape(p_name)}</b> в состав пропущено.",
+        parse_mode="HTML",
+    )
 
 def build_formatted_match_post(
     round_number: int | str,
@@ -3435,7 +3552,8 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
         "report_photo_id", "is_single_timeline",
         "report_mvp_player", "reporting_match_id",
         "ai_photos_list", "awaiting_report_photo",
-        "report_home_team", "report_away_team"
+        "report_home_team", "report_away_team",
+        "pending_new_players"
     ):
         context.user_data.pop(key, None)
 

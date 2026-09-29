@@ -59,6 +59,8 @@ from handlers.cabinet import (
     cb_report_choice_auto,
     cb_report_choice_manual,
     cb_confirm_ai_final,
+    cb_add_new_player,
+    cb_skip_new_player,
     cb_cup_winner,
     cb_report_home_goals,
     cb_report_away_goals,
@@ -417,10 +419,12 @@ def _register_user_handlers(app: Application) -> None:
     app.add_handler(MessageHandler(filters.Regex("^👤 Мой кабинет$"), show_cabinet))
     app.add_handler(MessageHandler(filters.Regex("^💬 Поддержка$"), show_support))
     
-    from handlers.drafts import handle_draft_media, cb_draft_confirm, cb_draft_reject
+    from handlers.drafts import handle_draft_media, cb_draft_confirm, cb_draft_reject, cb_draft_add_player, cb_draft_skip_player
     app.add_handler(MessageHandler((filters.PHOTO | filters.TEXT) & filters.ChatType.GROUPS & ~filters.COMMAND, handle_draft_media), group=2)
     app.add_handler(CallbackQueryHandler(cb_draft_confirm, pattern="^draft_conf_"))
     app.add_handler(CallbackQueryHandler(cb_draft_reject, pattern="^draft_rej_"))
+    app.add_handler(CallbackQueryHandler(cb_draft_add_player, pattern=r"^draft_add_player_"))
+    app.add_handler(CallbackQueryHandler(cb_draft_skip_player, pattern=r"^draft_skip_player_"))
     app.add_handler(MessageHandler(filters.Regex("^⚙️ Админ-панель$"), show_admin_panel))
 
     app.add_handler(CallbackQueryHandler(cb_refresh_division_table_topic, pattern=r"^refresh_div_table_\d+$"))
@@ -551,6 +555,8 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(cb_report_choice_auto, pattern="^cb_report_choice_auto_\\d+$"))
     app.add_handler(CallbackQueryHandler(cb_report_choice_manual, pattern="^cb_report_choice_manual_\\d+$"))
     app.add_handler(CallbackQueryHandler(cb_confirm_ai_final, pattern="^cb_confirm_ai_final_\\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_add_new_player, pattern=r"^cb_add_new_player_\d+_\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_skip_new_player, pattern=r"^cb_skip_new_player_\d+_\d+$"))
     # Шаг кубковой приёмки результата («кто прошёл дальше») обязан стоять до
     # catch-all группы 0: иначе нажатие утонуло бы в AI-чате.
     app.add_handler(CallbackQueryHandler(cb_cup_winner, pattern="^cb_cup_winner_\\d+_[12]$"))
