@@ -745,18 +745,13 @@ async def handle_edit_prompt_received(update: Update, context: ContextTypes.DEFA
     else:
         edit_brief = (msg.text or "").strip() or "Улучши динамику и стиль."
 
-    combined_brief = (
-        f"ТЕКУЩИЙ ЧЕРНОВИК:\n{draft.get('text', '')}\n\n"
-        f"ИНСТРУКЦИЯ ПО ПРАВКЕ:\n{edit_brief}"
-    )
-
     user_display = f"@{user.username}" if (user and user.username) else (user.first_name if user else "")
-    generated_text = await asyncio.to_thread(
-        club_smm_service.generate_club_post,
-        team_name=draft.get("team_name", DEFAULT_CLUB),
-        post_type="custom",
-        custom_brief=combined_brief,
-        user_name=user_display,
+    edited_text = await asyncio.to_thread(
+        club_smm_service.edit_club_post,
+        draft.get("team_name", DEFAULT_CLUB),
+        draft.get("text", ""),
+        edit_brief,
+        user_display,
     )
 
     try:
@@ -764,8 +759,17 @@ async def handle_edit_prompt_received(update: Update, context: ContextTypes.DEFA
     except Exception:
         pass
 
-    draft["text"] = generated_text
-    await _show_draft_preview(update, context, generated_text)
+    if not edited_text:
+        # ИИ недоступен: черновик остаётся прежним, а не подменяется шаблоном с текстом инструкции
+        await msg.reply_text(
+            "⚠️ Не удалось внести правку — ИИ сейчас не отвечает. Черновик остался без изменений, "
+            "попробуйте ещё раз чуть позже.",
+        )
+        await _show_draft_preview(update, context, draft.get("text", ""))
+        return ConversationHandler.END
+
+    draft["text"] = edited_text
+    await _show_draft_preview(update, context, edited_text)
     return ConversationHandler.END
 
 

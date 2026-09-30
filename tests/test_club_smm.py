@@ -792,3 +792,207 @@ class TestSmmPublishHelpers(unittest.IsolatedAsyncioTestCase):
     def test_fallback_post_is_none_safe(self):
         text = club_smm_service._build_fallback_post({"club": {}, "standings": None}, "matchday")
         self.assertTrue(text)
+
+
+class TestPostPrompts(unittest.TestCase):
+    """Промпты для написания постов: нейтральность, формат, правка, очистка ответа модели."""
+
+    def test_system_prompt_is_club_neutral(self):
+        text = club_smm_service._build_system_instruction(
+            {"club": {"name": "Ювентус", "emojis": "⚪⚫", "hashtags": ["#Juve"]}}
+        )
+        self.assertIn("Ювентус", text)
+        self.assertIn("Вперёд, Ювентус!", text)
+        self.assertNotIn("Орлы", text)
+        self.assertNotIn("Бешикташ", text)
+
+    def test_system_prompt_forbids_preambles_and_invented_facts(self):
+        text = club_smm_service._build_system_instruction({"club": {"name": "Ювентус"}})
+        self.assertIn("не выдумывай", text)
+        self.assertIn("Вот пост", text)
+        self.assertIn("не команды", text)
+
+    def test_format_rule_differs_for_caption(self):
+        self.assertIn("380", club_smm_service._format_rule(for_caption=True))
+        self.assertNotIn("380", club_smm_service._format_rule())
+
+    def test_prompt_json_drops_duplicates_and_raw_mvp(self):
+        payload = {
+            "club": {"name": "X"},
+            "recent_channel_posts": ["a"], "full_squad": ["b"], "generated_at": "t",
+            "last_match": {"match_id": 1, "mvp_player": "Иванов (Сити)", "mvp": {"name": "Иванов"}, "my_score": 2},
+        }
+        data = json.loads(club_smm_service._prompt_json(payload))
+        self.assertNotIn("recent_channel_posts", data)
+        self.assertNotIn("full_squad", data)
+        self.assertNotIn("mvp_player", data["last_match"])
+        self.assertEqual(data["last_match"]["mvp"]["name"], "Иванов")
+        self.assertEqual(data["last_match"]["my_score"], 2)
+        # исходный payload не мутируется
+        self.assertIn("mvp_player", payload["last_match"])
+
+    def test_recap_lists_assists_and_stage(self):
+        payload = {"last_match": {
+            "result": "win", "opponent": "Рома", "my_score": 3, "opp_score": 1, "stage": "final",
+            "club_goals": [{"player": "Петров", "count": 2}], "club_assists": [{"player": "Сидоров", "count": 1}],
+        }}
+        task = club_smm_service._get_task_instruction("recap", payload=payload)
+        self.assertIn("Петров (2)", task)
+        self.assertIn("Сидоров", task)
+        self.assertIn("финал", task)
+
+    def test_opponent_mvp_is_not_ours(self):
+        note = club_smm_service._mvp_note({"name": "Чужой", "is_our_club": False, "team": "Рома"}, "Рома", "Петров")
+        self.assertIn("СОПЕРНИКА", note)
+        self.assertIn("НЕ играет за наш клуб", note)
+
+    def test_edit_instruction_carries_draft_and_instruction(self):
+        task = club_smm_service._get_edit_instruction("СТАРЫЙ ТЕКСТ", "сделай короче")
+        self.assertIn("СТАРЫЙ ТЕКСТ", task)
+        self.assertIn("сделай короче", task)
+        self.assertIn("ПОЛНЫЙ исправленный пост", task)
+
+    def test_edit_returns_none_when_all_providers_fail(self):
+        with patch.object(club_smm_service, "get_club_smm_payload", return_value={"club": {"name": "Ювентус"}}), \
+             patch.object(club_smm_service, "_call_openrouter_text", return_value=(None, None)), \
+             patch.object(club_smm_service, "_call_gemini_text", return_value=(None, None)):
+            self.assertIsNone(club_smm_service.edit_club_post("Ювентус", "Пост", "короче"))
+
+    def test_edit_uses_model_answer_and_caps_instruction(self):
+        seen = {}
+
+        def fake_or(system, user, max_tokens):
+            seen["user"] = user
+            return "<b>Новый</b> пост " * 5, "m"
+
+        with patch.object(club_smm_service, "get_club_smm_payload", return_value={"club": {"name": "Ювентус"}}), \
+             patch.object(club_smm_service, "_call_openrouter_text", side_effect=fake_or):
+            out = club_smm_service.edit_club_post("Ювентус", "Пост", "я" * 5000)
+        self.assertIn("Новый", out)
+        self.assertNotIn("я" * (club_smm_service.EDIT_BRIEF_MAX_CHARS + 1), seen["user"])
+
+    def test_edit_skips_empty_input(self):
+        self.assertIsNone(club_smm_service.edit_club_post("Ювентус", "", "короче"))
+        self.assertIsNone(club_smm_service.edit_club_post("Ювентус", "Пост", "  "))
+
+    def test_clean_strips_preamble_and_code_fence(self):
+        raw = "Конечно! Вот ваш пост:\n\n```html\n<b>Заголовок</b>\nТекст #Тег\n```"
+        cleaned = club_smm_service._clean_smm_text(raw)
+        self.assertEqual(cleaned, "<b>Заголовок</b>\nТекст #Тег")
+
+    def test_clean_keeps_normal_post_intact(self):
+        raw = "🔥 <b>Победа!</b>\nВот это матч: 3:1 и точка. #Тег"
+        self.assertEqual(club_smm_service._clean_smm_text(raw), raw)
+
+    def _image_prompt(self, post_type, custom=""):
+        captured = {}
+
+        def fake_image(prompt):
+            captured["p"] = prompt
+            return None, None
+
+        with patch.object(club_smm_service, "_call_openrouter_image", side_effect=fake_image), \
+             patch.object(club_smm_service, "generate_club_smm_media", return_value=None):
+            club_smm_service.generate_club_ai_photo("Ювентус", post_type, custom)
+        return captured["p"]
+
+    def test_image_prompt_stage_wins_over_custom(self):
+        prompt = self._image_prompt("stage", "Кубок 1/8")
+        self.assertIn("tournament", prompt)
+        self.assertIn("Кубок 1/8", prompt)
+
+    def test_image_prompt_custom_is_capped_and_not_matchday(self):
+        prompt = self._image_prompt("custom", "x " * 500)
+        self.assertLessEqual(len(prompt), 700)
+        self.assertNotIn("matchday", prompt)
+
+    def test_recap_image_prompt_is_result_neutral(self):
+        prompt = self._image_prompt("recap")
+        self.assertNotIn("victory", prompt)
+        self.assertNotIn("confetti", prompt)
+
+
+class TestStagePostPrompts(unittest.TestCase):
+    """generate_stage_post: проигранная серия, финал, формат подписи."""
+
+    def _match(self, mine, theirs, status="confirmed"):
+        return {"opponent": "Рома", "my_score": mine, "opp_score": theirs, "status": status,
+                "club_goals": [], "club_assists": [], "mvp": None, "mvp_player": None, "date": None, "time": None}
+
+    def _run(self, stage, matches, **kw):
+        prompts = []
+        payload = {
+            "club": {"name": "Ювентус", "emojis": "⚽", "hashtags": ["#Juve"]},
+            "target_name": "Кубок, финал" if stage == "final" else f"Кубок, стадия {stage}",
+            "matches": matches,
+        }
+
+        def fake_or(system, user, max_tokens):
+            prompts.append(user)
+            return None, None
+
+        with patch.object(club_smm_service, "get_stage_or_round_payload", return_value=payload), \
+             patch.object(club_smm_service, "_call_openrouter_text", side_effect=fake_or), \
+             patch.object(club_smm_service, "_call_gemini_text", return_value=(None, None)):
+            post = club_smm_service.generate_stage_post("Ювентус", cup_stage=stage, **kw)
+        return prompts[0], post
+
+    def test_lost_series_forbids_euphoria(self):
+        prompt, post = self._run("1/8", [self._match(0, 2), self._match(1, 1), self._match(0, 1)])
+        self.assertIn("проиграли серию", prompt)
+        self.assertIn("никаких «победных эмоций»", prompt)
+        self.assertNotIn("Выход в следующий раунд", prompt)
+        self.assertIn("проиграна", post)
+        self.assertNotIn("идёт дальше", post)
+
+    def test_won_final_says_cup_holder(self):
+        prompt, post = self._run("final", [self._match(2, 0), self._match(1, 0)])
+        self.assertIn("финала кубка", prompt)
+        self.assertIn("обладателем кубка", prompt)
+        self.assertIn("обладатель кубка", post)
+
+    def test_won_series_moves_on(self):
+        prompt, post = self._run("1/4", [self._match(2, 0), self._match(1, 0)])
+        self.assertIn("Выход в следующий раунд", prompt)
+        self.assertIn("идёт дальше", post)
+
+    def test_in_progress_series_has_scores_and_no_verdict(self):
+        prompt, _ = self._run("1/4", [self._match(2, 0), self._match(None, None, status="scheduled")])
+        self.assertIn("2:0", prompt)
+        self.assertIn("не объявляй итог", prompt.lower())
+
+    def test_caption_mode_uses_caption_format(self):
+        prompt, _ = self._run("1/4", [self._match(2, 0)], for_caption=True)
+        self.assertIn("380", prompt)
+
+    def test_stage_post_tone_follows_outcome(self):
+        lost, _ = self._run("1/8", [self._match(0, 2), self._match(1, 1), self._match(0, 1)])
+        self.assertIn("ТОН ЭТОГО ПОСТА: сдержанный и благодарный", lost)
+        final, _ = self._run("final", [self._match(2, 0), self._match(1, 0)])
+        self.assertIn("триумфальный", final)
+        prog, _ = self._run("1/4", [self._match(2, 0), self._match(None, None, status="scheduled")])
+        self.assertIn("«ещё не конец»", prog)
+
+
+class TestPostTone(unittest.TestCase):
+    def test_tone_per_post_type(self):
+        anons = club_smm_service._get_task_instruction("matchday", payload={})
+        self.assertIn("интрига и нагнетание", anons)
+        table = club_smm_service._get_task_instruction("standings", payload={})
+        self.assertIn("деловой и короткий", table)
+        star = club_smm_service._get_task_instruction("spotlight", payload={})
+        self.assertIn("героический", star)
+
+    def test_recap_tone_depends_on_result(self):
+        def tone(res):
+            return club_smm_service._get_task_instruction(
+                "recap", payload={"last_match": {"result": res, "opponent": "Рома", "my_score": 1, "opp_score": 1}})
+        self.assertIn("торжественный и ликующий", tone("win"))
+        self.assertIn("сдержанный, с боевой горечью", tone("loss"))
+        self.assertIn("напряжённый и собранный", tone("draw"))
+
+    def test_base_prompt_has_style_rhythm_and_sample(self):
+        text = club_smm_service._build_system_instruction({"club": {"name": "Ювентус", "emojis": "⚪⚫"}})
+        self.assertIn("ТОН ЭТОГО ПОСТА", text)
+        self.assertIn("Образец ритма", text)
+        self.assertIn("не больше двух восклицательных знаков", text)
