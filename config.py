@@ -351,3 +351,22 @@ TRACKER_OCR_ENABLED = os.getenv("TRACKER_OCR_ENABLED", "false").strip().lower() 
 # умолчанию, включается явным флагом и никогда не должен быть true в проде.
 TRACKER_DEV_PIN_ENABLED = os.getenv("TRACKER_DEV_PIN_ENABLED", "false").strip().lower() in ("true", "1", "yes")
 
+
+
+# Бэкап базы (services/db_backup.py): сжатая копия league.db через SQLite backup API.
+# Каталог по умолчанию — backups/ рядом с кодом; в Docker его стоит вынести на том,
+# иначе копии живут в том же контейнере, что и база, и пропадут вместе с ним.
+_env_backup_dir = os.getenv("BACKUP_DIR", "backups").strip() or "backups"
+BACKUP_DIR = _env_backup_dir if os.path.isabs(_env_backup_dir) else str(PROJECT_ROOT / _env_backup_dir)
+# Раз в сколько часов делать копию; 0 — автобэкап выключен (/backup работает всегда).
+BACKUP_INTERVAL_HOURS = float(os.getenv("BACKUP_INTERVAL_HOURS", "24"))
+# Сколько последних копий хранить в каталоге, старые удаляются.
+BACKUP_KEEP = max(1, int(os.getenv("BACKUP_KEEP", "14")))
+# Чат, куда отправлять каждую автокопию файлом (id, пусто — не отправлять).
+# Это единственная копия вне сервера, поэтому чат должен быть приватным.
+BACKUP_TELEGRAM_CHAT_ID = os.getenv("BACKUP_TELEGRAM_CHAT_ID", "").strip()
+
+# /health и алерты фоновых джобов (services/job_health.py): после стольких
+# падений подряд глобальные админы получают сообщение в ЛС, не чаще раза в N часов.
+JOB_ALERT_AFTER_FAILURES = max(1, int(os.getenv("JOB_ALERT_AFTER_FAILURES", "3")))
+JOB_ALERT_COOLDOWN_HOURS = float(os.getenv("JOB_ALERT_COOLDOWN_HOURS", "6"))

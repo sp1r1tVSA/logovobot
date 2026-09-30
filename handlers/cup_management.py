@@ -36,6 +36,7 @@ from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
 
 import database
 from handlers.base import is_global_admin
+from services import admin_journal
 
 logger = logging.getLogger(__name__)
 
@@ -367,11 +368,19 @@ async def cb_cup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             priced = await _generate_stage_markets(stage["stage"], stage.get("season_id"), scope)
             note = f"{message} Выставлено объектов линии: {priced}."
             announce = "bets"
+            await admin_journal.record(
+                user_id, "cup_stage_bets_opened", "cup_stage", stage_id,
+                new=f"{stage['stage']}, объектов линии {priced}", division_id=scope or None,
+            )
     elif action == "start":
         ok, message = await asyncio.to_thread(database.start_cup_stage, stage_id, user_id)
         note = message
         if ok:
             announce = "start"
+            await admin_journal.record(
+                user_id, "cup_stage_started", "cup_stage", stage_id,
+                new=str(stage["stage"]), division_id=scope or None,
+            )
     else:
         return
 

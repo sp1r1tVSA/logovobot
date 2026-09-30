@@ -960,6 +960,10 @@ def _register_admin_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(cb_admin_integrity_case, pattern=r"^admin_integrity_case:\d+"))
     app.add_handler(CallbackQueryHandler(cb_admin_integrity_review, pattern=r"^admin_integrity_(ack|dismiss|confirm):\d+"))
 
+    # 🩺 Эксплуатация: /health, /backup, /ocr_stats, /audit — глобальные админы, только ЛС
+    from handlers.admin_ops import register_admin_ops_handlers
+    register_admin_ops_handlers(app)
+
 def register_all_handlers(application: Application) -> None:
     """Register all command, message, and callback handlers to the application."""
     # 0. Global lockdown guard at group -1 (runs before all standard handlers)

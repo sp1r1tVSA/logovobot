@@ -7,8 +7,8 @@ e-sports championships: divisions and rounds, match result intake via AI screens
 standings and Pillow-rendered infographics, a debt/warn discipline system, and a virtual
 prediction market ("Logovo.bet") exposed through a Telegram Mini App.
 
-The project is well past MVP — 249 Python files (118 application modules + 131 pytest
-files), 59 SQLite tables, and ten completed development phases documented in the
+The project is well past MVP — 396 Python files (173 application modules and scripts +
+223 pytest files), 73 SQLite tables (migrations through `031`), and ten completed development phases documented in the
 `PHASE_*.md` reports under `reports/`. Post-phase work is logged in the numbered
 `FIX_*.md` notes and the `*_AUDIT.md` reports beside them.
 
@@ -100,20 +100,20 @@ never prevents the bot itself from starting. Preserve that isolation.
 |---|---|
 | `main.py` | Entrypoint, `post_init`, background job registration |
 | `config.py` | All env parsing. Every setting must be read here, never via `os.getenv` at a call site |
-| `database.py` | ~10.5k lines: schema, migrations, and every repository function |
+| `database.py` | ~19.8k lines: schema, migrations, and every repository function |
 | `constants.py` | Shared enums and literals |
 | `club_registry.py` | Canonical club names, aliases, and the tiered name resolver. Imports `config` only |
 | `conftest.py` | Test bootstrap: per-module temp SQLite DB and the autouse fixtures (see Commands) |
-| `handlers/` (11 modules) | Telegram entrypoints — `admin`, `cabinet`, `drafts`, `betting`, `chat`, `topic_management`, `text_commands`, `squad_ai`, `tracker`, `base` |
+| `handlers/` (17 modules) | Telegram entrypoints — `admin`, `admin_bets`, `admin_ops`, `cabinet`, `drafts`, `betting`, `chat`, `club_smm`, `cup_management`, `league_overview`, `topic_management`, `text_commands`, `squad_ai`, `tracker`, `bot_menu`, `base` |
 | `services/ai/` | `ai_recognizer.py` (match-result Gemini Vision OCR), `squad_recognizer.py` (lineup OCR), `ai_chat.py` («Темшик» persona), `persona_base.py`, `bet_picks.py` (panel «ИИ-прогноз» via OpenRouter) |
 | `services/graphics/` (9 modules) | Pillow renderers: standings tables, club/player/FC cards, club schedules, round digests, top-stats, `division_theme.py`, `player_photos.py` |
 | `services/sports/` + `sports_provider.py` | External live-football provider adapters plus `cache`, `circuit`, `limiter`, `freshness`, `health`, `odds_sync` |
-| `services/` (root, ~39 modules) | Betting/market engines, ELO, Poisson, risk, settlement, gamification, seasons, `topic_cache.py` |
+| `services/` (root, ~63 modules) | Betting/market engines, ELO, Poisson, risk, settlement, gamification, seasons, `topic_cache.py`; operations: `db_backup`, `job_health`, `bot_health`, `ocr_metrics`, `admin_journal` |
 | `api/` (18 modules) | `aiohttp` Mini App API — `server.py`, `auth.py`, `rate_limiter.py`, and 15 `routes_*.py` modules |
 | `web/` | Mini App frontend (static `index.html`, `css/`, `js/` — `api`, `app`, `effects`, `store`, `tg`, `ui`) |
 | `utils/` | `media_utils.py`, a thin re-export wrapper over `services/animation_sender.py` |
 | `scripts/` (15 scripts) | One-off operational scripts (DB audit, backfills, imports, bulk club binding, cache refresh, season reset) |
-| `tests/` | 129 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
+| `tests/` | 223 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
 | `assets/` | **Not in git** — emptied on 2026-09-18 with the КПЛ season. Runtime recreates `avatars/` and `players/` on demand; `logos/` must be refilled by hand (see below) |
 | `reports/` | Historical `PHASE_*.md` plans/matrices/reports, `FIX_0*.md` notes and `*_AUDIT.md` audits, moved off the repo root |
 | `tasks/`, `docs/` | Working plan/todo notes and `PURGE_SEASON_GUIDE.md` |
@@ -376,11 +376,14 @@ became a debt just sets the score. A played debt gives both players −1 through
 every 30 min too, and a debts digest goes to the ПРЕДЫ thread every 12 h.
 `MAX_WARNS_LIMIT = 4`.
 
-`register_jobs()` in `main.py` schedules six more beyond those three, each in its own
+`register_jobs()` in `main.py` schedules more beyond those three, each in its own
 try/except block: live provider sync (45 s), intelligence cache (5 min), the notification
-queue (15 s), bet settlement (60 s), and the round preview / round digest posts to the
-АНАЛИТИКА topic (10 / 15 min). Settlement in particular used to run inline on Mini App
-requests — keep it off the request path.
+queue (15 s), bet settlement (60 s), the round preview / round digest posts to the
+АНАЛИТИКА topic (10 / 15 min) and the DB auto-backup check (30 min, see Operations).
+Settlement in particular used to run inline on Mini App requests — keep it off the request
+path. Every repeating job goes through `_run_repeating(application, name, callback,
+interval, first)`, which wraps it in `services/job_health.tracked` — schedule new jobs the
+same way, or `/health` will not see them.
 
 **Betting** ("Logovo.bet") is a closed virtual-currency system: `user_wallets`,
 `coin_transactions`, `markets`/`market_selections`, `user_bets`/`bet_items`, plus risk,
@@ -535,6 +538,67 @@ limit keys, scopes and bounds shared by the route and the analysis (`LIMIT_KEYS_
 
 ---
 
+## Operations (global admins)
+
+Four screens for **global admins only** (`is_global_admin`), in **private chat only** — in a
+group they answer with an «Открыть в ЛС» deep link (`?start=health`). They live in
+`handlers/admin_ops.py`, register at the end of `_register_admin_handlers` (before the AI
+catch-all), and appear in the global admins' command menu (`bot_menu.GLOBAL_ADMIN_COMMANDS`).
+Division admins get «⛔ Доступ запрещён»: the reports carry paths, key counts and every
+admin's actions.
+
+- **`/backup`** — makes a backup now; `/backup list` only lists them, with a 📎 button that
+  sends a copy as a file (≤ 50 MB, the Bot API limit). `services/db_backup.py` snapshots the
+  live DB through the SQLite backup API (`database.backup_database`, safe while the bot writes,
+  unlike copying a WAL file), switches the copy to `journal_mode=DELETE`, checks it with
+  `PRAGMA quick_check`, gzips it to `<name>.part` and renames it, so a crash never leaves a
+  half-written file that looks valid. A copy that fails the check raises `BackupError` and is
+  not kept. Files are `league-YYYYmmdd-HHMMSS.db.gz` in MSK, so name order is time order;
+  rotation keeps `BACKUP_KEEP` and never the last one. The `db_backup` job runs every 30 min
+  and backs up only when the newest file is older than `BACKUP_INTERVAL_HOURS` (0 = off) — the
+  age is read from the files, so a restart neither skips nor doubles a backup. With
+  `BACKUP_TELEGRAM_CHAT_ID` set, each auto-copy is also sent there. The send button only
+  accepts a name from `list_backups`, so a forged callback cannot point outside the folder.
+  `BACKUP_DIR` (default `backups/`) is gitignored and dockerignored — mount it as a volume.
+- **`/health`** — `services/bot_health.collect` (sync, run via `to_thread`) +
+  `format_report`: uptime, DB size / WAL / `quick_check` / last migration
+  (`database.get_db_health`), backups and disk, key **counts** (never the keys), lockdown,
+  process components (`api_server`, `startup_markets`, recorded from `post_init`), every
+  background job, and the last 24 h of OCR. `warnings()` puts problems on top. Job state
+  lives in `services/job_health` in process memory, so it covers the time since start. A job
+  is `failing` after an exception, and `stale` when it has not started for 3 intervals + 5 min.
+  After `JOB_ALERT_AFTER_FAILURES` failures in a row the global admins get a DM, at most once
+  per `JOB_ALERT_COOLDOWN_HOURS`, and one «восстановилась» message when it recovers. `tracked`
+  re-raises, so the application's error handler still sees the exception.
+- **`/ocr_stats [дни]`** (alias `/ocr`) — `ocr_runs` (migration `031`, no FK) holds one row per
+  result-screenshot recognition: `source` (`cabinet` = DM, `draft` = group draft), `status`
+  (`ok`, `failed`, `error`, `shootout`, `goals_exceed`, `no_teams`, `no_match`), the model
+  that answered, the attempt log, duration and the score read (already turned to the match's
+  player1/player2). The recognizer stays perceptual and never touches the DB: it only fills the
+  optional `stats` dict of `recognize_match_screenshots_bytes` (`model`, `attempts` as
+  `{model, outcome}`, `duration_ms`), and the handler stores it through
+  `ocr_metrics.record_run`. `outcome` starts `pending` and becomes `accepted` (player
+  confirmed the AI score / admin confirmed the draft), `manual` (player chose manual entry)
+  or `rejected` (draft rejected). Only a pending run changes. **Accuracy is not stored**: it
+  compares the score read with the match's final score on read, so a corrected result
+  counts at once, and technical results are excluded. Recording never raises.
+- **`/audit [@user|id] [категория]`** (alias `/admin_log`) — the admin journal, 10 per page,
+  filtered by category (`admin_journal.CATEGORIES`). Handlers write through
+  `admin_journal.record(actor_id, action, target_type, target_id, old=, new=,
+  division_id=, reason=)`, which is async, runs off the loop, and never raises. `ACTIONS`
+  labels known actions; an unknown one shows up as is under «Прочее», so a forgotten catalog
+  line hides nothing. `NOISY_ACTIONS` (repricing `odds_changed`, tracker/live transitions)
+  are left out of «Все». `database.get_admin_journal` reads `admin_audit_log` ∪
+  `bet_audit_log` and drops actor 0 (the system). `log_admin_action` falls back to
+  `bet_audit_log` when the insert hits the users FK — a global admin from `ADMIN_IDS` who
+  never pressed /start has no users row, and their actions used to be lost silently. When
+  you add an admin action, journal it and add it to `ACTIONS`.
+
+Tests: `test_db_backup`, `test_job_health`, `test_bot_health`, `test_ocr_metrics`,
+`test_admin_journal`.
+
+---
+
 ## Roles and access
 
 Three distinct levels, all resolved in `handlers/base.py` — use these helpers, never
@@ -546,6 +610,8 @@ compare against `config.ADMIN_IDS` inline:
 - `is_super_admin(telegram_id)` — the `ADMIN_IDS` env list and nothing else: no DB role,
   no division. It alone gates the Logovo.bet panel (`api/routes_admin_panel.py`) and the
   bootstrap `is_panel_admin` flag that shows its ⚙️ button in the Mini App.
+- The ops commands `/health`, `/backup`, `/ocr_stats` (`/ocr`) and `/audit` (`/admin_log`)
+  are `is_global_admin`-only and answer in private chat only (see Operations).
 
 `config.py` re-reads `config.ADMIN_IDS` dynamically inside these helpers, so admin changes
 take effect without a restart. Keep that behaviour.

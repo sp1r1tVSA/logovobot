@@ -15,6 +15,7 @@ from telegram.ext import ContextTypes
 
 import config
 import database
+from services import admin_journal
 from time_utils import fmt_msk
 from handlers.base import is_global_admin
 from handlers.cabinet import safe_send_notification
@@ -1135,6 +1136,7 @@ async def cb_admin_integrity_review(update: Update, context: ContextTypes.DEFAUL
         database.set_integrity_case_status, case_id, new_status, admin_id, None
     )
     if changed:
+        await admin_journal.record(admin_id, "integrity_case_status", "integrity_case", case_id, new=new_status)
         await query.answer(CASE_STATUS_TITLES.get(new_status, "Готово"))
     else:
         await query.answer("Дело не найдено.", show_alert=True)

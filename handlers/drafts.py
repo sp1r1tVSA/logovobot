@@ -8,6 +8,7 @@ import database
 import config
 from services.topic_cache import topic_cache
 from services.ai.ai_recognizer import recognize_match_screenshots_bytes
+from services import admin_journal, ocr_metrics
 from handlers.cabinet import match_and_enrich_squad, build_formatted_match_post, resolve_mvp_player_name, has_shootout
 
 logger = logging.getLogger(__name__)
@@ -133,18 +134,30 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
         reply_to_message_id=reply_to_id
     )
     
+    ocr_stats: dict = {}
+
+    async def _record_ocr(status: str, match_id=None, score1=None, score2=None):
+        return await asyncio.to_thread(
+            ocr_metrics.record_run, "draft", status,
+            stats=ocr_stats, user_id=user_id, match_id=match_id,
+            images=len(photos), score1=score1, score2=score2,
+        )
+
     try:
         ai_res = await asyncio.to_thread(
             recognize_match_screenshots_bytes,
             photos,
-            caption=caption
+            caption=caption,
+            stats=ocr_stats,
         )
     except Exception as e:
         logger.exception("Error in draft AI processing")
+        await _record_ocr("error")
         await status_msg.edit_text("❌ Ошибка при распознавании скриншота.")
         return
         
     if not ai_res:
+        await _record_ocr("failed")
         await status_msg.edit_text("🤖 ИИ не смог распознать результаты матча. Убедитесь, что скриншоты чёткие.")
         return
         
@@ -153,6 +166,7 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
     if has_shootout(ai_res):
         # Голы серии пенальти EA FC пишет в колонку «Г» — черновик со скриншота
         # вышел бы с неверными авторами. Такой результат вносится вручную в ЛС.
+        await _record_ocr("shootout")
         await status_msg.edit_text(
             "🥅 На скриншоте серия пенальти. Такой результат занесите вручную через "
             "личные сообщения бота: счёт основного времени и авторов голов с игры."
@@ -162,6 +176,7 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
     if any(m.get("ocr_goals_exceed_score") for m in matches_list):
         # Голов больше, чем на табло: ИИ перепутал колонки «Г»/«А». Ниже счёт
         # подтянулся бы под число голов — такой черновик публиковать нельзя.
+        await _record_ocr("goals_exceed")
         await status_msg.edit_text(
             "⛔ ИИ прочитал со скриншота больше голов, чем показывает счёт. Такой "
             "результат занесите вручную через личные сообщения бота."
@@ -179,6 +194,7 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
     t1_raw = detected_t1 or matches_list[0].get("team1")
     t2_raw = detected_t2 or matches_list[0].get("team2")
     if not t1_raw or not t2_raw:
+        await _record_ocr("no_teams")
         await status_msg.edit_text("🤖 ИИ распознал счет, но не смог определить команды по составам игроков. Пожалуйста, укажите названия клубов текстом в описании к фото.")
         return
         
@@ -189,6 +205,7 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
     division_id = group_data.get("division_id")
     first_match = await asyncio.to_thread(database.get_active_match_by_teams, t1, t2, caption, division_id=division_id)
     if not first_match:
+        await _record_ocr("no_match")
         await status_msg.edit_text(f"❌ Не найден активный матч между командами {html.escape(t1)} и {html.escape(t2)}.\nВозможно, этот тур уже подтвержден или названия клубов не совпадают.")
         return
 
@@ -231,6 +248,7 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
             )
         except Exception as e:
             logger.exception(f"Error matching squad in draft: {e}")
+            await _record_ocr("error", first_match.get("id"))
             await status_msg.edit_text("❌ Ошибка при сопоставлении состава. Возможно, игроки не зарегистрированы.")
             return
 
@@ -455,6 +473,12 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
             f"{', '.join([html.escape(p['player_name']) for p in all_new_players])}</i>"
         )
 
+    # Метрики OCR: один прогон на черновик, счёт — первой игры (хозяева/гости матча).
+    first_game = prepared_games[0]
+    draft_data["ocr_run_id"] = await _record_ocr(
+        "ok", first_game["match_id"], first_game["h_score"], first_game["a_score"],
+    )
+
     if "drafts" not in context.bot_data:
         context.bot_data["drafts"] = {}
     context.bot_data["drafts"][draft_uuid] = draft_data
@@ -617,6 +641,12 @@ async def cb_draft_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             failed_games.append((idx, g, str(e) or e.__class__.__name__))
             continue
 
+        await admin_journal.record(
+            query.from_user.id, "draft_confirmed", "match", m_id,
+            new=f"{g.get('home_team')} {g['h_score']}:{g['a_score']} {g.get('away_team')}",
+            division_id=g.get("division_id"),
+        )
+
         try:
             # Reward players with -1 warn if this was an overdue debt match
             try:
@@ -724,6 +754,8 @@ async def cb_draft_confirm(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await asyncio.to_thread(database.delete_draft, draft_uuid)
         except Exception as e:
             logger.warning(f"Failed to delete draft {draft_uuid} from SQLite: {e}")
+        if draft.get("ocr_run_id"):
+            await asyncio.to_thread(ocr_metrics.mark_outcome, "accepted", run_id=draft["ocr_run_id"])
         new_caption = f"{cleaned_text}\n\n✅ <b>Одобрено администратором {html.escape(admin_name)}.</b>"
         keep_markup = False
 
@@ -769,6 +801,15 @@ async def cb_draft_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await query.answer("⛔ У вас нет прав на дивизион этого черновика!", show_alert=True)
         return
     drafts.pop(draft_uuid, None)
+    if draft is not None:
+        if draft.get("ocr_run_id"):
+            await asyncio.to_thread(ocr_metrics.mark_outcome, "rejected", run_id=draft["ocr_run_id"])
+        for g in draft.get("games") or [draft]:
+            await admin_journal.record(
+                query.from_user.id, "draft_rejected", "match", g.get("match_id"),
+                new=f"{g.get('home_team')} {g.get('h_score')}:{g.get('a_score')} {g.get('away_team')}",
+                division_id=g.get("division_id"),
+            )
     try:
         await asyncio.to_thread(database.delete_draft, draft_uuid)
     except Exception as e:

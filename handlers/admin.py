@@ -40,7 +40,7 @@ from config import MAX_WARNS_LIMIT, GROUP_ID
 from handlers.squad_ai import offer_recognized_squad
 from handlers.bot_menu import refresh_admin_menu
 from services.graphics import player_photos
-from services import debt_lifecycle, debt_policy
+from services import admin_journal, debt_lifecycle, debt_policy
 from services.tournament_validator import RoundRobinValidator
 from services.schedule_generator import (
     generate_asymmetric_round_robin_fixtures,
@@ -202,6 +202,15 @@ async def _ensure_league_players_access(update: Update) -> bool:
         return True
     await _deny_access(update, "⛔ Раздел доступен только администраторам первого дивизиона или супер-админам")
     return False
+
+
+def _journal_player(player) -> str | None:
+    """«@username (Клуб)» for the admin journal; accepts a Row, a dict or None."""
+    if not player:
+        return None
+    p = dict(player)
+    who = f"@{p['username']}" if p.get("username") else f"ID {p.get('telegram_id')}"
+    return f"{who} ({p['team_name']})" if p.get("team_name") else who
 
 
 def _division_home_cb(user_id: int, div_id: int) -> str:
@@ -1436,6 +1445,7 @@ async def admin_div_admin_remove(update: Update, context: ContextTypes.DEFAULT_T
         return
 
     await asyncio.to_thread(database.remove_division_admin, div_id, target_id)
+    await admin_journal.record(user.id, "division_admin_removed", "user", target_id, division_id=div_id)
     logger.info(f"Division admin revoked: user={target_id} division={div_id} by={user.id}")
     await refresh_admin_menu(context.bot, target_id)
     await admin_div_admins_view(update, context, div_id=div_id)
@@ -1498,6 +1508,10 @@ async def admin_div_admin_add_receive(update: Update, context: ContextTypes.DEFA
 
     target_id = target["telegram_id"]
     await asyncio.to_thread(database.add_division_admin, div_id, target_id)
+    await admin_journal.record(
+        user.id, "division_admin_added", "user", target_id,
+        new=f"@{target['username']}" if target.get("username") else None, division_id=div_id,
+    )
     logger.info(f"Division admin granted: user={target_id} division={div_id} by={user.id}")
     await refresh_admin_menu(context.bot, target_id)
 
@@ -2039,6 +2053,11 @@ async def admin_div_toggle(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
     new_active = 0 if division.get("is_active") else 1
     await asyncio.to_thread(database.update_division, div_id, is_active=new_active)
+    await admin_journal.record(
+        query.from_user.id, "division_toggled", "division", div_id,
+        old="вкл" if division.get("is_active") else "выкл", new="вкл" if new_active else "выкл",
+        division_id=div_id,
+    )
     await query.answer(f"✅ Дивизион {'активирован' if new_active else 'деактивирован'}!", show_alert=False)
     await admin_div_view(update, context, div_id=div_id)
 
@@ -2144,6 +2163,10 @@ async def admin_div_create_receive(update: Update, context: ContextTypes.DEFAULT
         counter += 1
 
     div_id = await asyncio.to_thread(database.create_division, name=name, code=code)
+    await admin_journal.record(
+        update.effective_user.id, "division_created", "division", div_id,
+        new=f"{name} ({code})", division_id=div_id,
+    )
 
     keyboard = [
         [InlineKeyboardButton("🏆 Перейти к дивизиону", callback_data=f"admin_div_view_{div_id}")],
@@ -2198,7 +2221,12 @@ async def admin_div_rename_receive(update: Update, context: ContextTypes.DEFAULT
         await update.message.reply_text("❌ Название слишком короткое. Введите другое:")
         return ADMIN_EXPECT_DIV_RENAME
 
+    old_div = await asyncio.to_thread(database.get_division, div_id)
     await asyncio.to_thread(database.update_division, div_id, name=new_name)
+    await admin_journal.record(
+        update.effective_user.id, "division_renamed", "division", div_id,
+        old=old_div.get("name") if old_div else None, new=new_name, division_id=div_id,
+    )
     # TopicCache держит division_name копией, а не ссылкой: без перегрузки /table
     # в топиках дивизиона рисует старое название до перезапуска процесса.
     from services.topic_cache import topic_cache
@@ -2564,6 +2592,10 @@ async def admin_extend_match_execute(update: Update, context: ContextTypes.DEFAU
     
     match_id = int(query.data.replace("admin_extend_match_", ""))
     new_val = await asyncio.to_thread(database.extend_match_deadline, match_id)
+    await admin_journal.record(
+        query.from_user.id, "match_freeze_toggled", "match", match_id,
+        new="заморожен" if new_val == 1 else "разморожен",
+    )
     
     if new_val == 1:
         await query.answer("⏸ Дедлайн продлен (сроки долга заморожены)", show_alert=True)
@@ -2632,6 +2664,10 @@ async def admin_extend_hours_execute(update: Update, context: ContextTypes.DEFAU
     if not until_str:
         await query.answer("❌ Не удалось продлить матч.", show_alert=True)
         return
+    await admin_journal.record(
+        query.from_user.id, "match_deadline_extended", "match", match_id,
+        new=f"+{hours} ч, до {until_str}", division_id=match.get("division_id"),
+    )
 
     until_dt = database.parse_flexible_datetime(until_str)
     until_human = until_dt.strftime("%d.%m.%Y %H:%M") if until_dt else until_str
@@ -2839,6 +2875,12 @@ async def admin_open_round_save(update: Update, context: ContextTypes.DEFAULT_TY
         )
         return ConversationHandler.END
 
+    await admin_journal.record(
+        user.id, "round_opened", "round", round_number,
+        old=(r_info or {}).get("deadline") if prev_phase != debt_policy.ROUND_CLOSED else "закрыт",
+        new=f"дедлайн {deadline_text}", division_id=div_id,
+    )
+
     if prev_phase in (debt_policy.ROUND_OPEN, debt_policy.ROUND_OVERDUE):
         headline = f"🕒 <b>Дедлайн {round_number}-го тура изменён</b>"
     elif prev_phase == debt_policy.ROUND_CLOSED:
@@ -3002,6 +3044,10 @@ async def admin_open_batch_deadline(update: Update, context: ContextTypes.DEFAUL
     # Перечисляем открытые туры списком, а не диапазоном: в диапазоне мог
     # оказаться пропущенный тур без расписания.
     opened_list = ", ".join(str(r) for r in opened_rounds)
+    await admin_journal.record(
+        update.effective_user.id, "rounds_opened_batch", "round", opened_rounds[0],
+        new=f"туры {opened_list}, дедлайн {deadline_text}", division_id=div_id,
+    )
     announced = await _announce_rounds_opened(
         context,
         div_id,
@@ -3141,6 +3187,10 @@ async def admin_close_round_confirm(update: Update, context: ContextTypes.DEFAUL
 
     result = await asyncio.to_thread(database.close_round, round_number, div_id, query.from_user.id)
     debts = result.get("debts") or []
+    await admin_journal.record(
+        query.from_user.id, "round_closed", "round", round_number,
+        new=("досрочно, " if result.get("early") else "") + f"долгов: {len(debts)}", division_id=div_id,
+    )
 
     announced = await _announce_rounds_opened(context, div_id, _close_round_announcement(result), include_table=False)
 
@@ -3592,6 +3642,12 @@ async def admin_set_technical_result_execute(update: Update, context: ContextTyp
         await query.answer("❌ Не удалось назначить результат.", show_alert=True)
         return
 
+    await admin_journal.record(
+        query.from_user.id, "technical_verdict", "match", match_id,
+        new=_VERDICT_ALERTS[verdict].removeprefix("✅ ")
+        + ("" if outcome.get("applied") or not outcome.get("is_debt") else " (варны уже применены раньше)"),
+    )
+
     alert = _VERDICT_ALERTS[verdict]
     if outcome["is_debt"] and not outcome["applied"]:
         alert += "\nВарны по этому долгу уже выданы — изменён только счёт."
@@ -3633,6 +3689,15 @@ async def admin_reset_match_execute(update: Update, context: ContextTypes.DEFAUL
         return
 
     await asyncio.to_thread(database.reset_match, match_id)
+    old_score = (
+        f"{match.get('player1_score')}:{match.get('player2_score')}"
+        if match.get("player1_score") is not None else match.get("status")
+    )
+    await admin_journal.record(
+        query.from_user.id, "match_reset", "match", match_id,
+        old=f"{match.get('player1_team')} {old_score} {match.get('player2_team')}",
+        division_id=match.get("division_id"),
+    )
 
     where = (
         f"кубке ({html.escape(str(match.get('cup_stage') or ''))})"
@@ -3823,6 +3888,11 @@ async def admin_add_player_club_callback(update: Update, context: ContextTypes.D
 
     # Assign new player to the club with division_id
     temp_id, old_username = await asyncio.to_thread(database.assign_player_to_club, username, club, division_id)
+    await admin_journal.record(
+        query.from_user.id, "player_added", "user", temp_id,
+        old=f"@{old_username}" if old_username else None,
+        new=f"@{username} → {club}", division_id=division_id,
+    )
 
     text = (
         f"✅ <b>Игрок успешно добавлен!</b>\n\n"
@@ -3877,6 +3947,11 @@ async def admin_add_player_manual_club_text(update: Update, context: ContextType
         return ConversationHandler.END
 
     temp_id, old_username = await asyncio.to_thread(database.assign_player_to_club, username, club, division_id)
+    await admin_journal.record(
+        update.effective_user.id, "player_added", "user", temp_id,
+        old=f"@{old_username}" if old_username else None,
+        new=f"@{username} → {club}", division_id=division_id,
+    )
 
     text = (
         f"✅ <b>Игрок успешно добавлен!</b>\n\n"
@@ -3957,6 +4032,11 @@ async def admin_import_players_text(update: Update, context: ContextTypes.DEFAUL
             
         try:
             temp_id, old_username = await asyncio.to_thread(database.assign_player_to_club, username, team_name, 1)
+            await admin_journal.record(
+                update.effective_user.id, "player_added", "user", temp_id,
+                old=f"@{old_username}" if old_username else None,
+                new=f"@{username} → {team_name} (импорт)", division_id=1,
+            )
             added.append(f"• @{html.escape(username)} — {html.escape(team_name)} (ID: <code>{temp_id}</code>)")
         except Exception as e:
             errors.append(f"Ошибка при добавлении @{html.escape(username)}: {html.escape(str(e))}")
@@ -4013,7 +4093,14 @@ async def admin_edit_club_text(update: Update, context: ContextTypes.DEFAULT_TYP
         await update.message.reply_text("Произошла ошибка (не найден ID игрока). Сброс.")
         return ConversationHandler.END
         
+    before = await asyncio.to_thread(database.get_user, player_id)
     success, msg = await asyncio.to_thread(database.set_player_club, str(player_id), new_club)
+    if success:
+        await admin_journal.record(
+            update.effective_user.id, "club_changed", "user", int(player_id),
+            old=(before["team_name"] if before else None) or "нет", new=new_club,
+            division_id=before["division_id"] if before else None,
+        )
     await update.message.reply_text(
         f"{'✅' if success else '❌'} {msg}",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« К карточке игрока", callback_data=f"admin_view_player_{player_id}")]])
@@ -4209,6 +4296,7 @@ async def admin_toggle_role(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         
     success, msg = await asyncio.to_thread(database.update_player_role, player_id, new_role)
     if success:
+        await admin_journal.record(query.from_user.id, "role_changed", "user", player_id, new=new_role)
         # Refresh player card
         await admin_view_player(update, context, player_id=player_id)
     else:
@@ -4284,8 +4372,15 @@ async def admin_wipe_player_execute(update: Update, context: ContextTypes.DEFAUL
     await query.answer()
     
     player_id = int(query.data.replace("admin_wipe_player_execute_", ""))
+    before = await asyncio.to_thread(database.get_user, player_id)
     success, msg = await asyncio.to_thread(database.delete_player_completely, player_id)
-    
+    if success:
+        await admin_journal.record(
+            query.from_user.id, "player_wiped", "user", player_id,
+            old=_journal_player(before),
+            division_id=before["division_id"] if before else None,
+        )
+
     keyboard = [[InlineKeyboardButton("« Назад к списку", callback_data="admin_list_players_page_0")]]
     if success:
         await query.edit_message_text(f"✅ {html.escape(msg)}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="HTML")
@@ -4442,6 +4537,11 @@ async def admin_remove_player_command(update: Update, context: ContextTypes.DEFA
 
     success, msg = await asyncio.to_thread(database.remove_player, target)
     if success:
+        await admin_journal.record(
+            user.id, "player_removed", "user", player["telegram_id"] if player else None,
+            old=_journal_player(player) or target,
+            division_id=player.get("division_id") if player else None,
+        )
         await update.message.reply_text(f"✅ {html.escape(msg)}", parse_mode="HTML")
         if player:
             username_str = f"@{player['username']}" if player.get("username") else f"ID: {player['telegram_id']}"
@@ -4768,8 +4868,14 @@ async def admin_edit_club_execute(update: Update, context: ContextTypes.DEFAULT_
         return
     new_club = clubs_list[club_idx]
 
+    before = await asyncio.to_thread(database.get_user, p_id)
     success, msg = await asyncio.to_thread(database.set_player_club, str(p_id), new_club)
     if success:
+        await admin_journal.record(
+            query.from_user.id, "club_changed", "user", int(p_id),
+            old=(before["team_name"] if before else None) or "нет", new=new_club,
+            division_id=before["division_id"] if before else None,
+        )
         try:
             await _post_or_update_debts_in_warns(context)
         except Exception as e:
@@ -5076,6 +5182,12 @@ async def admin_bind_execute(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     success, msg = await asyncio.to_thread(database.set_player_club, str(player_id), club)
     if success:
+        await admin_journal.record(
+            query.from_user.id, "club_bound", "user", int(player_id),
+            old=player_row.get("team_name") or "нет",
+            new=f"{_journal_player({**player_row, 'team_name': None}) or player_id} → {club}",
+            division_id=div_id,
+        )
         # Клуб принадлежит дивизиону, поэтому его владелец обязан в нём числиться:
         # иначе тренер выпадет из таблицы, долгов и дайджестов — они считаются
         # по division_id, а не по названию клуба.
@@ -5157,6 +5269,10 @@ async def admin_bind_free_execute(update: Update, context: ContextTypes.DEFAULT_
 
     success, msg = await asyncio.to_thread(database.clear_player_club, int(owner["telegram_id"]))
     if success:
+        await admin_journal.record(
+            query.from_user.id, "club_freed", "user", int(owner["telegram_id"]),
+            old=_journal_player(owner), division_id=div_id,
+        )
         try:
             await _post_or_update_debts_in_warns(context)
         except Exception as e:
@@ -5219,7 +5335,13 @@ async def admin_edit_div_execute(update: Update, context: ContextTypes.DEFAULT_T
     target_div_raw = parts[1]
     target_div_id = None if target_div_raw == "none" else int(target_div_raw)
 
+    before = await asyncio.to_thread(database.get_user, p_id)
     await asyncio.to_thread(database.assign_user_division, p_id, target_div_id)
+    await admin_journal.record(
+        query.from_user.id, "player_division_changed", "user", p_id,
+        old=(before["division_id"] if before else None) or "нет",
+        new=target_div_id or "нет", division_id=target_div_id,
+    )
     await query.answer("✅ Дивизион обновлен!", show_alert=False)
     await admin_view_player(update, context, player_id=p_id)
 
@@ -5324,6 +5446,10 @@ async def admin_delete_player_execute(update: Update, context: ContextTypes.DEFA
 
     success, msg = await asyncio.to_thread(database.remove_player, str(p_id))
     if success:
+        await admin_journal.record(
+            query.from_user.id, "player_removed", "user", p_id,
+            old=_journal_player(player), division_id=division_id,
+        )
         try:
             await _post_or_update_debts_in_warns(context)
         except Exception as e:
@@ -7757,6 +7883,11 @@ async def admin_warn_execute(update: Update, context: ContextTypes.DEFAULT_TYPE)
             return
 
         new_count, is_exceeded = await asyncio.to_thread(database.add_warn, p_id, admin_id, reason)
+        await admin_journal.record(
+            admin_id, "warn_added", "user", p_id,
+            old=_journal_player(player), new=f"{new_count}/{MAX_WARNS_LIMIT}",
+            division_id=player.get("division_id"), reason=reason,
+        )
 
         username_str = f"@{player['username']}" if player['username'] else f"ID {p_id}"
         team_str = player['team_name'] or 'Без клуба'
@@ -7841,6 +7972,12 @@ async def admin_warn_remove_execute(update: Update, context: ContextTypes.DEFAUL
         reason = "Снятие варна администратором"
 
         new_count, success = await asyncio.to_thread(database.remove_warn, p_id, admin_id, reason)
+        if success:
+            await admin_journal.record(
+                admin_id, "warn_removed", "user", p_id,
+                old=_journal_player(player), new=f"{new_count}/{MAX_WARNS_LIMIT}",
+                division_id=player.get("division_id"), reason=reason,
+            )
 
         if not success:
             await query.answer("У игрока нет активных предупреждений.", show_alert=True)
@@ -7947,6 +8084,11 @@ async def admin_amnesty_execute(update: Update, context: ContextTypes.DEFAULT_TY
 
     admin_id = query.from_user.id
     await asyncio.to_thread(database.amnesty_player, p_id, admin_id)
+    await admin_journal.record(
+        admin_id, "warn_amnesty", "user", p_id,
+        old=f"{_journal_player(player)}, варнов {player.get('warn_count') or 0}", new=f"0/{MAX_WARNS_LIMIT}",
+        division_id=player.get("division_id"),
+    )
 
     username_str = f"@{player['username']}" if player['username'] else f"ID {p_id}"
     team_str = player['team_name'] or 'Без клуба'
@@ -7987,6 +8129,7 @@ async def admin_reset_season_warns(update: Update, context: ContextTypes.DEFAULT
         pass
 
     await asyncio.to_thread(database.reset_season_warns)
+    await admin_journal.record(query.from_user.id, "season_warns_reset", "league", None, new="все варны = 0")
     await query.edit_message_text(
         "✅ Все предупреждения сброшены (новый сезон).",
         reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("« Назад в админку", callback_data="admin_main_menu")]])
@@ -8003,6 +8146,10 @@ async def admin_reset_debts_command(update: Update, context: ContextTypes.DEFAUL
         return
 
     count = await asyncio.to_thread(database.admin_reset_all_warns_and_debts)
+    await admin_journal.record(
+        user_id, "warns_debts_reset_all", "league", None,
+        new=f"сброшено варнов у {count} игроков, стадии долгов очищены",
+    )
 
     text = (
         f"🧹 <b>Система долгов и варнов успешно сброшена!</b>\n\n"
@@ -8050,6 +8197,11 @@ async def admin_unwarn_command(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if is_all:
         await asyncio.to_thread(database.reset_user_warns, t_id, user_id)
+        await admin_journal.record(
+            user_id, "warns_reset_user", "user", t_id,
+            old=f"{_journal_player(target_user)}, варнов {target_user.get('warn_count') or 0}",
+            new=f"0/{MAX_WARNS_LIMIT}", division_id=target_user.get("division_id"),
+        )
         await update.message.reply_text(
             f"✅ Все варны игрока <b>{html.escape(u_name)}</b> [{html.escape(t_name)}] полностью аннулированы (0/{MAX_WARNS_LIMIT}).",
             parse_mode="HTML"
@@ -8057,6 +8209,11 @@ async def admin_unwarn_command(update: Update, context: ContextTypes.DEFAULT_TYP
     else:
         new_cnt, removed = await asyncio.to_thread(database.remove_warn, t_id, user_id, "Снято администратором")
         if removed:
+            await admin_journal.record(
+                user_id, "warn_removed", "user", t_id,
+                old=_journal_player(target_user), new=f"{new_cnt}/{MAX_WARNS_LIMIT}",
+                division_id=target_user.get("division_id"), reason="/unwarn",
+            )
             await update.message.reply_text(
                 f"✅ С игрока <b>{html.escape(u_name)}</b> [{html.escape(t_name)}] снят 1 варн.\n"
                 f"📊 Текущие варны: <b>{new_cnt}/{MAX_WARNS_LIMIT}</b>",

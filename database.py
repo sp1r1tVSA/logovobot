@@ -2307,6 +2307,9 @@ def init_db() -> None:
         # ─── 030: история постов клубного SMM-центра для контекста и хронологии ─
         _ensure_club_smm_schema(cursor)
 
+        # ─── 031: прогоны OCR скриншотов для метрик распознавания ─────────────
+        _ensure_ocr_runs_schema(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -2867,17 +2870,43 @@ def log_admin_action(
     season_id: int | None = None,
     metadata: str | None = None
 ) -> None:
-    """Record an administrative action into admin_audit_log."""
+    """Record an administrative action into admin_audit_log.
+
+    `admin_audit_log.admin_id` has an FK to users, and a global admin from
+    ADMIN_IDS who never pressed /start has no users row — the insert used to
+    fail silently and the action was lost. Such rows (and system actor 0) go to
+    `bet_audit_log`, which has no FK; the admin journal reads both tables.
+    """
+    new_value = new_value if new_value is not None else metadata
     try:
         with transaction() as conn:
-            conn.cursor().execute(
-                """
-                INSERT INTO admin_audit_log (
-                    admin_id, action, target_type, target_id, old_value, new_value, division_id, season_id, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
-                """,
-                (admin_id, action, target_type, target_id, old_value, new_value or reason or metadata, division_id, season_id)
-            )
+            cursor = conn.cursor()
+            try:
+                cursor.execute(
+                    """
+                    INSERT INTO admin_audit_log (
+                        admin_id, action, target_type, target_id, old_value, new_value,
+                        division_id, season_id, reason, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
+                    """,
+                    (admin_id, action, target_type or "", target_id, old_value, new_value,
+                     division_id, season_id, reason)
+                )
+            except sqlite3.IntegrityError:
+                if new_value is None:
+                    new_value = reason
+                elif reason:
+                    new_value = f"{new_value} — {reason}"
+                cursor.execute(
+                    """
+                    INSERT INTO bet_audit_log (
+                        actor_id, action, entity_type, entity_id, old_value, new_value,
+                        division_id, season_id, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
+                    """,
+                    (admin_id, action, target_type or "", target_id or 0, old_value, new_value,
+                     division_id, season_id)
+                )
     except Exception as e:
         logger.warning(f"Failed to log admin action '{action}': {e}")
 
@@ -4186,18 +4215,18 @@ def admin_set_match_score(match_id: int, player1_score: int, player2_score: int,
             (player1_score, player2_score, now_msk_str(), match_id)
         )
 
-        if is_correction and admin_id:
+        if admin_id:
             div_id = old_m["division_id"] if old_m else None
             s_id = old_m["season_id"] if old_m else None
             try:
                 log_admin_action(
                     admin_id=admin_id,
-                    action="correct_match_score",
+                    action="correct_match_score" if is_correction else "set_match_score",
                     target_type="match",
                     target_id=match_id,
                     old_value=old_score_str,
                     new_value=f"{player1_score}:{player2_score}",
-                    reason="Admin corrected confirmed match score",
+                    reason="Admin corrected confirmed match score" if is_correction else None,
                     division_id=div_id,
                     season_id=s_id
                 )
@@ -6641,17 +6670,6 @@ def apply_player_spelling_merges(plan: dict) -> dict:
             )
             updated["mvp"] += cursor.rowcount
     return updated
-
-
-def backup_database(target_path: str) -> None:
-    """Consistent online copy of the database, WAL included, via SQLite's backup API."""
-    src = get_connection()
-    dst = sqlite3.connect(target_path)
-    try:
-        src.backup(dst)
-    finally:
-        dst.close()
-        src.close()
 
 
 def get_club_top_scorers(team_name: str) -> list[dict]:
@@ -18151,6 +18169,7 @@ def delete_draft(draft_uuid: str) -> None:
 MIGRATION_028_OUTRIGHTS = "028_outright_markets"
 MIGRATION_029_FREEBETS = "029_freebets"
 MIGRATION_030_CLUB_SMM_POSTS = "030_club_smm_posts"
+MIGRATION_031_OCR_RUNS = "031_ocr_runs"
 OUTRIGHT_MARKET_TYPES = ("division_winner", "cup_winner", "division_top_scorer", "league_top_scorer")
 OUTRIGHT_OTHER_KEY = "__other__"
 MAX_OPEN_OUTRIGHT_BETS = 20
@@ -18315,6 +18334,43 @@ def _ensure_club_smm_schema(cursor: sqlite3.Cursor) -> None:
     cursor.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
         (MIGRATION_030_CLUB_SMM_POSTS, "club_smm_posts: history of club channel publications for SMM context"),
+    )
+
+
+def _ensure_ocr_runs_schema(cursor: sqlite3.Cursor) -> None:
+    """Миграция 031: один прогон OCR скриншотов результата — для /ocr_stats.
+
+    Без FK: удаление матча или игрока не должно стирать историю распознавания.
+    Счёт `ocr_score1/2` уже развёрнут к player1/player2 матча, чтобы точность
+    считалась сравнением с `matches.player1_score/player2_score` на чтении.
+    """
+    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (MIGRATION_031_OCR_RUNS,))
+    if cursor.fetchone():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS ocr_runs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            user_id INTEGER,
+            match_id INTEGER,
+            images INTEGER NOT NULL DEFAULT 0,
+            status TEXT NOT NULL,
+            model TEXT,
+            attempts INTEGER NOT NULL DEFAULT 0,
+            attempt_log TEXT,
+            duration_ms INTEGER,
+            ocr_score1 INTEGER,
+            ocr_score2 INTEGER,
+            outcome TEXT NOT NULL DEFAULT 'pending',
+            resolved_at TIMESTAMP,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ocr_runs_created ON ocr_runs(created_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_ocr_runs_match ON ocr_runs(match_id, id DESC)")
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_031_OCR_RUNS, "ocr_runs: screenshot OCR runs for recognition metrics"),
     )
 
 
@@ -19483,3 +19539,219 @@ def set_outright_odds_override(selection_id: int, odd) -> tuple[bool, dict | str
         if abs(new_value - float(sel["odds_value"])) > 0.001:
             _record_outright_price(cursor, selection_id, new_value, sel["probability"])
     return True, {"odds_value": new_value, "odds_override": odd, "market_id": sel["market_id"]}
+
+
+# ─── Эксплуатация: бэкап, здоровье базы, метрики OCR, журнал админов ─────────
+
+def backup_database(dest_path: str) -> dict:
+    """Consistent online copy of the live DB into `dest_path` via the SQLite backup API.
+
+    The backup API copies page by page under the right locks, so it is safe while
+    the bot keeps writing (a plain file copy of a WAL database is not). The copy is
+    switched to a rollback journal so it is one self-contained file, then checked
+    with `PRAGMA quick_check`. Returns `{"integrity": str, "pages": int}`.
+    """
+    src = get_connection()
+    try:
+        dst = sqlite3.connect(dest_path)
+        try:
+            src.backup(dst)
+            dst.execute("PRAGMA journal_mode=DELETE")
+            integrity = dst.execute("PRAGMA quick_check").fetchone()[0]
+            pages = dst.execute("PRAGMA page_count").fetchone()[0]
+        finally:
+            dst.close()
+    finally:
+        src.close()
+    return {"integrity": str(integrity), "pages": int(pages)}
+
+
+def get_db_health(run_quick_check: bool = True) -> dict:
+    """File sizes, integrity and the last applied migration of the live DB."""
+    import os as _os
+
+    def _size(path: str) -> int | None:
+        try:
+            return _os.path.getsize(path)
+        except OSError:
+            return None
+
+    info: dict = {
+        "path": str(DB_PATH),
+        "size_bytes": _size(str(DB_PATH)),
+        "wal_bytes": _size(f"{DB_PATH}-wal"),
+    }
+    conn = get_connection()
+    try:
+        info["page_count"] = conn.execute("PRAGMA page_count").fetchone()[0]
+        info["freelist_count"] = conn.execute("PRAGMA freelist_count").fetchone()[0]
+        info["journal_mode"] = conn.execute("PRAGMA journal_mode").fetchone()[0]
+        info["quick_check"] = (
+            str(conn.execute("PRAGMA quick_check").fetchone()[0]) if run_quick_check else None
+        )
+        row = conn.execute(
+            "SELECT version, applied_at FROM schema_migrations "
+            "ORDER BY version DESC LIMIT 1"
+        ).fetchone()
+        info["last_migration"] = row["version"] if row else None
+        info["migrations"] = conn.execute("SELECT COUNT(*) FROM schema_migrations").fetchone()[0]
+    finally:
+        conn.close()
+    return info
+
+
+def record_ocr_run(
+    source: str,
+    status: str,
+    *,
+    user_id: int | None = None,
+    match_id: int | None = None,
+    images: int = 0,
+    model: str | None = None,
+    attempts: int = 0,
+    attempt_log: str | None = None,
+    duration_ms: int | None = None,
+    ocr_score1: int | None = None,
+    ocr_score2: int | None = None,
+) -> int:
+    """Store one screenshot-OCR run; returns its id."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO ocr_runs (
+                source, user_id, match_id, images, status, model, attempts, attempt_log,
+                duration_ms, ocr_score1, ocr_score2, outcome, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now', '+3 hours'))
+            """,
+            (source, user_id, match_id, images, status, model, attempts, attempt_log,
+             duration_ms, ocr_score1, ocr_score2),
+        )
+        return cursor.lastrowid
+
+
+OCR_OUTCOMES = ("accepted", "manual", "rejected")
+
+
+def set_ocr_run_outcome(
+    outcome: str,
+    *,
+    run_id: int | None = None,
+    match_id: int | None = None,
+    source: str | None = None,
+) -> bool:
+    """Close a pending OCR run: by id, or the latest pending run of a match.
+
+    Only a `pending` run changes, so a double-pressed button or a later manual
+    entry never rewrites what already happened to the recognition.
+    """
+    if outcome not in OCR_OUTCOMES:
+        raise ValueError(f"Unknown OCR outcome: {outcome}")
+    with transaction() as conn:
+        cursor = conn.cursor()
+        if run_id is not None:
+            cursor.execute(
+                "UPDATE ocr_runs SET outcome = ?, resolved_at = datetime('now', '+3 hours') "
+                "WHERE id = ? AND outcome = 'pending'",
+                (outcome, run_id),
+            )
+        elif match_id is not None:
+            cursor.execute(
+                """
+                UPDATE ocr_runs SET outcome = ?, resolved_at = datetime('now', '+3 hours')
+                WHERE id = (
+                    SELECT id FROM ocr_runs
+                    WHERE match_id = ? AND outcome = 'pending' AND (? IS NULL OR source = ?)
+                    ORDER BY id DESC LIMIT 1
+                )
+                """,
+                (outcome, match_id, source, source),
+            )
+        else:
+            return False
+        return cursor.rowcount > 0
+
+
+def get_ocr_runs_since(since: str) -> list[dict]:
+    """OCR runs created at or after `since` (MSK string), with the match's final score."""
+    with transaction() as conn:
+        rows = conn.execute(
+            """
+            SELECT r.*, m.player1_score AS match_score1, m.player2_score AS match_score2,
+                   m.status AS match_status, COALESCE(m.is_technical, 0) AS match_is_technical
+            FROM ocr_runs r
+            LEFT JOIN matches m ON m.id = r.match_id
+            WHERE r.created_at >= ?
+            ORDER BY r.id DESC
+            """,
+            (since,),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def get_admin_journal(
+    limit: int = 10,
+    offset: int = 0,
+    *,
+    actions: "list[str] | tuple[str, ...] | None" = None,
+    exclude_actions: "list[str] | tuple[str, ...] | None" = None,
+    actor_id: int | None = None,
+    since: str | None = None,
+) -> tuple[list[dict], int]:
+    """Admin actions from both audit tables, newest first, with the total count.
+
+    `admin_audit_log` holds actions of admins that have a users row,
+    `bet_audit_log` holds betting audit plus the fallback rows of admins that do
+    not (see log_admin_action). Actor 0 is the system (live ingestion, auto
+    suspension) and is left out. Action filters are bound as `?` placeholders.
+    """
+    where = ["j.actor_id > 0"]
+    params: list = []
+    if actions:
+        where.append(f"j.action IN ({','.join('?' for _ in actions)})")
+        params.extend(actions)
+    if exclude_actions:
+        where.append(f"j.action NOT IN ({','.join('?' for _ in exclude_actions)})")
+        params.extend(exclude_actions)
+    if actor_id is not None:
+        where.append("j.actor_id = ?")
+        params.append(actor_id)
+    if since:
+        where.append("j.created_at >= ?")
+        params.append(since)
+    base = f"""
+        WITH j AS (
+            SELECT 'admin' AS src, id, admin_id AS actor_id, action, target_type, target_id,
+                   old_value, new_value, division_id, reason, created_at
+            FROM admin_audit_log
+            UNION ALL
+            SELECT 'bet' AS src, id, actor_id, action, entity_type, entity_id,
+                   old_value, new_value, division_id, NULL, created_at
+            FROM bet_audit_log
+        )
+        SELECT {{cols}} FROM j
+        LEFT JOIN users u ON u.telegram_id = j.actor_id
+        WHERE {' AND '.join(where)}
+    """
+    with transaction() as conn:
+        total = conn.execute(base.format(cols="COUNT(*)"), params).fetchone()[0]
+        rows = conn.execute(
+            base.format(cols="j.*, u.username AS actor_username")
+            + " ORDER BY j.created_at DESC, j.src, j.id DESC LIMIT ? OFFSET ?",
+            [*params, int(limit), int(offset)],
+        ).fetchall()
+    return [dict(r) for r in rows], int(total)
+
+
+def find_telegram_id_by_username(username: str) -> int | None:
+    """telegram_id of a users row by @username (case-insensitive), or None."""
+    name = (username or "").strip().lstrip("@").lower()
+    if not name:
+        return None
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT telegram_id FROM users WHERE LOWER(username) = ? AND telegram_id > 0 "
+            "ORDER BY telegram_id LIMIT 1",
+            (name,),
+        ).fetchone()
+    return int(row["telegram_id"]) if row else None

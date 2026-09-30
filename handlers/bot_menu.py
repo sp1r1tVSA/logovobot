@@ -21,6 +21,7 @@ from telegram.error import TelegramError
 
 import config
 import database
+from handlers.base import is_global_admin
 from handlers.league_overview import can_view_overview
 
 logger = logging.getLogger(__name__)
@@ -31,6 +32,14 @@ DEFAULT_COMMANDS = [
 
 ADMIN_COMMANDS = DEFAULT_COMMANDS + [
     BotCommand("overview", "Сводка по всем дивизионам"),
+]
+
+# Глобальным админам — ещё эксплуатация (handlers/admin_ops.py, только в ЛС).
+GLOBAL_ADMIN_COMMANDS = ADMIN_COMMANDS + [
+    BotCommand("health", "Состояние бота"),
+    BotCommand("backup", "Бэкап базы"),
+    BotCommand("ocr_stats", "Метрики распознавания скриншотов"),
+    BotCommand("audit", "Журнал действий админов"),
 ]
 
 
@@ -50,7 +59,8 @@ async def refresh_admin_menu(bot, user_id: int) -> bool:
     try:
         is_admin = await asyncio.to_thread(can_view_overview, user_id)
         if is_admin:
-            await bot.set_my_commands(ADMIN_COMMANDS, scope=scope)
+            commands = GLOBAL_ADMIN_COMMANDS if is_global_admin(user_id) else ADMIN_COMMANDS
+            await bot.set_my_commands(commands, scope=scope)
         else:
             await bot.delete_my_commands(scope=scope)
         return is_admin

@@ -7,6 +7,7 @@ import telegram.error
 from telegram.ext import ContextTypes
 
 import database
+from services import admin_journal
 from handlers.base import (
     is_admin,
     generate_league_table_image,
@@ -758,6 +759,12 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
         t_id = target_user["telegram_id"]
         new_cnt, exceeded = await asyncio.to_thread(database.add_warn, t_id, user_id, reason)
         from config import MAX_WARNS_LIMIT
+        await admin_journal.record(
+            user_id, "warn_added", "user", t_id,
+            old=f"@{target_user.get('username') or t_id} ({target_user.get('team_name') or '—'})",
+            new=f"{new_cnt}/{MAX_WARNS_LIMIT}", division_id=target_user.get("division_id"),
+            reason=reason,
+        )
 
         warn_msg = (
             f"⚠️ <b>ВЫДАНО ПРЕДУПРЕЖДЕНИЕ:</b>\n\n"
@@ -814,6 +821,12 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
         t_id = target_user["telegram_id"]
         new_cnt, removed = await asyncio.to_thread(database.remove_warn, t_id, user_id, "Снято администратором")
         if removed:
+            await admin_journal.record(
+                user_id, "warn_removed", "user", t_id,
+                old=f"@{target_user.get('username') or t_id} ({target_user.get('team_name') or '—'})",
+                new=f"варнов {new_cnt}", division_id=target_user.get("division_id"),
+                reason="Темшик снять варн",
+            )
             await msg.reply_text(
                 f"✅ Предупреждение снято с @{html.escape(target_user.get('username') or str(t_id))}. "
                 f"Текущие варны: <b>{new_cnt}</b>.",
@@ -868,8 +881,15 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
             return True
 
         user_ref, club_name = parts_p[0], parts_p[1].strip()
+        before = await asyncio.to_thread(database.find_user_by_ref, user_ref)
         ok, res_text = await asyncio.to_thread(database.set_player_club, user_ref, club_name)
         if ok:
+            await admin_journal.record(
+                user_id, "club_changed", "user", before["telegram_id"] if before else None,
+                old=(before.get("team_name") if before else None) or "нет",
+                new=f"{user_ref} → {club_name}",
+                division_id=before.get("division_id") if before else None,
+            )
             try:
                 from handlers.admin import _post_or_update_debts_in_warns
                 await _post_or_update_debts_in_warns(context)

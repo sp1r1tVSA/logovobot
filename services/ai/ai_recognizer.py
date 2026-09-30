@@ -4,6 +4,7 @@ import json
 import re
 import logging
 import threading
+import time
 import urllib.request
 import urllib.error
 import config
@@ -691,11 +692,55 @@ def recognize_match_screenshots_bytes(
     mime_type: str = "image/jpeg", 
     api_key: str = None, 
     caption: str = "",
-    squad_hints: dict[str, list[str]] = None
+    squad_hints: dict[str, list[str]] = None,
+    stats: dict | None = None,
+) -> dict | None:
+    """Распознать результат матча по скриншотам.
+
+    ``stats`` — необязательный dict, который функция заполняет метаданными
+    вызова для метрик OCR: ``model`` (кто дал итоговый ответ), ``attempts``
+    (список ``{"model", "outcome"}`` по каждому обращению к Gemini) и
+    ``duration_ms``. Модуль не пишет их в базу сам — распознаватель остаётся
+    чисто перцептивным и не знает о БД; сохраняет вызывающий код.
+    """
+    started = time.monotonic()
+    if stats is not None:
+        stats.setdefault("attempts", [])
+        stats["model"] = None
+    try:
+        return _recognize_match_screenshots(
+            images_bytes_list, mime_type, api_key, caption, squad_hints, stats,
+        )
+    finally:
+        if stats is not None:
+            stats["duration_ms"] = int((time.monotonic() - started) * 1000)
+
+
+def _exception_outcome(exc: Exception) -> str:
+    """Короткий код сбоя для метрик: таймаут отдельно от прочих ошибок."""
+    reason = getattr(exc, "reason", None)
+    if isinstance(exc, TimeoutError) or isinstance(reason, TimeoutError):
+        return "timeout"
+    return "error"
+
+
+def _note_attempt(stats: dict | None, model: str, outcome: str) -> None:
+    if stats is not None:
+        stats.setdefault("attempts", []).append({"model": model, "outcome": outcome})
+
+
+def _recognize_match_screenshots(
+    images_bytes_list: list[bytes],
+    mime_type: str,
+    api_key: str | None,
+    caption: str,
+    squad_hints: dict[str, list[str]] | None,
+    stats: dict | None,
 ) -> dict | None:
     keys_to_try = get_ordered_ocr_keys(api_key)
     if not keys_to_try:
         logger.error("GEMINI_API_KEY is empty or not set!")
+        _note_attempt(stats, "", "no_key")
         return None
 
     if not images_bytes_list:
@@ -763,10 +808,12 @@ def recognize_match_screenshots_bytes(
                             f"Gemini model '{m_name}' returned unparseable JSON "
                             f"({json_err}); snippet: {snippet!r} — trying next model"
                         )
+                        _note_attempt(stats, m_name, "bad_json")
                         continue
 
                     if not isinstance(parsed_data, dict):
                         logger.warning(f"Gemini model '{m_name}' returned non-dict JSON: {parsed_data}")
+                        _note_attempt(stats, m_name, "bad_json")
                         continue
 
                     # Support matches array or single match object
@@ -854,21 +901,29 @@ def recognize_match_screenshots_bytes(
                         # Больше голов, чем на табло, — чтение заведомо ошибочное.
                         # Другая модель часто читает таблицу верно; если нет —
                         # вернём первый ответ с флагом, и его внесут вручную.
+                        _note_attempt(stats, m_name, "goals_exceed")
                         if impossible_result is None:
                             impossible_result = parsed_data
+                            if stats is not None:
+                                stats["model"] = m_name
                         logger.warning(
                             f"AI Vision ({m_name}): more goals than the score, trying next model"
                         )
                         break
+                    _note_attempt(stats, m_name, "ok")
+                    if stats is not None:
+                        stats["model"] = m_name
                     return parsed_data
                 else:
                     logger.warning(f"Gemini model '{m_name}' returned no candidates: {res_json}")
+                    _note_attempt(stats, m_name, "empty")
                     continue
 
             except urllib.error.HTTPError as e:
                 error_body = e.read().decode("utf-8", errors="ignore")
                 key_suffix = f"...{target_api_key[-4:]}" if len(target_api_key) > 4 else "***"
                 logger.warning(f"Gemini model '{m_name}' (key {key_suffix}) HTTP {e.code}: {error_body[:300]}")
+                _note_attempt(stats, m_name, f"http_{e.code}")
                 if e.code == 404:
                     # Модель недоступна/устарела — не проверяем остальные ключи для этой модели
                     break
@@ -878,6 +933,7 @@ def recognize_match_screenshots_bytes(
                 continue
             except Exception as e:
                 logger.exception(f"Gemini model '{m_name}' recognition error: {e}")
+                _note_attempt(stats, m_name, _exception_outcome(e))
                 continue
 
     if impossible_result is not None:

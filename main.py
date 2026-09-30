@@ -30,12 +30,15 @@ async def post_init(application: Application) -> None:
         logger.warning(f"Failed to set bot command menu: {e}")
 
     # 🎰 Start Logovo.bet Telegram Mini App API server
+    from services import job_health
     try:
         from api.server import start_api_server_background
         import config
         await start_api_server_background(host=config.API_HOST, port=config.API_PORT)
+        job_health.record_component("api_server", True, f"порт {config.API_PORT}")
     except Exception as e:
         logger.warning(f"Failed to start Logovo.bet Mini App server: {e}")
+        job_health.record_component("api_server", False, f"{type(e).__name__}: {e}")
 
     # 📱 Configure Telegram WebApp Menu Button
     try:
@@ -57,17 +60,27 @@ async def post_init(application: Application) -> None:
         from services.betting_engine import regenerate_all_active_markets
         count = await asyncio.to_thread(regenerate_all_active_markets)
         logger.info(f"🎰 Regenerated betting markets for {count} active matches on startup")
+        job_health.record_component("startup_markets", True, f"пересчитано матчей: {count}")
     except Exception as e:
         logger.warning(f"Failed to auto-regenerate markets on startup: {e}")
+        job_health.record_component("startup_markets", False, f"{type(e).__name__}: {e}")
+
+def _run_repeating(application: Application, name: str, callback, interval: float, first: float) -> None:
+    """Schedule a job wrapped by job_health, so /health sees it and admins get alerted."""
+    from services import job_health
+    application.job_queue.run_repeating(
+        job_health.tracked(name, callback, interval), interval=interval, first=first, name=name,
+    )
+
 
 def register_jobs(application: Application) -> None:
     """Register periodic background jobs."""
     # Check round deadlines & send reminders every 30 minutes
-    application.job_queue.run_repeating(job_check_deadlines_and_remind, interval=1800, first=30)
+    _run_repeating(application, "deadline_reminders", job_check_deadlines_and_remind, 1800, 30)
     # Post/update debts summary in ПРЕДЫ thread every 12 hours
-    application.job_queue.run_repeating(job_post_debts_to_warns, interval=12 * 3600, first=60)
+    _run_repeating(application, "debts_digest", job_post_debts_to_warns, 12 * 3600, 60)
     # Run automated debt lifecycle tracker (reminders + auto-warns + auto-kick) every 30 minutes
-    application.job_queue.run_repeating(job_debt_lifecycle_tracker, interval=1800, first=90)
+    _run_repeating(application, "debt_lifecycle", job_debt_lifecycle_tracker, 1800, 90)
 
     # Phase 6: Live provider sync, intelligence cache & smart notifications
     try:
@@ -77,13 +90,13 @@ def register_jobs(application: Application) -> None:
             process_notification_queue_job,
             settle_finished_bets_job,
         )
-        application.job_queue.run_repeating(sync_live_provider_job, interval=45, first=15)
-        application.job_queue.run_repeating(sync_intelligence_cache_job, interval=300, first=45)
+        _run_repeating(application, "live_provider_sync", sync_live_provider_job, 45, 15)
+        _run_repeating(application, "intelligence_cache", sync_intelligence_cache_job, 300, 45)
         # Always on: bet win/refund notices go through this queue. With
         # SMART_NOTIFICATIONS_ENABLED off the job delivers only those.
-        application.job_queue.run_repeating(process_notification_queue_job, interval=15, first=20)
+        _run_repeating(application, "notification_queue", process_notification_queue_job, 15, 20)
         # Bet settlement used to run inline on Mini App requests; now scheduled off the loop.
-        application.job_queue.run_repeating(settle_finished_bets_job, interval=60, first=25)
+        _run_repeating(application, "bet_settlement", settle_finished_bets_job, 60, 25)
     except Exception as e:
         logger.warning(f"Could not register Phase 6 background jobs: {e}")
 
@@ -91,15 +104,15 @@ def register_jobs(application: Application) -> None:
     # Отдельный try/except — падение аналитики не должно ронять остальные джобы.
     try:
         from handlers.admin import job_post_round_preview, job_post_round_digest
-        application.job_queue.run_repeating(job_post_round_preview, interval=600, first=120)
-        application.job_queue.run_repeating(job_post_round_digest, interval=900, first=150)
+        _run_repeating(application, "round_preview", job_post_round_preview, 600, 120)
+        _run_repeating(application, "round_digest", job_post_round_digest, 900, 150)
     except Exception as e:
         logger.warning(f"Could not register round analytics jobs: {e}")
 
     # Символическая сборная: раз на каждый полностью сыгранный блок из 5 туров.
     try:
         from handlers.admin import job_post_totw
-        application.job_queue.run_repeating(job_post_totw, interval=900, first=180)
+        _run_repeating(application, "totw", job_post_totw, 900, 180)
     except Exception as e:
         logger.warning(f"Could not register TOTW job: {e}")
 
@@ -107,7 +120,7 @@ def register_jobs(application: Application) -> None:
     # показывает дела супер-админу, ставки никогда не блокирует.
     try:
         from services.background_sync import scan_integrity_job
-        application.job_queue.run_repeating(scan_integrity_job, interval=120, first=60)
+        _run_repeating(application, "integrity_scan", scan_integrity_job, 120, 60)
     except Exception as e:
         logger.warning(f"Could not register integrity scan job: {e}")
 
@@ -115,9 +128,21 @@ def register_jobs(application: Application) -> None:
     # Пересчитываются только рынки, чьё состояние изменилось; Монте-Карло — в потоке.
     try:
         from services.outright_service import REFRESH_INTERVAL_SECONDS, refresh_outrights_job
-        application.job_queue.run_repeating(refresh_outrights_job, interval=REFRESH_INTERVAL_SECONDS, first=75)
+        _run_repeating(application, "outrights_refresh", refresh_outrights_job, REFRESH_INTERVAL_SECONDS, 75)
     except Exception as e:
         logger.warning(f"Could not register outright markets job: {e}")
+
+    # Бэкап базы: джоба проверяет раз в 30 минут, пора ли (по возрасту последнего
+    # файла), так что рестарт не пропускает и не удваивает копию.
+    try:
+        import config
+        if config.BACKUP_INTERVAL_HOURS > 0:
+            from handlers.admin_ops import job_auto_backup
+            _run_repeating(application, "db_backup", job_auto_backup, 1800, 240)
+        else:
+            logger.info("Auto backup disabled (BACKUP_INTERVAL_HOURS=0)")
+    except Exception as e:
+        logger.warning(f"Could not register backup job: {e}")
 
 def main() -> None:
     """Initialize and run the Telegram bot application."""

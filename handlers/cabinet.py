@@ -18,6 +18,7 @@ import asyncio
 import telegram.error
 from telegram.error import Forbidden
 from services.ai import ai_recognizer
+from services import admin_journal, ocr_metrics
 import config
 from config import MAX_WARNS_LIMIT
 from services.graphics import player_card_generator
@@ -2234,6 +2235,11 @@ async def cb_report_choice_manual(update: Update, context: ContextTypes.DEFAULT_
     # К ручному вводу часто переходят как раз потому, что ИИ ошибся, — корону
     # из распознавания не переносим: MVP выбирается заново на шаге после ассистов.
     context.user_data.pop("report_mvp_player", None)
+    # Метрики OCR: распознавание этой сессии закончилось ручным вводом. Только
+    # по id прогона — ручной ввод без распознавания ничего не помечает.
+    ocr_run_id = context.user_data.pop("ocr_run_id", None)
+    if ocr_run_id:
+        await asyncio.to_thread(ocr_metrics.mark_outcome, "manual", run_id=ocr_run_id)
 
     home_team = match['player1_team'] or match['player1_nickname']
     away_team = match['player2_team'] or match['player2_nickname']
@@ -2928,6 +2934,21 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
 
     status_msg = None
+    ocr_stats: dict = {}
+    ocr_recorded = False
+    context.user_data.pop("ocr_run_id", None)
+
+    async def _record_ocr(status: str, score1: int | None = None, score2: int | None = None) -> None:
+        nonlocal ocr_recorded
+        ocr_recorded = True
+        run_id = await asyncio.to_thread(
+            ocr_metrics.record_run, "cabinet", status,
+            stats=ocr_stats, user_id=user_id, match_id=match_id,
+            images=len(photos_list[:3]), score1=score1, score2=score2,
+        )
+        if run_id:
+            context.user_data["ocr_run_id"] = run_id
+
     try:
         status_msg = await query.message.reply_text("🤖 <i>ИИ распознаёт результат со скриншотов...</i>", parse_mode="HTML")
 
@@ -2937,7 +2958,9 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             img_b = await f_obj.download_as_bytearray()
             downloaded_bytes.append(bytes(img_b))
 
-        ai_res = await asyncio.to_thread(ai_recognizer.recognize_match_screenshots_bytes, downloaded_bytes)
+        ai_res = await asyncio.to_thread(
+            ai_recognizer.recognize_match_screenshots_bytes, downloaded_bytes, stats=ocr_stats,
+        )
 
         match = await asyncio.to_thread(database.get_match, match_id) if match_id else None
         home_team = match.get("player1_team") if match else "Хозяева"
@@ -2948,6 +2971,7 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         if has_shootout(ai_res):
             # EA FC пишет голы серии пенальти в колонку «Г»: счёт и авторы со
             # скриншота неверны, такой результат вносится вручную.
+            await _record_ocr("shootout")
             context.user_data["report_photo_id"] = photos_list[0] if photos_list else context.user_data.get("report_photo_id")
             context.user_data.pop("report_mvp_player", None)
             cancel_cb = get_match_cancel_cb(context, user_id, match_id)
@@ -3008,6 +3032,8 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             score_sides = ((home_team, h_goals, h_score), (away_team, a_goals, a_score))
             excess_line = _goal_excess_line(score_sides)
             shortfall_line = excess_line or _goal_shortfall_line(score_sides)
+            # Счёт в метриках — в порядке хозяева/гости матча (player1/player2).
+            await _record_ocr("goals_exceed" if excess_line else "ok", h_score, a_score)
 
             h_goals_summary = ", ".join([f"{p} ({c})" for p, c in h_goals.items()]) if h_goals else "Нет"
             a_goals_summary = ", ".join([f"{p} ({c})" for p, c in a_goals.items()]) if a_goals else "Нет"
@@ -3078,6 +3104,7 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             context.user_data["report_photo_id"] = photos_list[0] if photos_list else context.user_data.get("report_photo_id")
             context.user_data.pop("report_mvp_player", None)
             cancel_cb = get_match_cancel_cb(context, user_id, match_id)
+            await _record_ocr("failed")
             fail_text = (
                 "⚠️ <b>Не удалось автоматически распознать результат со скриншотов.</b>\n\n"
                 "Пожалуйста, выберите способ внесения результата вручную:"
@@ -3089,6 +3116,8 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             await query.message.reply_text(fail_text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
     except Exception as e:
         logger.exception("AI Vision processing error")
+        if not ocr_recorded:
+            await _record_ocr("error")
         context.user_data["report_photo_id"] = photos_list[0] if photos_list else context.user_data.get("report_photo_id")
         await query.message.reply_text("⚠️ Ошибка при распознавании скриншотов. Попробуйте ещё раз.")
     finally:
@@ -3453,6 +3482,10 @@ async def cb_cup_winner(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
     if not ok:
         await query.answer(message, show_alert=True)
         return
+    await admin_journal.record(
+        query.from_user.id, "cup_game_winner_set", "match", match_id,
+        new=f"{teams[0]} – {teams[1]}: дальше {message}",
+    )
 
     confirm_cb = context.user_data.get("cup_confirm_callback") or f"cb_confirm_ai_final_{match_id}"
     await query.answer(f"Дальше проходит {message}")
@@ -3565,6 +3598,10 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
         database.confirm_and_finalize_match, match_id, h_score, a_score, events,
         reporter_id=user_id, photo_id=photo_id, mvp_player=mvp_player,
     )
+    await asyncio.to_thread(
+        ocr_metrics.mark_outcome, "accepted",
+        run_id=context.user_data.get("ocr_run_id"), match_id=match_id, source="cabinet",
+    )
 
     # Clean up reporting session keys from user_data
     for key in (
@@ -3575,7 +3612,7 @@ async def cb_confirm_ai_final(update: Update, context: ContextTypes.DEFAULT_TYPE
         "report_mvp_player", "reporting_match_id",
         "ai_photos_list", "awaiting_report_photo",
         "report_home_team", "report_away_team",
-        "pending_new_players"
+        "pending_new_players", "ocr_run_id"
     ):
         context.user_data.pop(key, None)
 
