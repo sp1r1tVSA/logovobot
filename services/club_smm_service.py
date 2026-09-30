@@ -224,6 +224,97 @@ def _clean_smm_text(raw_text: str | None) -> str:
     return cleaned.strip()
 
 
+# ─── Проверка готового поста на фактические и тональные ошибки ─────────────
+
+_SCORE_RE = re.compile(r"(?<![\d:.])(\d{1,2})\s*:\s*(\d{1,2})(?![\d:])")
+_SCORE_KEY_RE = re.compile(r"score|goals|wins|draws|losses|(?:^|_)(?:gf|ga)(?:$|_)", re.I)
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?…])\s+|\n+")
+
+# Слова, недопустимые в посте с данным исходом. Слоган «Только победа!» сюда не входит намеренно.
+_FORBIDDEN_BY_KIND = {
+    "loss": ("победили", "одержали победу", "празднуем", "ликуем", "триумф", "эйфори", "разгромили", "выиграли"),
+    "series_lost": ("победили", "празднуем", "ликуем", "триумф", "эйфори", "идём дальше", "идем дальше",
+                    "проходим дальше", "прошли дальше", "выход в следующ", "выиграли серию"),
+    "win": ("проиграли", "потерпели поражение", "уступили", "обидное поражение", "горечь поражения", "вылетели"),
+    "series_won": ("проиграли серию", "вылетели", "покидаем кубок", "потерпели поражение"),
+    "cup_won": ("проиграли", "вылетели", "потерпели поражение"),
+    "series_progress": ("вылетели", "выиграли серию", "прошли дальше", "проиграли серию", "обладатель кубка",
+                        "обладателем кубка"),
+}
+
+
+def _score_pairs_from_text(text: str) -> set[tuple[int, int]]:
+    return {(int(a), int(b)) for a, b in _SCORE_RE.findall(text or "")}
+
+
+def _allowed_score_pairs(payload: dict, extra_text: str = "") -> set[tuple[int, int]]:
+    """Все счёты, которые пост вправе упомянуть: из данных (в обе стороны), времени матчей и вводного текста."""
+    allowed = _score_pairs_from_text(extra_text)
+    try:
+        allowed |= _score_pairs_from_text(json.dumps(payload, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        pass
+
+    def walk(node):
+        if isinstance(node, dict):
+            nums = [v for k, v in node.items()
+                    if isinstance(v, int) and not isinstance(v, bool) and _SCORE_KEY_RE.search(str(k))]
+            for a in nums:
+                for b in nums:
+                    allowed.add((a, b))
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, (list, tuple)):
+            for v in node:
+                walk(v)
+
+    walk(payload)
+    return allowed
+
+
+def _opponent_mvp_problem(text: str, payload: dict) -> str | None:
+    """MVP соперника не должен называться «нашим»."""
+    mvp = ((payload or {}).get("last_match") or {}).get("mvp") or {}
+    name = (mvp.get("name") or "").strip()
+    if not name or mvp.get("is_our_club") is not False:
+        return None
+    surname = name.split()[-1]
+    if len(surname) < 3:
+        return None
+    for sentence in _SENTENCE_SPLIT_RE.split(text):
+        low = sentence.lower()
+        if surname.lower() in low and re.search(r"\bнаш\w*", low):
+            return f"игрок соперника {name} назван «нашим» — он не играет за наш клуб"
+    return None
+
+
+def validate_post(text: str, payload: dict, kind: str = "custom", extra_text: str = "") -> list[str]:
+    """Список найденных проблем в тексте поста; пустой — пост можно публиковать.
+
+    Проверяются только грубые ошибки, которые видно без понимания смысла: счёт, которого нет в данных,
+    слова не того исхода (эйфория в посте о поражении и наоборот) и игрок соперника в роли «нашего».
+    Имена игроков не сверяются: без разбора морфологии это давало бы ложные срабатывания.
+    """
+    problems: list[str] = []
+    plain = re.sub(r"<[^>]+>", "", text or "")
+
+    allowed = _allowed_score_pairs(payload, extra_text)
+    bad_scores = sorted({f"{a}:{b}" for a, b in _score_pairs_from_text(plain)
+                         if a <= 15 and b <= 15 and (a, b) not in allowed})
+    if bad_scores:
+        problems.append(f"в тексте счёт {', '.join(bad_scores)}, которого нет в данных — используй только счёт из данных")
+
+    low = plain.lower()
+    hits = [w for w in _FORBIDDEN_BY_KIND.get(kind, ()) if w in low]
+    if hits:
+        problems.append(f"тон не соответствует исходу: встречаются слова «{'», «'.join(hits)}»")
+
+    opp = _opponent_mvp_problem(plain, payload)
+    if opp:
+        problems.append(opp)
+    return problems
+
+
 # ─── Сбор данных клуба из SQLite ───────────────────────────────────────────
 
 def get_club_smm_payload(team_name: str) -> dict:
@@ -322,7 +413,7 @@ def get_club_smm_payload(team_name: str) -> dict:
     club_identity = {
         "name": canon,
         "nickname": "«Чёрные орлы» (Kara Kartallar)" if is_besiktas else f"ФК «{canon}»",
-        "colors": "Чёрно-белые ⚪⚫" if is_besiktas else "Клубные цвета",
+        "colors": "Чёрно-белые ⚪⚫" if is_besiktas else "",
         "emojis": "🦅⚪⚫" if is_besiktas else "⚽🔥",
         "hashtags": ["#Besiktas", "#KaraKartal", "#ЛоговоФифарей"] if is_besiktas else [f"#{canon.replace(' ', '')}", "#ЛоговоФифарей"],
     }
@@ -468,7 +559,7 @@ def _format_recent_context_for_prompt(payload: dict) -> str:
 
 _SMM_BASE_INSTRUCTION = (
     "Ты — пресс-атташе и SMM-менеджер футбольного клуба {club_name} ({club_nickname}) в турнире «Логово Фифарей».\n"
-    "Канал посвящён нашему клубу: его матчам, победам, игрокам и борьбе за трофеи. Цвета клуба: {club_colors}.\n"
+    "Канал посвящён нашему клубу: его матчам, победам, игрокам и борьбе за трофеи.{club_colors}\n"
     "Тренер команды: {manager_name}.\n"
     "{user_context}\n"
     "СТРУКТУРА И ОБЪЁМ ПОСТА (СТРОГО):\n"
@@ -519,7 +610,7 @@ def _build_system_instruction(payload: dict) -> str:
     return _SMM_BASE_INSTRUCTION.format(
         club_name=club_name,
         club_nickname=club.get("nickname") or f"ФК «{club_name}»",
-        club_colors=club.get("colors") or "клубные цвета",
+        club_colors=f" Цвета клуба: {club['colors']}." if club.get("colors") else "",
         manager_name=mgr_name,
         club_emojis=club.get("emojis") or "⚽🔥",
         club_hashtags=hashtags,
@@ -630,13 +721,18 @@ def _tone_rule(kind: str) -> str:
     return f"ТОН ЭТОГО ПОСТА: {tone}\n"
 
 
-def _get_task_instruction(post_type: str, custom_brief: str = "", for_caption: bool = False, payload: dict = None) -> str:
-    kind = post_type
+def _tone_kind(post_type: str, payload: dict | None) -> str:
+    """Тип тона/проверки для поста: исход матча для recap, «anons» для matchday, иначе сам тип."""
     if post_type == "recap":
         res = ((payload or {}).get("last_match") or {}).get("result", "win")
-        kind = {"loss": "loss", "draw": "draw"}.get(res, "win")
-    elif post_type == "matchday":
-        kind = "anons"
+        return {"loss": "loss", "draw": "draw"}.get(res, "win")
+    if post_type == "matchday":
+        return "anons"
+    return post_type
+
+
+def _get_task_instruction(post_type: str, custom_brief: str = "", for_caption: bool = False, payload: dict = None) -> str:
+    kind = _tone_kind(post_type, payload)
     core = _task_core(post_type, custom_brief, for_caption, payload)
     return f"{core.rstrip()}\n{_tone_rule(kind)}"
 
@@ -905,6 +1001,47 @@ def transcribe_audio(audio_bytes: bytes, audio_mime: str = "audio/ogg") -> str |
 
 # ─── Главная функция генерации текста ───────────────────────────────────────
 
+def _generate_validated(
+    system_text: str,
+    user_text: str,
+    max_tokens: int,
+    limit: int,
+    payload: dict,
+    kind: str,
+    extra_text: str = "",
+    audio_bytes: bytes = None,
+    audio_mime: str = "audio/ogg",
+    label: str = "",
+) -> str | None:
+    """OpenRouter → Gemini; каждый ответ проходит validate_post.
+
+    Ответ с ошибками не публикуется: следующий провайдер получает список ошибок в запросе.
+    None — ни один провайдер не дал годный текст (вызывающий решает: шаблон или отказ).
+    """
+    feedback = ""
+    for provider in ("openrouter", "gemini"):
+        prompt = user_text + feedback
+        if provider == "openrouter":
+            text, model_name = _call_openrouter_text(system_text, prompt, max_tokens)
+        else:
+            text, model_name = _call_gemini_text(
+                system_text, prompt, max_tokens, audio_bytes=audio_bytes, audio_mime=audio_mime
+            )
+        if not text:
+            continue
+        fitted = _fit_html(text, limit)
+        problems = validate_post(fitted, payload, kind, extra_text)
+        if not problems:
+            logger.info(f"Club SMM {label}text generated via {provider} ({model_name})")
+            return fitted
+        logger.warning(f"Club SMM {label}text from {provider} ({model_name}) rejected: {'; '.join(problems)}")
+        feedback = (
+            "\n\nВ ПРЕДЫДУЩЕМ ВАРИАНТЕ НАЙДЕНЫ ОШИБКИ — ИСПРАВЬ ИХ: " + "; ".join(problems) + ". "
+            "Данные клуба выше не менялись."
+        )
+    return None
+
+
 def generate_club_post(
     team_name: str,
     post_type: str = "matchday",
@@ -937,22 +1074,16 @@ def generate_club_post(
     limit = CAPTION_MAX_CHARS if for_caption else POST_MAX_CHARS
     max_tokens = 220 if for_caption else 350
 
-    # 1. Пробуем OpenRouter (бесплатные модели)
-    text, model_name = _call_openrouter_text(system_text, user_text, max_tokens)
-    if text:
-        logger.info(f"Club SMM text generated via OpenRouter ({model_name})")
-        return _fit_html(text, limit)
-
-    # 2. Резерв: Gemini (бесплатные Flash Lite модели с квотой 500 запросов/день)
-    text, model_name = _call_gemini_text(
-        system_text, user_text, max_tokens, audio_bytes=audio_bytes, audio_mime=audio_mime
+    # OpenRouter → Gemini (квота 500 запросов/день); ответ с фактическими ошибками не принимается
+    text = _generate_validated(
+        system_text, user_text, max_tokens, limit, payload, _tone_kind(post_type, payload),
+        extra_text=custom_brief, audio_bytes=audio_bytes, audio_mime=audio_mime,
     )
     if text:
-        logger.info(f"Club SMM text generated via Gemini ({model_name})")
-        return _fit_html(text, limit)
+        return text
 
-    # 4. Фолбэк на шаблонную аналитику
-    logger.warning("Club SMM: All AI providers failed. Using database stats template.")
+    # Фолбэк на шаблонную аналитику
+    logger.warning("Club SMM: no AI provider gave a valid post. Using database stats template.")
     return _build_fallback_post(payload, post_type, for_caption, custom_brief=custom_brief)
 
 
@@ -979,14 +1110,15 @@ def edit_club_post(team_name: str, draft_text: str, instruction: str, user_name:
         f"АКТУАЛЬНЫЕ ДАННЫЕ КЛУБА (JSON):\n{_prompt_json(payload)}"
     )
 
-    text, model_name = _call_openrouter_text(system_text, user_text, 350)
-    if not text:
-        text, model_name = _call_gemini_text(system_text, user_text, 350)
+    # Счёт из черновика и из просьбы тренера считается допустимым: правка не должна его «выдумывать»
+    text = _generate_validated(
+        system_text, user_text, 350, POST_MAX_CHARS, payload, "custom",
+        extra_text=f"{draft_text}\n{instruction}", label="edit ",
+    )
     if not text:
         logger.warning("Club SMM: post edit failed on every AI provider")
         return None
-    logger.info(f"Club SMM post edited via {model_name}")
-    return _fit_html(text, POST_MAX_CHARS)
+    return text
 
 
 # ─── Генерация фото через OpenRouter Image API ──────────────────────────────
@@ -1520,19 +1652,16 @@ def generate_stage_post(
     limit = CAPTION_MAX_CHARS if for_caption else POST_MAX_CHARS
     max_tokens = 220 if for_caption else 350
 
-    # 1. OpenRouter
-    text, model_name = _call_openrouter_text(system_text, user_text, max_tokens)
+    # Счёт серии (2:1) в данных явно не лежит — добавляем его к допустимым
+    series_text = f"{my_wins}:{opp_wins}" if cup_stage else ""
+    text = _generate_validated(
+        system_text, user_text, max_tokens, limit, stage_payload, tone_kind,
+        extra_text=series_text, label="stage ",
+    )
     if text:
-        logger.info(f"Club SMM stage text generated via OpenRouter ({model_name})")
-        return _fit_html(text, limit)
+        return text
 
-    # 2. Gemini
-    text, model_name = _call_gemini_text(system_text, user_text, max_tokens)
-    if text:
-        logger.info(f"Club SMM stage text generated via Gemini ({model_name})")
-        return _fit_html(text, limit)
-
-    # 3. Fallback — нейтральный шаблон, пригодный для любого клуба
+    # Fallback — нейтральный шаблон, пригодный для любого клуба
     opp_safe = html.escape(str(opp), quote=False)
     if cup_stage and all_done:
         head = "КУБОК: ФИНАЛ" if is_final else f"КУБОК: ИТОГИ СТАДИИ {html.escape(stage_label, quote=False)}"

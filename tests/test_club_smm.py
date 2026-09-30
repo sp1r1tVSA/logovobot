@@ -806,6 +806,15 @@ class TestPostPrompts(unittest.TestCase):
         self.assertNotIn("Орлы", text)
         self.assertNotIn("Бешикташ", text)
 
+    def test_system_prompt_colors_line_only_when_known(self):
+        plain = club_smm_service._build_system_instruction({"club": {"name": "Ювентус", "colors": ""}})
+        self.assertNotIn("Цвета клуба", plain)
+        self.assertNotIn("Клубные цвета", plain)
+        known = club_smm_service._build_system_instruction(
+            {"club": {"name": "Ювентус", "colors": "Чёрно-белые"}}
+        )
+        self.assertIn("Цвета клуба: Чёрно-белые.", known)
+
     def test_system_prompt_forbids_preambles_and_invented_facts(self):
         text = club_smm_service._build_system_instruction({"club": {"name": "Ювентус"}})
         self.assertIn("не выдумывай", text)
@@ -972,6 +981,96 @@ class TestStagePostPrompts(unittest.TestCase):
         self.assertIn("триумфальный", final)
         prog, _ = self._run("1/4", [self._match(2, 0), self._match(None, None, status="scheduled")])
         self.assertIn("«ещё не конец»", prog)
+
+
+class TestPostValidation(unittest.TestCase):
+    """validate_post и _generate_validated: пост с фактической или тональной ошибкой не публикуется."""
+
+    PAYLOAD = {
+        "club": {"name": "Ювентус"},
+        "last_match": {
+            "result": "loss", "opponent": "Рома", "my_score": 1, "opp_score": 2,
+            "mvp": {"name": "Иван Чужой", "is_our_club": False, "team": "Рома"},
+        },
+        "next_match": {"opponent": "Милан", "scheduled_time": "20:30"},
+        "recent_matches": [{"my_score": 3, "opp_score": 0}],
+    }
+
+    def test_score_from_data_is_allowed_in_both_orientations(self):
+        for txt in ("Счёт 1:2 в Риме", "Счёт 2:1", "Ранее 3:0"):
+            self.assertEqual(club_smm_service.validate_post(txt, self.PAYLOAD, "custom"), [])
+
+    def test_invented_score_is_flagged(self):
+        problems = club_smm_service.validate_post("Уступили 0:5", self.PAYLOAD, "custom")
+        self.assertEqual(len(problems), 1)
+        self.assertIn("0:5", problems[0])
+
+    def test_match_time_is_not_a_score(self):
+        self.assertEqual(club_smm_service.validate_post("Начало в 20:30", self.PAYLOAD, "anons"), [])
+
+    def test_extra_text_scores_are_allowed(self):
+        self.assertEqual(club_smm_service.validate_post("Серия 2:0", self.PAYLOAD, "custom", extra_text="2:0"), [])
+
+    def test_html_tags_do_not_hide_or_fake_scores(self):
+        self.assertTrue(club_smm_service.validate_post("<b>4:4</b>", self.PAYLOAD, "custom"))
+
+    def test_euphoria_in_loss_and_defeat_in_win_are_flagged(self):
+        self.assertTrue(club_smm_service.validate_post("Мы победили и празднуем!", self.PAYLOAD, "loss"))
+        self.assertTrue(club_smm_service.validate_post("Мы проиграли, горечь поражения", self.PAYLOAD, "win"))
+        self.assertEqual(club_smm_service.validate_post("Только победа! Вперёд!", self.PAYLOAD, "loss"), [])
+
+    def test_lost_series_cannot_advance(self):
+        self.assertTrue(club_smm_service.validate_post("Мы идём дальше!", self.PAYLOAD, "series_lost"))
+
+    def test_opponent_mvp_called_ours_is_flagged(self):
+        problems = club_smm_service.validate_post("Наш MVP — Чужой, спасибо!", self.PAYLOAD, "custom")
+        self.assertTrue(any("Чужой" in p for p in problems))
+        self.assertEqual(club_smm_service.validate_post("Чужой был лучшим у Ромы. Наши держались.", self.PAYLOAD, "custom"), [])
+
+    def _chain(self, or_answers, gem_answers, kind="loss"):
+        or_calls, gem_calls = [], []
+
+        def fake_or(system, user, max_tokens):
+            or_calls.append(user)
+            return (or_answers.pop(0), "m") if or_answers else (None, None)
+
+        def fake_gem(system, user, max_tokens, **kw):
+            gem_calls.append(user)
+            return (gem_answers.pop(0), "g") if gem_answers else (None, None)
+
+        with patch.object(club_smm_service, "_call_openrouter_text", side_effect=fake_or), \
+             patch.object(club_smm_service, "_call_gemini_text", side_effect=fake_gem):
+            out = club_smm_service._generate_validated("sys", "user", 300, 700, self.PAYLOAD, kind)
+        return out, or_calls, gem_calls
+
+    def test_valid_first_answer_is_returned_without_second_call(self):
+        out, or_calls, gem_calls = self._chain(["Держались до конца. 1:2"], [])
+        self.assertIn("1:2", out)
+        self.assertEqual(gem_calls, [])
+
+    def test_invalid_answer_moves_to_next_provider_with_feedback(self):
+        out, or_calls, gem_calls = self._chain(["Победили 9:0, празднуем!"], ["Сдержанный пост о характере."])
+        self.assertEqual(out, "Сдержанный пост о характере.")
+        self.assertIn("НАЙДЕНЫ ОШИБКИ", gem_calls[0])
+        self.assertIn("9:0", gem_calls[0])
+
+    def test_all_invalid_returns_none(self):
+        out, _, _ = self._chain(["Победили 9:0"], ["Празднуем триумф!"])
+        self.assertIsNone(out)
+
+    def test_generate_club_post_falls_back_to_template_when_answers_are_invalid(self):
+        with patch.object(club_smm_service, "get_club_smm_payload", return_value=dict(self.PAYLOAD)), \
+             patch.object(club_smm_service, "_call_openrouter_text", return_value=("Победили 9:0, празднуем!", "m")), \
+             patch.object(club_smm_service, "_call_gemini_text", return_value=("Триумф 7:7!", "g")):
+            post = club_smm_service.generate_club_post("Ювентус", "recap")
+        self.assertNotIn("9:0", post)
+        self.assertNotIn("7:7", post)
+
+    def test_edit_keeps_scores_from_draft(self):
+        with patch.object(club_smm_service, "get_club_smm_payload", return_value={"club": {"name": "Ювентус"}}), \
+             patch.object(club_smm_service, "_call_openrouter_text", return_value=("Короче: 4:2 в нашу пользу", "m")):
+            out = club_smm_service.edit_club_post("Ювентус", "Мы выиграли 4:2", "сделай короче")
+        self.assertIn("4:2", out)
 
 
 class TestPostTone(unittest.TestCase):
