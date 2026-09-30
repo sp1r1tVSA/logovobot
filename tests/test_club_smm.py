@@ -769,6 +769,32 @@ class TestSmmAccessAndRouting(unittest.IsolatedAsyncioTestCase):
         )
         self.assertLess(conv_idx, hub_idx)
 
+    def test_photo_reaches_the_conversation_not_the_global_photo_handler(self):
+        """Регрессия: фото для поста молча игнорировалось — общий обработчик фото шёл раньше диалога."""
+        from telegram import Chat, Message, PhotoSize, Update, User
+        from telegram.ext import Application, ConversationHandler
+        from handlers import _register_cabinet_handlers
+        from datetime import datetime
+        app = Application.builder().token("123:ABC").build()
+        try:
+            _register_cabinet_handlers(app)
+        except Exception as exc:  # pragma: no cover
+            self.skipTest(f"registration unavailable: {exc}")
+        chat = Chat(id=5, type="private")
+        msg = Message(message_id=1, date=datetime.now(), chat=chat, from_user=User(5, "u", False),
+                      photo=(PhotoSize("f", "u", 10, 10),))
+        update = Update(update_id=1, message=msg)
+        # Диалог ждёт фото: ключ (chat, user) в состоянии SMM_STATE_WAIT_PHOTO
+        conv = next(
+            h for h in app.handlers[0]
+            if isinstance(h, ConversationHandler)
+            and any("smm_enter_photo" in str(getattr(getattr(e, "pattern", None), "pattern", ""))
+                    for e in h.entry_points)
+        )
+        conv._conversations[(5, 5)] = club_smm.SMM_STATE_WAIT_PHOTO
+        first = next(h for h in app.handlers[0] if h.check_update(update))
+        self.assertIs(first, conv)
+
 
 class TestSmmPublishHelpers(unittest.IsolatedAsyncioTestCase):
     async def test_short_text_goes_as_caption(self):

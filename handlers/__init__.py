@@ -588,18 +588,8 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(cb_skip_report_photo, pattern="^cb_skip_report_photo$"))
     app.add_handler(CallbackQueryHandler(ai_recognize_now, pattern="^ai_recognize_now_\\d+$"))
 
-    async def global_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        if not update.message or update.effective_chat.type != "private":
-            return
-        if context.user_data.get("awaiting_report_photo") or context.user_data.get("reporting_match_id"):
-            await save_report_photo(update, context)
-
-    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.ALL), global_photo_handler))
-
-    app.add_handler(CallbackQueryHandler(show_club_stats, pattern="^cabinet_club_stats$"))
-    app.add_handler(CallbackQueryHandler(show_my_squad, pattern="^cabinet_my_squad$"))
-    app.add_handler(CallbackQueryHandler(show_player_card, pattern="^(player_card|pcard)_.+$"))
-
+    # Диалог SMM-центра стоит ДО общего обработчика фото: тот принимает любое личное фото
+    # и, будучи в той же группе раньше, «съедал» фото, которое тренер шлёт для поста.
     # 🦅 Personal Club SMM Center (for @sp1r1tVSA / admins)
     app.add_handler(CommandHandler(["set_club_channel", "club_channel"], cmd_set_club_channel))
     smm_conv = ConversationHandler(
@@ -653,6 +643,18 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CommandHandler(["club_post", "besiktas", "smm_post"], cmd_smm_hub))
     # Перехват постов, опубликованных напрямую в канале клуба (не через SMM-центр)
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, on_channel_post))
+
+    async def global_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not update.message or update.effective_chat.type != "private":
+            return
+        if context.user_data.get("awaiting_report_photo") or context.user_data.get("reporting_match_id"):
+            await save_report_photo(update, context)
+
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & (filters.PHOTO | filters.Document.ALL), global_photo_handler))
+
+    app.add_handler(CallbackQueryHandler(show_club_stats, pattern="^cabinet_club_stats$"))
+    app.add_handler(CallbackQueryHandler(show_my_squad, pattern="^cabinet_my_squad$"))
+    app.add_handler(CallbackQueryHandler(show_player_card, pattern="^(player_card|pcard)_.+$"))
 
 def _register_admin_handlers(app: Application) -> None:
     """Register administrator panel, tournament management, and dispute resolution handlers."""
