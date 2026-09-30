@@ -75,7 +75,9 @@ TIMEOUT_COOLDOWN_SECONDS = 10 * 60
 BAD_REQUEST_COOLDOWN_SECONDS = 30 * 60
 MAX_COOLDOWN_SECONDS = 60 * 60
 # Маршрутизатор: 400 приходит от выбранной им на этот раз модели, а не от него самого.
-NO_COOLDOWN_MODELS = {"openrouter/free"}
+ROUTER_MODEL = "openrouter/free"
+NO_COOLDOWN_MODELS = {ROUTER_MODEL}
+ROUTER_BUDGET_SECONDS = 30
 
 _openrouter_cooldowns: dict[str, float] = {}   # модель → time.monotonic(), до которого её пропускаем
 
@@ -220,6 +222,9 @@ def _is_meta_reasoning(text: str) -> bool:
 _PREAMBLE_RE = re.compile(r"^(?:конечно|вот|держи|готово|ниже|разумеется|отлично)[^\n]{0,80}:[ \t]*\n+", re.I)
 
 
+_ANGLE_WRAP_RE = re.compile(r"^<(?![/!a-zA-Z])(.+)>$")
+
+
 def _clean_smm_text(raw_text: str | None) -> str:
     """
     Очищает текст от блоков рассуждений (<think>, <thought>, <reasoning>),
@@ -243,6 +248,9 @@ def _clean_smm_text(raw_text: str | None) -> str:
     # 5. Блоки кода (```html … ```) — оставляем содержимое, убираем обёртку
     cleaned = re.sub(r"```[a-zA-Z]*[ \t]*\n?", "", cleaned)
     cleaned = cleaned.strip()
+    # 5a. Строка целиком в угловых скобках («<⚽ Заголовок>») — оформление модели, а не тег
+    cleaned = "\n".join(_ANGLE_WRAP_RE.sub(r"\1", ln.strip()) if ln.lstrip().startswith("<") else ln
+                        for ln in cleaned.split("\n"))
     # 6. Вступительная строка вроде «Конечно! Вот ваш пост:» — не часть поста
     cleaned = _PREAMBLE_RE.sub("", cleaned, count=1)
     return cleaned.strip()
@@ -334,6 +342,38 @@ def _latin_words_problem(plain: str, payload: dict, extra_text: str = "") -> str
     return None
 
 
+_LETTER_RUN_RE = re.compile(r"[^\W\d_]+")
+_CYR_RE = re.compile(r"[А-Яа-яЁё]")
+_LAT_RE = re.compile(r"[A-Za-z]")
+_CAPS_LATIN_RE = re.compile(r"(?<![A-Za-z])[A-Z]{4,}(?![A-Za-z])")
+_FORM_LETTERS_RE = re.compile(r"(?<![^\W\d_])[WDL](?:\s+[WDL]){2,}(?![^\W\d_])")
+
+
+def _script_problems(plain: str, payload: dict, extra_text: str = "") -> list[str]:
+    """Слова из двух алфавитов («Мукhtar»), имена ЗАГЛАВНОЙ латиницей и форма буквами W/D/L — брак слабой модели."""
+    body = _HASHTAG_RE.sub(" ", plain)
+    try:
+        known = json.dumps(payload, ensure_ascii=False, default=str) + " " + (extra_text or "")
+    except (TypeError, ValueError):
+        known = extra_text or ""
+    known_low = known.lower()
+    out: list[str] = []
+
+    mixed = sorted({w for w in _LETTER_RUN_RE.findall(body)
+                    if _CYR_RE.search(w) and _LAT_RE.search(w) and w.lower() not in known_low})
+    if mixed:
+        out.append(f"слова из русских и латинских букв сразу ({', '.join(mixed[:4])}) — пиши слово целиком по-русски")
+
+    caps = sorted({w for w in _CAPS_LATIN_RE.findall(body)
+                   if w.lower() not in _LATIN_ALLOWED and w not in known})
+    if caps:
+        out.append(f"имена ЗАГЛАВНОЙ латиницей ({', '.join(caps[:4])}) — пиши имена как в данных, обычным регистром")
+
+    if _FORM_LETTERS_RE.search(body):
+        out.append("форма записана буквами W/D/L — опиши её словами (победа, ничья, поражение)")
+    return out
+
+
 # Хэштеги, которые модель вправе добавить сверх клубных
 _EXTRA_TAG_RE = re.compile(r"#(?:Кубок|Финал|Дерби|Matchday|Тур\d+)\Z", re.I)
 _TAIL_TAGS_RE = re.compile(r"(?:[ \t]*#\w+)+[ \t]*\Z")
@@ -388,6 +428,7 @@ def validate_post(text: str, payload: dict, kind: str = "custom", extra_text: st
     latin = _latin_words_problem(plain, payload, extra_text)
     if latin:
         problems.append(latin)
+    problems.extend(_script_problems(plain, payload, extra_text))
     return problems
 
 
@@ -908,87 +949,130 @@ def _get_edit_instruction(draft_text: str, instruction: str) -> str:
 
 # ─── Провайдер 1: OpenRouter (Бесплатные нейронки) ──────────────────────────
 
-def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> tuple[str | None, str | None]:
-    """Генерация текста через цепочку бесплатных моделей OpenRouter."""
+def _openrouter_request(
+    base_url: str, api_key: str, model: str, system_text: str, user_text: str,
+    max_tokens: int, timeout: float, with_reasoning: bool = True,
+) -> dict:
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_text},
+            {"role": "user", "content": user_text},
+        ],
+        "temperature": 0.8,
+        "max_tokens": max_tokens,
+    }
+    if with_reasoning:
+        # Не тратим токены на рассуждения; часть моделей (openrouter/free) этого не позволяет — см. повтор ниже.
+        payload["reasoning"] = {"effort": "none", "exclude": True}
+    req = urllib.request.Request(
+        f"{base_url}/chat/completions",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_key}",
+            "Content-Type": "application/json",
+            "HTTP-Referer": "https://logovobot.ru",
+            "X-Title": "Logovobot Club SMM",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _openrouter_answer_text(data, model: str) -> str | None:
+    """Достаёт из ответа чистый текст поста; None — ответа нет (пусто, только рассуждения, нет choices)."""
+    choices = data.get("choices") if isinstance(data, dict) else None
+    if not choices:
+        err = data.get("error") if isinstance(data, dict) else None
+        logger.warning(f"OpenRouter SMM: model '{model}' returned no choices ({str(err)[:200] or 'no error field'}). Trying next...")
+        return None
+    msg = (choices[0] or {}).get("message") or {}
+    # Берем исключительно content, ни в коем случае не reasoning
+    clean = _clean_smm_text(msg.get("content") or "")
+    if clean and len(clean.strip()) > 30 and not _is_meta_reasoning(clean):
+        return clean.strip()
+    logger.warning(
+        f"OpenRouter SMM: model '{model}' returned empty or reasoning-only content (len={len(clean)}). Trying next..."
+    )
+    return None
+
+
+def _run_openrouter_chain(
+    models: list[str], system_text: str, user_text: str, max_tokens: int, budget_seconds: float,
+) -> tuple[str | None, str | None]:
+    """Пробует модели по порядку в пределах общего бюджета времени; (None, None) — никто не ответил."""
     api_key = getattr(config, "OPENROUTER_API_KEY", "").strip()
-    if not api_key:
+    if not api_key or not models:
         return None, None
 
     base_url = getattr(config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
-    models = get_ordered_openrouter_models()
-    # Мета-модель openrouter/free — гарантированный хвост цепочки, в том же бюджете времени.
-    if "openrouter/free" not in models and "openrouter/free" not in _dead_openrouter_models:
-        models = models + ["openrouter/free"]
     budget_tokens = max(max_tokens, 1500)
-    deadline = time.monotonic() + OPENROUTER_CHAIN_BUDGET_SECONDS
+    deadline = time.monotonic() + budget_seconds
 
     for model in models:
-        remaining = deadline - time.monotonic()
-        if remaining < 3:
-            logger.warning("OpenRouter SMM: chain budget exhausted, falling back")
-            break
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": system_text},
-                {"role": "user", "content": user_text},
-            ],
-            "temperature": 0.8,
-            "max_tokens": budget_tokens,
-            "reasoning": {"effort": "none", "exclude": True},
-        }
-        body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{base_url}/chat/completions",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://logovobot.ru",
-                "X-Title": "Logovobot Club SMM",
-            },
-        )
-        try:
-            with urllib.request.urlopen(
-                req, timeout=min(OPENROUTER_MODEL_TIMEOUT_SECONDS, remaining)
-            ) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            choice = data["choices"][0]
-            msg = choice.get("message", {})
-            # Берем исключительно content, ни в коем случае не reasoning
-            raw_text = msg.get("content") or ""
-            clean = _clean_smm_text(raw_text)
-            if clean and len(clean.strip()) > 30 and not _is_meta_reasoning(clean):
-                return clean.strip(), model
-            else:
-                logger.warning(
-                    f"OpenRouter SMM: model '{model}' returned empty or reasoning-only content (len={len(clean)}). Trying next..."
+        data = None
+        with_reasoning = True
+        for _attempt in range(2):   # второй заход — только после «Reasoning is mandatory»
+            remaining = deadline - time.monotonic()
+            if remaining < 3:
+                break
+            try:
+                data = _openrouter_request(
+                    base_url, api_key, model, system_text, user_text, budget_tokens,
+                    min(OPENROUTER_MODEL_TIMEOUT_SECONDS, remaining), with_reasoning,
                 )
-        except urllib.error.HTTPError as e:
-            if e.code == 404:
-                _dead_openrouter_models.add(model)
-                logger.warning(f"OpenRouter SMM: model '{model}' HTTP 404 (disabled from roster), trying next free model...")
-            else:
+                break
+            except urllib.error.HTTPError as e:
+                if e.code == 404:
+                    _dead_openrouter_models.add(model)
+                    logger.warning(f"OpenRouter SMM: model '{model}' HTTP 404 (disabled from roster), trying next free model...")
+                    break
                 detail = ""
                 try:
                     detail = e.read().decode("utf-8", "replace")[:200].replace("\n", " ")
                 except Exception:
                     pass
+                if e.code == 400 and with_reasoning and "reasoning" in detail.lower():
+                    # openrouter/free: «Reasoning is mandatory for this endpoint and cannot be disabled»
+                    logger.info(f"OpenRouter SMM: model '{model}' rejects reasoning=none, retrying without it")
+                    with_reasoning = False
+                    continue
                 logger.warning(f"OpenRouter SMM: model '{model}' HTTP {e.code} {detail}, trying next free model...")
                 if model not in NO_COOLDOWN_MODELS:
                     if e.code == 429:
                         _cool_down_openrouter(model, _retry_after_seconds(e))
                     elif e.code == 400:
                         _cool_down_openrouter(model, BAD_REQUEST_COOLDOWN_SECONDS)
+                break
+            except Exception as e:
+                logger.warning(f"OpenRouter SMM: model '{model}' failed: {e}")
+                if model not in NO_COOLDOWN_MODELS:
+                    _cool_down_openrouter(model, TIMEOUT_COOLDOWN_SECONDS)
+                break
+        if data is None:
+            if deadline - time.monotonic() < 3:
+                logger.warning("OpenRouter SMM: chain budget exhausted, falling back")
+                break
             continue
-        except Exception as e:
-            logger.warning(f"OpenRouter SMM: model '{model}' failed: {e}")
-            if model not in NO_COOLDOWN_MODELS:
-                _cool_down_openrouter(model, TIMEOUT_COOLDOWN_SECONDS)
-            continue
+        text = _openrouter_answer_text(data, model)
+        if text:
+            return text, model
 
     return None, None
 
+
+def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> tuple[str | None, str | None]:
+    """Генерация текста через цепочку бесплатных моделей OpenRouter — без маршрутизатора openrouter/free."""
+    models = [m for m in get_ordered_openrouter_models() if m != ROUTER_MODEL]
+    return _run_openrouter_chain(models, system_text, user_text, max_tokens, OPENROUTER_CHAIN_BUDGET_SECONDS)
+
+
+def _call_openrouter_router_text(system_text: str, user_text: str, max_tokens: int) -> tuple[str | None, str | None]:
+    """Последний шанс: маршрутизатор openrouter/free. Каждый раз другая модель, нередко слабая,
+    поэтому его зовём только после Gemini."""
+    if ROUTER_MODEL in _dead_openrouter_models:
+        return None, None
+    return _run_openrouter_chain([ROUTER_MODEL], system_text, user_text, max_tokens, ROUTER_BUDGET_SECONDS)
 
 
 # ─── Провайдер 3: Gemini Fallback для текста ────────────────────────────────
@@ -1101,16 +1185,18 @@ def _generate_validated(
     audio_mime: str = "audio/ogg",
     label: str = "",
 ) -> str | None:
-    """OpenRouter → Gemini; каждый ответ проходит validate_post.
+    """OpenRouter → Gemini → маршрутизатор openrouter/free; каждый ответ проходит validate_post.
 
     Ответ с ошибками не публикуется: следующий провайдер получает список ошибок в запросе.
     None — ни один провайдер не дал годный текст (вызывающий решает: шаблон или отказ).
     """
     feedback = ""
-    for provider in ("openrouter", "gemini"):
+    for provider in ("openrouter", "gemini", "router"):
         prompt = user_text + feedback
         if provider == "openrouter":
             text, model_name = _call_openrouter_text(system_text, prompt, max_tokens)
+        elif provider == "router":
+            text, model_name = _call_openrouter_router_text(system_text, prompt, max_tokens)
         else:
             text, model_name = _call_gemini_text(
                 system_text, prompt, max_tokens, audio_bytes=audio_bytes, audio_mime=audio_mime

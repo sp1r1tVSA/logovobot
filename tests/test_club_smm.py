@@ -23,6 +23,19 @@ import database
 from services import club_smm_service
 from handlers import club_smm
 
+# Настоящий вызов маршрутизатора — для его собственных тестов; во всех остальных он выключен,
+# чтобы ключ из локального .env не уводил тесты в сеть.
+REAL_ROUTER_CALL = club_smm_service._call_openrouter_router_text
+_router_patch = patch.object(club_smm_service, "_call_openrouter_router_text", return_value=(None, None))
+
+
+def setUpModule():
+    _router_patch.start()
+
+
+def tearDownModule():
+    _router_patch.stop()
+
 
 class TestClubSmmConfig(unittest.TestCase):
     def test_openrouter_models_parsing(self):
@@ -357,6 +370,159 @@ class TestStageAndRoundPosts(unittest.TestCase):
             self.assertIn("m/b", S._openrouter_cooldowns)
             # у маршрутизатора 400 — вина выбранной им модели, пауза не ставится
             self.assertNotIn("openrouter/free", S._openrouter_cooldowns)
+
+
+class TestProviderChainOrder(unittest.TestCase):
+    """OpenRouter (сильные модели) → Gemini → маршрутизатор openrouter/free."""
+
+    PAYLOAD = {"club": {"name": "Ренн", "hashtags": ["#Ренн"]}}
+    GOOD = "⚽ <b>Ренн вперёд!</b>\nСпокойный чистый текст без выдумок. #Ренн"
+
+    def _run(self, or_res, gem_res, router_res):
+        S = club_smm_service
+        calls = []
+
+        def make(name, res):
+            def fn(*a, **k):
+                calls.append(name)
+                return res
+            return fn
+
+        with patch.object(S, "_call_openrouter_text", side_effect=make("or", or_res)), \
+             patch.object(S, "_call_gemini_text", side_effect=make("gem", gem_res)), \
+             patch.object(S, "_call_openrouter_router_text", side_effect=make("router", router_res)):
+            text = S._generate_validated("s", "u", 300, 700, self.PAYLOAD, "custom")
+        return text, calls
+
+    def test_gemini_is_asked_before_the_router(self):
+        text, calls = self._run((None, None), (self.GOOD, "gem"), (self.GOOD, "router"))
+        self.assertEqual(calls, ["or", "gem"])
+        self.assertIsNotNone(text)
+
+    def test_router_is_the_last_resort(self):
+        text, calls = self._run((None, None), (None, None), (self.GOOD, "router"))
+        self.assertEqual(calls, ["or", "gem", "router"])
+        self.assertIsNotNone(text)
+
+    def test_nobody_answers_gives_none(self):
+        text, calls = self._run((None, None), (None, None), (None, None))
+        self.assertEqual(calls, ["or", "gem", "router"])
+        self.assertIsNone(text)
+
+    def test_strong_chain_never_includes_the_router(self):
+        import urllib.error
+        S = club_smm_service
+        seen = []
+
+        def fake_urlopen(req, timeout=0):
+            seen.append(json.loads(req.data.decode("utf-8"))["model"])
+            raise urllib.error.HTTPError("http://x", 429, "err", {}, None)
+
+        with patch.object(config, "OPENROUTER_API_KEY", "k"), \
+             patch.object(config, "OPENROUTER_SMM_MODELS", ["m/a", "openrouter/free"]), \
+             patch.dict(S._openrouter_cooldowns, {}, clear=True), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertEqual(S._call_openrouter_text("s", "u", 100), (None, None))
+        self.assertEqual(seen, ["m/a"])
+
+
+class TestOpenRouterRobustness(unittest.TestCase):
+    GOOD = {"choices": [{"message": {"content": "🦅 <b>Орлы взлетают!</b>\n\nТолько вперёд, только победа! #Besiktas"}}]}
+
+    @staticmethod
+    def _resp(data):
+        r = MagicMock()
+        r.read.return_value = json.dumps(data).encode("utf-8")
+        r.__enter__.return_value = r
+        return r
+
+    def test_router_retries_without_reasoning_when_it_is_mandatory(self):
+        import urllib.error
+        S = club_smm_service
+        payloads = []
+
+        def fake_urlopen(req, timeout=0):
+            payloads.append(json.loads(req.data.decode("utf-8")))
+            if "reasoning" in payloads[-1]:
+                body = io.BytesIO(b'{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}')
+                raise urllib.error.HTTPError("http://x", 400, "Bad Request", {}, body)
+            return self._resp(self.GOOD)
+
+        with patch.object(config, "OPENROUTER_API_KEY", "k"), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            text, model = REAL_ROUTER_CALL("s", "u", 100)
+        self.assertIn("Орлы взлетают", text)
+        self.assertEqual(model, "openrouter/free")
+        self.assertEqual(len(payloads), 2)
+        self.assertIn("reasoning", payloads[0])
+        self.assertNotIn("reasoning", payloads[1])
+
+    def test_other_400_is_not_retried(self):
+        import urllib.error
+        S = club_smm_service
+        calls = []
+
+        def fake_urlopen(req, timeout=0):
+            calls.append(1)
+            raise urllib.error.HTTPError("http://x", 400, "Bad", {}, io.BytesIO(b'{"error":"bad model"}'))
+
+        with patch.object(config, "OPENROUTER_API_KEY", "k"), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertEqual(REAL_ROUTER_CALL("s", "u", 100), (None, None))
+        self.assertEqual(len(calls), 1)
+
+    def test_response_without_choices_goes_to_next_model(self):
+        S = club_smm_service
+        answers = {"m/a": {"error": {"message": "provider returned error"}}, "m/b": self.GOOD}
+
+        def fake_urlopen(req, timeout=0):
+            return self._resp(answers[json.loads(req.data.decode("utf-8"))["model"]])
+
+        with patch.object(config, "OPENROUTER_API_KEY", "k"), \
+             patch.object(config, "OPENROUTER_SMM_MODELS", ["m/a", "m/b"]), \
+             patch.dict(S._openrouter_cooldowns, {}, clear=True), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            text, model = S._call_openrouter_text("s", "u", 100)
+            self.assertNotIn("m/a", S._openrouter_cooldowns)
+        self.assertEqual(model, "m/b")
+        self.assertIn("Орлы взлетают", text)
+
+
+class TestAngleWrapAndScripts(unittest.TestCase):
+    PAYLOAD = {"club": {"name": "Ренн"}, "players": ["Saad Blas"]}
+
+    def test_line_wrapped_in_angle_brackets_is_unwrapped(self):
+        S = club_smm_service
+        raw = "<⚽🔥 Гладуро Ренн…>\n\nТекст <b>жирный</b> и обычный."
+        fitted = S._fit_html(S._clean_smm_text(raw), 700)
+        self.assertNotIn("&lt;", fitted)
+        self.assertTrue(fitted.startswith("⚽🔥 Гладуро Ренн…"))
+        self.assertIn("<b>жирный</b>", fitted)
+
+    def test_real_tags_at_line_start_are_untouched(self):
+        S = club_smm_service
+        raw = "<b>Заголовок</b>\n<i>Курсив</i>"
+        self.assertEqual(S._clean_smm_text(raw), raw)
+
+    def test_mixed_script_word_is_rejected(self):
+        problems = club_smm_service.validate_post("Наш Мукhtar забил, ThomassonА тоже.", self.PAYLOAD)
+        joined = " ".join(problems)
+        self.assertIn("Мукhtar", joined)
+        self.assertIn("ThomassonА", joined)
+
+    def test_all_caps_latin_name_is_rejected_but_data_form_is_fine(self):
+        S = club_smm_service
+        self.assertTrue(any("SAAD" in p for p in S.validate_post("Гол забил SAAD!", self.PAYLOAD)))
+        self.assertEqual(S.validate_post("Гол забил Saad!", self.PAYLOAD), [])
+        # если в данных имя уже так записано — это не ошибка модели
+        self.assertEqual(S.validate_post("Гол забил FRANK!", {"players": ["FRANK"]}), [])
+        self.assertEqual(S.validate_post("Матч FIFA и UEFA", self.PAYLOAD), [])
+
+    def test_form_letters_are_rejected(self):
+        S = club_smm_service
+        self.assertTrue(any("W/D/L" in p for p in S.validate_post("Форма: W L L L L", self.PAYLOAD)))
+        self.assertEqual(S.validate_post("Форма: три победы подряд", self.PAYLOAD), [])
+        self.assertEqual(S.validate_post("Уровень L2 и D3", self.PAYLOAD), [])
 
 
 class TestClubSmmOpenRouterImage(unittest.TestCase):

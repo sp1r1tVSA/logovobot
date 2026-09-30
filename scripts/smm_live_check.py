@@ -53,10 +53,12 @@ class Recorder:
         self.verdicts: list[tuple[str, list[str]]] = []   # (text as validated, problems), one per non-empty answer
         self._orig_or = S._call_openrouter_text
         self._orig_gem = S._call_gemini_text
+        self._orig_router = S._call_openrouter_router_text
         self._orig_validate = S.validate_post
         S.validate_post = self._validate
         S._call_openrouter_text = lambda *a, **k: self._call("openrouter", self._orig_or, a, k)
         S._call_gemini_text = lambda *a, **k: self._call("gemini", self._orig_gem, a, k)
+        S._call_openrouter_router_text = lambda *a, **k: self._call("router", self._orig_router, a, k)
 
     def _call(self, provider, orig, args, kwargs):
         if self.dry:
