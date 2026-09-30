@@ -80,6 +80,7 @@ MARKET_GROUPS: dict[str, tuple[str, tuple[str, ...]]] = {
     "itotal": ("Инд. тотал", ("individual_total_1", "individual_total_2")),
     "handicap": ("Фора", ("handicap",)),
     "btts": ("Обе забьют", ("btts",)),
+    "outright": ("Долгосрочные", ("outright",)),
 }
 _GROUP_BY_MARKET_KEY = {key: gid for gid, (_label, keys) in MARKET_GROUPS.items() for key in keys}
 
@@ -158,10 +159,10 @@ def _round_robin(matches: list[dict], limit: int, max_options: int | None = None
     Останавливается и по числу матчей, и по суммарному числу исходов:
     первый матч берётся всегда, следующий — только если влезает в бюджет.
     """
-    by_div: dict[int, list[dict]] = {}
+    by_div: dict[int | None, list[dict]] = {}
     for m in sorted(matches, key=lambda x: (x.get("round_number") or 0, x["match_id"])):
-        by_div.setdefault(m["division_id"], []).append(m)
-    queues = [by_div[k] for k in sorted(by_div)]
+        by_div.setdefault(m.get("division_id"), []).append(m)
+    queues = [by_div[k] for k in sorted(by_div, key=lambda k: (k is None, k or 0))]
     picked: list[dict] = []
     options = 0
     while queues and len(picked) < limit:
@@ -184,55 +185,126 @@ def collect_candidates(
     filters: dict | None = None,
     max_options: int | None = MAX_OPTIONS,
 ) -> list[dict]:
-    """Матчи с открытыми рынками и исходами, пригодными для прогноза."""
+    """Матчи и долгосрочные рынки с открытыми исходами, пригодными для прогноза."""
     f = filters or {}
     allowed_groups = set(f.get("markets") or ())
     odds_lo = max(MIN_ODDS, f.get("odds_min") or 0)
     odds_hi = f.get("odds_max")
-    board, _total = database.get_admin_market_board(division_ids, "active", "", 1000, 0)
     matches = []
-    for m in board:
-        if m.get("match_status") in _FINISHED_MATCH_STATUSES:
-            continue
-        markets = [mk for mk in m.get("markets", []) if mk.get("status") == "open"]
-        overround = _match_overround(markets)
-        options = []
-        for mk in markets:
-            group = _GROUP_BY_MARKET_KEY.get(mk.get("market_key"), "other")
-            if allowed_groups and group not in allowed_groups:
+
+    # 1. Регулярная линия матчей (если не выбран исключительно фильтр долгосрочных)
+    if not allowed_groups or any(g != "outright" for g in allowed_groups):
+        board, _total = database.get_admin_market_board(division_ids, "active", "", 1000, 0)
+        for m in board:
+            if m.get("match_status") in _FINISHED_MATCH_STATUSES:
                 continue
-            for s in mk.get("selections", []):
-                odds = s.get("odds_value")
-                if s.get("status") != "active" or not odds or odds < odds_lo:
+            markets = [mk for mk in m.get("markets", []) if mk.get("status") == "open"]
+            overround = _match_overround(markets)
+            options = []
+            for mk in markets:
+                group = _GROUP_BY_MARKET_KEY.get(mk.get("market_key"), "other")
+                if allowed_groups and group not in allowed_groups:
                     continue
-                if odds_hi is not None and odds > odds_hi:
-                    continue
-                options.append({
-                    "selection_id": s["id"],
-                    "market_id": mk.get("id"),
-                    "market_key": mk.get("market_key"),
-                    "market_group": group,
-                    "market_name": mk.get("market_name"),
-                    "selection_key": s.get("selection_key"),
-                    "selection_name": s.get("selection_name"),
-                    "odds": round(float(odds), 2),
-                    "line_probability": round(min(99.0, 100.0 / (float(odds) * overround)), 1),
+                for s in mk.get("selections", []):
+                    odds = s.get("odds_value")
+                    if s.get("status") != "active" or not odds or odds < odds_lo:
+                        continue
+                    if odds_hi is not None and odds > odds_hi:
+                        continue
+                    options.append({
+                        "selection_id": s["id"],
+                        "market_id": mk.get("id"),
+                        "market_key": mk.get("market_key"),
+                        "market_group": group,
+                        "market_name": mk.get("market_name"),
+                        "selection_key": s.get("selection_key"),
+                        "selection_name": s.get("selection_name"),
+                        "odds": round(float(odds), 2),
+                        "line_probability": round(min(99.0, 100.0 / (float(odds) * overround)), 1),
+                    })
+            if options:
+                matches.append({
+                    "match_id": m["match_id"],
+                    "division_id": m.get("division_id"),
+                    "division_name": m.get("division_name"),
+                    "cup_label": m.get("cup_label"),
+                    "round_number": m.get("round_number"),
+                    "cup_series_id": m.get("cup_series_id"),
+                    "tournament_type": m.get("tournament_type"),
+                    "cup_stage": m.get("cup_stage"),
+                    "game_num_in_series": m.get("game_num_in_series"),
+                    "team1": m.get("team1_name"),
+                    "team2": m.get("team2_name"),
+                    "options": options,
                 })
-        if options:
-            matches.append({
-                "match_id": m["match_id"],
-                "division_id": m.get("division_id"),
-                "division_name": m.get("division_name"),
-                "cup_label": m.get("cup_label"),
-                "round_number": m.get("round_number"),
-                "cup_series_id": m.get("cup_series_id"),
-                "tournament_type": m.get("tournament_type"),
-                "cup_stage": m.get("cup_stage"),
-                "game_num_in_series": m.get("game_num_in_series"),
-                "team1": m.get("team1_name"),
-                "team2": m.get("team2_name"),
-                "options": options,
-            })
+
+    # 2. Долгосрочные рынки (outrights): победители дивизионов, кубки, бомбардиры
+    if not allowed_groups or "outright" in allowed_groups:
+        try:
+            outrights = database.get_outright_markets(statuses=("open",))
+            is_cup_closed = database.is_general_cup_outright_closed()
+            is_betting_closed = database.outright_betting_closed()
+            div_names = {d["id"]: d["name"] for d in database.get_divisions()}
+
+            for om in outrights:
+                om_div = om.get("division_id")
+                if division_ids and om_div is not None and om_div not in division_ids:
+                    continue
+                if division_ids and om_div is None:
+                    continue
+
+                if database.is_general_cup_market(om):
+                    if is_cup_closed:
+                        continue
+                else:
+                    if is_betting_closed:
+                        continue
+
+                options = []
+                for s in om.get("selections", []):
+                    if s.get("status") != "active":
+                        continue
+                    odds = s.get("odds_value")
+                    if not odds or float(odds) < odds_lo:
+                        continue
+                    if odds_hi is not None and float(odds) > odds_hi:
+                        continue
+                    prob_val = float(s.get("probability") or 0.0)
+                    prob_pct = round(prob_val * 100, 1) if prob_val > 0 else round(min(99.0, 100.0 / float(odds)), 1)
+                    options.append({
+                        "selection_id": s["id"],
+                        "market_id": om["id"],
+                        "market_key": "outright",
+                        "market_group": "outright",
+                        "market_name": om["title"],
+                        "selection_key": s.get("selection_key"),
+                        "selection_name": s.get("name"),
+                        "odds": round(float(odds), 2),
+                        "line_probability": prob_pct,
+                    })
+
+                if options:
+                    div_name = div_names.get(om_div, f"Дивизион {om_div}") if om_div else "Вся лига"
+                    matches.append({
+                        "match_id": -om["id"],
+                        "is_outright": True,
+                        "outright_market_id": om["id"],
+                        "title": om["title"],
+                        "division_id": om_div,
+                        "division_name": div_name,
+                        "cup_label": None,
+                        "round_number": 999,
+                        "cup_series_id": None,
+                        "tournament_type": "outright",
+                        "cup_stage": None,
+                        "game_num_in_series": None,
+                        "team1": om["title"],
+                        "team2": "",
+                        "options": options,
+                    })
+        except Exception:
+            logger.exception("AI picks: failed to collect outright candidates")
+
     return _round_robin(matches, max_matches, max_options)
 
 
@@ -259,6 +331,8 @@ def _enrich(matches: list[dict]) -> None:
     """Таблица, форма и прогноз ансамбля. Любой сбой — матч просто без контекста."""
     tables: dict[int, tuple[list, dict]] = {}
     for m in matches:
+        if m.get("is_outright"):
+            continue
         div = m.get("division_id") or 1
         try:
             if div not in tables:
@@ -289,10 +363,11 @@ def _enrich(matches: list[dict]) -> None:
 
 _SYSTEM_PROMPT = (
     "Ты — аналитик виртуальной букмекерской линии киберфутбольной лиги (EA FC, игроки-люди, "
-    "реальные деньги не участвуют). Тебе дают матчи с таблицей, формой (W/D/L, свежий матч слева), "
-    "прогнозом статистической модели и списком исходов: [id, исход, коэффициент, вероятность по линии %].\n"
+    "реальные деньги не участвуют). Тебе дают матчи и долгосрочные рынки сезона (победители дивизионов, кубков, "
+    "бомбардиры) с таблицей, формой (W/D/L, свежий матч слева), прогнозом статистической модели и списком исходов: "
+    "[id, исход, коэффициент, вероятность по линии %].\n"
     "Задача: выбери до {limit} исходов с НАИБОЛЬШЕЙ вероятностью захода и оцени вероятность каждого "
-    "в процентах. Не больше {per_match} исходов на матч. Опирайся на данные, а не на названия клубов: "
+    "в процентах. Не больше {per_match} исходов на матч или долгосрочный рынок. Опирайся на данные, а не на реальные клубы: "
     "реальная сила клуба тут не важна, играют люди.\n"
     "Ответ — ТОЛЬКО JSON без пояснений и без markdown:\n"
     '{{"picks": [{{"id": <id исхода>, "probability": <число 1-99>, "reason": "<коротко по-русски, до 120 символов>"}}]}}'
@@ -302,6 +377,16 @@ _SYSTEM_PROMPT = (
 def _payload_for_model(matches: list[dict]) -> list[dict]:
     out = []
     for m in matches:
+        if m.get("is_outright"):
+            out.append({
+                "market_id": m.get("outright_market_id"),
+                "type": "outright",
+                "title": m.get("title"),
+                "division": m.get("division_name"),
+                "options": [[o["selection_id"], o["selection_name"], o["odds"], o["line_probability"]]
+                            for o in m["options"]],
+            })
+            continue
         item = {
             "match_id": m["match_id"],
             "match": f'{m["team1"]} — {m["team2"]}',
@@ -510,6 +595,8 @@ def _pick_row(match: dict, option: dict, probability: float, reason: str) -> dic
     return {
         "selection_id": option["selection_id"],
         "match_id": match["match_id"],
+        "is_outright": bool(match.get("is_outright")),
+        "outright_market_id": match.get("outright_market_id"),
         "division_id": match.get("division_id"),
         "division_name": match.get("division_name"),
         "cup_label": match.get("cup_label"),
@@ -521,8 +608,8 @@ def _pick_row(match: dict, option: dict, probability: float, reason: str) -> dic
         "tournament_type": match.get("tournament_type"),
         "cup_stage": match.get("cup_stage"),
         "game_num_in_series": match.get("game_num_in_series"),
-        "team1": match["team1"],
-        "team2": match["team2"],
+        "team1": match.get("team1") or match.get("title", ""),
+        "team2": match.get("team2") or "",
         "market_id": option.get("market_id"),
         "market_key": option.get("market_key"),
         "market_name": option["market_name"],

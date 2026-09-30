@@ -2304,6 +2304,9 @@ def init_db() -> None:
         # ─── 029: фрибеты — награда за достижения для долгосрочных ставок ─────
         _ensure_freebets(cursor)
 
+        # ─── 030: история постов клубного SMM-центра для контекста и хронологии ─
+        _ensure_club_smm_schema(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -5623,6 +5626,174 @@ def get_stage_match_photos(team_name: str, round_number: int | None = None, cup_
             return []
         rows = cursor.fetchall()
         return list(dict.fromkeys(r["photo_id"] for r in rows if r["photo_id"]))
+
+
+def resolve_match_mvp(
+    cursor: sqlite3.Cursor,
+    match_id: int,
+    mvp_name: str | None,
+    team_name: str,
+    opponent_name: str,
+) -> dict | None:
+    """Определяет клубную принадлежность MVP матча (свой клуб, соперник или нейтральный)."""
+    if not mvp_name or not str(mvp_name).strip():
+        return None
+    clean_mvp = str(mvp_name).strip()
+    our_canon = resolve_team_name(team_name) or team_name.strip()
+    opp_canon = resolve_team_name(opponent_name) or opponent_name.strip()
+
+    # 1. Проверяем протокол событий матча (match_events)
+    cursor.execute("SELECT team_name, player_name FROM match_events WHERE match_id = ?", (match_id,))
+    events = cursor.fetchall()
+    for ev in events:
+        p_name = ev["player_name"]
+        t_name = ev["team_name"]
+        if is_same_footballer(clean_mvp, p_name) or normalize_player_name_key(clean_mvp) == normalize_player_name_key(p_name):
+            if teams_match(t_name, our_canon):
+                return {"name": p_name, "team": our_canon, "is_our_club": True, "is_opponent": False}
+            elif teams_match(t_name, opp_canon):
+                return {"name": p_name, "team": opp_canon, "is_our_club": False, "is_opponent": True}
+
+    # 2. Проверяем состав нашего клуба
+    our_roster = _load_club_roster(cursor, our_canon)
+    our_hits = _squad_candidates(clean_mvp, our_roster)
+    if our_hits:
+        return {"name": next(iter(our_hits)), "team": our_canon, "is_our_club": True, "is_opponent": False}
+
+    # 3. Проверяем состав соперника
+    opp_roster = _load_club_roster(cursor, opp_canon)
+    opp_hits = _squad_candidates(clean_mvp, opp_roster)
+    if opp_hits:
+        return {"name": next(iter(opp_hits)), "team": opp_canon, "is_our_club": False, "is_opponent": True}
+
+    # 4. Проверяем по всей базе squad_players
+    cursor.execute("SELECT team_name, player_name FROM squad_players")
+    for sp in cursor.fetchall():
+        if is_same_footballer(clean_mvp, sp["player_name"]) or normalize_player_name_key(clean_mvp) == normalize_player_name_key(sp["player_name"]):
+            t = sp["team_name"]
+            if teams_match(t, our_canon):
+                return {"name": sp["player_name"], "team": our_canon, "is_our_club": True, "is_opponent": False}
+            elif teams_match(t, opp_canon):
+                return {"name": sp["player_name"], "team": opp_canon, "is_our_club": False, "is_opponent": True}
+            else:
+                return {"name": sp["player_name"], "team": t, "is_our_club": False, "is_opponent": False}
+
+    return {"name": clean_mvp, "team": "Неизвестно", "is_our_club": False, "is_opponent": False}
+
+
+def get_team_recent_matches(team_name: str, limit: int = 5) -> list[dict]:
+    """История последних завершённых матчей клуба со счётом, авторами голов и MVP."""
+    canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
+    if not canon:
+        return []
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, round_number, tournament_type, cup_stage,
+                   player1_team, player2_team, player1_score, player2_score,
+                   status, played_at, mvp_player
+            FROM matches
+            WHERE (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?)
+                   OR player1_team = ? OR player2_team = ?)
+              AND status IN ('confirmed', 'completed')
+            ORDER BY id DESC LIMIT ?
+        """, (canon, canon, team_name.strip(), team_name.strip(), limit))
+        rows = cursor.fetchall()
+
+        matches = []
+        for r in rows:
+            m_id = r["id"]
+            is_p1 = teams_match(r["player1_team"], canon)
+            my_score = r["player1_score"] if is_p1 else r["player2_score"]
+            opp_score = r["player2_score"] if is_p1 else r["player1_score"]
+            opponent = r["player2_team"] if is_p1 else r["player1_team"]
+            res = "win" if my_score > opp_score else ("draw" if my_score == opp_score else "loss")
+
+            cursor.execute("""
+                SELECT team_name, player_name, event_type, count
+                FROM match_events
+                WHERE match_id = ?
+            """, (m_id,))
+            ev_rows = cursor.fetchall()
+            my_goals, opp_goals, my_assists = [], [], []
+            for ev in ev_rows:
+                p_name = ev["player_name"]
+                cnt = ev["count"] or 1
+                item = {"player": p_name, "count": cnt}
+                if teams_match(ev["team_name"], canon):
+                    if ev["event_type"] == "goal":
+                        my_goals.append(item)
+                    elif ev["event_type"] == "assist":
+                        my_assists.append(item)
+                else:
+                    if ev["event_type"] == "goal":
+                        opp_goals.append(item)
+
+            mvp_data = resolve_match_mvp(cursor, m_id, r["mvp_player"], canon, opponent)
+            matches.append({
+                "match_id": m_id,
+                "round": r["round_number"],
+                "cup_stage": r["cup_stage"],
+                "tournament_type": r["tournament_type"],
+                "opponent": opponent,
+                "is_home": is_p1,
+                "my_score": my_score,
+                "opp_score": opp_score,
+                "result": res,
+                "played_at": r["played_at"],
+                "club_goals": my_goals,
+                "club_assists": my_assists,
+                "opp_goals": opp_goals,
+                "mvp": mvp_data,
+            })
+        return matches
+
+
+def save_published_club_smm_post(
+    team_name: str,
+    channel_id: str,
+    message_id: int | None,
+    post_type: str,
+    post_text: str,
+    media_mode: str | None = None,
+) -> int:
+    """Сохраняет опубликованный SMM-пост клуба в историю публикаций."""
+    canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
+    if not canon or not post_text:
+        return 0
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO club_smm_posts (
+                team_name, channel_id, message_id, post_type, post_text, media_mode, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
+        """, (canon, str(channel_id), message_id, post_type, post_text, media_mode))
+        return cursor.lastrowid or 0
+
+
+def get_recent_club_smm_posts(team_name: str, limit: int = 5) -> list[dict]:
+    """Возвращает историю недавних опубликованных SMM-постов клуба (новые сверху)."""
+    canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
+    if not canon:
+        return []
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT id, team_name, channel_id, message_id, post_type, post_text, media_mode, created_at
+            FROM club_smm_posts
+            WHERE LOWER(team_name) = LOWER(?) OR team_name = ?
+            ORDER BY id DESC LIMIT ?
+        """, (canon, team_name.strip(), limit))
+        return [
+            {
+                "id": r["id"],
+                "post_type": r["post_type"],
+                "text": r["post_text"],
+                "media_mode": r["media_mode"],
+                "created_at": r["created_at"],
+            }
+            for r in cursor.fetchall()
+        ]
 
 
 def save_squad_players(team_name: str, player_names: list) -> int:

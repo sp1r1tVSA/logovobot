@@ -78,6 +78,27 @@ def _seed() -> None:
                                                        odds_value, model_odds, status, odds_version)
                         VALUES (?, ?, ?, ?, ?, ?, 'active', 1)
                     """, (sel_id, market_id, skey, sname, odds, odds))
+        cursor.execute("DELETE FROM outright_odds_history WHERE selection_id BETWEEN 972700 AND 972799")
+        cursor.execute("DELETE FROM outright_selections WHERE id BETWEEN 972700 AND 972799")
+        cursor.execute("DELETE FROM outright_markets WHERE id BETWEEN 972700 AND 972799")
+    bet_picks.clear_cache()
+
+
+def _seed_outrights() -> None:
+    with database.transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("DELETE FROM outright_odds_history WHERE selection_id BETWEEN 972700 AND 972799")
+        cursor.execute("DELETE FROM outright_selections WHERE id BETWEEN 972700 AND 972799")
+        cursor.execute("DELETE FROM outright_markets WHERE id BETWEEN 972700 AND 972799")
+        cursor.execute("""
+            INSERT INTO outright_markets (id, season_id, market_type, scope_key, division_id, title, status, created_at, updated_at)
+            VALUES (972701, 1, 'division_winner', 'div_1', 1, 'Победитель Дивизиона 1', 'open', datetime('now', '+3 hours'), datetime('now', '+3 hours'))
+        """)
+        cursor.execute("""
+            INSERT INTO outright_selections (id, market_id, selection_key, name, team_name, division_id, probability, model_odds, odds_value, status, sort_order, updated_at)
+            VALUES (972701, 972701, 'lille', 'Лилль', 'Лилль', 1, 0.45, 2.20, 2.20, 'active', 1, datetime('now', '+3 hours')),
+                   (972702, 972701, 'westham', 'Вест Хэм', 'Вест Хэм', 1, 0.30, 3.10, 3.10, 'active', 2, datetime('now', '+3 hours'))
+        """)
     bet_picks.clear_cache()
 
 
@@ -486,6 +507,17 @@ class TestPicksRoute(AioHTTPTestCase):
             status, body = await self._get(query, PICKS_ADMIN)
             self.assertEqual(status, 400, query)
             self.assertEqual(body["error"], "bad_filters")
+
+    async def test_outright_candidates_and_filters(self):
+        _seed_outrights()
+        # 1. Запрос только долгосрочных рынков
+        status, body = await self._get("?markets=outright", PICKS_ADMIN)
+        self.assertEqual(status, 200, body)
+        self.assertTrue(body["picks"])
+        for p in body["picks"]:
+            self.assertEqual(p["market_group"], "outright")
+            self.assertTrue(p["is_outright"])
+            self.assertTrue(p["selection_id"] in (972701, 972702))
 
 
 if __name__ == "__main__":
