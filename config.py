@@ -85,22 +85,6 @@ def _get_gemini_smm_models() -> list[str]:
 GEMINI_SMM_MODELS = _get_gemini_smm_models()
 MY_CLUB_CHANNEL = os.getenv("MY_CLUB_CHANNEL", "").strip()
 
-def _get_openrouter_smm_models() -> list[str]:
-    raw = os.getenv("OPENROUTER_SMM_MODELS", "").strip()
-    if raw:
-        return [m.strip() for m in raw.split(",") if m.strip()]
-    return [
-        "qwen/qwen3.8-27b:free",
-        "google/gemma-4-31b-it:free",
-        "google/gemma-4-26b-a4b-it:free",
-        "nvidia/nemotron-3.5-lightning:free",
-        "openrouter/free",
-    ]
-
-OPENROUTER_SMM_MODELS = _get_openrouter_smm_models()
-
-
-
 def _get_gemini_image_models() -> list[str]:
     raw = os.getenv("GEMINI_IMAGE_MODELS", "").strip()
     if raw:
@@ -114,19 +98,6 @@ def _get_gemini_image_models() -> list[str]:
 
 GEMINI_IMAGE_MODELS = _get_gemini_image_models()
 
-def _get_openrouter_image_models() -> list[str]:
-    raw = os.getenv("OPENROUTER_IMAGE_MODELS", "").strip()
-    if raw:
-        return [m.strip() for m in raw.split(",") if m.strip()]
-    return [
-        "inclusionai/ming-image-0.1-design",
-        "recraft/recraft-v4.1-flash",
-        "black-forest-labs/flux.2-klein-4b",
-        "sourceful/riverflow-v2.5-fast",
-        "recraft/recraft-v3",
-    ]
-
-OPENROUTER_IMAGE_MODELS = _get_openrouter_image_models()
 # ─── OpenRouter: ИИ-прогноз во вкладке панели Logovo.bet ──────────────────────
 # Без ключа вкладка работает по вероятностям линии. OPENROUTER_MODEL — одна
 # модель или несколько через запятую: бесплатные (:free и stealth/*) пропадают

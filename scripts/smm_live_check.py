@@ -7,11 +7,11 @@ Run it where the real `.env` lives (the server):
     python scripts/smm_live_check.py --stages              # also one cup stage and one league round
     python scripts/smm_live_check.py --dry                 # no network: stub models, checks the script itself
 
-For every request it prints each raw model answer (provider, model, length), what
+For every request it prints each raw Gemini answer (provider, model, length), what
 `validate_post` said about it, and the text that would be shown to the coach — so both
 prompt quality and validator false positives can be judged by eye. Read-only: it only
 calls the same SELECT-based payload builders the bot uses, and never publishes anything.
-Free models are rate-limited, hence the pause between requests (--pause).
+Gemini's free tier is rate-limited, hence the pause between requests (--pause).
 """
 from __future__ import annotations
 
@@ -45,25 +45,21 @@ def _pick_clubs(limit_scan: int = 60) -> list[str]:
 
 
 class Recorder:
-    """Wraps the two provider calls and records every raw answer with its validator verdict."""
+    """Wraps the Gemini call and records every raw answer with its validator verdict."""
 
     def __init__(self, dry: bool):
         self.dry = dry
         self.attempts: list[dict] = []
         self.verdicts: list[tuple[str, list[str]]] = []   # (text as validated, problems), one per non-empty answer
-        self._orig_or = S._call_openrouter_text
         self._orig_gem = S._call_gemini_text
-        self._orig_router = S._call_openrouter_router_text
         self._orig_validate = S.validate_post
         S.validate_post = self._validate
-        S._call_openrouter_text = lambda *a, **k: self._call("openrouter", self._orig_or, a, k)
         S._call_gemini_text = lambda *a, **k: self._call("gemini", self._orig_gem, a, k)
-        S._call_openrouter_router_text = lambda *a, **k: self._call("router", self._orig_router, a, k)
 
     def _call(self, provider, orig, args, kwargs):
         if self.dry:
-            # Deliberately invalid on the first provider (invented score), fine on the second.
-            text = ("<b>⚽🔥 Тест</b>\nСчёт 9:9 — выдумка. #Тест" if provider == "openrouter"
+            # Deliberately invalid on the first attempt (invented score), fine on the retry.
+            text = ("<b>⚽🔥 Тест</b>\nСчёт 9:9 — выдумка. #Тест" if not self.attempts
                     else "<b>⚽🔥 Тест</b>\nКороткий чистый пост без счёта. #Тест")
             model = "dry-run"
         else:
@@ -115,11 +111,8 @@ def main() -> int:
     ap.add_argument("--dry", action="store_true", help="stub the models, do not touch the network")
     args = ap.parse_args()
 
-    if not args.dry and not (
-        getattr(config, "OPENROUTER_API_KEY", "") or getattr(config, "GEMINI_API_KEY", "")
-        or getattr(config, "GEMINI_CHAT_API_KEY", "")
-    ):
-        print("Нет ни OPENROUTER_API_KEY, ни GEMINI_*_API_KEY в config — запусти на сервере с .env.")
+    if not args.dry and not S.get_ordered_gemini_keys():
+        print("Нет ключей Gemini (GEMINI_SMM_API_KEY / GEMINI_CHAT_API_KEY) в config — запусти на сервере с .env.")
         return 2
 
     clubs = args.clubs or _pick_clubs()

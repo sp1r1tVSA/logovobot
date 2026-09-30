@@ -2,12 +2,12 @@
 tests/test_club_smm.py
 
 Unit tests for Personal Club SMM center:
-- OpenRouter and Gemini free models configuration and rotation
+- Gemini models configuration and key rotation
 - HTML sanitizing and tag fitting
 - Fallback post formatting
 - Data extraction payload structure
-- Text generation via OpenRouter and Gemini
-- Free AI Image generation and Gemini Image fallback
+- Text generation via Gemini, validated and retried with the error list
+- Gemini Image generation with the Pillow club card as a fallback
 - Permission guards and channel configuration
 """
 
@@ -23,26 +23,7 @@ import database
 from services import club_smm_service
 from handlers import club_smm
 
-# Настоящий вызов маршрутизатора — для его собственных тестов; во всех остальных он выключен,
-# чтобы ключ из локального .env не уводил тесты в сеть.
-REAL_ROUTER_CALL = club_smm_service._call_openrouter_router_text
-_router_patch = patch.object(club_smm_service, "_call_openrouter_router_text", return_value=(None, None))
-
-
-def setUpModule():
-    _router_patch.start()
-
-
-def tearDownModule():
-    _router_patch.stop()
-
-
 class TestClubSmmConfig(unittest.TestCase):
-    def test_openrouter_models_parsing(self):
-        with patch.dict("os.environ", {"OPENROUTER_SMM_MODELS": "meta-llama/llama-3.3-70b-instruct:free, qwen/qwen-2.5-72b-instruct:free"}):
-            models = config._get_openrouter_smm_models()
-            self.assertEqual(models, ["meta-llama/llama-3.3-70b-instruct:free", "qwen/qwen-2.5-72b-instruct:free"])
-
     def test_gemini_smm_models_parsing(self):
         with patch.dict("os.environ", {"GEMINI_SMM_MODELS": "gemini-3.1-flash-lite, gemini-3.5-flash-lite"}):
             models = config._get_gemini_smm_models()
@@ -153,25 +134,6 @@ class TestClubSmmPermissionsAndChannel(unittest.TestCase):
 
 
 class TestClubSmmMultiProviderText(unittest.TestCase):
-    @patch("urllib.request.urlopen")
-    def test_openrouter_text_generation(self, mock_urlopen):
-        fake_response = {
-            "choices": [{
-                "message": {
-                    "content": "🦅 <b>Матчдэй от Llama 3.3!</b>\n\nТолько победа орлов! #Besiktas"
-                }
-            }]
-        }
-        mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(fake_response).encode("utf-8")
-        mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
-
-        with patch.object(config, "OPENROUTER_API_KEY", "fake_openrouter_key"):
-            text, model = club_smm_service._call_openrouter_text("System", "User", 1500)
-            self.assertIn("Матчдэй от Llama 3.3", text)
-            self.assertIsNotNone(model)
-
     def test_clean_smm_text_strips_think_tags(self):
         raw = "<think>Нужно написать пост про тренера\nШаг 1: анализ</think>🦅 <b>Новая эра Бешикташа!</b>\n\nВперёд к победам! #Besiktas"
         clean = club_smm_service._clean_smm_text(raw)
@@ -198,41 +160,6 @@ class TestClubSmmMultiProviderText(unittest.TestCase):
         )
         self.assertFalse(club_smm_service._is_meta_reasoning(valid_post))
 
-    @patch("urllib.request.urlopen")
-    def test_openrouter_skips_reasoning_only_response(self, mock_urlopen):
-        # 1-я модель возвращает только reasoning без content
-        resp1 = {
-            "choices": [{
-                "message": {
-                    "content": "",
-                    "reasoning": "Нужно ответить пользователю на русском. Задача: написать пост..."
-                }
-            }]
-        }
-        # 2-я модель возвращает нормальный content
-        resp2 = {
-            "choices": [{
-                "message": {
-                    "content": "🦅 <b>Орлы взлетают!</b>\n\nТолько вперёд, только победа! #Besiktas"
-                }
-            }]
-        }
-        mock_r1 = MagicMock()
-        mock_r1.read.return_value = json.dumps(resp1).encode("utf-8")
-        mock_r1.__enter__.return_value = mock_r1
-
-        mock_r2 = MagicMock()
-        mock_r2.read.return_value = json.dumps(resp2).encode("utf-8")
-        mock_r2.__enter__.return_value = mock_r2
-
-        mock_urlopen.side_effect = [mock_r1, mock_r2]
-
-        with patch.object(config, "OPENROUTER_API_KEY", "fake_openrouter_key"):
-            text, model = club_smm_service._call_openrouter_text("System", "User", 1500)
-            self.assertIsNotNone(text)
-            self.assertNotIn("Нужно ответить", text)
-            self.assertIn("Орлы взлетают!", text)
-
     @patch("services.club_smm_service.get_ordered_gemini_keys", return_value=["test_api_key"])
     @patch("services.ai.ai_recognizer._get_gemini_opener")
     def test_gemini_skips_thought_only_candidate(self, mock_opener_fn, mock_keys):
@@ -257,8 +184,8 @@ class TestClubSmmMultiProviderText(unittest.TestCase):
 
 
 class TestClubSmmVisualFallback(unittest.TestCase):
-    @patch("services.club_smm_service._call_openrouter_image", return_value=(None, None))
-    def test_generate_club_ai_photo_falls_back_to_pillow(self, mock_or_img):
+    @patch("services.club_smm_service._call_gemini_image", return_value=(None, None))
+    def test_generate_club_ai_photo_falls_back_to_pillow(self, mock_img):
         buf = club_smm_service.generate_club_ai_photo("Бешикташ", post_type="matchday")
         self.assertIsNotNone(buf)
         # Pillow retina PNG
@@ -321,8 +248,7 @@ class TestStageAndRoundPosts(unittest.TestCase):
         self.assertEqual(payload_cup["matches"][0]["opponent"], "Фенербахче")
 
     def test_generate_stage_post_fallback(self):
-        with patch("services.club_smm_service._call_openrouter_text", return_value=(None, None)), \
-             patch("services.club_smm_service._call_gemini_text", return_value=(None, None)):
+        with patch("services.club_smm_service._call_gemini_text", return_value=(None, None)):
             post_league = club_smm_service.generate_stage_post("Бешикташ", round_number=1)
             self.assertIn("ИТОГИ ТУРА 1", post_league)
             self.assertIn("2:1", post_league)
@@ -332,198 +258,56 @@ class TestStageAndRoundPosts(unittest.TestCase):
 
     def test_generate_stage_post_with_ai(self):
         fake_ai_text = "🦅 <b>Огненный триумф в Туре 1!</b>\n\nБешикташ вырывает победу 2:1 у соперника! #Besiktas"
-        with patch("services.club_smm_service._call_openrouter_text", return_value=(fake_ai_text, "openrouter/free")):
+        with patch("services.club_smm_service._call_gemini_text", return_value=(fake_ai_text, "gemini-test")):
             post = club_smm_service.generate_stage_post("Бешикташ", round_number=1)
             self.assertIn("Огненный триумф в Туре 1!", post)
 
-    def test_openrouter_models_order_and_no_stealth(self):
-        with patch.dict(os.environ, {"OPENROUTER_SMM_MODELS": ""}):
-            models = config._get_openrouter_smm_models()
-        self.assertNotIn("stealth/space-bunny-alpha", models)
-        self.assertNotIn("stealth/space-bunny-alpha", club_smm_service.GUARANTEED_OPENROUTER_MODELS)
-        # сильная по-русски модель первая, маршрутизатор — последним
-        self.assertEqual(models[0], "qwen/qwen3.8-27b:free")
-        self.assertEqual(models[-1], "openrouter/free")
 
-    def test_ordered_models_are_stable_and_skip_cooled_down(self):
-        S = club_smm_service
-        with patch.object(config, "OPENROUTER_SMM_MODELS", ["m/a", "m/b", "openrouter/free"]),                 patch.dict(S._openrouter_cooldowns, {}, clear=True):
-            self.assertEqual(S.get_ordered_openrouter_models(), ["m/a", "m/b", "openrouter/free"])
-            self.assertEqual(S.get_ordered_openrouter_models(), ["m/a", "m/b", "openrouter/free"])
-            S._cool_down_openrouter("m/a", 600)
-            self.assertEqual(S.get_ordered_openrouter_models(), ["m/b", "openrouter/free"])
-
-    def test_http_errors_put_model_on_cooldown(self):
-        import urllib.error
-        S = club_smm_service
-
-        def http_error(code):
-            return urllib.error.HTTPError("http://x", code, "err", {}, None)
-
-        def fake_urlopen(req, timeout=0):
-            model = json.loads(req.data.decode("utf-8"))["model"]
-            raise http_error({"m/a": 429, "m/b": 400, "openrouter/free": 400}[model])
-
-        with patch.object(config, "OPENROUTER_API_KEY", "k"),                 patch.object(config, "OPENROUTER_SMM_MODELS", ["m/a", "m/b", "openrouter/free"]),                 patch.dict(S._openrouter_cooldowns, {}, clear=True),                 patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            self.assertEqual(S._call_openrouter_text("s", "u", 100), (None, None))
-            self.assertIn("m/a", S._openrouter_cooldowns)
-            self.assertIn("m/b", S._openrouter_cooldowns)
-            # у маршрутизатора 400 — вина выбранной им модели, пауза не ставится
-            self.assertNotIn("openrouter/free", S._openrouter_cooldowns)
-
-
-class TestProviderChainOrder(unittest.TestCase):
-    """OpenRouter (сильные модели) → Gemini → маршрутизатор openrouter/free."""
+class TestGeminiChain(unittest.TestCase):
+    """Единственный провайдер — Gemini: одна попытка при пустом ответе, две при отклонённом."""
 
     PAYLOAD = {"club": {"name": "Ренн", "hashtags": ["#Ренн"]}}
     GOOD = "⚽ <b>Ренн вперёд!</b>\nСпокойный чистый текст без выдумок. #Ренн"
+    BAD = "⚽ <b>Ренн</b>\nСчёт 9:9 — выдумка. #Ренн"
 
-    def _run(self, or_res, gem_res, router_res):
+    def _run(self, answers):
         S = club_smm_service
-        calls = []
+        prompts = []
 
-        def make(name, res):
-            def fn(*a, **k):
-                calls.append(name)
-                return res
-            return fn
+        def fake(system, user, max_tokens, **kw):
+            prompts.append(user)
+            return answers.pop(0) if answers else (None, None)
 
-        with patch.object(S, "_call_openrouter_text", side_effect=make("or", or_res)), \
-             patch.object(S, "_call_gemini_text", side_effect=make("gem", gem_res)), \
-             patch.object(S, "_call_openrouter_router_text", side_effect=make("router", router_res)):
+        with patch.object(S, "_call_gemini_text", side_effect=fake):
             text = S._generate_validated("s", "u", 300, 700, self.PAYLOAD, "custom")
-        return text, calls
+        return text, prompts
 
-    def test_gemini_is_asked_before_the_router(self):
-        text, calls = self._run((None, None), (self.GOOD, "gem"), (self.GOOD, "router"))
-        self.assertEqual(calls, ["or", "gem"])
+    def test_valid_answer_needs_one_call(self):
+        text, prompts = self._run([(self.GOOD, "g")])
         self.assertIsNotNone(text)
+        self.assertEqual(len(prompts), 1)
 
-    def test_router_is_the_last_resort(self):
-        text, calls = self._run((None, None), (None, None), (self.GOOD, "router"))
-        self.assertEqual(calls, ["or", "gem", "router"])
+    def test_rejected_answer_is_retried_with_the_error_list(self):
+        text, prompts = self._run([(self.BAD, "g"), (self.GOOD, "g")])
         self.assertIsNotNone(text)
+        self.assertEqual(len(prompts), 2)
+        self.assertIn("НАЙДЕНЫ ОШИБКИ", prompts[1])
+        self.assertIn("9:9", prompts[1])
 
-    def test_nobody_answers_gives_none(self):
-        text, calls = self._run((None, None), (None, None), (None, None))
-        self.assertEqual(calls, ["or", "gem", "router"])
+    def test_two_rejected_answers_give_none(self):
+        text, prompts = self._run([(self.BAD, "g"), (self.BAD, "g"), (self.GOOD, "g")])
         self.assertIsNone(text)
+        self.assertEqual(len(prompts), club_smm_service.GEMINI_ATTEMPTS)
 
-    def test_strong_chain_never_includes_the_router(self):
-        import urllib.error
+    def test_silent_gemini_is_not_asked_twice(self):
+        text, prompts = self._run([])
+        self.assertIsNone(text)
+        self.assertEqual(len(prompts), 1)
+
+    def test_no_openrouter_left_in_the_smm_service(self):
         S = club_smm_service
-        seen = []
-
-        def fake_urlopen(req, timeout=0):
-            seen.append(json.loads(req.data.decode("utf-8"))["model"])
-            raise urllib.error.HTTPError("http://x", 429, "err", {}, None)
-
-        with patch.object(config, "OPENROUTER_API_KEY", "k"), \
-             patch.object(config, "OPENROUTER_SMM_MODELS", ["m/a", "openrouter/free"]), \
-             patch.dict(S._openrouter_cooldowns, {}, clear=True), \
-             patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            self.assertEqual(S._call_openrouter_text("s", "u", 100), (None, None))
-        self.assertEqual(seen, ["m/a"])
-
-
-class TestOpenRouterRobustness(unittest.TestCase):
-    GOOD = {"choices": [{"message": {"content": "🦅 <b>Орлы взлетают!</b>\n\nТолько вперёд, только победа! #Besiktas"}}]}
-
-    @staticmethod
-    def _resp(data):
-        r = MagicMock()
-        r.read.return_value = json.dumps(data).encode("utf-8")
-        r.__enter__.return_value = r
-        return r
-
-    def test_router_retries_without_reasoning_when_it_is_mandatory(self):
-        import urllib.error
-        S = club_smm_service
-        payloads = []
-
-        def fake_urlopen(req, timeout=0):
-            payloads.append(json.loads(req.data.decode("utf-8")))
-            if "reasoning" in payloads[-1]:
-                body = io.BytesIO(b'{"error":{"message":"Reasoning is mandatory for this endpoint and cannot be disabled."}}')
-                raise urllib.error.HTTPError("http://x", 400, "Bad Request", {}, body)
-            return self._resp(self.GOOD)
-
-        with patch.object(config, "OPENROUTER_API_KEY", "k"), \
-             patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            text, model = REAL_ROUTER_CALL("s", "u", 100)
-        self.assertIn("Орлы взлетают", text)
-        self.assertEqual(model, "openrouter/free")
-        self.assertEqual(len(payloads), 2)
-        self.assertIn("reasoning", payloads[0])
-        self.assertNotIn("reasoning", payloads[1])
-
-    def test_daily_free_limit_switches_off_every_free_model(self):
-        import time
-        import urllib.error
-        S = club_smm_service
-        reset_ms = int((time.time() + 3 * 3600) * 1000)
-        body = ('{"error":{"message":"Rate limit exceeded: free-models-per-day. Add 10 credits","code":429,'
-                '"metadata":{"headers":{"X-RateLimit-Limit":"50","X-RateLimit-Remaining":"0",'
-                '"X-RateLimit-Reset":"%d"}}}}' % reset_ms)
-        calls = []
-
-        def fake_urlopen(req, timeout=0):
-            calls.append(json.loads(req.data.decode("utf-8"))["model"])
-            raise urllib.error.HTTPError("http://x", 429, "Too Many", {}, io.BytesIO(body.encode("utf-8")))
-
-        with patch.object(config, "OPENROUTER_API_KEY", "k"), \
-             patch.object(config, "OPENROUTER_SMM_MODELS", ["m/a:free", "m/b:free", "openrouter/free"]), \
-             patch.object(S, "_free_quota_blocked_until", 0.0), \
-             patch.dict(S._openrouter_cooldowns, {}, clear=True), \
-             patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            self.assertEqual(S._call_openrouter_text("s", "u", 100), (None, None))
-            # один запрос дал 429 на лимит — остальные бесплатные модели даже не пробуются
-            self.assertEqual(calls, ["m/a:free"])
-            self.assertTrue(S._free_quota_blocked())
-            # до сброса ≈3 часа (из X-RateLimit-Reset)
-            self.assertAlmostEqual(S._free_quota_blocked_until - time.monotonic(), 3 * 3600, delta=30)
-            # и маршрутизатор тоже не зовётся
-            self.assertEqual(REAL_ROUTER_CALL("s", "u", 100), (None, None))
-            self.assertEqual(calls, ["m/a:free"])
-
-    def test_daily_limit_without_reset_header_waits_until_utc_midnight(self):
-        import time
-        S = club_smm_service
-        with patch.object(S, "_free_quota_blocked_until", 0.0):
-            wait = S._block_free_models_until_reset('{"error":{"message":"free-models-per-day"}}')
-        self.assertTrue(0 < wait <= 86400)
-        self.assertAlmostEqual(wait, 86400 - time.time() % 86400, delta=5)
-
-    def test_other_400_is_not_retried(self):
-        import urllib.error
-        S = club_smm_service
-        calls = []
-
-        def fake_urlopen(req, timeout=0):
-            calls.append(1)
-            raise urllib.error.HTTPError("http://x", 400, "Bad", {}, io.BytesIO(b'{"error":"bad model"}'))
-
-        with patch.object(config, "OPENROUTER_API_KEY", "k"), \
-             patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            self.assertEqual(REAL_ROUTER_CALL("s", "u", 100), (None, None))
-        self.assertEqual(len(calls), 1)
-
-    def test_response_without_choices_goes_to_next_model(self):
-        S = club_smm_service
-        answers = {"m/a": {"error": {"message": "provider returned error"}}, "m/b": self.GOOD}
-
-        def fake_urlopen(req, timeout=0):
-            return self._resp(answers[json.loads(req.data.decode("utf-8"))["model"]])
-
-        with patch.object(config, "OPENROUTER_API_KEY", "k"), \
-             patch.object(config, "OPENROUTER_SMM_MODELS", ["m/a", "m/b"]), \
-             patch.dict(S._openrouter_cooldowns, {}, clear=True), \
-             patch("urllib.request.urlopen", side_effect=fake_urlopen):
-            text, model = S._call_openrouter_text("s", "u", 100)
-            self.assertNotIn("m/a", S._openrouter_cooldowns)
-        self.assertEqual(model, "m/b")
-        self.assertIn("Орлы взлетают", text)
-
+        self.assertFalse([n for n in dir(S) if "openrouter" in n.lower()])
+        self.assertFalse(hasattr(config, "OPENROUTER_SMM_MODELS") or hasattr(config, "OPENROUTER_IMAGE_MODELS"))
 
 class TestAngleWrapAndScripts(unittest.TestCase):
     PAYLOAD = {"club": {"name": "Ренн"}, "players": ["Saad Blas"]}
@@ -562,65 +346,62 @@ class TestAngleWrapAndScripts(unittest.TestCase):
         self.assertEqual(S.validate_post("Уровень L2 и D3", self.PAYLOAD), [])
 
 
-class TestClubSmmOpenRouterImage(unittest.TestCase):
-    @patch("urllib.request.urlopen")
-    def test_call_openrouter_image_b64(self, mock_urlopen):
-        fake_image_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRopenrouter_test"
-        fake_b64 = base64.b64encode(fake_image_bytes).decode("utf-8")
-        fake_response = {
-            "data": [
-                {"b64_json": fake_b64}
-            ]
-        }
+class TestClubSmmGeminiImage(unittest.TestCase):
+    @staticmethod
+    def _opener(resp_data):
         mock_resp = MagicMock()
-        mock_resp.read.return_value = json.dumps(fake_response).encode("utf-8")
+        mock_resp.read.return_value = json.dumps(resp_data).encode("utf-8")
         mock_resp.__enter__.return_value = mock_resp
-        mock_urlopen.return_value = mock_resp
+        opener = MagicMock()
+        opener.open.return_value = mock_resp
+        return opener
 
-        with patch.object(config, "OPENROUTER_API_KEY", "sk-or-test-key"):
-            buf, model = club_smm_service._call_openrouter_image("epic soccer match")
-            self.assertIsNotNone(buf)
-            self.assertEqual(buf.getvalue(), fake_image_bytes)
-            self.assertEqual(model, "inclusionai/ming-image-0.1-design")
+    @patch("services.club_smm_service.get_ordered_gemini_keys", return_value=["k"])
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    def test_inline_image_is_decoded(self, mock_opener_fn, mock_keys):
+        fake = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRgemini_test"
+        mock_opener_fn.return_value = self._opener({"candidates": [{"content": {"parts": [
+            {"text": "вот арт"},
+            {"inlineData": {"mimeType": "image/png", "data": base64.b64encode(fake).decode()}},
+        ]}}]})
+        with patch.object(config, "GEMINI_IMAGE_MODELS", ["gemini-x-image"]):
+            buf, model = club_smm_service._call_gemini_image("epic soccer match")
+        self.assertEqual(buf.getvalue(), fake)
+        self.assertEqual(model, "gemini-x-image")
 
-    @patch("urllib.request.urlopen")
-    def test_call_openrouter_image_url(self, mock_urlopen):
-        fake_image_bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDRdownloaded_test"
-        fake_response = {
-            "data": [
-                {"url": "https://openrouter.ai/sample.png"}
-            ]
-        }
-        mock_resp_api = MagicMock()
-        mock_resp_api.read.return_value = json.dumps(fake_response).encode("utf-8")
-        mock_resp_api.__enter__.return_value = mock_resp_api
+    @patch("services.club_smm_service.get_ordered_gemini_keys", return_value=["k"])
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    def test_imagen_models_are_skipped_and_text_only_answer_is_no_image(self, mock_opener_fn, mock_keys):
+        opener = self._opener({"candidates": [{"content": {"parts": [{"text": "не могу"}]}}]})
+        mock_opener_fn.return_value = opener
+        with patch.object(config, "GEMINI_IMAGE_MODELS", ["imagen-3.0-generate-002", "gemini-x-image"]):
+            self.assertEqual(club_smm_service._call_gemini_image("p"), (None, None))
+        self.assertEqual(opener.open.call_count, 1)
+        self.assertIn("gemini-x-image", opener.open.call_args[0][0].full_url)
 
-        mock_resp_img = MagicMock()
-        mock_resp_img.read.return_value = fake_image_bytes
-        mock_resp_img.__enter__.return_value = mock_resp_img
+    @patch("services.club_smm_service.get_ordered_gemini_keys", return_value=[])
+    def test_no_keys_means_no_image(self, mock_keys):
+        self.assertEqual(club_smm_service._call_gemini_image("p"), (None, None))
 
-        mock_urlopen.side_effect = [mock_resp_api, mock_resp_img]
+    @patch("services.club_smm_service.get_ordered_gemini_keys", return_value=["k1", "k2"])
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    def test_unavailable_model_skips_other_keys(self, mock_opener_fn, mock_keys):
+        import urllib.error
+        opener = MagicMock()
+        opener.open.side_effect = urllib.error.HTTPError("http://x", 404, "nf", {}, None)
+        mock_opener_fn.return_value = opener
+        with patch.object(config, "GEMINI_IMAGE_MODELS", ["gemini-x-image"]):
+            self.assertEqual(club_smm_service._call_gemini_image("p"), (None, None))
+        self.assertEqual(opener.open.call_count, 1)
 
-        with patch.object(config, "OPENROUTER_API_KEY", "sk-or-test-key"):
-            buf, model = club_smm_service._call_openrouter_image("epic soccer match")
-            self.assertIsNotNone(buf)
-            self.assertEqual(buf.getvalue(), fake_image_bytes)
-            self.assertEqual(model, "inclusionai/ming-image-0.1-design")
-
-    @patch("services.club_smm_service._call_openrouter_image")
-    def test_generate_club_ai_photo_prefers_openrouter(self, mock_or_img):
+    @patch("services.club_smm_service._call_gemini_image")
+    def test_generate_club_ai_photo_prefers_gemini(self, mock_img):
         fake_buf = io.BytesIO(b"fake_image_data")
-        mock_or_img.return_value = (fake_buf, "recraft/recraft-v4.1-flash")
+        mock_img.return_value = (fake_buf, "gemini-x-image")
 
         res = club_smm_service.generate_club_ai_photo("Бешикташ", post_type="matchday")
         self.assertEqual(res, fake_buf)
-        mock_or_img.assert_called_once()
-
-    def test_openrouter_image_models_config(self):
-        models = config._get_openrouter_image_models()
-        self.assertIn("inclusionai/ming-image-0.1-design", models)
-        self.assertEqual(models[0], "inclusionai/ming-image-0.1-design")
-        self.assertIn("recraft/recraft-v4.1-flash", models)
+        mock_img.assert_called_once()
 
 
 class TestClubSmmCustomPhoto(unittest.IsolatedAsyncioTestCase):
@@ -1094,21 +875,20 @@ class TestPostPrompts(unittest.TestCase):
         self.assertIn("сделай короче", task)
         self.assertIn("ПОЛНЫЙ исправленный пост", task)
 
-    def test_edit_returns_none_when_all_providers_fail(self):
+    def test_edit_returns_none_when_gemini_fails(self):
         with patch.object(club_smm_service, "get_club_smm_payload", return_value={"club": {"name": "Ювентус"}}), \
-             patch.object(club_smm_service, "_call_openrouter_text", return_value=(None, None)), \
              patch.object(club_smm_service, "_call_gemini_text", return_value=(None, None)):
             self.assertIsNone(club_smm_service.edit_club_post("Ювентус", "Пост", "короче"))
 
     def test_edit_uses_model_answer_and_caps_instruction(self):
         seen = {}
 
-        def fake_or(system, user, max_tokens):
+        def fake_gem(system, user, max_tokens, **kw):
             seen["user"] = user
             return "<b>Новый</b> пост " * 5, "m"
 
         with patch.object(club_smm_service, "get_club_smm_payload", return_value={"club": {"name": "Ювентус"}}), \
-             patch.object(club_smm_service, "_call_openrouter_text", side_effect=fake_or):
+             patch.object(club_smm_service, "_call_gemini_text", side_effect=fake_gem):
             out = club_smm_service.edit_club_post("Ювентус", "Пост", "я" * 5000)
         self.assertIn("Новый", out)
         self.assertNotIn("я" * (club_smm_service.EDIT_BRIEF_MAX_CHARS + 1), seen["user"])
@@ -1133,7 +913,7 @@ class TestPostPrompts(unittest.TestCase):
             captured["p"] = prompt
             return None, None
 
-        with patch.object(club_smm_service, "_call_openrouter_image", side_effect=fake_image), \
+        with patch.object(club_smm_service, "_call_gemini_image", side_effect=fake_image), \
              patch.object(club_smm_service, "generate_club_smm_media", return_value=None):
             club_smm_service.generate_club_ai_photo("Ювентус", post_type, custom)
         return captured["p"]
@@ -1169,13 +949,12 @@ class TestStagePostPrompts(unittest.TestCase):
             "matches": matches,
         }
 
-        def fake_or(system, user, max_tokens):
+        def fake_gem(system, user, max_tokens, **kw):
             prompts.append(user)
             return None, None
 
         with patch.object(club_smm_service, "get_stage_or_round_payload", return_value=payload), \
-             patch.object(club_smm_service, "_call_openrouter_text", side_effect=fake_or), \
-             patch.object(club_smm_service, "_call_gemini_text", return_value=(None, None)):
+             patch.object(club_smm_service, "_call_gemini_text", side_effect=fake_gem):
             post = club_smm_service.generate_stage_post("Ювентус", cup_stage=stage, **kw)
         return prompts[0], post
 
@@ -1272,48 +1051,43 @@ class TestPostValidation(unittest.TestCase):
         self.assertTrue(any("Чужой" in p for p in problems))
         self.assertEqual(club_smm_service.validate_post("Чужой был лучшим у Ромы. Наши держались.", self.PAYLOAD, "custom"), [])
 
-    def _chain(self, or_answers, gem_answers, kind="loss"):
-        or_calls, gem_calls = [], []
-
-        def fake_or(system, user, max_tokens):
-            or_calls.append(user)
-            return (or_answers.pop(0), "m") if or_answers else (None, None)
+    def _chain(self, answers, kind="loss"):
+        calls = []
 
         def fake_gem(system, user, max_tokens, **kw):
-            gem_calls.append(user)
-            return (gem_answers.pop(0), "g") if gem_answers else (None, None)
+            calls.append(user)
+            return (answers.pop(0), "g") if answers else (None, None)
 
-        with patch.object(club_smm_service, "_call_openrouter_text", side_effect=fake_or), \
-             patch.object(club_smm_service, "_call_gemini_text", side_effect=fake_gem):
+        with patch.object(club_smm_service, "_call_gemini_text", side_effect=fake_gem):
             out = club_smm_service._generate_validated("sys", "user", 300, 700, self.PAYLOAD, kind)
-        return out, or_calls, gem_calls
+        return out, calls
 
     def test_valid_first_answer_is_returned_without_second_call(self):
-        out, or_calls, gem_calls = self._chain(["Держались до конца. 1:2"], [])
+        out, calls = self._chain(["Держались до конца. 1:2"])
         self.assertIn("1:2", out)
-        self.assertEqual(gem_calls, [])
+        self.assertEqual(len(calls), 1)
 
-    def test_invalid_answer_moves_to_next_provider_with_feedback(self):
-        out, or_calls, gem_calls = self._chain(["Победили 9:0, празднуем!"], ["Сдержанный пост о характере."])
+    def test_invalid_answer_is_retried_with_feedback(self):
+        out, calls = self._chain(["Победили 9:0, празднуем!", "Сдержанный пост о характере."])
         self.assertEqual(out, "Сдержанный пост о характере.")
-        self.assertIn("НАЙДЕНЫ ОШИБКИ", gem_calls[0])
-        self.assertIn("9:0", gem_calls[0])
+        self.assertIn("НАЙДЕНЫ ОШИБКИ", calls[1])
+        self.assertIn("9:0", calls[1])
 
     def test_all_invalid_returns_none(self):
-        out, _, _ = self._chain(["Победили 9:0"], ["Празднуем триумф!"])
+        out, _ = self._chain(["Победили 9:0", "Празднуем триумф!"])
         self.assertIsNone(out)
 
     def test_generate_club_post_falls_back_to_template_when_answers_are_invalid(self):
         with patch.object(club_smm_service, "get_club_smm_payload", return_value=dict(self.PAYLOAD)), \
-             patch.object(club_smm_service, "_call_openrouter_text", return_value=("Победили 9:0, празднуем!", "m")), \
-             patch.object(club_smm_service, "_call_gemini_text", return_value=("Триумф 7:7!", "g")):
+             patch.object(club_smm_service, "_call_gemini_text",
+                          side_effect=[("Победили 9:0, празднуем!", "g"), ("Триумф 7:7!", "g")]):
             post = club_smm_service.generate_club_post("Ювентус", "recap")
         self.assertNotIn("9:0", post)
         self.assertNotIn("7:7", post)
 
     def test_edit_keeps_scores_from_draft(self):
         with patch.object(club_smm_service, "get_club_smm_payload", return_value={"club": {"name": "Ювентус"}}), \
-             patch.object(club_smm_service, "_call_openrouter_text", return_value=("Короче: 4:2 в нашу пользу", "m")):
+             patch.object(club_smm_service, "_call_gemini_text", return_value=("Короче: 4:2 в нашу пользу", "m")):
             out = club_smm_service.edit_club_post("Ювентус", "Мы выиграли 4:2", "сделай короче")
         self.assertIn("4:2", out)
 
@@ -1375,8 +1149,8 @@ class TestPostRepairAndLanguage(unittest.TestCase):
         self.assertEqual(club_smm_service.validate_post("Хет-трик в FIFA", payload, "custom"), [])
 
     def test_generated_text_gets_repaired_tags(self):
-        with patch.object(club_smm_service, "_call_openrouter_text",
-                          return_value=("Держались до конца, работаем дальше.\n\n#Lid #BLAS", "m")),              patch.object(club_smm_service, "_call_gemini_text", return_value=(None, None)):
+        with patch.object(club_smm_service, "_call_gemini_text",
+                          return_value=("Держались до конца, работаем дальше.\n\n#Lid #BLAS", "m")):
             out = club_smm_service._generate_validated("s", "u", 300, 700, self.PAYLOAD, "loss")
         self.assertTrue(out.endswith("#Juve #ЛоговоФифарей"))
 

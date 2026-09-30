@@ -4,11 +4,11 @@ services/club_smm_service.py
 Персональный SMM-генератор постов для Telegram-канала о клубе (ФК «Бешикташ» и др.).
 
 Архитектура:
-  1. ТЕКСТ ПОСТОВ: Бесплатные модели OpenRouter (Llama 3.3 70B, Qwen 2.5 72B,
-     Mistral Small 24B, DeepSeek R1) с ротацией и автоматическим фолбэком
-     на бесплатные Gemini (Flash Lite 500 RPD) и шаблонную аналитику.
-  2. ГЕНЕРАЦИЯ ФОТО / АРТОВ: Бесплатный Flux AI (Pollinations) + Gemini Image
-     + фолбэк на графическую карточку клуба (Pillow Retina).
+  1. ТЕКСТ ПОСТОВ: только Gemini по API-ключу (GEMINI_SMM_API_KEY, модели
+     GEMINI_SMM_MODELS, квота Flash Lite 500 запросов в день), каждый ответ
+     проходит validate_post; если годного текста нет — шаблонная аналитика.
+  2. ГЕНЕРАЦИЯ ФОТО / АРТОВ: Gemini Image (GEMINI_IMAGE_MODELS) с фолбэком
+     на графическую карточку клуба (Pillow Retina).
   3. ДАННЫЕ: Актуальная статистика из SQLite (положение в дивизионе, форма,
      последний и предстоящий матчи, авторы голов/ассистов, MVP).
 """
@@ -39,107 +39,7 @@ CAPTION_MAX_CHARS = 450
 # Жёсткий лимит подписи к фото в Telegram — 1024; счёт идёт по сырому HTML.
 PUBLISH_CAPTION_MAX_CHARS = 1000
 
-# Общий бюджет цепочки OpenRouter: дальше всё равно ждёт Gemini и шаблон, а сообщение
-# «Пишу…» не должно висеть минутами (6 моделей × 25 с = 150 с в худшем случае).
-OPENROUTER_CHAIN_BUDGET_SECONDS = 60
-OPENROUTER_MODEL_TIMEOUT_SECONDS = 25
-
-# ─── Модели и ключи ─────────────────────────────────────────────────────────
-
-_openrouter_lock = threading.Lock()
-
-DEPRECATED_OPENROUTER_MODELS = {
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen-2.5-72b-instruct:free",
-    "mistralai/mistral-small-24b-instruct-2501:free",
-    "deepseek/deepseek-r1:free",
-}
-
-_dead_openrouter_models: set[str] = set(DEPRECATED_OPENROUTER_MODELS)
-
-# Порядок — это приоритет: сильные по-русски модели первыми, маршрутизатор openrouter/free
-# (каждый раз другая модель, нередко слабая) — хвостом. stealth/space-bunny-alpha убран:
-# на боевом сервере отвечал HTTP 400 на каждый запрос.
-GUARANTEED_OPENROUTER_MODELS = [
-    "qwen/qwen3.8-27b:free",
-    "google/gemma-4-31b-it:free",
-    "google/gemma-4-26b-a4b-it:free",
-    "nvidia/nemotron-3.5-lightning:free",
-    "openrouter/free",
-]
-
-# Пауза для модели, которая только что ответила ошибкой: без неё каждый пост заново ждал бы
-# 429 и таймауты одних и тех же моделей. Значения по образцу services/ai/bet_picks.py.
-RATE_LIMIT_COOLDOWN_SECONDS = 10 * 60
-TIMEOUT_COOLDOWN_SECONDS = 10 * 60
-BAD_REQUEST_COOLDOWN_SECONDS = 30 * 60
-MAX_COOLDOWN_SECONDS = 60 * 60
-# Маршрутизатор: 400 приходит от выбранной им на этот раз модели, а не от него самого.
-ROUTER_MODEL = "openrouter/free"
-NO_COOLDOWN_MODELS = {ROUTER_MODEL}
-ROUTER_BUDGET_SECONDS = 30
-
-_openrouter_cooldowns: dict[str, float] = {}   # модель → time.monotonic(), до которого её пропускаем
-
-# Суточный лимит бесплатных запросов (free-models-per-day, 50 на аккаунт без кредитов) общий для ВСЕХ
-# :free-моделей и openrouter/free: после него дальше пробовать бессмысленно до сброса.
-DAILY_LIMIT_MARKER = "free-models-per-day"
-_free_quota_blocked_until = 0.0   # time.monotonic()
-_RATELIMIT_RESET_RE = re.compile(r'"X-RateLimit-Reset"\s*:\s*"?(\d{10,13})')
-
-
-def _is_free_model(model: str) -> bool:
-    return model.endswith(":free") or model == ROUTER_MODEL
-
-
-def _free_quota_blocked() -> bool:
-    return time.monotonic() < _free_quota_blocked_until
-
-
-def _block_free_models_until_reset(detail: str) -> float:
-    """Отключает все бесплатные модели до сброса суточного лимита; возвращает паузу в секундах."""
-    global _free_quota_blocked_until
-    seconds = 0.0
-    m = _RATELIMIT_RESET_RE.search(detail or "")
-    if m:
-        reset = int(m.group(1))
-        reset = reset / 1000 if reset > 10 ** 11 else reset   # миллисекунды или секунды
-        seconds = reset - time.time()
-    if not 0 < seconds <= 24 * 3600:
-        seconds = 86400 - time.time() % 86400   # лимит OpenRouter сбрасывается в 00:00 UTC
-    with _openrouter_lock:
-        _free_quota_blocked_until = time.monotonic() + seconds
-    return seconds
-
-
-def _cool_down_openrouter(model: str, seconds: float) -> None:
-    with _openrouter_lock:
-        _openrouter_cooldowns[model] = time.monotonic() + min(max(seconds, 60), MAX_COOLDOWN_SECONDS)
-
-
-def _retry_after_seconds(e: "urllib.error.HTTPError") -> float:
-    """Пауза из заголовка Retry-After (секунды), иначе стандартная для 429."""
-    try:
-        return float(e.headers.get("Retry-After"))
-    except (AttributeError, TypeError, ValueError):
-        return float(RATE_LIMIT_COOLDOWN_SECONDS)
-
-
-def get_ordered_openrouter_models() -> list[str]:
-    """Актуальные бесплатные модели OpenRouter в порядке приоритета, без «остывающих» и мёртвых."""
-    raw_models = getattr(config, "OPENROUTER_SMM_MODELS", []) or GUARANTEED_OPENROUTER_MODELS
-    # Отсеиваем устаревшие и заведомо вернувшие 404 модели
-    models = [m for m in raw_models if m not in _dead_openrouter_models]
-    if not models:
-        models = [m for m in GUARANTEED_OPENROUTER_MODELS if m not in _dead_openrouter_models]
-    if not models:
-        models = ["openrouter/free"]
-
-    now = time.monotonic()
-    with _openrouter_lock:
-        return [m for m in models if _openrouter_cooldowns.get(m, 0.0) <= now]
-
-
+# ─── Ключи Gemini ───────────────────────────────────────────────────────────
 
 _gemini_key_idx = 0
 _gemini_key_lock = threading.Lock()
@@ -977,146 +877,7 @@ def _get_edit_instruction(draft_text: str, instruction: str) -> str:
     )
 
 
-# ─── Провайдер 1: OpenRouter (Бесплатные нейронки) ──────────────────────────
-
-def _openrouter_request(
-    base_url: str, api_key: str, model: str, system_text: str, user_text: str,
-    max_tokens: int, timeout: float, with_reasoning: bool = True,
-) -> dict:
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system_text},
-            {"role": "user", "content": user_text},
-        ],
-        "temperature": 0.8,
-        "max_tokens": max_tokens,
-    }
-    if with_reasoning:
-        # Не тратим токены на рассуждения; часть моделей (openrouter/free) этого не позволяет — см. повтор ниже.
-        payload["reasoning"] = {"effort": "none", "exclude": True}
-    req = urllib.request.Request(
-        f"{base_url}/chat/completions",
-        data=json.dumps(payload).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-            "HTTP-Referer": "https://logovobot.ru",
-            "X-Title": "Logovobot Club SMM",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
-
-
-def _openrouter_answer_text(data, model: str) -> str | None:
-    """Достаёт из ответа чистый текст поста; None — ответа нет (пусто, только рассуждения, нет choices)."""
-    choices = data.get("choices") if isinstance(data, dict) else None
-    if not choices:
-        err = data.get("error") if isinstance(data, dict) else None
-        logger.warning(f"OpenRouter SMM: model '{model}' returned no choices ({str(err)[:200] or 'no error field'}). Trying next...")
-        return None
-    msg = (choices[0] or {}).get("message") or {}
-    # Берем исключительно content, ни в коем случае не reasoning
-    clean = _clean_smm_text(msg.get("content") or "")
-    if clean and len(clean.strip()) > 30 and not _is_meta_reasoning(clean):
-        return clean.strip()
-    logger.warning(
-        f"OpenRouter SMM: model '{model}' returned empty or reasoning-only content (len={len(clean)}). Trying next..."
-    )
-    return None
-
-
-def _run_openrouter_chain(
-    models: list[str], system_text: str, user_text: str, max_tokens: int, budget_seconds: float,
-) -> tuple[str | None, str | None]:
-    """Пробует модели по порядку в пределах общего бюджета времени; (None, None) — никто не ответил."""
-    api_key = getattr(config, "OPENROUTER_API_KEY", "").strip()
-    if not api_key or not models:
-        return None, None
-
-    base_url = getattr(config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
-    budget_tokens = max(max_tokens, 1500)
-    deadline = time.monotonic() + budget_seconds
-
-    for model in models:
-        if _is_free_model(model) and _free_quota_blocked():
-            continue
-        data = None
-        with_reasoning = True
-        for _attempt in range(2):   # второй заход — только после «Reasoning is mandatory»
-            remaining = deadline - time.monotonic()
-            if remaining < 3:
-                break
-            try:
-                data = _openrouter_request(
-                    base_url, api_key, model, system_text, user_text, budget_tokens,
-                    min(OPENROUTER_MODEL_TIMEOUT_SECONDS, remaining), with_reasoning,
-                )
-                break
-            except urllib.error.HTTPError as e:
-                if e.code == 404:
-                    _dead_openrouter_models.add(model)
-                    logger.warning(f"OpenRouter SMM: model '{model}' HTTP 404 (disabled from roster), trying next free model...")
-                    break
-                detail = ""
-                try:
-                    detail = e.read().decode("utf-8", "replace").replace("\n", " ")
-                except Exception:
-                    pass
-                if e.code == 429 and DAILY_LIMIT_MARKER in detail and _is_free_model(model):
-                    wait = _block_free_models_until_reset(detail)
-                    logger.warning(
-                        f"OpenRouter SMM: суточный лимит бесплатных запросов исчерпан, "
-                        f"бесплатные модели отключены на {wait / 3600:.1f} ч (до сброса). "
-                        f"Кредиты на аккаунте OpenRouter снимают лимит."
-                    )
-                    break
-                detail = detail[:200]
-                if e.code == 400 and with_reasoning and "reasoning" in detail.lower():
-                    # openrouter/free: «Reasoning is mandatory for this endpoint and cannot be disabled»
-                    logger.info(f"OpenRouter SMM: model '{model}' rejects reasoning=none, retrying without it")
-                    with_reasoning = False
-                    continue
-                logger.warning(f"OpenRouter SMM: model '{model}' HTTP {e.code} {detail}, trying next free model...")
-                if model not in NO_COOLDOWN_MODELS:
-                    if e.code == 429:
-                        _cool_down_openrouter(model, _retry_after_seconds(e))
-                    elif e.code == 400:
-                        _cool_down_openrouter(model, BAD_REQUEST_COOLDOWN_SECONDS)
-                break
-            except Exception as e:
-                logger.warning(f"OpenRouter SMM: model '{model}' failed: {e}")
-                if model not in NO_COOLDOWN_MODELS:
-                    _cool_down_openrouter(model, TIMEOUT_COOLDOWN_SECONDS)
-                break
-        if data is None:
-            if deadline - time.monotonic() < 3:
-                logger.warning("OpenRouter SMM: chain budget exhausted, falling back")
-                break
-            continue
-        text = _openrouter_answer_text(data, model)
-        if text:
-            return text, model
-
-    return None, None
-
-
-def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> tuple[str | None, str | None]:
-    """Генерация текста через цепочку бесплатных моделей OpenRouter — без маршрутизатора openrouter/free."""
-    models = [m for m in get_ordered_openrouter_models() if m != ROUTER_MODEL]
-    return _run_openrouter_chain(models, system_text, user_text, max_tokens, OPENROUTER_CHAIN_BUDGET_SECONDS)
-
-
-def _call_openrouter_router_text(system_text: str, user_text: str, max_tokens: int) -> tuple[str | None, str | None]:
-    """Последний шанс: маршрутизатор openrouter/free. Каждый раз другая модель, нередко слабая,
-    поэтому его зовём только после Gemini."""
-    if ROUTER_MODEL in _dead_openrouter_models or _free_quota_blocked():
-        return None, None
-    return _run_openrouter_chain([ROUTER_MODEL], system_text, user_text, max_tokens, ROUTER_BUDGET_SECONDS)
-
-
-# ─── Провайдер 3: Gemini Fallback для текста ────────────────────────────────
+# ─── Gemini: генерация текста ───────────────────────────────────────────────
 
 def _call_gemini_text(
     system_text: str,
@@ -1126,7 +887,7 @@ def _call_gemini_text(
     audio_mime: str = "audio/ogg",
     min_len: int = 30,
 ) -> tuple[str | None, str | None]:
-    """Резервная генерация текста через Gemini."""
+    """Генерация текста через Gemini (модели и ключи ротируются); (None, None) — никто не ответил."""
     keys = get_ordered_gemini_keys()
     if not keys:
         return None, None
@@ -1194,8 +955,8 @@ def _call_gemini_text(
 def transcribe_audio(audio_bytes: bytes, audio_mime: str = "audio/ogg") -> str | None:
     """Расшифровывает голосовое/кружок тренера в текст через Gemini.
 
-    Нужна, потому что первым в цепочке идёт OpenRouter, который аудио не принимает:
-    без расшифровки тема тренера терялась бы, если ответила не Gemini.
+    Текст темы нужен и валидатору (`extra_text`), и повторной попытке, поэтому аудио
+    расшифровывается один раз, а дальше в запросах идёт уже текст.
     """
     if not audio_bytes:
         return None
@@ -1214,6 +975,9 @@ def transcribe_audio(audio_bytes: bytes, audio_mime: str = "audio/ogg") -> str |
 
 # ─── Главная функция генерации текста ───────────────────────────────────────
 
+GEMINI_ATTEMPTS = 2   # вторая попытка получает список ошибок первой
+
+
 def _generate_validated(
     system_text: str,
     user_text: str,
@@ -1226,30 +990,26 @@ def _generate_validated(
     audio_mime: str = "audio/ogg",
     label: str = "",
 ) -> str | None:
-    """OpenRouter → Gemini → маршрутизатор openrouter/free; каждый ответ проходит validate_post.
+    """Gemini; каждый ответ проходит validate_post.
 
-    Ответ с ошибками не публикуется: следующий провайдер получает список ошибок в запросе.
-    None — ни один провайдер не дал годный текст (вызывающий решает: шаблон или отказ).
+    Ответ с ошибками не публикуется: повторный запрос получает список ошибок.
+    None — годного текста нет (вызывающий решает: шаблон или отказ).
     """
     feedback = ""
-    for provider in ("openrouter", "gemini", "router"):
-        prompt = user_text + feedback
-        if provider == "openrouter":
-            text, model_name = _call_openrouter_text(system_text, prompt, max_tokens)
-        elif provider == "router":
-            text, model_name = _call_openrouter_router_text(system_text, prompt, max_tokens)
-        else:
-            text, model_name = _call_gemini_text(
-                system_text, prompt, max_tokens, audio_bytes=audio_bytes, audio_mime=audio_mime
-            )
+    for attempt in range(1, GEMINI_ATTEMPTS + 1):
+        text, model_name = _call_gemini_text(
+            system_text, user_text + feedback, max_tokens, audio_bytes=audio_bytes, audio_mime=audio_mime
+        )
         if not text:
-            continue
+            return None   # ключи/квота/таймаут: повтор с теми же ключами ничего не изменит
         fitted = _repair_hashtags(_fit_html(text, limit), payload, limit)
         problems = validate_post(fitted, payload, kind, extra_text)
         if not problems:
-            logger.info(f"Club SMM {label}text generated via {provider} ({model_name})")
+            logger.info(f"Club SMM {label}text generated via Gemini ({model_name}), attempt {attempt}")
             return fitted
-        logger.warning(f"Club SMM {label}text from {provider} ({model_name}) rejected: {'; '.join(problems)}")
+        logger.warning(
+            f"Club SMM {label}text from Gemini ({model_name}) rejected on attempt {attempt}: {'; '.join(problems)}"
+        )
         feedback = (
             "\n\nВ ПРЕДЫДУЩЕМ ВАРИАНТЕ НАЙДЕНЫ ОШИБКИ — ИСПРАВЬ ИХ: " + "; ".join(problems) + ". "
             "Данные клуба выше не менялись."
@@ -1269,9 +1029,8 @@ def generate_club_post(
     """
     Генерирует текст поста.
     Цепочка исполнения:
-      1. Бесплатные модели OpenRouter (Llama 3.3 70B, Qwen 2.5 72B, Mistral, DeepSeek)
-      2. Бесплатные модели Gemini (Flash Lite 500 RPD)
-      3. Шаблонный аналитический пост из базы данных
+      1. Gemini (квота Flash Lite 500 запросов в день), до двух попыток с проверкой validate_post
+      2. Шаблонный аналитический пост из базы данных
     """
     if audio_bytes and not (custom_brief or "").strip():
         transcript = transcribe_audio(audio_bytes, audio_mime)
@@ -1289,7 +1048,7 @@ def generate_club_post(
     limit = CAPTION_MAX_CHARS if for_caption else POST_MAX_CHARS
     max_tokens = 220 if for_caption else 350
 
-    # OpenRouter → Gemini (квота 500 запросов/день); ответ с фактическими ошибками не принимается
+    # Gemini; ответ с фактическими ошибками не принимается
     text = _generate_validated(
         system_text, user_text, max_tokens, limit, payload, _tone_kind(post_type, payload),
         extra_text=custom_brief, audio_bytes=audio_bytes, audio_mime=audio_mime,
@@ -1298,7 +1057,7 @@ def generate_club_post(
         return text
 
     # Фолбэк на шаблонную аналитику
-    logger.warning("Club SMM: no AI provider gave a valid post. Using database stats template.")
+    logger.warning("Club SMM: Gemini gave no valid post. Using database stats template.")
     return _build_fallback_post(payload, post_type, for_caption, custom_brief=custom_brief)
 
 
@@ -1331,86 +1090,65 @@ def edit_club_post(team_name: str, draft_text: str, instruction: str, user_name:
         extra_text=f"{draft_text}\n{instruction}", label="edit ",
     )
     if not text:
-        logger.warning("Club SMM: post edit failed on every AI provider")
+        logger.warning("Club SMM: post edit failed, Gemini gave no valid text")
         return None
     return text
 
 
-# ─── Генерация фото через OpenRouter Image API ──────────────────────────────
+# ─── Генерация фото через Gemini Image ──────────────────────────────────────
 
-def _call_openrouter_image(prompt: str) -> tuple[io.BytesIO | None, str | None]:
+GEMINI_IMAGE_BUDGET_SECONDS = 45
+GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS = 25
+
+
+def _call_gemini_image(prompt: str) -> tuple[io.BytesIO | None, str | None]:
+    """Картинка через Gemini (generateContent с responseModalities IMAGE).
+
+    Модели Imagen работают через другой метод (:predict) и здесь пропускаются. Если ключей нет,
+    модель недоступна на тарифе (429/403/404) или ответ без картинки — (None, None), и вызывающий
+    берёт Pillow-карточку. Общий бюджет ограничен: сообщение «Рисую…» не должно висеть минутами.
     """
-    Генерирует изображение через OpenRouter Unified Image API (POST /api/v1/images).
-    Использует OPENROUTER_API_KEY и модели (recraft/recraft-v4.1-flash, flux.2-klein-4b и др.).
-    """
-    api_key = getattr(config, "OPENROUTER_API_KEY", "").strip()
-    if not api_key:
+    keys = get_ordered_gemini_keys()
+    if not keys:
         return None, None
 
-    models = getattr(config, "OPENROUTER_IMAGE_MODELS", [
-        "inclusionai/ming-image-0.1-design",
-        "recraft/recraft-v4.1-flash",
-        "black-forest-labs/flux.2-klein-4b",
-        "sourceful/riverflow-v2.5-fast",
-        "recraft/recraft-v3",
-    ])
+    from services.ai.ai_recognizer import _get_gemini_opener
+    opener = _get_gemini_opener()
+    base_url = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
+    models = [m for m in getattr(config, "GEMINI_IMAGE_MODELS", []) if not m.startswith("imagen")]
+    body = json.dumps({
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"responseModalities": ["IMAGE"]},
+    }).encode("utf-8")
 
-    base_url = getattr(config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
-    url = f"{base_url}/images"
-
+    deadline = time.monotonic() + GEMINI_IMAGE_BUDGET_SECONDS
     for model in models:
-        payload = {
-            "model": model,
-            "prompt": prompt,
-            "n": 1,
-        }
-        if "ming" not in model:
-            payload["aspect_ratio"] = "1:1"
-        body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            url,
-            data=body,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://logovobot.local",
-                "X-Title": "Logovobot Club SMM",
-                "User-Agent": "Logovobot/Image",
-            }
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=40) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            items = data.get("data", [])
-            for item in items:
-                b64 = item.get("b64_json")
-                if b64:
-                    img_bytes = base64.b64decode(b64)
-                    buf = io.BytesIO(img_bytes)
-                    buf.seek(0)
-                    logger.info(f"Club SMM: Image successfully generated with OpenRouter ({model})")
-                    return buf, model
-                img_url = item.get("url")
-                if img_url:
-                    img_req = urllib.request.Request(img_url, headers={"User-Agent": "Logovobot/Image"})
-                    with urllib.request.urlopen(img_req, timeout=30) as img_resp:
-                        img_bytes = img_resp.read()
-                    buf = io.BytesIO(img_bytes)
-                    buf.seek(0)
-                    logger.info(f"Club SMM: Image downloaded from OpenRouter ({model})")
-                    return buf, model
-        except urllib.error.HTTPError as e:
-            err_msg = ""
+        for key in keys:
+            remaining = deadline - time.monotonic()
+            if remaining < 3:
+                logger.warning("Gemini Image: budget exhausted, falling back")
+                return None, None
+            req = urllib.request.Request(
+                f"{base_url}/v1beta/models/{model}:generateContent?key={key}", data=body,
+                headers={"Content-Type": "application/json", "User-Agent": "Logovobot/SMM"},
+            )
             try:
-                err_msg = e.read().decode("utf-8")
-            except Exception:
-                pass
-            logger.warning(f"OpenRouter Image: model '{model}' HTTP {e.code}: {err_msg}")
-            continue
-        except Exception as e:
-            logger.warning(f"OpenRouter Image: model '{model}' error: {e}")
-            continue
-
+                with opener.open(req, timeout=min(GEMINI_IMAGE_REQUEST_TIMEOUT_SECONDS, remaining)) as resp:
+                    res = json.loads(resp.read().decode("utf-8"))
+                for cand in res.get("candidates") or []:
+                    for part in (cand.get("content") or {}).get("parts") or []:
+                        inline = part.get("inlineData") or part.get("inline_data") or {}
+                        if inline.get("data"):
+                            buf = io.BytesIO(base64.b64decode(inline["data"]))
+                            buf.seek(0)
+                            return buf, model
+                logger.warning(f"Gemini Image: model '{model}' returned no image, trying next...")
+            except urllib.error.HTTPError as e:
+                logger.warning(f"Gemini Image: model '{model}' HTTP {e.code}, trying next...")
+                if e.code in (400, 403, 404):
+                    break   # модель недоступна этому аккаунту — другие ключи не помогут
+            except Exception as e:
+                logger.warning(f"Gemini Image: model '{model}' failed: {e}")
     return None, None
 
 
@@ -1419,11 +1157,9 @@ def _call_openrouter_image(prompt: str) -> tuple[io.BytesIO | None, str | None]:
 def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_prompt: str = "") -> io.BytesIO | None:
     """
     Генерирует визуал клуба для SMM-поста.
-    Использует Pillow Retina club card как основной и единственный надёжный метод.
-    Попытка через OpenRouter Image API оставлена — активируется автоматически
-    если OPENROUTER_API_KEY пополнен (>$0 баланса).
+    Сначала Gemini Image по тому же API-ключу; если модель недоступна или не ответила —
+    Pillow Retina club card, основной надёжный метод без внешних зависимостей.
     """
-    # 1. Попытка через OpenRouter Image API (активна только при наличии баланса)
     canon = resolve_team_name(team_name) or team_name
     is_besiktas = "бешикташ" in canon.lower() or "besiktas" in canon.lower()
     soccer_guard = (
@@ -1472,12 +1208,12 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
             f"Artistic 3D emblem of soccer club {canon} in arena, {soccer_guard}, championship atmosphere, cinematic 4k"
         )
 
-    buf, or_model = _call_openrouter_image(prompt)
+    buf, image_model = _call_gemini_image(prompt)
     if buf:
-        logger.info(f"Club SMM: AI photo via OpenRouter ({or_model})")
+        logger.info(f"Club SMM: AI photo via Gemini ({image_model})")
         return buf
 
-    # 2. Pillow Retina club card — основной надёжный метод (без внешних зависимостей)
+    # Pillow Retina club card — основной надёжный метод (без внешних зависимостей)
     logger.info(f"Club SMM: Using Pillow club card for '{team_name}' (post_type={post_type})")
     return generate_club_smm_media(team_name)
 
