@@ -69,6 +69,21 @@ class TestPostTotw(TotwHandlersBase):
         self.assertTrue(ok)
         context.bot.send_photo.assert_awaited_once()
 
+    async def test_forced_post_of_unfinished_block_does_not_set_the_marker(self):
+        context = _context()
+        with patch.object(database, "is_round_range_completed", return_value=False),                 patch.object(admin_handlers, "_resolve_totw_topic", AsyncMock(return_value=(-1001, 7))),                 patch.object(admin_handlers, "render_totw", self._render()):
+            ok = await admin_handlers.post_totw(context, self.div_id, 1, 5, force=True)
+        self.assertTrue(ok)
+        context.bot.send_photo.assert_awaited_once()
+        self.assertFalse(database.has_round_content_post(self.div_id, 5, "totw"))
+
+    async def test_forced_post_of_finished_block_sets_the_marker(self):
+        context = _context()
+        with patch.object(database, "is_round_range_completed", return_value=True),                 patch.object(admin_handlers, "_resolve_totw_topic", AsyncMock(return_value=(-1001, 7))),                 patch.object(admin_handlers, "render_totw", self._render()):
+            ok = await admin_handlers.post_totw(context, self.div_id, 1, 5, force=True)
+        self.assertTrue(ok)
+        self.assertTrue(database.has_round_content_post(self.div_id, 5, "totw"))
+
     async def test_unfinished_block_is_skipped(self):
         context = _context()
         with patch.object(database, "is_round_range_completed", return_value=False), \

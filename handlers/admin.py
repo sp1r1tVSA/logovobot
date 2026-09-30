@@ -6841,7 +6841,9 @@ async def job_post_round_digest(context: ContextTypes.DEFAULT_TYPE) -> None:
 #
 # Публикуется один раз на блок (1–5, 6–10, …), когда все матчи блока
 # подтверждены — долг держит матч в pending и тем самым держит блок. Факт
-# публикации — строка round_content_posts('totw') на последнем туре блока.
+# публикации — строка round_content_posts('totw') на последнем туре блока. Принудительный
+# пост недоигранного блока маркер не ставит: сборная по неполным цифрам не должна
+# отменять настоящую.
 
 async def _resolve_totw_topic(division_id: int) -> tuple[int, int] | None:
     """(group_chat_id, message_thread_id) топика ТАБЛИЦЫ, иначе АНАЛИТИКА, иначе None."""
@@ -6870,9 +6872,10 @@ async def post_totw(
     """Опубликовать символическую сборную блока туров в группу дивизиона. True, если пост ушёл."""
     if not force and await asyncio.to_thread(database.has_round_content_post, division_id, end_round, "totw"):
         return False
-    if not force and not await asyncio.to_thread(
+    completed = await asyncio.to_thread(
         database.is_round_range_completed, start_round, end_round, division_id, season_id
-    ):
+    )
+    if not force and not completed:
         logger.info(f"TOTW skipped: division {division_id} rounds {start_round}-{end_round} are not finished.")
         return False
 
@@ -6898,7 +6901,16 @@ async def post_totw(
         logger.warning(f"Could not post TOTW {start_round}-{end_round} to division {division_id}: {e}")
         return False
 
-    await asyncio.to_thread(database.record_round_content_post, division_id, end_round, "totw", msg.message_id)
+    if completed:
+        await asyncio.to_thread(database.record_round_content_post, division_id, end_round, "totw", msg.message_id)
+    else:
+        # A forced post of a block that is still being played is a preview built from partial
+        # numbers. Recording it would make the job treat the block as published and never post
+        # the real team once the last match is in (divisions 3-4, block 1-5, 24.09 -> 29.09).
+        logger.info(
+            f"TOTW {start_round}-{end_round} of division {division_id} posted before the block was finished; "
+            "the publication marker is not set, the job will post the final team."
+        )
     return True
 
 
