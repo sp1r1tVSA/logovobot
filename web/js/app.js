@@ -586,6 +586,25 @@ class AppController {
       this.switchView('admin');
     });
 
+    // 1c. Магазин: кнопка 🛒 и клик по балансу в шапке
+    ['header-shop-btn', 'header-balance-btn'].forEach(id => {
+      document.getElementById(id)?.addEventListener('click', () => this.switchView('shop'));
+    });
+    document.getElementById('shop-category-pills')?.addEventListener('click', (e) => {
+      const pill = e.target.closest('.category-pill');
+      if (!pill) return;
+      document.querySelectorAll('#shop-category-pills .category-pill').forEach(p => {
+        p.classList.toggle('active', p === pill);
+      });
+      const desc = document.getElementById('shop-empty-desc');
+      if (desc) {
+        desc.textContent = pill.dataset.shopCat === 'all'
+          ? 'Магазин готовится к открытию. Копи монеты — они пригодятся.'
+          : `Раздел «${pill.textContent.replace(/^\S+\s/, '')}» пока пуст.`;
+      }
+      tgBridge.hapticImpact('light');
+    });
+
     // 2b. Division Selector Tabs (Lobby)
     const lobbyDivTabs = document.getElementById('lobby-division-tabs-container');
     if (lobbyDivTabs) {
@@ -1559,6 +1578,7 @@ class AppController {
     }
 
     document.getElementById('header-admin-btn')?.classList.toggle('active', viewName === 'admin');
+    document.getElementById('header-shop-btn')?.classList.toggle('active', viewName === 'shop');
     tgBridge.hapticImpact('light');
   }
 

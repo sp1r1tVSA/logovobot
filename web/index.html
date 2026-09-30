@@ -19,9 +19,9 @@
   <!-- Styles. Сервер (api/server.py) переписывает /css/… и /js/app.js на
        /v/<хэш содержимого>/…, так что ?v= ниже нужен только для локального
        просмотра без API-сервера — бампать его вручную не нужно. -->
-  <link rel="stylesheet" href="/css/main.css?v=3.5.0">
-  <link rel="stylesheet" href="/css/components.css?v=3.5.0">
-  <link rel="stylesheet" href="/css/coupon.css?v=3.5.0">
+  <link rel="stylesheet" href="/css/main.css?v=3.5.1">
+  <link rel="stylesheet" href="/css/components.css?v=3.5.1">
+  <link rel="stylesheet" href="/css/coupon.css?v=3.5.1">
 
   <!-- Critical Coupons & Team Logos Styles -->
   <style id="coupons-critical-css">
@@ -130,6 +130,8 @@
     <div class="header-right">
       <!-- Admin Panel Button: shown only to admins -->
       <button class="admin-pill" id="header-admin-btn" type="button" title="Управление Logovo.bet" hidden>⚙️</button>
+      <!-- Shop: награды за монеты (клик по балансу открывает его же) -->
+      <button class="admin-pill shop-pill" id="header-shop-btn" type="button" title="Магазин наград" aria-label="Магазин">🛒</button>
       <!-- Level Badge Pill -->
       <div class="level-pill" id="header-level-btn" title="Ваш уровень и опыт">
         <span class="level-badge-icon">🎯</span>
@@ -316,6 +318,36 @@
       <div id="my-club-matches-container" class="club-panel"></div>
       <div id="my-club-squad-container" class="club-panel" style="display: none;"></div>
       <div id="my-club-history-container" class="club-panel" style="display: none;"></div>
+    </section>
+
+    <!-- 7. Shop — награды за монеты. Каталога пока нет: только меню и заглушка. -->
+    <section id="view-shop" class="view-section">
+      <div class="coupons-page-header">
+        <h1 class="coupons-page-title">🛒 Магазин</h1>
+        <p class="coupons-page-subtitle">Трать монеты на усиление состава</p>
+      </div>
+
+      <div class="shop-balance-card">
+        <div class="shop-balance-main">
+          <span class="shop-balance-label">Твой баланс</span>
+          <span class="shop-balance-val"><span id="shop-balance-val">—</span> 🪙</span>
+        </div>
+        <span class="shop-balance-hint">Монеты приносят выигранные ставки, достижения и новые уровни</span>
+      </div>
+
+      <div class="coupons-filter-chips" id="shop-category-pills">
+        <button class="category-pill active" data-shop-cat="all">Все</button>
+        <button class="category-pill" data-shop-cat="squad">⚽ Состав</button>
+        <button class="category-pill" data-shop-cat="transfers">🔁 Трансферы</button>
+        <button class="category-pill" data-shop-cat="bot">🤖 Бот</button>
+        <button class="category-pill" data-shop-cat="style">🎨 Оформление</button>
+      </div>
+
+      <div class="shop-empty-state" id="shop-items-container">
+        <div class="shop-empty-icon">🔒</div>
+        <div class="shop-empty-title">Награды скоро появятся</div>
+        <div class="shop-empty-desc" id="shop-empty-desc">Магазин готовится к открытию. Копи монеты — они пригодятся.</div>
+      </div>
     </section>
 
     <!-- VIEW: ADMIN PANEL (admins only, filled by js/admin.js) -->
@@ -583,6 +615,6 @@
 
 
   <!-- Main JavaScript App with cache-busting -->
-  <script type="module" src="/js/app.js?v=3.5.0"></script>
+  <script type="module" src="/js/app.js?v=3.5.1"></script>
 </body>
 </html>

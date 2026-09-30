@@ -477,6 +477,8 @@ export class UIRenderer {
       // Монета уже нарисована в .balance-icon — второй эмодзи здесь не нужен.
       balEl.textContent = this.formatNumber(user.balance);
     }
+    const shopBalEl = document.getElementById('shop-balance-val');
+    if (shopBalEl && user) shopBalEl.textContent = this.formatNumber(user.balance);
     const lvlEl = document.getElementById('user-level-val');
     if (lvlEl && progression) {
       lvlEl.textContent = `Lvl ${progression.level || 1}`;

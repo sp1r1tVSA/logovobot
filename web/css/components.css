@@ -5797,3 +5797,29 @@ span.team-logo-fallback {
 .adm-check-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .adm-check-side { font-size: 0.76rem; color: var(--text-muted); white-space: nowrap; }
 .adm-check:has(input:checked) { background: rgba(245, 176, 39, 0.08); }
+
+/* ─── Shop (вкладка «Магазин»; каталога пока нет) ─── */
+.shop-balance-card {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  background: linear-gradient(135deg, rgba(245, 176, 39, 0.14), rgba(245, 176, 39, 0.03));
+  border: 1px solid rgba(245, 176, 39, 0.28);
+  border-radius: 16px;
+}
+.shop-balance-main { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.shop-balance-label { font-size: 0.78rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
+.shop-balance-val { font-family: 'Outfit', sans-serif; font-size: 1.45rem; font-weight: 900; color: var(--accent-gold); white-space: nowrap; }
+.shop-balance-hint { font-size: 0.74rem; color: var(--text-muted); line-height: 1.35; }
+.shop-empty-state {
+  text-align: center;
+  padding: 44px 20px;
+  background: rgba(14, 18, 27, 0.5);
+  border: 1px dashed rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+}
+.shop-empty-icon { font-size: 2.4rem; margin-bottom: 10px; filter: drop-shadow(0 0 16px rgba(245, 176, 39, 0.35)); }
+.shop-empty-title { font-family: 'Outfit', sans-serif; font-size: 1.05rem; font-weight: 800; color: #fff; margin-bottom: 6px; }
+.shop-empty-desc { font-size: 0.84rem; color: var(--text-secondary); line-height: 1.45; max-width: 300px; margin: 0 auto; }
