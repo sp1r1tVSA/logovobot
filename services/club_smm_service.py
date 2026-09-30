@@ -44,9 +44,8 @@ PUBLISH_CAPTION_MAX_CHARS = 1000
 OPENROUTER_CHAIN_BUDGET_SECONDS = 60
 OPENROUTER_MODEL_TIMEOUT_SECONDS = 25
 
-# ─── Ротация ключей и моделей ───────────────────────────────────────────────
+# ─── Модели и ключи ─────────────────────────────────────────────────────────
 
-_openrouter_model_idx = 0
 _openrouter_lock = threading.Lock()
 
 DEPRECATED_OPENROUTER_MODELS = {
@@ -58,17 +57,44 @@ DEPRECATED_OPENROUTER_MODELS = {
 
 _dead_openrouter_models: set[str] = set(DEPRECATED_OPENROUTER_MODELS)
 
+# Порядок — это приоритет: сильные по-русски модели первыми, маршрутизатор openrouter/free
+# (каждый раз другая модель, нередко слабая) — хвостом. stealth/space-bunny-alpha убран:
+# на боевом сервере отвечал HTTP 400 на каждый запрос.
 GUARANTEED_OPENROUTER_MODELS = [
-    "stealth/space-bunny-alpha",
-    "openrouter/free",
     "qwen/qwen3.8-27b:free",
     "google/gemma-4-31b-it:free",
-    "nvidia/nemotron-3.5-lightning:free",
     "google/gemma-4-26b-a4b-it:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "openrouter/free",
 ]
 
+# Пауза для модели, которая только что ответила ошибкой: без неё каждый пост заново ждал бы
+# 429 и таймауты одних и тех же моделей. Значения по образцу services/ai/bet_picks.py.
+RATE_LIMIT_COOLDOWN_SECONDS = 10 * 60
+TIMEOUT_COOLDOWN_SECONDS = 10 * 60
+BAD_REQUEST_COOLDOWN_SECONDS = 30 * 60
+MAX_COOLDOWN_SECONDS = 60 * 60
+# Маршрутизатор: 400 приходит от выбранной им на этот раз модели, а не от него самого.
+NO_COOLDOWN_MODELS = {"openrouter/free"}
+
+_openrouter_cooldowns: dict[str, float] = {}   # модель → time.monotonic(), до которого её пропускаем
+
+
+def _cool_down_openrouter(model: str, seconds: float) -> None:
+    with _openrouter_lock:
+        _openrouter_cooldowns[model] = time.monotonic() + min(max(seconds, 60), MAX_COOLDOWN_SECONDS)
+
+
+def _retry_after_seconds(e: "urllib.error.HTTPError") -> float:
+    """Пауза из заголовка Retry-After (секунды), иначе стандартная для 429."""
+    try:
+        return float(e.headers.get("Retry-After"))
+    except (AttributeError, TypeError, ValueError):
+        return float(RATE_LIMIT_COOLDOWN_SECONDS)
+
+
 def get_ordered_openrouter_models() -> list[str]:
-    """Возвращает список актуальных бесплатных моделей OpenRouter с ротацией Round-Robin."""
+    """Актуальные бесплатные модели OpenRouter в порядке приоритета, без «остывающих» и мёртвых."""
     raw_models = getattr(config, "OPENROUTER_SMM_MODELS", []) or GUARANTEED_OPENROUTER_MODELS
     # Отсеиваем устаревшие и заведомо вернувшие 404 модели
     models = [m for m in raw_models if m not in _dead_openrouter_models]
@@ -77,11 +103,9 @@ def get_ordered_openrouter_models() -> list[str]:
     if not models:
         models = ["openrouter/free"]
 
-    global _openrouter_model_idx
+    now = time.monotonic()
     with _openrouter_lock:
-        idx = _openrouter_model_idx % len(models)
-        _openrouter_model_idx += 1
-        return models[idx:] + models[:idx]
+        return [m for m in models if _openrouter_cooldowns.get(m, 0.0) <= now]
 
 
 
@@ -893,10 +917,22 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
                 _dead_openrouter_models.add(model)
                 logger.warning(f"OpenRouter SMM: model '{model}' HTTP 404 (disabled from roster), trying next free model...")
             else:
-                logger.warning(f"OpenRouter SMM: model '{model}' HTTP {e.code}, trying next free model...")
+                detail = ""
+                try:
+                    detail = e.read().decode("utf-8", "replace")[:200].replace("\n", " ")
+                except Exception:
+                    pass
+                logger.warning(f"OpenRouter SMM: model '{model}' HTTP {e.code} {detail}, trying next free model...")
+                if model not in NO_COOLDOWN_MODELS:
+                    if e.code == 429:
+                        _cool_down_openrouter(model, _retry_after_seconds(e))
+                    elif e.code == 400:
+                        _cool_down_openrouter(model, BAD_REQUEST_COOLDOWN_SECONDS)
             continue
         except Exception as e:
             logger.warning(f"OpenRouter SMM: model '{model}' failed: {e}")
+            if model not in NO_COOLDOWN_MODELS:
+                _cool_down_openrouter(model, TIMEOUT_COOLDOWN_SECONDS)
             continue
 
     return None, None

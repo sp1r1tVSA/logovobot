@@ -14,6 +14,7 @@ Unit tests for Personal Club SMM center:
 import base64
 import io
 import json
+import os
 import unittest
 from unittest.mock import MagicMock, patch
 
@@ -322,11 +323,40 @@ class TestStageAndRoundPosts(unittest.TestCase):
             post = club_smm_service.generate_stage_post("Бешикташ", round_number=1)
             self.assertIn("Огненный триумф в Туре 1!", post)
 
-    def test_openrouter_models_include_space_bunny(self):
-        models = config._get_openrouter_smm_models()
-        self.assertIn("stealth/space-bunny-alpha", models)
-        self.assertEqual(models[0], "stealth/space-bunny-alpha")
-        self.assertIn("stealth/space-bunny-alpha", club_smm_service.GUARANTEED_OPENROUTER_MODELS)
+    def test_openrouter_models_order_and_no_stealth(self):
+        with patch.dict(os.environ, {"OPENROUTER_SMM_MODELS": ""}):
+            models = config._get_openrouter_smm_models()
+        self.assertNotIn("stealth/space-bunny-alpha", models)
+        self.assertNotIn("stealth/space-bunny-alpha", club_smm_service.GUARANTEED_OPENROUTER_MODELS)
+        # сильная по-русски модель первая, маршрутизатор — последним
+        self.assertEqual(models[0], "qwen/qwen3.8-27b:free")
+        self.assertEqual(models[-1], "openrouter/free")
+
+    def test_ordered_models_are_stable_and_skip_cooled_down(self):
+        S = club_smm_service
+        with patch.object(config, "OPENROUTER_SMM_MODELS", ["m/a", "m/b", "openrouter/free"]),                 patch.dict(S._openrouter_cooldowns, {}, clear=True):
+            self.assertEqual(S.get_ordered_openrouter_models(), ["m/a", "m/b", "openrouter/free"])
+            self.assertEqual(S.get_ordered_openrouter_models(), ["m/a", "m/b", "openrouter/free"])
+            S._cool_down_openrouter("m/a", 600)
+            self.assertEqual(S.get_ordered_openrouter_models(), ["m/b", "openrouter/free"])
+
+    def test_http_errors_put_model_on_cooldown(self):
+        import urllib.error
+        S = club_smm_service
+
+        def http_error(code):
+            return urllib.error.HTTPError("http://x", code, "err", {}, None)
+
+        def fake_urlopen(req, timeout=0):
+            model = json.loads(req.data.decode("utf-8"))["model"]
+            raise http_error({"m/a": 429, "m/b": 400, "openrouter/free": 400}[model])
+
+        with patch.object(config, "OPENROUTER_API_KEY", "k"),                 patch.object(config, "OPENROUTER_SMM_MODELS", ["m/a", "m/b", "openrouter/free"]),                 patch.dict(S._openrouter_cooldowns, {}, clear=True),                 patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertEqual(S._call_openrouter_text("s", "u", 100), (None, None))
+            self.assertIn("m/a", S._openrouter_cooldowns)
+            self.assertIn("m/b", S._openrouter_cooldowns)
+            # у маршрутизатора 400 — вина выбранной им модели, пауза не ставится
+            self.assertNotIn("openrouter/free", S._openrouter_cooldowns)
 
 
 class TestClubSmmOpenRouterImage(unittest.TestCase):
