@@ -338,6 +338,8 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
             "new_players": new_players,
         })
 
+    dropped_games = len(matches_list) - len(prepared_games)
+
     import uuid
     draft_uuid = str(uuid.uuid4())[:8]
 
