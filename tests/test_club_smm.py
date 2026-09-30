@@ -440,6 +440,7 @@ class TestClubSmmCustomPhoto(unittest.IsolatedAsyncioTestCase):
         query = MagicMock()
         query.answer = AsyncMock()
         update.callback_query = query
+        update.effective_user.id = club_smm.SMM_OWNER_ID
         context = MagicMock()
         context.user_data = {
             "smm_draft": {
@@ -547,6 +548,7 @@ class TestClubSmmCustomPhoto(unittest.IsolatedAsyncioTestCase):
         query = MagicMock()
         query.answer = AsyncMock()
         update.callback_query = query
+        update.effective_user.id = club_smm.SMM_OWNER_ID
         context = MagicMock()
         context.user_data = {
             "smm_draft": {
@@ -671,3 +673,122 @@ class TestDatabaseMatchPhotos(unittest.TestCase):
 
 
 
+
+
+class TestSmmAccessAndRouting(unittest.IsolatedAsyncioTestCase):
+    def test_access_owner_and_global_admin_only(self):
+        self.assertTrue(club_smm.is_smm_allowed(club_smm.SMM_OWNER_ID))
+        self.assertFalse(club_smm.is_smm_allowed(None))
+        self.assertFalse(club_smm.is_smm_allowed(0))
+        with patch.object(club_smm, "is_global_admin", return_value=True):
+            self.assertTrue(club_smm.is_smm_allowed(555))
+        with patch.object(club_smm, "is_global_admin", return_value=False):
+            self.assertFalse(club_smm.is_smm_allowed(555))
+
+    def test_parse_stage_callback(self):
+        p = club_smm._parse_stage_callback
+        self.assertEqual(p("smm_stage:league:7"), (7, None, None))
+        self.assertEqual(p("smm_stage:cup:0:1/8"), (None, "1/8", 0))
+        self.assertEqual(p("smm_stage:cup:3:1/4"), (None, "1/4", 3))
+        # старый формат без scope
+        self.assertEqual(p("smm_stage:cup:Финал"), (None, "Финал", None))
+        self.assertEqual(p("smm_stage"), (None, None, None))
+
+    def test_button_routes_cover_every_smm_callback(self):
+        import re
+        samples = [
+            "smm_hub", "smm_choose_stage", "smm_stage:league:3", "smm_stage:cup:0:1/8",
+            "smm_gen:matchday", "smm_regen", "smm_publish:text", "smm_publish:match_photos",
+            "smm_remove_photo", "smm_attach_match_photos", "smm_cancel_edit",
+            "smm_cancel_photo", "smm_draft",
+        ]
+        for data in samples:
+            self.assertTrue(
+                any(re.search(pat, data) for pat, _ in club_smm.SMM_BUTTON_ROUTES), data
+            )
+
+    async def test_ends_conversation_wrapper_returns_end(self):
+        from unittest.mock import AsyncMock
+        from telegram.ext import ConversationHandler
+        inner = AsyncMock()
+        wrapped = club_smm._ends_conversation(inner)
+        self.assertEqual(await wrapped("u", "c"), ConversationHandler.END)
+        inner.assert_awaited_once_with("u", "c")
+
+    async def test_guard_denies_stranger_with_single_answer(self):
+        from unittest.mock import AsyncMock
+        update = MagicMock()
+        update.effective_user.id = 999
+        update.callback_query.answer = AsyncMock()
+        with patch.object(club_smm, "is_global_admin", return_value=False):
+            self.assertFalse(await club_smm._guard(update))
+        update.callback_query.answer.assert_awaited_once()
+
+    async def test_timeout_handler_ends_conversation(self):
+        from unittest.mock import AsyncMock
+        from telegram.ext import ConversationHandler
+        update = MagicMock()
+        update.effective_chat.send_message = AsyncMock()
+        self.assertEqual(await club_smm.on_smm_timeout(update, MagicMock()), ConversationHandler.END)
+        update.effective_chat.send_message.assert_awaited_once()
+
+    def test_conversation_registered_before_standalone_routes(self):
+        from telegram.ext import Application, ConversationHandler, CallbackQueryHandler
+        from handlers import _register_cabinet_handlers
+        app = Application.builder().token("123:ABC").build()
+        try:
+            _register_cabinet_handlers(app)
+        except Exception as exc:  # pragma: no cover - регистрация зависит от окружения
+            self.skipTest(f"registration unavailable: {exc}")
+        handlers = app.handlers[0]
+        conv_idx = next(
+            i for i, h in enumerate(handlers)
+            if isinstance(h, ConversationHandler) and any(
+                "smm_enter_stage" in str(getattr(getattr(e, "pattern", None), "pattern", ""))
+                for e in h.entry_points
+            )
+        )
+        hub_idx = next(
+            i for i, h in enumerate(handlers)
+            if isinstance(h, CallbackQueryHandler)
+            and getattr(h.pattern, "pattern", "") == "^smm_hub$"
+        )
+        self.assertLess(conv_idx, hub_idx)
+
+
+class TestSmmPublishHelpers(unittest.IsolatedAsyncioTestCase):
+    async def test_short_text_goes_as_caption(self):
+        from unittest.mock import AsyncMock
+        bot = MagicMock()
+        bot.send_photo = AsyncMock(return_value="msg")
+        bot.send_message = AsyncMock()
+        res = await club_smm._send_with_photo(bot, "@ch", "photo", "коротко")
+        self.assertEqual(res, "msg")
+        bot.send_photo.assert_awaited_once()
+        bot.send_message.assert_not_awaited()
+
+    async def test_long_text_splits_photo_and_message(self):
+        from unittest.mock import AsyncMock
+        bot = MagicMock()
+        bot.send_photo = AsyncMock()
+        bot.send_message = AsyncMock(return_value="text_msg")
+        long_text = "Слово. " * 300
+        res = await club_smm._send_with_photo(bot, "@ch", "photo", long_text)
+        self.assertEqual(res, "text_msg")
+        _, kwargs = bot.send_photo.call_args
+        self.assertNotIn("caption", kwargs)
+        self.assertLessEqual(len(bot.send_message.call_args.kwargs["text"]), 4000)
+
+    async def test_publish_falls_back_to_text_with_note(self):
+        from unittest.mock import AsyncMock
+        bot = MagicMock()
+        bot.send_message = AsyncMock(return_value="m")
+        msg, note = await club_smm._publish_draft(
+            bot, "@ch", "match_photos", {"text": "t", "team_name": "Бешикташ", "match_photos": []}
+        )
+        self.assertEqual(msg, "m")
+        self.assertIn("текстом", note)
+
+    def test_fallback_post_is_none_safe(self):
+        text = club_smm_service._build_fallback_post({"club": {}, "standings": None}, "matchday")
+        self.assertTrue(text)

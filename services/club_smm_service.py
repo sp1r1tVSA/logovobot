@@ -21,6 +21,7 @@ import logging
 import os
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -35,6 +36,13 @@ logger = logging.getLogger(__name__)
 POST_TARGET_CHARS = 350
 POST_MAX_CHARS = 700
 CAPTION_MAX_CHARS = 450
+# Жёсткий лимит подписи к фото в Telegram — 1024; счёт идёт по сырому HTML.
+PUBLISH_CAPTION_MAX_CHARS = 1000
+
+# Общий бюджет цепочки OpenRouter: дальше всё равно ждёт Gemini и шаблон, а сообщение
+# «Пишу…» не должно висеть минутами (6 моделей × 25 с = 150 с в худшем случае).
+OPENROUTER_CHAIN_BUDGET_SECONDS = 60
+OPENROUTER_MODEL_TIMEOUT_SECONDS = 25
 
 # ─── Ротация ключей и моделей ───────────────────────────────────────────────
 
@@ -224,106 +232,77 @@ def get_club_smm_payload(team_name: str) -> dict:
     last_match_data = None
     next_match_data = None
 
-    with database.transaction() as conn:
-        cursor = conn.cursor()
+    m_row = database.get_club_last_played_match(canon)
+    if m_row:
+        m_id = m_row["id"]
+        is_p1 = teams_match(m_row["player1_team"], canon)
+        my_score = m_row["player1_score"] if is_p1 else m_row["player2_score"]
+        opp_score = m_row["player2_score"] if is_p1 else m_row["player1_score"]
+        opponent = m_row["player2_team"] if is_p1 else m_row["player1_team"]
+        my_score = my_score or 0
+        opp_score = opp_score or 0
 
-        # 1. Последний матч
-        cursor.execute("""
-            SELECT id, round_number, player1_team, player2_team, player1_score, player2_score,
-                   status, played_at, mvp_player, tournament_type, cup_stage
-            FROM matches
-            WHERE (player1_team = ? OR player2_team = ?)
-              AND status IN ('confirmed', 'completed')
-            ORDER BY id DESC LIMIT 1
-        """, (canon, canon))
-        m_row = cursor.fetchone()
+        result_type = "win" if my_score > opp_score else ("draw" if my_score == opp_score else "loss")
 
-        if m_row:
-            m_id = m_row["id"]
-            is_p1 = teams_match(m_row["player1_team"], canon)
-            my_score = m_row["player1_score"] if is_p1 else m_row["player2_score"]
-            opp_score = m_row["player2_score"] if is_p1 else m_row["player1_score"]
-            opponent = m_row["player2_team"] if is_p1 else m_row["player1_team"]
+        my_goals, my_assists, opp_goals = [], [], []
+        for ev in database.get_match_events(m_id):
+            p_name = ev["player_name"]
+            cnt = ev["count"] or 1
+            if teams_match(ev["team_name"], canon):
+                if ev["event_type"] == "goal":
+                    my_goals.append({"player": p_name, "count": cnt})
+                elif ev["event_type"] == "assist":
+                    my_assists.append({"player": p_name, "count": cnt})
+            elif ev["event_type"] == "goal":
+                opp_goals.append({"player": p_name, "count": cnt})
 
-            result_type = "win" if my_score > opp_score else ("draw" if my_score == opp_score else "loss")
+        mvp_data = database.resolve_match_mvp_by_id(m_id, m_row["mvp_player"], canon, opponent)
 
-            cursor.execute("""
-                SELECT team_name, player_name, event_type, count
-                FROM match_events
-                WHERE match_id = ?
-            """, (m_id,))
-            events = cursor.fetchall()
+        last_match_data = {
+            "match_id": m_id,
+            "round": m_row["round_number"],
+            "stage": m_row["cup_stage"] if m_row["tournament_type"] == "cup" else None,
+            "opponent": opponent,
+            "is_home": is_p1,
+            "my_score": my_score,
+            "opp_score": opp_score,
+            "result": result_type,
+            "mvp_player": m_row["mvp_player"],
+            "mvp": mvp_data,
+            "club_goals": my_goals,
+            "club_assists": my_assists,
+            "opp_goals": opp_goals,
+            "played_at": m_row["played_at"],
+        }
 
-            my_goals, my_assists, opp_goals = [], [], []
-            for ev in events:
-                p_name = ev["player_name"]
-                cnt = ev["count"] or 1
-                if teams_match(ev["team_name"], canon):
-                    if ev["event_type"] == "goal":
-                        my_goals.append({"player": p_name, "count": cnt})
-                    elif ev["event_type"] == "assist":
-                        my_assists.append({"player": p_name, "count": cnt})
-                else:
-                    if ev["event_type"] == "goal":
-                        opp_goals.append({"player": p_name, "count": cnt})
+    next_row = database.get_club_next_match(canon)
+    if next_row:
+        is_p1 = teams_match(next_row["player1_team"], canon)
+        opp_name = next_row["player2_team"] if is_p1 else next_row["player1_team"]
+        opp_stats = None
+        if division_id:
+            standings = database.get_standings(division_id=division_id)
+            for rank, row in enumerate(standings, 1):
+                if teams_match(row["team_name"], opp_name):
+                    opp_stats = {
+                        "rank": rank,
+                        "points": row["points"],
+                        "wins": row["wins"],
+                        "draws": row["draws"],
+                        "losses": row["losses"],
+                    }
+                    break
 
-            mvp_data = database.resolve_match_mvp(cursor, m_id, m_row["mvp_player"], canon, opponent)
-
-            last_match_data = {
-                "match_id": m_id,
-                "round": m_row["round_number"],
-                "stage": m_row["cup_stage"] if m_row["tournament_type"] == "cup" else None,
-                "opponent": opponent,
-                "is_home": is_p1,
-                "my_score": my_score,
-                "opp_score": opp_score,
-                "result": result_type,
-                "mvp_player": m_row["mvp_player"],
-                "mvp": mvp_data,
-                "club_goals": my_goals,
-                "club_assists": my_assists,
-                "opp_goals": opp_goals,
-                "played_at": m_row["played_at"],
-            }
-
-        # 2. Следующий матч
-        cursor.execute("""
-            SELECT id, round_number, player1_team, player2_team, tournament_type, cup_stage,
-                   match_date, match_time
-            FROM matches
-            WHERE (player1_team = ? OR player2_team = ?)
-              AND status = 'pending'
-            ORDER BY round_number ASC, id ASC LIMIT 1
-        """, (canon, canon))
-        next_row = cursor.fetchone()
-
-        if next_row:
-            is_p1 = teams_match(next_row["player1_team"], canon)
-            opp_name = next_row["player2_team"] if is_p1 else next_row["player1_team"]
-            opp_stats = None
-            if division_id:
-                standings = database.get_standings(division_id=division_id)
-                for rank, row in enumerate(standings, 1):
-                    if teams_match(row["team_name"], opp_name):
-                        opp_stats = {
-                            "rank": rank,
-                            "points": row["points"],
-                            "wins": row["wins"],
-                            "draws": row["draws"],
-                            "losses": row["losses"],
-                        }
-                        break
-
-            next_match_data = {
-                "match_id": next_row["id"],
-                "round": next_row["round_number"],
-                "stage": next_row["cup_stage"] if next_row["tournament_type"] == "cup" else None,
-                "opponent": opp_name,
-                "is_home": is_p1,
-                "opponent_stats": opp_stats,
-                "scheduled_date": next_row["match_date"],
-                "scheduled_time": next_row["match_time"],
-            }
+        next_match_data = {
+            "match_id": next_row["id"],
+            "round": next_row["round_number"],
+            "stage": next_row["cup_stage"] if next_row["tournament_type"] == "cup" else None,
+            "opponent": opp_name,
+            "is_home": is_p1,
+            "opponent_stats": opp_stats,
+            "scheduled_date": next_row["match_date"],
+            "scheduled_time": next_row["match_time"],
+        }
 
     recent_matches = database.get_team_recent_matches(canon, limit=5)
     recent_posts = database.get_recent_club_smm_posts(canon, limit=5)
@@ -616,9 +595,17 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
 
     base_url = getattr(config, "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").rstrip("/")
     models = get_ordered_openrouter_models()
+    # Мета-модель openrouter/free — гарантированный хвост цепочки, в том же бюджете времени.
+    if "openrouter/free" not in models and "openrouter/free" not in _dead_openrouter_models:
+        models = models + ["openrouter/free"]
     budget_tokens = max(max_tokens, 1500)
+    deadline = time.monotonic() + OPENROUTER_CHAIN_BUDGET_SECONDS
 
     for model in models:
+        remaining = deadline - time.monotonic()
+        if remaining < 3:
+            logger.warning("OpenRouter SMM: chain budget exhausted, falling back")
+            break
         payload = {
             "model": model,
             "messages": [
@@ -641,7 +628,9 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
             },
         )
         try:
-            with urllib.request.urlopen(req, timeout=25) as resp:
+            with urllib.request.urlopen(
+                req, timeout=min(OPENROUTER_MODEL_TIMEOUT_SECONDS, remaining)
+            ) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
             choice = data["choices"][0]
             msg = choice.get("message", {})
@@ -665,49 +654,20 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
             logger.warning(f"OpenRouter SMM: model '{model}' failed: {e}")
             continue
 
-    # Резервная попытка через мета-модель openrouter/free, если все остальные вернули ошибки
-    if "openrouter/free" not in models and "openrouter/free" not in _dead_openrouter_models:
-        logger.info("OpenRouter SMM: attempting guaranteed fallback to 'openrouter/free'...")
-        payload = {
-            "model": "openrouter/free",
-            "messages": [
-                {"role": "system", "content": system_text},
-                {"role": "user", "content": user_text},
-            ],
-            "temperature": 0.8,
-            "max_tokens": budget_tokens,
-            "reasoning": {"effort": "none", "exclude": True},
-        }
-        body = json.dumps(payload).encode("utf-8")
-        req = urllib.request.Request(
-            f"{base_url}/chat/completions",
-            data=body,
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-                "HTTP-Referer": "https://logovobot.ru",
-                "X-Title": "Logovobot Club SMM",
-            },
-        )
-        try:
-            with urllib.request.urlopen(req, timeout=25) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
-            choice = data["choices"][0]
-            msg = choice.get("message", {})
-            raw_text = msg.get("content") or ""
-            clean = _clean_smm_text(raw_text)
-            if clean and len(clean.strip()) > 30 and not _is_meta_reasoning(clean):
-                return clean.strip(), "openrouter/free"
-        except Exception as e:
-            logger.warning(f"OpenRouter SMM: fallback 'openrouter/free' failed: {e}")
-
     return None, None
 
 
 
 # ─── Провайдер 3: Gemini Fallback для текста ────────────────────────────────
 
-def _call_gemini_text(system_text: str, user_text: str, max_tokens: int, audio_bytes: bytes = None) -> tuple[str | None, str | None]:
+def _call_gemini_text(
+    system_text: str,
+    user_text: str,
+    max_tokens: int,
+    audio_bytes: bytes = None,
+    audio_mime: str = "audio/ogg",
+    min_len: int = 30,
+) -> tuple[str | None, str | None]:
     """Резервная генерация текста через Gemini."""
     keys = get_ordered_gemini_keys()
     if not keys:
@@ -723,7 +683,7 @@ def _call_gemini_text(system_text: str, user_text: str, max_tokens: int, audio_b
     if audio_bytes:
         user_parts.append({
             "inline_data": {
-                "mime_type": "audio/ogg",
+                "mime_type": audio_mime or "audio/ogg",
                 "data": base64.b64encode(audio_bytes).decode("utf-8"),
             }
         })
@@ -761,7 +721,7 @@ def _call_gemini_text(system_text: str, user_text: str, max_tokens: int, audio_b
                     logger.warning(f"Gemini SMM: model '{model}' generated only thoughts, skipping...")
                     continue
                 clean = _clean_smm_text(text)
-                if clean and len(clean.strip()) > 30 and not _is_meta_reasoning(clean):
+                if clean and len(clean.strip()) >= min_len and not _is_meta_reasoning(clean):
                     return clean.strip(), model
             except urllib.error.HTTPError as e:
                 logger.warning(f"Gemini SMM: model '{model}' HTTP {e.code}, trying next...")
@@ -771,6 +731,27 @@ def _call_gemini_text(system_text: str, user_text: str, max_tokens: int, audio_b
                 continue
 
     return None, None
+
+
+def transcribe_audio(audio_bytes: bytes, audio_mime: str = "audio/ogg") -> str | None:
+    """Расшифровывает голосовое/кружок тренера в текст через Gemini.
+
+    Нужна, потому что первым в цепочке идёт OpenRouter, который аудио не принимает:
+    без расшифровки тема тренера терялась бы, если ответила не Gemini.
+    """
+    if not audio_bytes:
+        return None
+    text, _model = _call_gemini_text(
+        "Ты расшифровываешь голосовые сообщения. Верни только дословный текст сказанного "
+        "по-русски, без пояснений, кавычек и форматирования.",
+        "Расшифруй это сообщение.",
+        400,
+        audio_bytes=audio_bytes,
+        audio_mime=audio_mime,
+        min_len=1,
+    )
+    transcript = (text or "").strip()
+    return transcript or None
 
 
 # ─── Главная функция генерации текста ───────────────────────────────────────
@@ -791,6 +772,11 @@ def generate_club_post(
       2. Бесплатные модели Gemini (Flash Lite 500 RPD)
       3. Шаблонный аналитический пост из базы данных
     """
+    if audio_bytes and not (custom_brief or "").strip():
+        transcript = transcribe_audio(audio_bytes, audio_mime)
+        if transcript:
+            custom_brief = transcript
+            audio_bytes = None  # уже расшифровано — повторно слать аудио незачем
     payload = get_club_smm_payload(team_name)
     if user_name:
         payload["request_user"] = user_name
@@ -809,7 +795,9 @@ def generate_club_post(
         return _fit_html(text, limit)
 
     # 2. Резерв: Gemini (бесплатные Flash Lite модели с квотой 500 запросов/день)
-    text, model_name = _call_gemini_text(system_text, user_text, max_tokens, audio_bytes=audio_bytes)
+    text, model_name = _call_gemini_text(
+        system_text, user_text, max_tokens, audio_bytes=audio_bytes, audio_mime=audio_mime
+    )
     if text:
         logger.info(f"Club SMM text generated via Gemini ({model_name})")
         return _fit_html(text, limit)
@@ -968,9 +956,9 @@ def generate_club_ai_photo(team_name: str, post_type: str = "matchday", custom_p
 def _build_fallback_post(payload: dict, post_type: str, for_caption: bool = False, custom_brief: str = "") -> str:
     """Шаблонный аналитический пост из базы данных."""
     club = payload.get("club", {})
-    canon = club.get("name", "Бешикташ")
-    emojis = club.get("emojis", "🦅⚪⚫")
-    hashtags = " ".join(club.get("hashtags", ["#Besiktas", "#ЛоговоФифарей"]))
+    canon = club.get("name") or "клуб"
+    emojis = club.get("emojis") or "⚽🔥"
+    hashtags = " ".join(club.get("hashtags") or ["#ЛоговоФифарей"])
     st = payload.get("standings") or {}
     last_m = payload.get("last_match")
     next_m = payload.get("next_match")
@@ -979,9 +967,9 @@ def _build_fallback_post(payload: dict, post_type: str, for_caption: bool = Fals
         clean_brief = custom_brief.replace("\n", " ").strip()
         return (
             f"{emojis} <b>КЛУБНЫЕ НОВОСТИ: {canon.upper()}</b>\n\n"
-            f"⚡ {clean_brief}! «Чёрные орлы» открывают новую главу в турнире «Логово Фифарей». "
-            f"Впереди тактическая перезагрузка, максимальная концентрация на победах и бескомпромиссная битва "
-            f"за высшие места в таблице. Болельщики, только вперёд!\n\n"
+            f"⚡ {html.escape(clean_brief.rstrip('.!?…'), quote=False)}! «{html.escape(canon, quote=False)}» "
+            f"продолжает путь в турнире «Логово Фифарей». Впереди максимальная концентрация "
+            f"на победах и битва за высшие места в таблице. Болельщики, только вперёд!\n\n"
             f"{hashtags}"
         )
 
@@ -989,7 +977,7 @@ def _build_fallback_post(payload: dict, post_type: str, for_caption: bool = Fals
         res = last_m.get("result", "win")
         res_emoji = "✅ ПОБЕДА!" if res == "win" else ("🤝 НИЧЬЯ" if res == "draw" else "⚡ РЕЗУЛЬТАТ")
         score_line = f"{canon} {last_m.get('my_score', 0)} : {last_m.get('opp_score', 0)} {last_m.get('opponent', 'соперник')}"
-        scorers = ", ".join(f"{g['player']} ({g['count']})" if isinstance(g, dict) and g.get("count", 1) > 1 else (g['player'] if isinstance(g, dict) else str(g)) for g in last_m.get("club_goals", [])) or "—"
+        scorers = ", ".join(f"{g['player']} ({g['count']})" if isinstance(g, dict) and (g.get("count") or 1) > 1 else (g['player'] if isinstance(g, dict) else str(g)) for g in last_m.get("club_goals", [])) or "—"
         
         mvp_info = ""
         mvp_obj = last_m.get("mvp")
@@ -1016,24 +1004,24 @@ def _build_fallback_post(payload: dict, post_type: str, for_caption: bool = Fals
 
     if post_type == "matchday" and next_m:
         opp = next_m["opponent"]
-        tour = f"Тур {next_m['round']}" if next_m.get("round", 0) > 0 else (next_m.get("stage") or "Кубок")
+        tour = f"Тур {next_m['round']}" if (next_m.get("round") or 0) > 0 else (next_m.get("stage") or "Кубок")
         return (
             f"{emojis} <b>MATCHDAY! ВРЕМЯ БИТВЫ!</b>\n\n"
             f"⚔️ <b>{canon}</b> — <b>{opp}</b>\n"
             f"🏆 <b>Турнир:</b> {payload.get('division', {}).get('name', 'Лига')} · {tour}\n\n"
             f"Очередной важнейший матч в борьбе за очки. Настрой только на победу, "
-            f"орлы готовы показать свой лучший футбол на поле!\n\n"
+            f"парни готовы показать свой лучший футбол на поле!\n\n"
             f"Поддержим родной клуб в комментариях! 🔥\n\n"
             f"{hashtags} #Matchday"
         )
 
     rank = st.get("rank", "—")
-    pts = st.get("points", 0)
-    w, d, l = st.get("wins", 0), st.get("draws", 0), st.get("losses", 0)
-    diff = st.get("goal_diff", 0)
+    pts = st.get("points") or 0
+    w, d, l = st.get("wins") or 0, st.get("draws") or 0, st.get("losses") or 0
+    diff = int(st.get("goal_diff") or 0)
     top_p = (payload.get("top_scorers") or [{}])[0]
-    top_name = top_p.get("player_name", "—")
-    top_goals = top_p.get("goals", 0)
+    top_name = top_p.get("player_name") or "—"
+    top_goals = top_p.get("goals") or 0
 
     return (
         f"{emojis} <b>ПОЛОЖЕНИЕ КЛУБА «{canon.upper()}»</b>\n\n"
@@ -1068,168 +1056,131 @@ def generate_club_smm_media(team_name: str) -> io.BytesIO | None:
 
 # ─── Посты по конкретным турам лиги и стадиям кубка ─────────────────────────
 
+_DONE_STATUSES = ("confirmed", "completed")
+
+
+def _side_scores(m: dict, canon: str) -> tuple[bool, int | None, int | None, str]:
+    """(наш клуб первый?, наши голы, голы соперника, соперник) для строки матча."""
+    is_p1 = teams_match(m["player1_team"], canon)
+    my_sc = m["player1_score"] if is_p1 else m["player2_score"]
+    opp_sc = m["player2_score"] if is_p1 else m["player1_score"]
+    opponent = m["player2_team"] if is_p1 else m["player1_team"]
+    return is_p1, my_sc, opp_sc, opponent
+
+
 def get_club_stages_and_rounds(team_name: str) -> dict:
     """
     Возвращает список всех сыгранных и предстоящих кубковых стадий и туров лиги для данного клуба.
+
+    Кубки различаются по `cup_scope`: 0 — общий кубок, N — кубок дивизиона N, поэтому
+    «1/4 финала» общего кубка и «1/4 финала» кубка дивизиона — две разные записи.
     """
     canon = resolve_team_name(team_name) or team_name
     cup_stages = []
     league_rounds = []
 
-    with database.transaction() as conn:
-        cursor = conn.cursor()
+    by_kind = database.get_club_matches_by_kind(canon)
 
-        # 1. Кубковые матчи клуба
-        cursor.execute("""
-            SELECT id, cup_stage, player1_team, player2_team, player1_score, player2_score, status
-            FROM matches
-            WHERE (player1_team = ? OR player2_team = ?) AND tournament_type = 'cup'
-            ORDER BY id ASC
-        """, (canon, canon))
-        cup_matches = cursor.fetchall()
+    stages_dict: dict[tuple[int, str], list[dict]] = {}
+    for m in by_kind["cup"]:
+        scope = database.cup_scope(m.get("cup_division_id")) or 0
+        stages_dict.setdefault((scope, m["cup_stage"] or "Кубок"), []).append(m)
 
-        stages_dict = {}
-        for m in cup_matches:
-            st = m["cup_stage"] or "Кубок"
-            if st not in stages_dict:
-                stages_dict[st] = []
-            stages_dict[st].append(m)
+    for (scope, st), m_list in stages_dict.items():
+        _, _, _, opp = _side_scores(m_list[0], canon)
+        all_done = all(m["status"] in _DONE_STATUSES for m in m_list)
+        any_done = any(m["status"] in _DONE_STATUSES for m in m_list)
 
-        for st, m_list in stages_dict.items():
-            first = m_list[0]
-            is_p1 = teams_match(first["player1_team"], canon)
-            opp = first["player2_team"] if is_p1 else first["player1_team"]
-            all_done = all(m["status"] in ("confirmed", "completed") for m in m_list)
-            any_done = any(m["status"] in ("confirmed", "completed") for m in m_list)
+        my_wins = 0
+        opp_wins = 0
+        scores = []
+        for m in m_list:
+            if m["status"] not in _DONE_STATUSES:
+                continue
+            _, my_sc, opp_sc, _ = _side_scores(m, canon)
+            my_sc, opp_sc = my_sc or 0, opp_sc or 0
+            scores.append(f"{my_sc}:{opp_sc}")
+            if my_sc > opp_sc:
+                my_wins += 1
+            elif opp_sc > my_sc:
+                opp_wins += 1
 
-            my_wins = 0
-            opp_wins = 0
-            scores = []
-            for m in m_list:
-                if m["status"] in ("confirmed", "completed"):
-                    p1_sc = m["player1_score"] or 0
-                    p2_sc = m["player2_score"] or 0
-                    p1_is_me = teams_match(m["player1_team"], canon)
-                    my_sc = p1_sc if p1_is_me else p2_sc
-                    opp_sc = p2_sc if p1_is_me else p1_sc
-                    scores.append(f"{my_sc}:{opp_sc}")
-                    if my_sc > opp_sc:
-                        my_wins += 1
-                    elif opp_sc > my_sc:
-                        opp_wins += 1
+        cup_stages.append({
+            "stage": st,
+            "cup_scope": scope,
+            "opponent": opp,
+            "status": "completed" if all_done else ("in_progress" if any_done else "pending"),
+            "score_series": f"{my_wins}:{opp_wins}" if any_done else None,
+            "match_scores": scores,
+            "match_count": len(m_list),
+        })
 
-            status_label = "completed" if all_done else ("in_progress" if any_done else "pending")
-            cup_stages.append({
-                "stage": st,
-                "opponent": opp,
-                "status": status_label,
-                "score_series": f"{my_wins}:{opp_wins}" if any_done else None,
-                "match_scores": scores,
-                "match_count": len(m_list),
-            })
-
-        # 2. Туры лиги
-        cursor.execute("""
-            SELECT id, round_number, player1_team, player2_team, player1_score, player2_score, status
-            FROM matches
-            WHERE (player1_team = ? OR player2_team = ?) AND tournament_type = 'league'
-            ORDER BY round_number ASC, id ASC
-        """, (canon, canon))
-        for m in cursor.fetchall():
-            rnd = m["round_number"]
-            is_p1 = teams_match(m["player1_team"], canon)
-            opp = m["player2_team"] if is_p1 else m["player1_team"]
-            done = m["status"] in ("confirmed", "completed")
-            my_sc = m["player1_score"] if is_p1 else m["player2_score"]
-            opp_sc = m["player2_score"] if is_p1 else m["player1_score"]
-            league_rounds.append({
-                "round": rnd,
-                "opponent": opp,
-                "status": "completed" if done else "pending",
-                "score": f"{my_sc}:{opp_sc}" if done else None,
-            })
+    for m in by_kind["league"]:
+        if m["round_number"] is None:
+            continue
+        _, my_sc, opp_sc, opp = _side_scores(m, canon)
+        done = m["status"] in _DONE_STATUSES
+        league_rounds.append({
+            "round": m["round_number"],
+            "opponent": opp,
+            "status": "completed" if done else "pending",
+            "score": f"{my_sc or 0}:{opp_sc or 0}" if done else None,
+        })
 
     return {"cup_stages": cup_stages, "league_rounds": league_rounds}
 
 
-def get_stage_or_round_payload(team_name: str, round_number: int | None = None, cup_stage: str | None = None) -> dict:
+def _with_count(name: str, cnt: int) -> str:
+    return f"{name} ({cnt})" if cnt > 1 else name
+
+
+def get_stage_or_round_payload(
+    team_name: str,
+    round_number: int | None = None,
+    cup_stage: str | None = None,
+    cup_division_id: int | None = None,
+) -> dict:
     """
     Извлекает подробные данные матча(ей) для конкретного тура лиги или стадии кубка.
+    `cup_division_id`: 0 — общий кубок, N — кубок дивизиона N.
     """
     canon = resolve_team_name(team_name) or team_name
     base_payload = get_club_smm_payload(canon)
 
     matches_data = []
-    with database.transaction() as conn:
-        cursor = conn.cursor()
-        if cup_stage:
-            cursor.execute("""
-                SELECT id, round_number, tournament_type, cup_stage, player1_team, player2_team,
-                       player1_score, player2_score, status, mvp_player, match_date, match_time
-                FROM matches
-                WHERE (player1_team = ? OR player2_team = ?)
-                  AND tournament_type = 'cup'
-                  AND cup_stage = ?
-                ORDER BY id ASC
-            """, (canon, canon, str(cup_stage)))
-        else:
-            cursor.execute("""
-                SELECT id, round_number, tournament_type, cup_stage, player1_team, player2_team,
-                       player1_score, player2_score, status, mvp_player, match_date, match_time
-                FROM matches
-                WHERE (player1_team = ? OR player2_team = ?)
-                  AND tournament_type = 'league'
-                  AND round_number = ?
-                ORDER BY id ASC
-            """, (canon, canon, int(round_number or 1)))
+    for r in database.get_club_stage_matches(
+        canon, round_number=round_number, cup_stage=cup_stage, cup_division_id=cup_division_id
+    ):
+        m_id = r["id"]
+        is_p1, my_score, opp_score, opponent = _side_scores(r, canon)
 
-        m_rows = cursor.fetchall()
-        for r in m_rows:
-            m_id = r["id"]
-            is_p1 = teams_match(r["player1_team"], canon)
-            my_score = r["player1_score"] if is_p1 else r["player2_score"]
-            opp_score = r["player2_score"] if is_p1 else r["player1_score"]
-            opponent = r["player2_team"] if is_p1 else r["player1_team"]
+        my_goals, my_assists, opp_goals = [], [], []
+        for ev in database.get_match_events(m_id):
+            p_name = ev["player_name"]
+            cnt = ev["count"] or 1
+            if teams_match(ev["team_name"], canon):
+                if ev["event_type"] == "goal":
+                    my_goals.append(_with_count(p_name, cnt))
+                elif ev["event_type"] == "assist":
+                    my_assists.append(_with_count(p_name, cnt))
+            elif teams_match(ev["team_name"], opponent) and ev["event_type"] == "goal":
+                opp_goals.append(_with_count(p_name, cnt))
 
-            cursor.execute("""
-                SELECT team_name, player_name, event_type, count
-                FROM match_events
-                WHERE match_id = ?
-            """, (m_id,))
-            events = cursor.fetchall()
-            my_goals, my_assists = [], []
-            opp_goals = []
-            for ev in events:
-                p_name = ev["player_name"]
-                cnt = ev["count"] or 1
-                if teams_match(ev["team_name"], canon):
-                    if ev["event_type"] == "goal":
-                        my_goals.append(f"{p_name} ({cnt})" if cnt > 1 else p_name)
-                    elif ev["event_type"] == "assist":
-                        my_assists.append(f"{p_name} ({cnt})" if cnt > 1 else p_name)
-                elif teams_match(ev["team_name"], opponent):
-                    if ev["event_type"] == "goal":
-                        opp_goals.append(f"{p_name} ({cnt})" if cnt > 1 else p_name)
-
-            mvp_resolved = None
-            if r["mvp_player"]:
-                mvp_resolved = database.resolve_match_mvp(cursor, m_id, r["mvp_player"], canon, opponent)
-
-            matches_data.append({
-                "match_id": m_id,
-                "is_home": is_p1,
-                "opponent": opponent,
-                "my_score": my_score,
-                "opp_score": opp_score,
-                "status": r["status"],
-                "mvp_player": r["mvp_player"],
-                "mvp": mvp_resolved,
-                "club_goals": my_goals,
-                "club_assists": my_assists,
-                "opp_goals": opp_goals,
-                "date": r["match_date"],
-                "time": r["match_time"],
-            })
+        matches_data.append({
+            "match_id": m_id,
+            "is_home": is_p1,
+            "opponent": opponent,
+            "my_score": my_score,
+            "opp_score": opp_score,
+            "status": r["status"],
+            "mvp_player": r["mvp_player"],
+            "mvp": database.resolve_match_mvp_by_id(m_id, r["mvp_player"], canon, opponent),
+            "club_goals": my_goals,
+            "club_assists": my_assists,
+            "opp_goals": opp_goals,
+            "date": r["match_date"],
+            "time": r["match_time"],
+        })
 
     target_type = "cup" if cup_stage else "league"
     target_name = f"Кубок, стадия {cup_stage}" if cup_stage else f"Тур {round_number}"
@@ -1256,19 +1207,21 @@ def generate_stage_post(
     round_number: int | None = None,
     cup_stage: str | None = None,
     for_caption: bool = False,
+    cup_division_id: int | None = None,
 ) -> str:
     """
     Генерирует пост строго в 1 абзац о конкретном туре лиги или стадии кубка.
+    `cup_division_id`: 0 — общий кубок, N — кубок дивизиона N.
     """
     canon = resolve_team_name(team_name) or team_name
-    stage_payload = get_stage_or_round_payload(canon, round_number, cup_stage)
+    stage_payload = get_stage_or_round_payload(canon, round_number, cup_stage, cup_division_id)
     system_text = _build_system_instruction(stage_payload)
 
     target_name = stage_payload["target_name"]
     matches = stage_payload["matches"]
-    club_name = stage_payload["club"].get("name", "Бешикташ")
-    emojis = stage_payload["club"].get("emojis", "🦅⚪⚫")
-    hashtags = " ".join(stage_payload["club"].get("hashtags", ["#Besiktas", "#ЛоговоФифарей"]))
+    club_name = html.escape(stage_payload["club"].get("name") or canon, quote=False)
+    emojis = stage_payload["club"].get("emojis") or "⚽🔥"
+    hashtags = " ".join(stage_payload["club"].get("hashtags") or ["#ЛоговоФифарей"])
 
     if not matches:
         return f"{emojis} <b>{target_name.upper()}</b>\n\nМатчи {club_name} на этой стадии не найдены в расписании.\n\n{hashtags}"
@@ -1284,7 +1237,7 @@ def generate_stage_post(
             opp_wins = sum(1 for m in matches if (m["opp_score"] or 0) > (m["my_score"] or 0))
             passed = my_wins > opp_wins
             outcome_str = f"Победа в серии {my_wins}:{opp_wins}! Выход в следующий раунд!" if passed else f"Итог серии {my_wins}:{opp_wins}."
-            games_str = ", ".join(f"{m['my_score']}:{m['opp_score']}" for m in matches)
+            games_str = ", ".join(f"{m['my_score'] or 0}:{m['opp_score'] or 0}" for m in matches)
             all_scorers = []
             for m in matches:
                 all_scorers.extend(m["club_goals"])
@@ -1373,26 +1326,27 @@ def generate_stage_post(
         logger.info(f"Club SMM stage text generated via Gemini ({model_name})")
         return _fit_html(text, limit)
 
-    # 3. Fallback
+    # 3. Fallback — нейтральный шаблон, пригодный для любого клуба
+    opp_safe = html.escape(str(opp), quote=False)
     if cup_stage and all_done:
         return (
-            f"{emojis} <b>КУБОК: ИТОГИ СТАДИИ {cup_stage}</b>\n\n"
-            f"Кубковое противостояние против «{opp}» завершилось! Черно-белые сражались на каждом сантиметре поля "
-            f"и показали несгибаемый характер орлов. Двигаемся дальше за трофеем!\n\n"
+            f"{emojis} <b>КУБОК: ИТОГИ СТАДИИ {html.escape(str(cup_stage), quote=False)}</b>\n\n"
+            f"Кубковое противостояние против «{opp_safe}» завершилось! {club_name} сражался на каждом "
+            f"сантиметре поля и показал характер. Двигаемся дальше за трофеем!\n\n"
             f"{hashtags} #Кубок"
         )
-    elif not cup_stage and first_m["status"] in ("confirmed", "completed"):
+    elif not cup_stage and first_m["status"] in _DONE_STATUSES:
         m = first_m
         return (
             f"{emojis} <b>ИТОГИ ТУРА {round_number}</b>\n\n"
-            f"Финальный свисток в матче против «{opp}» зафиксировал счёт {m['my_score']}:{m['opp_score']}. "
-            f"Парни @sp1r1tVSA отдали все силы ради победы. Продолжаем сезон и готовимся к новым сражениям!\n\n"
+            f"Финальный свисток в матче против «{opp_safe}» зафиксировал счёт "
+            f"{m['my_score'] or 0}:{m['opp_score'] or 0}. Продолжаем сезон и готовимся к новым сражениям!\n\n"
             f"{hashtags} #Тур{round_number}"
         )
     else:
         return (
             f"{emojis} <b>{target_name.upper()}: ВРЕМЯ БИТВЫ!</b>\n\n"
-            f"Готовимся к ответственному противостоянию против «{opp}»! Выходим на поле максимально заряженными "
-            f"и нацеленными исключительно на положительный результат. Вперёд, Орлы!\n\n"
+            f"Готовимся к ответственному противостоянию против «{opp_safe}»! Выходим на поле максимально "
+            f"заряженными и нацеленными на результат. Вперёд, {club_name}!\n\n"
             f"{hashtags}"
         )

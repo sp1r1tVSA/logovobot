@@ -391,7 +391,8 @@ async def show_cabinet(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         ],
         [InlineKeyboardButton("« Назад в меню", callback_data="main_menu")]
     ]
-    if user.id == 1642770076 or (user.id in getattr(config, "ADMIN_IDS", [])) or is_admin(user.id):
+    from handlers.club_smm import is_smm_allowed
+    if is_smm_allowed(user.id):
         keyboard.insert(0, [
             InlineKeyboardButton("🦅 SMM-центр клуба (ИИ)", callback_data="smm_hub")
         ])

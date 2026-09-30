@@ -307,6 +307,9 @@ from handlers.club_smm import (
     cb_smm_remove_photo,
     cb_smm_attach_match_photos,
     on_channel_post,
+    on_smm_timeout,
+    SMM_BUTTON_ROUTES,
+    _ends_conversation as _smm_ends_conversation,
     SMM_STATE_WAIT_PROMPT,
     SMM_STATE_WAIT_EDIT,
     SMM_STATE_WAIT_CHANNEL,
@@ -598,17 +601,7 @@ def _register_cabinet_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(show_player_card, pattern="^(player_card|pcard)_.+$"))
 
     # 🦅 Personal Club SMM Center (for @sp1r1tVSA / admins)
-    app.add_handler(CommandHandler(["club_post", "besiktas", "smm_post"], cmd_smm_hub))
     app.add_handler(CommandHandler(["set_club_channel", "club_channel"], cmd_set_club_channel))
-    app.add_handler(CallbackQueryHandler(cb_smm_hub, pattern="^smm_hub$"))
-    app.add_handler(CallbackQueryHandler(cb_smm_choose_stage, pattern="^smm_choose_stage$"))
-    app.add_handler(CallbackQueryHandler(cb_smm_stage_selected, pattern=r"^smm_stage:(league|cup):.+$"))
-    app.add_handler(CallbackQueryHandler(cb_smm_generate, pattern=r"^smm_gen:[\w_]+$"))
-    app.add_handler(CallbackQueryHandler(cb_smm_regenerate, pattern="^smm_regen$"))
-    app.add_handler(CallbackQueryHandler(cb_smm_publish, pattern=r"^smm_publish:(text|media|card|ai_photo|custom_photo|match_photos)$"))
-    app.add_handler(CallbackQueryHandler(cb_smm_remove_photo, pattern="^smm_remove_photo$"))
-    app.add_handler(CallbackQueryHandler(cb_smm_attach_match_photos, pattern="^smm_attach_match_photos$"))
-
     smm_conv = ConversationHandler(
         entry_points=[
             CallbackQueryHandler(start_stage_input, pattern="^smm_enter_stage$"),
@@ -622,10 +615,10 @@ def _register_cabinet_handlers(app: Application) -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_stage_input_received)
             ],
             SMM_STATE_WAIT_PROMPT: [
-                MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, handle_custom_prompt_received)
+                MessageHandler((filters.TEXT | filters.VOICE | filters.VIDEO_NOTE) & ~filters.COMMAND, handle_custom_prompt_received)
             ],
             SMM_STATE_WAIT_EDIT: [
-                MessageHandler((filters.TEXT | filters.VOICE) & ~filters.COMMAND, handle_edit_prompt_received)
+                MessageHandler((filters.TEXT | filters.VOICE | filters.VIDEO_NOTE) & ~filters.COMMAND, handle_edit_prompt_received)
             ],
             SMM_STATE_WAIT_PHOTO: [
                 MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_custom_photo_received),
@@ -634,12 +627,19 @@ def _register_cabinet_handlers(app: Application) -> None:
             SMM_STATE_WAIT_CHANNEL: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, handle_channel_received)
             ],
+            ConversationHandler.TIMEOUT: [
+                MessageHandler(filters.ALL, on_smm_timeout),
+                CallbackQueryHandler(on_smm_timeout),
+            ],
         },
         fallbacks=[
-            CallbackQueryHandler(cb_smm_choose_stage, pattern="^smm_choose_stage$"),
-            CallbackQueryHandler(cancel_edit_and_return, pattern=r"^(smm_cancel_edit|smm_cancel_photo)$"),
-            CallbackQueryHandler(cancel_smm_flow, pattern="^smm_hub$"),
-            CallbackQueryHandler(show_cabinet, pattern="^menu_cabinet$"),
+            # Любая кнопка SMM-центра посреди ввода сбрасывает диалог (см. SMM_BUTTON_ROUTES)
+            *[
+                CallbackQueryHandler(_smm_ends_conversation(cb), pattern=pat)
+                for pat, cb in SMM_BUTTON_ROUTES
+            ],
+            CallbackQueryHandler(_smm_ends_conversation(show_cabinet), pattern="^menu_cabinet$"),
+            CommandHandler(["club_post", "besiktas", "smm_post"], _smm_ends_conversation(cmd_smm_hub)),
             CommandHandler("cancel", cancel_smm_flow),
         ],
         allow_reentry=True,
@@ -647,6 +647,10 @@ def _register_cabinet_handlers(app: Application) -> None:
         conversation_timeout=300
     )
     app.add_handler(smm_conv)
+    # Обычные кнопки — ПОСЛЕ диалога: пока диалог ждёт ввод, его fallbacks должны сработать первыми
+    for _pat, _cb in SMM_BUTTON_ROUTES:
+        app.add_handler(CallbackQueryHandler(_cb, pattern=_pat))
+    app.add_handler(CommandHandler(["club_post", "besiktas", "smm_post"], cmd_smm_hub))
     # Перехват постов, опубликованных напрямую в канале клуба (не через SMM-центр)
     app.add_handler(MessageHandler(filters.ChatType.CHANNEL, on_channel_post))
 

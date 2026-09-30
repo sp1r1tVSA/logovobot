@@ -5555,6 +5555,132 @@ def get_team_squad_photo(team_name: str) -> str | None:
         return row[0] if row and row[0] else None
 
 
+_CLUB_MATCH_SELECT = """
+    SELECT m.id, m.round_number, m.tournament_type, m.cup_stage, m.stage_id,
+           m.player1_team, m.player2_team, m.player1_score, m.player2_score,
+           m.status, m.played_at, m.mvp_player, m.match_date, m.match_time,
+           COALESCE(m.is_technical, 0) AS is_technical,
+           st.division_id AS cup_division_id
+    FROM matches m
+    LEFT JOIN cup_stages st ON st.id = m.stage_id
+"""
+_CLUB_MATCH_SIDE = "(LOWER(m.player1_team) = LOWER(?) OR LOWER(m.player2_team) = LOWER(?))"
+
+
+def _club_match_scope_sql(cup_division_id: int | None) -> tuple[str, tuple]:
+    """Условие «этот кубок» для матчей с JOIN на cup_stages: None — без фильтра,
+    0 / пусто — общий кубок, N — кубок дивизиона N."""
+    if cup_division_id is None:
+        return "", ()
+    scope = cup_scope(cup_division_id)
+    if scope is None:
+        return " AND st.division_id IS NULL", ()
+    return " AND st.division_id = ?", (scope,)
+
+
+def get_club_last_played_match(team_name: str) -> dict | None:
+    """Последний сыгранный матч клуба — по времени игры, а не по id: результат,
+    внесённый позже задним числом, не должен «перебивать» более свежую игру."""
+    canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
+    if not canon:
+        return None
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _CLUB_MATCH_SELECT
+            + f" WHERE {_CLUB_MATCH_SIDE} AND m.status IN ('confirmed', 'completed')"
+            + " ORDER BY COALESCE(m.played_at, '') DESC, m.id DESC LIMIT 1",
+            (canon, canon),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_club_next_match(team_name: str) -> dict | None:
+    """Ближайший неигранный матч клуба (без технических). Туры без номера — в конце."""
+    canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
+    if not canon:
+        return None
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _CLUB_MATCH_SELECT
+            + f" WHERE {_CLUB_MATCH_SIDE} AND m.status = 'pending' AND COALESCE(m.is_technical, 0) = 0"
+            + " ORDER BY (m.round_number IS NULL), m.round_number ASC, m.id ASC LIMIT 1",
+            (canon, canon),
+        )
+        row = cursor.fetchone()
+        return dict(row) if row else None
+
+
+def get_club_matches_by_kind(team_name: str) -> dict[str, list[dict]]:
+    """Все матчи клуба, разложенные на кубковые и лиговые (для выбора тура/стадии)."""
+    canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
+    result: dict[str, list[dict]] = {"cup": [], "league": []}
+    if not canon:
+        return result
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            _CLUB_MATCH_SELECT
+            + f" WHERE {_CLUB_MATCH_SIDE} AND m.tournament_type IN ('cup', 'league')"
+            + " ORDER BY m.id ASC",
+            (canon, canon),
+        )
+        for row in cursor.fetchall():
+            result["cup" if row["tournament_type"] == "cup" else "league"].append(dict(row))
+    result["league"].sort(key=lambda m: (m["round_number"] is None, m["round_number"] or 0, m["id"]))
+    return result
+
+
+def get_club_stage_matches(
+    team_name: str,
+    round_number: int | None = None,
+    cup_stage: str | None = None,
+    cup_division_id: int | None = None,
+) -> list[dict]:
+    """Матчи клуба в туре лиги или кубковой стадии. Общий кубок и кубки дивизионов
+    различаются через `cup_stages.division_id`; `cup_division_id=None` берёт кубок
+    самого свежего матча этой стадии, чтобы две серии не склеились в одну."""
+    canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
+    if not canon:
+        return []
+    with transaction() as conn:
+        cursor = conn.cursor()
+        if cup_stage:
+            base = (
+                _CLUB_MATCH_SELECT
+                + f" WHERE {_CLUB_MATCH_SIDE} AND m.tournament_type = 'cup' AND m.cup_stage = ?"
+            )
+            args = (canon, canon, str(cup_stage))
+            if cup_division_id is None:
+                cursor.execute(base + " ORDER BY m.id DESC LIMIT 1", args)
+                latest = cursor.fetchone()
+                if latest is None:
+                    return []
+                cup_division_id = latest["cup_division_id"] or 0
+            scope_sql, scope_args = _club_match_scope_sql(cup_division_id)
+            cursor.execute(base + scope_sql + " ORDER BY m.id ASC", args + scope_args)
+        else:
+            cursor.execute(
+                _CLUB_MATCH_SELECT
+                + f" WHERE {_CLUB_MATCH_SIDE} AND m.tournament_type = 'league' AND m.round_number = ?"
+                + " ORDER BY m.id ASC",
+                (canon, canon, int(round_number if round_number is not None else 1)),
+            )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def resolve_match_mvp_by_id(
+    match_id: int, mvp_name: str | None, team_name: str, opponent_name: str
+) -> dict | None:
+    """`resolve_match_mvp` для вызова вне открытого курсора."""
+    if not mvp_name:
+        return None
+    with transaction() as conn:
+        return resolve_match_mvp(conn.cursor(), match_id, mvp_name, team_name, opponent_name)
+
+
 def get_last_match_photos(team_name: str) -> list[str]:
     """Retrieve screenshot photo_id(s) for the team's most recent completed match or cup series."""
     canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
@@ -5568,7 +5694,7 @@ def get_last_match_photos(team_name: str) -> list[str]:
             WHERE (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?)
                    OR player1_team = ? OR player2_team = ?)
               AND status IN ('confirmed', 'completed')
-            ORDER BY id DESC LIMIT 1
+            ORDER BY COALESCE(played_at, '') DESC, id DESC LIMIT 1
         """, (canon, canon, team_name.strip(), team_name.strip()))
         m = cursor.fetchone()
         if not m:
@@ -5593,24 +5719,40 @@ def get_last_match_photos(team_name: str) -> list[str]:
         return []
 
 
-def get_stage_match_photos(team_name: str, round_number: int | None = None, cup_stage: str | None = None) -> list[str]:
-    """Retrieve screenshot photo_id(s) for a specific round or cup stage of the team."""
+def get_stage_match_photos(
+    team_name: str,
+    round_number: int | None = None,
+    cup_stage: str | None = None,
+    cup_division_id: int | None = None,
+) -> list[str]:
+    """Retrieve screenshot photo_id(s) for a specific round or cup stage of the team.
+
+    `cup_division_id` — как в `get_club_stage_matches`: 0 — общий кубок, N — кубок
+    дивизиона, None — кубок самого свежего матча этой стадии.
+    """
     canon = resolve_team_name(team_name) or (team_name.strip() if team_name else "")
     if not canon:
         return []
     with transaction() as conn:
         cursor = conn.cursor()
         if cup_stage:
+            if cup_division_id is None:
+                stage_rows = get_club_stage_matches(canon, cup_stage=cup_stage)
+                if not stage_rows:
+                    return []
+                cup_division_id = stage_rows[0]["cup_division_id"] or 0
+            scope_sql, scope_args = _club_match_scope_sql(cup_division_id)
             cursor.execute("""
-                SELECT photo_id FROM matches
-                WHERE (LOWER(player1_team) = LOWER(?) OR LOWER(player2_team) = LOWER(?)
-                       OR player1_team = ? OR player2_team = ?)
-                  AND tournament_type = 'cup'
-                  AND cup_stage = ?
-                  AND status IN ('confirmed', 'completed')
-                  AND photo_id IS NOT NULL AND photo_id != ''
-                ORDER BY game_num_in_series ASC, id ASC
-            """, (canon, canon, team_name.strip(), team_name.strip(), str(cup_stage)))
+                SELECT m.photo_id FROM matches m
+                LEFT JOIN cup_stages st ON st.id = m.stage_id
+                WHERE (LOWER(m.player1_team) = LOWER(?) OR LOWER(m.player2_team) = LOWER(?))
+                  AND m.tournament_type = 'cup'
+                  AND m.cup_stage = ?
+                  AND m.status IN ('confirmed', 'completed')
+                  AND m.photo_id IS NOT NULL AND m.photo_id != ''
+                  """ + scope_sql + """
+                ORDER BY m.game_num_in_series ASC, m.id ASC
+            """, (canon, canon, str(cup_stage)) + scope_args)
         elif round_number is not None:
             cursor.execute("""
                 SELECT photo_id FROM matches
