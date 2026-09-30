@@ -50,8 +50,11 @@ class Recorder:
     def __init__(self, dry: bool):
         self.dry = dry
         self.attempts: list[dict] = []
+        self.verdicts: list[tuple[str, list[str]]] = []   # (text as validated, problems), one per non-empty answer
         self._orig_or = S._call_openrouter_text
         self._orig_gem = S._call_gemini_text
+        self._orig_validate = S.validate_post
+        S.validate_post = self._validate
         S._call_openrouter_text = lambda *a, **k: self._call("openrouter", self._orig_or, a, k)
         S._call_gemini_text = lambda *a, **k: self._call("gemini", self._orig_gem, a, k)
 
@@ -66,32 +69,37 @@ class Recorder:
         self.attempts.append({"provider": provider, "model": model, "text": text or ""})
         return text, model
 
+    def _validate(self, text, payload, kind="custom", extra_text=""):
+        problems = self._orig_validate(text, payload, kind, extra_text)
+        self.verdicts.append((text, problems))
+        return problems
+
     def reset(self):
         self.attempts = []
+        self.verdicts = []
 
 
-def _report(rec: Recorder, payload: dict, kind: str, final: str, extra_text: str = "") -> dict:
+def _report(rec: Recorder, final: str, show_final: bool = True) -> dict:
+    """Prints every provider attempt with the verdict `validate_post` actually gave it."""
     print(f"  попыток провайдеров: {len(rec.attempts)}")
     stats = {"attempts": len(rec.attempts), "rejected": 0, "empty": 0}
+    verdicts = iter(rec.verdicts)
     for i, a in enumerate(rec.attempts, 1):
         if not a["text"]:
             stats["empty"] += 1
             print(f"  [{i}] {a['provider']}: пусто (ключ/квота/таймаут)")
             continue
-        fitted = S._fit_html(a["text"], S.POST_MAX_CHARS)
-        problems = S.validate_post(fitted, payload, kind, extra_text)
+        checked, problems = next(verdicts, (a["text"], []))
         if problems:
             stats["rejected"] += 1
         verdict = "OK" if not problems else "ОТКЛОНЁН: " + "; ".join(problems)
         print(f"  [{i}] {a['provider']} ({a['model']}), {len(a['text'])} симв. → {verdict}")
-        print("      " + a["text"].replace("\n", "\n      "))
-    used_template = not any(
-        a["text"] and not S.validate_post(S._fit_html(a["text"], S.POST_MAX_CHARS), payload, kind, extra_text)
-        for a in rec.attempts
-    )
+        print("      " + checked.replace("\n", "\n      "))
+    used_template = not any(not problems for _, problems in rec.verdicts)
     stats["template"] = used_template
-    print(f"  ИТОГ ({'шаблон-фолбэк' if used_template else 'ответ модели'}), {len(final)} симв.:")
-    print("      " + final.replace("\n", "\n      "))
+    if show_final:
+        print(f"  ИТОГ ({'шаблон-фолбэк' if used_template else 'ответ модели'}), {len(final)} симв.:")
+        print("      " + final.replace("\n", "\n      "))
     return stats
 
 
@@ -135,8 +143,7 @@ def main() -> int:
             rec.reset()
             brief = args.brief if pt == "custom" else ""
             final = S.generate_club_post(club, pt, custom_brief=brief)
-            payload = S.get_club_smm_payload(club)
-            bump(_report(rec, payload, S._tone_kind(pt, payload), final, brief))
+            bump(_report(rec, final))
             time.sleep(0 if args.dry else args.pause)
 
         if args.stages:
@@ -158,9 +165,7 @@ def main() -> int:
                 except Exception as exc:  # report and go on, this is a diagnostic tool
                     print(f"  ОШИБКА: {exc!r} (структура элемента: {sorted(item)})")
                     continue
-                print(f"  ИТОГ: {final}")
-                totals["requests"] += 1
-                totals["attempts"] += len(rec.attempts)
+                bump(_report(rec, final))
                 time.sleep(0 if args.dry else args.pause)
 
     print("\n=== СВОДКА ===")

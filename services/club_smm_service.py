@@ -312,6 +312,54 @@ def _opponent_mvp_problem(text: str, payload: dict) -> str | None:
     return None
 
 
+_LATIN_WORD_RE = re.compile(r"[A-Za-z]{4,}")
+_HASHTAG_RE = re.compile(r"#\w+")
+# Латиница, которую русский пост вправе содержать помимо имён из данных
+_LATIN_ALLOWED = {"fifa", "uefa", "logovo", "trick", "live", "mobile"}
+
+
+def _latin_words_problem(plain: str, payload: dict, extra_text: str = "") -> str | None:
+    """Английские слова в русском посте («home», «ended») — след слабой модели. Имена из данных не считаются."""
+    words = {w.lower() for w in _LATIN_WORD_RE.findall(_HASHTAG_RE.sub(" ", plain))}
+    if not words:
+        return None
+    try:
+        known = json.dumps(payload, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        known = ""
+    known_words = {w.lower() for w in _LATIN_WORD_RE.findall(known + " " + (extra_text or ""))}
+    stray = sorted(words - known_words - _LATIN_ALLOWED)
+    if stray:
+        return f"английские слова ({', '.join(stray[:4])}) — пиши только по-русски"
+    return None
+
+
+# Хэштеги, которые модель вправе добавить сверх клубных
+_EXTRA_TAG_RE = re.compile(r"#(?:Кубок|Финал|Дерби|Matchday|Тур\d+)\Z", re.I)
+_TAIL_TAGS_RE = re.compile(r"(?:[ \t]*#\w+)+[ \t]*\Z")
+
+
+def _repair_hashtags(text: str, payload: dict, limit: int) -> str:
+    """Заменяет выдуманные моделью хэштеги (#Lid, #BLAS) клубными; хвост без хэштегов дополняет ими."""
+    canon = list(((payload or {}).get("club") or {}).get("hashtags") or [])
+    if not canon:
+        return text
+    body = text.rstrip()
+    m = _TAIL_TAGS_RE.search(body)
+    extras: list[str] = []
+    if m:
+        canon_l = {t.lower() for t in canon}
+        for tag in re.findall(r"#\w+", m.group(0)):
+            if tag.lower() not in canon_l and _EXTRA_TAG_RE.match(tag) and tag not in extras:
+                extras.append(tag)
+        body = body[: m.start()].rstrip()
+    tags = " ".join(canon + extras)
+    repaired = f"{body}\n\n{tags}"
+    if len(repaired) > limit:
+        repaired = f"{body}\n\n{' '.join(canon)}"
+    return repaired if len(repaired) <= limit else text
+
+
 def validate_post(text: str, payload: dict, kind: str = "custom", extra_text: str = "") -> list[str]:
     """Список найденных проблем в тексте поста; пустой — пост можно публиковать.
 
@@ -336,6 +384,10 @@ def validate_post(text: str, payload: dict, kind: str = "custom", extra_text: st
     opp = _opponent_mvp_problem(plain, payload)
     if opp:
         problems.append(opp)
+
+    latin = _latin_words_problem(plain, payload, extra_text)
+    if latin:
+        problems.append(latin)
     return problems
 
 
@@ -1065,7 +1117,7 @@ def _generate_validated(
             )
         if not text:
             continue
-        fitted = _fit_html(text, limit)
+        fitted = _repair_hashtags(_fit_html(text, limit), payload, limit)
         problems = validate_post(fitted, payload, kind, extra_text)
         if not problems:
             logger.info(f"Club SMM {label}text generated via {provider} ({model_name})")
@@ -1534,6 +1586,16 @@ def get_stage_or_round_payload(
             "time": r["match_time"],
         })
 
+    # Текущая форма и таблица нужны анонсу; в обзоре сыгранного матча они подмешивают сегодняшние серии
+    # («шестая победа подряд» в посте о первом туре), поэтому там их нет.
+    played_any = any(m["status"] in _DONE_STATUSES for m in matches_data)
+    if played_any:
+        standings = recent = streak = None
+    else:
+        standings = base_payload.get("standings")
+        recent = base_payload.get("recent_matches")
+        streak = base_payload.get("streak_context")
+
     target_type = "cup" if cup_stage else "league"
     if cup_stage:
         target_name = "Кубок, финал" if _stage_label(cup_stage) == "финал" else f"Кубок, стадия {cup_stage}"
@@ -1549,10 +1611,10 @@ def get_stage_or_round_payload(
         "round_number": round_number,
         "cup_stage": cup_stage,
         "matches": matches_data,
-        "standings": base_payload.get("standings"),
-        "recent_matches": base_payload.get("recent_matches"),
+        "standings": standings,
+        "recent_matches": recent,
         "recent_channel_posts": base_payload.get("recent_channel_posts"),
-        "streak_context": base_payload.get("streak_context"),
+        "streak_context": streak,
         "full_squad": base_payload.get("full_squad"),
     }
 
@@ -1595,6 +1657,9 @@ def generate_stage_post(
         done_matches = [m for m in matches if m["status"] in _DONE_STATUSES]
         my_wins = sum(1 for m in done_matches if (m["my_score"] or 0) > (m["opp_score"] or 0))
         opp_wins = sum(1 for m in done_matches if (m["opp_score"] or 0) > (m["my_score"] or 0))
+        # Серия «до двух побед» решена и при неотыгранной третьей игре (2:0)
+        if not all_done and max(my_wins, opp_wins) * 2 > len(matches):
+            all_done = True
         games_str = ", ".join(f"{m['my_score'] or 0}:{m['opp_score'] or 0}" for m in done_matches)
         stage_phrase = "финала кубка" if is_final else f"кубковой стадии {stage_label}"
         if all_done:

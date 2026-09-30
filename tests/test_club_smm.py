@@ -1000,6 +1000,18 @@ class TestStagePostPrompts(unittest.TestCase):
         self.assertIn("2:0", prompt)
         self.assertIn("не объявляй итог", prompt.lower())
 
+    def test_series_decided_at_two_wins_even_with_third_game_unplayed(self):
+        prompt, post = self._run("1/4", [self._match(2, 0), self._match(1, 0),
+                                         self._match(None, None, status="scheduled")])
+        self.assertIn("Выход в следующий раунд", prompt)
+        self.assertNotIn("не объявляй итог", prompt.lower())
+        self.assertIn("идёт дальше", post)
+
+    def test_one_win_of_three_is_not_a_decided_series(self):
+        prompt, _ = self._run("1/4", [self._match(2, 0), self._match(None, None, status="scheduled"),
+                                      self._match(None, None, status="scheduled")])
+        self.assertIn("не объявляй итог", prompt.lower())
+
     def test_caption_mode_uses_caption_format(self):
         prompt, _ = self._run("1/4", [self._match(2, 0)], for_caption=True)
         self.assertIn("380", prompt)
@@ -1101,6 +1113,69 @@ class TestPostValidation(unittest.TestCase):
              patch.object(club_smm_service, "_call_openrouter_text", return_value=("Короче: 4:2 в нашу пользу", "m")):
             out = club_smm_service.edit_club_post("Ювентус", "Мы выиграли 4:2", "сделай короче")
         self.assertIn("4:2", out)
+
+
+class TestStagePayloadForm(unittest.TestCase):
+    """Обзор сыгранного матча не должен получать сегодняшнюю форму и таблицу."""
+
+    BASE = {
+        "club": {"name": "Ювентус"}, "manager": None, "division": "Д1",
+        "standings": {"rank": 3}, "recent_matches": [{"result": "win"}],
+        "streak_context": "шестая победа подряд", "recent_channel_posts": [], "full_squad": [],
+    }
+
+    def _payload(self, status):
+        row = {"id": 1, "player1_team": "Ювентус", "player2_team": "Рома", "player1_score": 2,
+               "player2_score": 1, "status": status, "mvp_player": None, "match_date": None, "match_time": None}
+        with patch.object(club_smm_service, "get_club_smm_payload", return_value=dict(self.BASE)),              patch.object(club_smm_service.database, "get_club_stage_matches", return_value=[row]),              patch.object(club_smm_service.database, "get_match_events", return_value=[]),              patch.object(club_smm_service.database, "resolve_match_mvp_by_id", return_value=None):
+            return club_smm_service.get_stage_or_round_payload("Ювентус", round_number=1)
+
+    def test_played_stage_has_no_current_form(self):
+        p = self._payload("confirmed")
+        self.assertIsNone(p["streak_context"])
+        self.assertIsNone(p["standings"])
+        self.assertIsNone(p["recent_matches"])
+
+    def test_upcoming_stage_keeps_form_for_the_teaser(self):
+        p = self._payload("scheduled")
+        self.assertEqual(p["streak_context"], "шестая победа подряд")
+        self.assertEqual(p["standings"], {"rank": 3})
+
+
+class TestPostRepairAndLanguage(unittest.TestCase):
+    PAYLOAD = {"club": {"name": "Ювентус", "hashtags": ["#Juve", "#ЛоговоФифарей"]}}
+
+    def test_invented_hashtags_are_replaced_with_club_ones(self):
+        out = club_smm_service._repair_hashtags("Пост.\n\n#Lid #LofyFifarey #BLAS", self.PAYLOAD, 700)
+        self.assertEqual(out, "Пост.\n\n#Juve #ЛоговоФифарей")
+
+    def test_missing_hashtags_are_appended(self):
+        out = club_smm_service._repair_hashtags("Пост без тегов.", self.PAYLOAD, 700)
+        self.assertTrue(out.endswith("#Juve #ЛоговоФифарей"))
+
+    def test_known_extra_tags_survive(self):
+        out = club_smm_service._repair_hashtags("Пост. #Juve #Тур5 #Мусор", self.PAYLOAD, 700)
+        self.assertTrue(out.endswith("#Juve #ЛоговоФифарей #Тур5"))
+
+    def test_repair_never_exceeds_limit(self):
+        text = "Пост. #Lid"
+        self.assertEqual(club_smm_service._repair_hashtags(text, self.PAYLOAD, 12), text)
+
+    def test_no_club_hashtags_leaves_text_alone(self):
+        self.assertEqual(club_smm_service._repair_hashtags("Пост #X", {"club": {}}, 700), "Пост #X")
+
+    def test_english_words_are_flagged_but_names_and_tags_are_not(self):
+        payload = {"club": {"name": "Besiktas"}}
+        bad = club_smm_service.validate_post("Наша команда home ended сильно", payload, "custom")
+        self.assertTrue(any("home" in p for p in bad))
+        self.assertEqual(club_smm_service.validate_post("Besiktas вперёд! #Besiktas #KaraKartal", payload, "custom"), [])
+        self.assertEqual(club_smm_service.validate_post("Хет-трик в FIFA", payload, "custom"), [])
+
+    def test_generated_text_gets_repaired_tags(self):
+        with patch.object(club_smm_service, "_call_openrouter_text",
+                          return_value=("Держались до конца, работаем дальше.\n\n#Lid #BLAS", "m")),              patch.object(club_smm_service, "_call_gemini_text", return_value=(None, None)):
+            out = club_smm_service._generate_validated("s", "u", 300, 700, self.PAYLOAD, "loss")
+        self.assertTrue(out.endswith("#Juve #ЛоговоФифарей"))
 
 
 class TestPostTone(unittest.TestCase):
