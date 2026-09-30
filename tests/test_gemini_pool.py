@@ -210,6 +210,68 @@ class TestGeminiFallbackOnRateLimit(unittest.TestCase):
         self.assertEqual(res["left_score"], 1)
         self.assertEqual(res["team1"], "Real Madrid")
 
+    @staticmethod
+    def _gemini_reply(right_goals):
+        match_data = json.dumps({
+            "matches": [{
+                "team1": "Man Utd",
+                "team2": "Barcelona",
+                "left_score": 1,
+                "right_score": 1,
+                "left_goals": ["Tielemans"],
+                "right_goals": right_goals,
+                "left_assists": ["Mbeumo"],
+                "right_assists": [],
+            }]
+        })
+        return json.dumps({
+            "candidates": [{"content": {"parts": [{"text": match_data}]}}]
+        }).encode("utf-8")
+
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    def test_match_ocr_retries_next_model_when_goals_exceed_score(self, mock_get_opener):
+        mock_get_opener.return_value = self.mock_opener
+        impossible = self._gemini_reply(["Gordon", "Bardghji"])
+        valid = self._gemini_reply(["Gordon"])
+
+        import services.ai.ai_recognizer as ar
+        with ar._ocr_model_lock:
+            ar._ocr_model_index = 0
+
+        called = []
+
+        def fake_open(req, timeout=30):
+            called.append(req.full_url)
+            cm = MagicMock()
+            cm.__enter__.return_value.read.return_value = (
+                impossible if GEMINI_MODELS[0] in req.full_url else valid
+            )
+            return cm
+
+        self.mock_opener.open.side_effect = fake_open
+        with self.assertLogs("services.ai.ai_recognizer", level="WARNING"):
+            res = recognize_match_screenshots_bytes([b"fake_image_bytes"], api_key="single_key")
+        self.assertEqual(len(called), 2)
+        self.assertEqual(res["matches"][0]["right_goals"], ["Gordon"])
+        self.assertNotIn("ocr_goals_exceed_score", res["matches"][0])
+
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    def test_match_ocr_returns_flagged_reading_when_every_model_overcounts(self, mock_get_opener):
+        mock_get_opener.return_value = self.mock_opener
+        impossible = self._gemini_reply(["Gordon", "Bardghji"])
+
+        def fake_open(req, timeout=30):
+            cm = MagicMock()
+            cm.__enter__.return_value.read.return_value = impossible
+            return cm
+
+        self.mock_opener.open.side_effect = fake_open
+        with self.assertLogs("services.ai.ai_recognizer", level="WARNING"):
+            res = recognize_match_screenshots_bytes([b"fake_image_bytes"], api_key="single_key")
+        self.assertEqual(self.mock_opener.open.call_count, len(GEMINI_MODELS))
+        self.assertIsNotNone(res)
+        self.assertTrue(res["matches"][0]["ocr_goals_exceed_score"])
+
 
 class TestGeminiChatPoolRotation(unittest.TestCase):
     def test_chat_exact_models_list(self):

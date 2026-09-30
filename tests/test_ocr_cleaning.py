@@ -427,6 +427,23 @@ PARIS_RIGHT = _rows(  # screen order: A, G
 )
 
 
+# GROUND TRUTH: lovesosat (Man Utd) 1 - 1 quete-основа (Барселона), тур 13,
+# дивизион 5. Gordon scored and Bardghji assisted; the published result credited
+# Barcelona with two goals (Gordon, Bardghji) against a score of 1.
+MANU_LEFT = _rows(
+    ("Andrey Santos", 0, 0), ("Mbeumo", 0, 1), ("Rashford", 0, 0),
+    ("Tielemans", 1, 0), ("Amad", 0, 0), ("Matheus Cunha", 0, 0),
+)
+BARCA_RIGHT = _rows(  # screen order: A, G
+    ("Fermín", 0, 0), ("Pedri", 0, 0), ("Lamine Yamal", 0, 0),
+    ("Gordon", 0, 1), ("Raphinha", 0, 0), ("Bardghji", 1, 0),
+)
+BARCA_RIGHT_MISREAD = _rows(
+    ("Fermín", 0, 0), ("Pedri", 0, 0), ("Lamine Yamal", 0, 0),
+    ("Gordon", 1, 1), ("Raphinha", 0, 0), ("Bardghji", 0, 1),
+)
+
+
 def _full_table(rows):
     """Pads a transcribed table with 0-0 bench-free rows up to a whole XI."""
     pad = [{"name": f"Filler{i}", "digits": [0, 0]} for i in range(11 - len(rows))]
@@ -453,6 +470,36 @@ class TestTableRows(unittest.TestCase):
         self.assertEqual(m["right_goals"], ["Camara", "Golovin"])
         self.assertEqual(m["right_assists"], ["Golovin", "Balogun"])
         self.assertNotIn("ocr_needs_review", m)
+
+    def test_manu_barca_screenshot(self):
+        m = {"left_score": 1, "right_score": 1, "left_rows": MANU_LEFT, "right_rows": BARCA_RIGHT}
+        apply_table_rows(m)
+        validate_and_sanitize_match_events(m)
+        self.assertEqual(m["left_goals"], ["Tielemans"])
+        self.assertEqual(m["left_assists"], ["Mbeumo"])
+        self.assertEqual(m["right_goals"], ["Gordon"])
+        self.assertEqual(m["right_assists"], ["Bardghji"])
+        self.assertNotIn("ocr_goals_exceed_score", m)
+
+    def test_more_goals_than_the_score_is_flagged(self):
+        """Hidden rows only add goals, so 2 goals at a score of 1 is a misreading."""
+        m = {"left_score": 1, "right_score": 1, "left_rows": MANU_LEFT, "right_rows": BARCA_RIGHT_MISREAD}
+        with self.assertLogs("services.ai.ai_recognizer", level=logging.WARNING):
+            apply_table_rows(m)
+            validate_and_sanitize_match_events(m)
+        self.assertEqual(m["right_goals"], ["Gordon", "Bardghji"])
+        self.assertTrue(m["ocr_goals_exceed_score"])
+        self.assertTrue(m["ocr_needs_review"])
+
+    def test_fewer_goals_than_the_score_is_not_an_excess(self):
+        m = {"left_score": 3, "right_score": 2, "left_rows": FOREST_LEFT, "right_rows": PARIS_RIGHT}
+        with self.assertLogs("services.ai.ai_recognizer", level=logging.WARNING):
+            apply_table_rows(m)
+            validate_and_sanitize_match_events(m)
+        self.assertNotIn("ocr_goals_exceed_score", m)
+
+    def test_prompt_says_goals_never_exceed_the_score(self):
+        self.assertIn("БОЛЬШЕ счёта она не бывает НИКОГДА", PROMPT_TEXT)
 
     def test_mirrored_reading_is_swapped_back_by_the_score(self):
         """The model 'helpfully' wrote the right table as G, A instead of screen order."""

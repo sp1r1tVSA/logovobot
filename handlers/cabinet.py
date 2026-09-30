@@ -213,6 +213,26 @@ def _goal_shortfall_line(sides) -> str:
     )
 
 
+def _goal_excess_line(sides) -> str:
+    """Error for the AI confirmation card when more goals were read than scored.
+
+    Unlike a shortfall this is never a scrolled table: hidden rows only add goals,
+    so the stats were misread (a G/A column mix-up) and the card must not offer to
+    save them. `sides` is ((team, {player: goals}, score), ...).
+    """
+    over = [
+        f"{safe_escape(team)} — {sum(goals.values())} при счёте {score}"
+        for team, goals, score in sides
+        if sum(goals.values()) > score
+    ]
+    if not over:
+        return ""
+    return (
+        f"⛔ <b>Голов распознано больше, чем в счёте:</b> {'; '.join(over)}.\n"
+        f"<i>ИИ ошибся в колонках «Г»/«А» — внесите результат вручную.</i>\n\n"
+    )
+
+
 def safe_escape(val: str | None, default: str = "") -> str:
     """Safe HTML escaping for strings that may be None."""
     if val is None:
@@ -2984,9 +3004,9 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             else:
                 context.user_data.pop("report_mvp_player", None)
             mvp_line = f"👑 <b>Игрок матча (MVP):</b> {safe_escape(mvp_player)}\n\n" if mvp_player else ""
-            shortfall_line = _goal_shortfall_line(
-                ((home_team, h_goals, h_score), (away_team, a_goals, a_score))
-            )
+            score_sides = ((home_team, h_goals, h_score), (away_team, a_goals, a_score))
+            excess_line = _goal_excess_line(score_sides)
+            shortfall_line = excess_line or _goal_shortfall_line(score_sides)
 
             h_goals_summary = ", ".join([f"{p} ({c})" for p, c in h_goals.items()]) if h_goals else "Нет"
             a_goals_summary = ", ".join([f"{p} ({c})" for p, c in a_goals.items()]) if a_goals else "Нет"
@@ -3013,10 +3033,11 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             manual_cb = f"cb_report_choice_manual_{match_id}"
 
             keyboard = [
-                [InlineKeyboardButton("✅ Всё верно (Сохранить и занести результат)", callback_data=f"cb_confirm_ai_final_{match_id}")],
                 [InlineKeyboardButton("✏️ Изменить вручную", callback_data=manual_cb)],
                 [InlineKeyboardButton("❌ Отмена", callback_data=cancel_cb)]
             ]
+            if not excess_line:
+                keyboard.insert(0, [InlineKeyboardButton("✅ Всё верно (Сохранить и занести результат)", callback_data=f"cb_confirm_ai_final_{match_id}")])
             markup = InlineKeyboardMarkup(keyboard)
 
             photo_to_show = photos_list[0] if photos_list else context.user_data.get("report_photo_id")

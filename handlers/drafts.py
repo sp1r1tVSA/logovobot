@@ -158,7 +158,16 @@ async def _process_draft_group_delayed(buffer_key: str, update: Update, context:
             "личные сообщения бота: счёт основного времени и авторов голов с игры."
         )
         return
-    
+
+    if any(m.get("ocr_goals_exceed_score") for m in matches_list):
+        # Голов больше, чем на табло: ИИ перепутал колонки «Г»/«А». Ниже счёт
+        # подтянулся бы под число голов — такой черновик публиковать нельзя.
+        await status_msg.edit_text(
+            "⛔ ИИ прочитал со скриншота больше голов, чем показывает счёт. Такой "
+            "результат занесите вручную через личные сообщения бота."
+        )
+        return
+
     # 1. Determine team names (by player names / squads first, then fallback to OCR / caption)
     s1_all_p = (matches_list[0].get("side1_goals") or matches_list[0].get("left_goals") or []) + \
                (matches_list[0].get("side1_assists") or matches_list[0].get("left_assists") or [])

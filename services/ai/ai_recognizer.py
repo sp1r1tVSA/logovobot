@@ -297,6 +297,10 @@ PROMPT_TEXT = """
    - Запиши ВСЕ строки каждой таблицы от шапки до самой нижней, включая строку над кнопками.
    - Количество элементов в `left_rows` и `right_rows` обычно одинаковое — пересчитай.
    - Сумма голов НЕ обязана совпадать со счётом — не подгоняй её (см. про прокрутку выше).
+   - Но БОЛЬШЕ счёта она не бывает НИКОГДА: скрытые строки только добавляют голы.
+     Если у команды со счётом 1 в `digits` колонки `Г` набралось 2 гола — ты взял цифру
+     из колонки `А` или из соседней строки. Перечитай эту таблицу по заголовкам.
+     То же для ассистов: их не больше счёта, и игрок не ассистирует сам себе.
 
 6. **ДВА СКРИНШОТА ОДНОЙ ТАБЛИЦЫ (ПРОКРУТКА):**
    - Если прислано 2 скриншота одной игры (верх и низ состава), объедини их строки в один
@@ -424,11 +428,15 @@ def validate_and_sanitize_match_events(m: dict) -> None:
                 assists.pop()
 
     # Goal/score reconciliation: a short goal list means a table row was missed.
+    # A long one cannot be explained by scrolling — hidden rows only ever add
+    # goals — so the reading itself is wrong and must not be saved as is.
     mismatches = []
     for side, score in (("left", left_score), ("right", right_score)):
         n_goals = len(m.get(f"{side}_goals") or [])
         if score > 0 and n_goals != score:
             mismatches.append(f"{side}: {n_goals} goal(s) vs score {score}")
+        if score > 0 and n_goals > score:
+            m["ocr_goals_exceed_score"] = True
     if mismatches:
         m["ocr_needs_review"] = True
         logger.warning(
@@ -722,6 +730,7 @@ def recognize_match_screenshots_bytes(
     payload_bytes = json.dumps(payload).encode("utf-8")
     base_url = os.environ.get("GEMINI_BASE_URL", "https://generativelanguage.googleapis.com").rstrip("/")
 
+    impossible_result = None
     for m_name in get_ordered_ocr_models():
         for target_api_key in keys_to_try:
             try:
@@ -841,6 +850,16 @@ def recognize_match_screenshots_bytes(
                         f"AI Vision ({m_name}) recognized {len(matches_list)} match(es): "
                         + ", ".join([f"{m.get('left_score')}-{m.get('right_score')}" for m in matches_list])
                     )
+                    if any(m.get("ocr_goals_exceed_score") for m in matches_list):
+                        # Больше голов, чем на табло, — чтение заведомо ошибочное.
+                        # Другая модель часто читает таблицу верно; если нет —
+                        # вернём первый ответ с флагом, и его внесут вручную.
+                        if impossible_result is None:
+                            impossible_result = parsed_data
+                        logger.warning(
+                            f"AI Vision ({m_name}): more goals than the score, trying next model"
+                        )
+                        break
                     return parsed_data
                 else:
                     logger.warning(f"Gemini model '{m_name}' returned no candidates: {res_json}")
@@ -861,6 +880,8 @@ def recognize_match_screenshots_bytes(
                 logger.exception(f"Gemini model '{m_name}' recognition error: {e}")
                 continue
 
+    if impossible_result is not None:
+        return impossible_result
     logger.error("All Gemini Vision fallback models and keys failed or were rate-limited.")
     return None
 
