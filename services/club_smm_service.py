@@ -81,6 +81,36 @@ ROUTER_BUDGET_SECONDS = 30
 
 _openrouter_cooldowns: dict[str, float] = {}   # модель → time.monotonic(), до которого её пропускаем
 
+# Суточный лимит бесплатных запросов (free-models-per-day, 50 на аккаунт без кредитов) общий для ВСЕХ
+# :free-моделей и openrouter/free: после него дальше пробовать бессмысленно до сброса.
+DAILY_LIMIT_MARKER = "free-models-per-day"
+_free_quota_blocked_until = 0.0   # time.monotonic()
+_RATELIMIT_RESET_RE = re.compile(r'"X-RateLimit-Reset"\s*:\s*"?(\d{10,13})')
+
+
+def _is_free_model(model: str) -> bool:
+    return model.endswith(":free") or model == ROUTER_MODEL
+
+
+def _free_quota_blocked() -> bool:
+    return time.monotonic() < _free_quota_blocked_until
+
+
+def _block_free_models_until_reset(detail: str) -> float:
+    """Отключает все бесплатные модели до сброса суточного лимита; возвращает паузу в секундах."""
+    global _free_quota_blocked_until
+    seconds = 0.0
+    m = _RATELIMIT_RESET_RE.search(detail or "")
+    if m:
+        reset = int(m.group(1))
+        reset = reset / 1000 if reset > 10 ** 11 else reset   # миллисекунды или секунды
+        seconds = reset - time.time()
+    if not 0 < seconds <= 24 * 3600:
+        seconds = 86400 - time.time() % 86400   # лимит OpenRouter сбрасывается в 00:00 UTC
+    with _openrouter_lock:
+        _free_quota_blocked_until = time.monotonic() + seconds
+    return seconds
+
 
 def _cool_down_openrouter(model: str, seconds: float) -> None:
     with _openrouter_lock:
@@ -1010,6 +1040,8 @@ def _run_openrouter_chain(
     deadline = time.monotonic() + budget_seconds
 
     for model in models:
+        if _is_free_model(model) and _free_quota_blocked():
+            continue
         data = None
         with_reasoning = True
         for _attempt in range(2):   # второй заход — только после «Reasoning is mandatory»
@@ -1029,9 +1061,18 @@ def _run_openrouter_chain(
                     break
                 detail = ""
                 try:
-                    detail = e.read().decode("utf-8", "replace")[:200].replace("\n", " ")
+                    detail = e.read().decode("utf-8", "replace").replace("\n", " ")
                 except Exception:
                     pass
+                if e.code == 429 and DAILY_LIMIT_MARKER in detail and _is_free_model(model):
+                    wait = _block_free_models_until_reset(detail)
+                    logger.warning(
+                        f"OpenRouter SMM: суточный лимит бесплатных запросов исчерпан, "
+                        f"бесплатные модели отключены на {wait / 3600:.1f} ч (до сброса). "
+                        f"Кредиты на аккаунте OpenRouter снимают лимит."
+                    )
+                    break
+                detail = detail[:200]
                 if e.code == 400 and with_reasoning and "reasoning" in detail.lower():
                     # openrouter/free: «Reasoning is mandatory for this endpoint and cannot be disabled»
                     logger.info(f"OpenRouter SMM: model '{model}' rejects reasoning=none, retrying without it")
@@ -1070,7 +1111,7 @@ def _call_openrouter_text(system_text: str, user_text: str, max_tokens: int) -> 
 def _call_openrouter_router_text(system_text: str, user_text: str, max_tokens: int) -> tuple[str | None, str | None]:
     """Последний шанс: маршрутизатор openrouter/free. Каждый раз другая модель, нередко слабая,
     поэтому его зовём только после Gemini."""
-    if ROUTER_MODEL in _dead_openrouter_models:
+    if ROUTER_MODEL in _dead_openrouter_models or _free_quota_blocked():
         return None, None
     return _run_openrouter_chain([ROUTER_MODEL], system_text, user_text, max_tokens, ROUTER_BUDGET_SECONDS)
 

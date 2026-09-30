@@ -457,6 +457,43 @@ class TestOpenRouterRobustness(unittest.TestCase):
         self.assertIn("reasoning", payloads[0])
         self.assertNotIn("reasoning", payloads[1])
 
+    def test_daily_free_limit_switches_off_every_free_model(self):
+        import time
+        import urllib.error
+        S = club_smm_service
+        reset_ms = int((time.time() + 3 * 3600) * 1000)
+        body = ('{"error":{"message":"Rate limit exceeded: free-models-per-day. Add 10 credits","code":429,'
+                '"metadata":{"headers":{"X-RateLimit-Limit":"50","X-RateLimit-Remaining":"0",'
+                '"X-RateLimit-Reset":"%d"}}}}' % reset_ms)
+        calls = []
+
+        def fake_urlopen(req, timeout=0):
+            calls.append(json.loads(req.data.decode("utf-8"))["model"])
+            raise urllib.error.HTTPError("http://x", 429, "Too Many", {}, io.BytesIO(body.encode("utf-8")))
+
+        with patch.object(config, "OPENROUTER_API_KEY", "k"), \
+             patch.object(config, "OPENROUTER_SMM_MODELS", ["m/a:free", "m/b:free", "openrouter/free"]), \
+             patch.object(S, "_free_quota_blocked_until", 0.0), \
+             patch.dict(S._openrouter_cooldowns, {}, clear=True), \
+             patch("urllib.request.urlopen", side_effect=fake_urlopen):
+            self.assertEqual(S._call_openrouter_text("s", "u", 100), (None, None))
+            # один запрос дал 429 на лимит — остальные бесплатные модели даже не пробуются
+            self.assertEqual(calls, ["m/a:free"])
+            self.assertTrue(S._free_quota_blocked())
+            # до сброса ≈3 часа (из X-RateLimit-Reset)
+            self.assertAlmostEqual(S._free_quota_blocked_until - time.monotonic(), 3 * 3600, delta=30)
+            # и маршрутизатор тоже не зовётся
+            self.assertEqual(REAL_ROUTER_CALL("s", "u", 100), (None, None))
+            self.assertEqual(calls, ["m/a:free"])
+
+    def test_daily_limit_without_reset_header_waits_until_utc_midnight(self):
+        import time
+        S = club_smm_service
+        with patch.object(S, "_free_quota_blocked_until", 0.0):
+            wait = S._block_free_models_until_reset('{"error":{"message":"free-models-per-day"}}')
+        self.assertTrue(0 < wait <= 86400)
+        self.assertAlmostEqual(wait, 86400 - time.time() % 86400, delta=5)
+
     def test_other_400_is_not_retried(self):
         import urllib.error
         S = club_smm_service
