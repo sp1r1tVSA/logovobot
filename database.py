@@ -5763,6 +5763,14 @@ def save_published_club_smm_post(
         return 0
     with transaction() as conn:
         cursor = conn.cursor()
+        if message_id is not None:
+            cursor.execute(
+                "SELECT id FROM club_smm_posts WHERE channel_id = ? AND message_id = ?",
+                (str(channel_id), message_id)
+            )
+            existing = cursor.fetchone()
+            if existing:
+                return existing["id"]
         cursor.execute("""
             INSERT INTO club_smm_posts (
                 team_name, channel_id, message_id, post_type, post_text, media_mode, created_at
@@ -18000,6 +18008,7 @@ def delete_draft(draft_uuid: str) -> None:
 
 MIGRATION_028_OUTRIGHTS = "028_outright_markets"
 MIGRATION_029_FREEBETS = "029_freebets"
+MIGRATION_030_CLUB_SMM_POSTS = "030_club_smm_posts"
 OUTRIGHT_MARKET_TYPES = ("division_winner", "cup_winner", "division_top_scorer", "league_top_scorer")
 OUTRIGHT_OTHER_KEY = "__other__"
 MAX_OPEN_OUTRIGHT_BETS = 20
@@ -18140,6 +18149,30 @@ def _ensure_freebets(cursor: sqlite3.Cursor) -> None:
     cursor.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
         (MIGRATION_029_FREEBETS, "freebets: user_freebets table + achievements_catalog.reward_freebet"),
+    )
+
+
+def _ensure_club_smm_schema(cursor: sqlite3.Cursor) -> None:
+    """Миграция 030: история опубликованных постов клубного SMM-центра для контекста и хронологии."""
+    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (MIGRATION_030_CLUB_SMM_POSTS,))
+    if cursor.fetchone():
+        return
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS club_smm_posts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            team_name TEXT NOT NULL,
+            channel_id TEXT NOT NULL,
+            message_id INTEGER,
+            post_type TEXT,
+            post_text TEXT NOT NULL,
+            media_mode TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_club_smm_posts_team_id ON club_smm_posts(team_name, id DESC)")
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_030_CLUB_SMM_POSTS, "club_smm_posts: history of club channel publications for SMM context"),
     )
 
 

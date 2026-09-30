@@ -267,6 +267,8 @@ def get_club_smm_payload(team_name: str) -> dict:
                     if ev["event_type"] == "goal":
                         opp_goals.append({"player": p_name, "count": cnt})
 
+            mvp_data = database.resolve_match_mvp(cursor, m_id, m_row["mvp_player"], canon, opponent)
+
             last_match_data = {
                 "match_id": m_id,
                 "round": m_row["round_number"],
@@ -277,6 +279,7 @@ def get_club_smm_payload(team_name: str) -> dict:
                 "opp_score": opp_score,
                 "result": result_type,
                 "mvp_player": m_row["mvp_player"],
+                "mvp": mvp_data,
                 "club_goals": my_goals,
                 "club_assists": my_assists,
                 "opp_goals": opp_goals,
@@ -322,6 +325,11 @@ def get_club_smm_payload(team_name: str) -> dict:
                 "scheduled_time": next_row["match_time"],
             }
 
+    recent_matches = database.get_team_recent_matches(canon, limit=5)
+    recent_posts = database.get_recent_club_smm_posts(canon, limit=5)
+    streak_context = _compute_streak_context(recent_matches, canon)
+    full_squad = database.get_squad(canon)
+
     is_besiktas = "бешикташ" in canon.lower() or "besiktas" in canon.lower()
     club_identity = {
         "name": canon,
@@ -340,14 +348,132 @@ def get_club_smm_payload(team_name: str) -> dict:
         },
         "standings": card_data.get("league_stats"),
         "recent_form": card_data.get("recent_form", []),
+        "recent_matches": recent_matches,
+        "recent_channel_posts": recent_posts,
+        "streak_context": streak_context,
         "cup": card_data.get("cup_stats"),
         "top_scorers": card_data.get("top_scorers", []),
         "top_assists": card_data.get("top_assists", []),
-        "squad_sample": (card_data.get("squad") or [])[:12],
+        "full_squad": full_squad,
+        "squad_sample": full_squad[:15] if full_squad else (card_data.get("squad") or [])[:15],
         "last_match": last_match_data,
         "next_match": next_match_data,
         "generated_at": now_msk_str(),
     }
+
+
+def _compute_streak_context(recent_matches: list[dict], team_name: str) -> str:
+    """Формирует текстовое описание серии и турнирного тренда по истории последних матчей."""
+    if not recent_matches:
+        return "Сезон только начинается, сыгранных матчей пока нет."
+
+    total_played = len(recent_matches)
+    wins = sum(1 for m in recent_matches if m.get("result") == "win")
+    draws = sum(1 for m in recent_matches if m.get("result") == "draw")
+    losses = sum(1 for m in recent_matches if m.get("result") == "loss")
+
+    last_res = recent_matches[0].get("result")
+
+    if total_played == 1:
+        if last_res == "win":
+            return "Успешный старт турнира: уверенная победа в первом матче."
+        elif last_res == "draw":
+            return "Старт турнира: боевая ничья в первом матче."
+        else:
+            return "Первый матч сезона завершился поражением, вся борьба впереди."
+
+    prior_matches = recent_matches[1:]
+    prior_wins = 0
+    for m in prior_matches:
+        if m.get("result") == "win":
+            prior_wins += 1
+        else:
+            break
+
+    prior_unbeaten = 0
+    for m in prior_matches:
+        if m.get("result") in ("win", "draw"):
+            prior_unbeaten += 1
+        else:
+            break
+
+    if last_res == "loss":
+        if prior_wins >= 2:
+            return f"Обидное прерывание победной серии: до этого матча было {prior_wins} победы подряд (всего за {total_played} игр: В:{wins}, Н:{draws}, П:{losses})."
+        elif prior_unbeaten >= 2:
+            return f"Первое поражение после беспроигрышной серии из {prior_unbeaten} матчей (всего за {total_played} игр: В:{wins}, Н:{draws}, П:{losses})."
+        else:
+            return f"Турнирный отрезок из {total_played} матчей: {wins} побед, {draws} ничьих, {losses} поражений."
+    elif last_res == "win":
+        current_win_streak = 0
+        for m in recent_matches:
+            if m.get("result") == "win":
+                current_win_streak += 1
+            else:
+                break
+        if current_win_streak >= 2:
+            return f"Победная серия продолжается: {current_win_streak} победы подряд (всего за {total_played} игр: В:{wins}, Н:{draws}, П:{losses})!"
+        else:
+            return f"Важная победа! Итоги последних {total_played} встреч: {wins} побед, {draws} ничьих, {losses} поражений."
+    else:
+        return f"Боевая ничья. Баланс последних {total_played} встреч: {wins} побед, {draws} ничьих, {losses} поражений."
+
+
+def _format_recent_context_for_prompt(payload: dict) -> str:
+    """Формирует текстовый блок хронологии постов и истории матчей для промпта LLM."""
+    sections = []
+
+    # 1. Хронология постов с канала
+    channel_posts = payload.get("recent_channel_posts") or []
+    if channel_posts:
+        p_lines = [
+            "📜 ХРОНОЛОГИЯ ПОСЛЕДНИХ ПУБЛИКАЦИЙ В КАНАЛЕ КЛУБА:",
+            "(ОБЯЗАТЕЛЬНО учитывай эти публикации: не повторяй одинаковые фразы, заходы и заголовки, развивай общую сюжетную линию канала!):"
+        ]
+        for i, p in enumerate(channel_posts[:4], 1):
+            date_str = (p.get("created_at") or "")[:16]
+            ptype = p.get("post_type", "пост")
+            snippet = (p.get("text") or "").replace("\n", " ").strip()
+            if len(snippet) > 130:
+                snippet = snippet[:130] + "…"
+            p_lines.append(f"  {i}. [{date_str}] ({ptype}): «{snippet}»")
+        sections.append("\n".join(p_lines))
+    else:
+        sections.append("📜 ХРОНОЛОГИЯ КАНАЛА: В базе пока нет предыдущих сохранённых публикаций канала.")
+
+    # 2. История последних матчей
+    recent_matches = payload.get("recent_matches") or []
+    club_name = payload.get("club", {}).get("name", "Клуб")
+    if recent_matches:
+        m_lines = [
+            "📅 ИСТОРИЯ ПОСЛЕДНИХ МАТЧЕЙ (ТУРНИРНЫЙ КОНТЕКСТ):",
+            "(Используй эти факты в посте: упоминай динамику турнира, серию побед или прерывание серии, а не просто голый счёт):"
+        ]
+        for m in recent_matches[:4]:
+            t_type = "Лига" if m.get("tournament_type") == "league" else "Кубок"
+            round_label = f"Тур {m.get('round')}" if m.get("round") else (m.get("cup_stage") or "Матч")
+            res_ru = "Победа" if m.get("result") == "win" else ("Ничья" if m.get("result") == "draw" else "Поражение")
+            scorers_list = [f"{g['player']}" if g.get('count', 1) == 1 else f"{g['player']} ({g.get('count')})" for g in m.get("club_goals", [])]
+            sc_str = f" | Голы {club_name}: {', '.join(scorers_list)}" if scorers_list else ""
+            mvp_info = ""
+            if m.get("mvp"):
+                mvp_obj = m["mvp"]
+                team_lbl = f"наш {club_name}" if mvp_obj.get("is_our_club") else f"соперник {mvp_obj.get('team')}"
+                mvp_info = f" | MVP: {mvp_obj.get('name')} ({team_lbl})"
+            m_lines.append(f"  • {round_label} ({t_type}): {m.get('my_score')}:{m.get('opp_score')} vs {m.get('opponent')} — {res_ru}{sc_str}{mvp_info}")
+
+        streak_desc = payload.get("streak_context")
+        if streak_desc:
+            m_lines.append(f"  Турнирный тренд: {streak_desc}")
+        sections.append("\n".join(m_lines))
+
+    # 3. Полный состав команды
+    full_squad = payload.get("full_squad") or []
+    if full_squad:
+        squad_str = ", ".join(full_squad[:25])
+        sections.append(f"👥 СОСТАВ НАШЕГО КЛУБА ({club_name}):\n{squad_str}\n(ВНИМАНИЕ: только эти игроки играют за {club_name}! Любые другие фамилии — это игроки соперников!)")
+
+    return "\n\n".join(sections)
 
 
 # ─── Промпты для текстовых моделей ──────────────────────────────────────────
@@ -362,6 +488,12 @@ _SMM_BASE_INSTRUCTION = (
     "- Основной текст: ровно ОДИН плотный энергичный абзац (3-4 коротких предложения, суммарно около 300-400 символов). "
     "Никаких длинных сочинений, списков, пунктов или рассуждений.\n"
     "- В конце: 2-3 хэштега через пробел (например: {club_hashtags}).\n\n"
+    "ПРИНАДЛЕЖНОСТЬ ИГРОКОВ И ПРАВИЛО MVP (КАТЕГОРИЧЕСКИ СТРОГО):\n"
+    "- Наш клуб — {club_name}. Публикуй посты строго с позиции интересов и гордости за {club_name}!\n"
+    "- Всегда чётко разделяй наших футболистов и игроков соперника. Игроки нашего клуба перечислены в блоке состава.\n"
+    "- Если MVP матча признан игрок СОПЕРНИКА: КАТЕГОРИЧЕСКИ ЗАПРЕЩЕНО называть его «нашим», хвалить его от лица нашего клуба или приписывать ему победу! В посте нашего канала пиши исключительно о НАШИХ футболистах (голы, ассисты, характер борьбы). Про игрока соперника либо не пиши вовсе, либо упомяни только в контексте соперника.\n"
+    "- При поражении команды ЗАПРЕЩЕНО писать о победных эмоциях или радости. Пиши с боевой горечью, отдавая должное характеру парней и настраивая на реванш в следующих турах.\n"
+    "- Опирайся на историю предыдущих матчей и хронологию постов в канале: не пиши матч в вакууме, связывай его с динамикой турнира (победная серия, первое поражение, подъем в таблице).\n\n"
     "ТОНАЛЬНОСТЬ И СТИЛЬ:\n"
     "- Боевой, страстный, фанатский, энергичный дух («Вперёд, Орлы!», «Только победа!»).\n"
     "- Живой спортивный язык без канцелярита.\n"
@@ -369,7 +501,7 @@ _SMM_BASE_INSTRUCTION = (
     "ФОРМАТИРОВАНИЕ:\n"
     "- Используй ТОЛЬКО Telegram HTML: <b>жирный</b>, <i>курсив</i>, <code>код</code>. "
     "Никакого Markdown! Запрещены символы ** и решётки # в качестве заголовков.\n"
-    "- Достоверность: используй ТОЛЬКО те цифры, авторов голов, счёта и соперников, которые переданы в JSON. "
+    "- Достоверность: используй ТОЛЬКО те цифры, авторов голов, счёта и соперников, которые переданы в данных. "
     "Ничего не выдумывай от себя.\n"
     "- СТРОГО: выдавай СРАЗУ готовый текст поста для Telegram-канала без каких-либо служебных пояснений, мыслей и вступительных слов.\n"
 )
@@ -392,22 +524,65 @@ def _build_system_instruction(payload: dict) -> str:
     )
 
 
-def _get_task_instruction(post_type: str, custom_brief: str = "", for_caption: bool = False) -> str:
+def _get_task_instruction(post_type: str, custom_brief: str = "", for_caption: bool = False, payload: dict = None) -> str:
     format_rule = (
         "ТРЕБОВАНИЕ К ФОРМАТУ: 1 строка заголовок -> 1 плотный абзац (3-4 предложения, до 350-400 символов) -> хэштеги. "
         "Пиши сразу готовый текст поста."
     )
 
     if post_type == "matchday":
+        next_m = (payload or {}).get("next_match")
+        opp_str = f" против {next_m['opponent']}" if next_m and next_m.get("opponent") else ""
         return (
-            "ЗАДАЧА: Напиши короткий боевой анонс MATCHDAY.\n"
-            "Суть: соперник, турнир, важность победы и призыв поддержать орлов.\n"
+            f"ЗАДАЧА: Напиши короткий боевой анонс MATCHDAY{opp_str}.\n"
+            "Суть: соперник, турнир, важность победы, турнирный контекст и призыв поддержать команду.\n"
             f"{format_rule}"
         )
     elif post_type == "recap":
+        last_m = (payload or {}).get("last_match")
+        if last_m:
+            res = last_m.get("result", "win")
+            opp = last_m.get("opponent", "соперник")
+            my_sc = last_m.get("my_score", 0)
+            opp_sc = last_m.get("opp_score", 0)
+            scorers_list = [f"{g['player']}" if g.get('count', 1) == 1 else f"{g['player']} ({g.get('count')})" for g in last_m.get("club_goals", [])]
+            scorers = ", ".join(scorers_list) or "команда"
+
+            mvp_info = ""
+            mvp_obj = last_m.get("mvp")
+            if mvp_obj and mvp_obj.get("name"):
+                if mvp_obj.get("is_our_club"):
+                    mvp_info = f"\n⭐ MVP встречи: НАШ игрок {mvp_obj['name']} — обязательно отметь его яркую игру!"
+                else:
+                    mvp_info = (
+                        f"\n⚠️ ВНИМАНИЕ: MVP встречи получил игрок СОПЕРНИКА {mvp_obj['name']} ({mvp_obj.get('team', opp)}). "
+                        f"СТРОГО: {mvp_obj['name']} — футболист соперника, он НЕ играет за наш клуб! "
+                        f"Категорически запрещено называть его нашим или хвалить как своего. В посте пиши только о наших ребятах (голы: {scorers})."
+                    )
+
+            if res == "loss":
+                return (
+                    f"ЗАДАЧА: Напиши боевой обзор сыгранного матча (поражение {my_sc}:{opp_sc} против {opp}).\n"
+                    f"Суть: обидный результат, яркая игра наших футболистов (голы: {scorers}), несгибаемый бойцовский характер и решимость взять реванш в следующих матчах. "
+                    f"СТРОГО: никаких «победных эмоций» и эйфории!{mvp_info}\n"
+                    f"{format_rule}"
+                )
+            elif res == "draw":
+                return (
+                    f"ЗАДАЧА: Напиши обзор упорной боевой ничьей ({my_sc}:{opp_sc} против {opp}).\n"
+                    f"Суть: тяжелейшая борьба за очки, авторы наших голов ({scorers}), характер и выводы перед следующим туром.{mvp_info}\n"
+                    f"{format_rule}"
+                )
+            else:
+                return (
+                    f"ЗАДАЧА: Напиши победный обзор матча (победа {my_sc}:{opp_sc} против {opp})!\n"
+                    f"Суть: победные эмоции, авторы голов ({scorers}), доминирование и уверенность.{mvp_info}\n"
+                    f"{format_rule}"
+                )
+
         return (
             "ЗАДАЧА: Напиши короткие итоги последнего матча.\n"
-            "Суть: итоговый счёт, кто забил/MVP и победные эмоции команды.\n"
+            "Суть: итоговый счёт, кто забил у нас, эмоции команды по итогам игры.\n"
             f"{format_rule}"
         )
     elif post_type == "standings":
@@ -419,7 +594,7 @@ def _get_task_instruction(post_type: str, custom_brief: str = "", for_caption: b
     elif post_type == "spotlight":
         return (
             "ЗАДАЧА: Напиши короткий пост о лидере команды.\n"
-            "Суть: имя звезды клуба, голы/ассисты и влияние на игру.\n"
+            "Суть: имя звезды нашего клуба, голы/ассисты и влияние на игру.\n"
             f"{format_rule}"
         )
     else:  # custom
@@ -620,8 +795,9 @@ def generate_club_post(
     if user_name:
         payload["request_user"] = user_name
     system_text = _build_system_instruction(payload)
-    task_text = _get_task_instruction(post_type, custom_brief, for_caption)
-    user_text = f"{task_text}\n\nАКТУАЛЬНЫЕ ДАННЫЕ КЛУБА (JSON):\n{json.dumps(payload, ensure_ascii=False)}"
+    task_text = _get_task_instruction(post_type, custom_brief, for_caption, payload=payload)
+    context_text = _format_recent_context_for_prompt(payload)
+    user_text = f"{task_text}\n\n{context_text}\n\nАКТУАЛЬНЫЕ ДАННЫЕ КЛУБА (JSON):\n{json.dumps(payload, ensure_ascii=False)}"
 
     limit = CAPTION_MAX_CHARS if for_caption else POST_MAX_CHARS
     max_tokens = 220 if for_caption else 350
@@ -810,15 +986,31 @@ def _build_fallback_post(payload: dict, post_type: str, for_caption: bool = Fals
         )
 
     if post_type == "recap" and last_m:
-        res_emoji = "✅ ПОБЕДА!" if last_m["result"] == "win" else ("🤝 НИЧЬЯ" if last_m["result"] == "draw" else "⚡ РЕЗУЛЬТАТ")
-        score_line = f"{canon} {last_m['my_score']} : {last_m['opp_score']} {last_m['opponent']}"
-        scorers = ", ".join(f"{g['player']} ({g['count']})" for g in last_m["club_goals"]) or "—"
-        mvp = f"\n⭐ <b>MVP матча:</b> {last_m['mvp_player']}" if last_m.get("mvp_player") else ""
+        res = last_m.get("result", "win")
+        res_emoji = "✅ ПОБЕДА!" if res == "win" else ("🤝 НИЧЬЯ" if res == "draw" else "⚡ РЕЗУЛЬТАТ")
+        score_line = f"{canon} {last_m.get('my_score', 0)} : {last_m.get('opp_score', 0)} {last_m.get('opponent', 'соперник')}"
+        scorers = ", ".join(f"{g['player']} ({g['count']})" if isinstance(g, dict) and g.get("count", 1) > 1 else (g['player'] if isinstance(g, dict) else str(g)) for g in last_m.get("club_goals", [])) or "—"
+        
+        mvp_info = ""
+        mvp_obj = last_m.get("mvp")
+        if isinstance(mvp_obj, dict) and mvp_obj.get("name"):
+            if mvp_obj.get("is_our_club"):
+                mvp_info = f"\n⭐ <b>MVP матча:</b> {mvp_obj['name']}"
+            else:
+                mvp_info = f"\n⭐ <b>MVP матча:</b> {mvp_obj['name']} ({mvp_obj.get('team', last_m.get('opponent', 'соперник'))})"
+        elif last_m.get("mvp_player"):
+            mvp_info = f"\n⭐ <b>MVP матча:</b> {last_m['mvp_player']}"
+
+        outro = (
+            "Парни выложились на все сто процентов. Двигаемся дальше по турнирной сетке!"
+            if res != "loss"
+            else "Обидное поражение, но впереди работа над ошибками и реванш. Только вперёд!"
+        )
         return (
             f"{emojis} <b>MATCH RECAP: {res_emoji}</b>\n\n"
             f"📊 <b>Счёт:</b> <code>{score_line}</code>\n"
-            f"⚽ <b>Голы:</b> {scorers}{mvp}\n\n"
-            f"Парни выложились на все сто процентов. Двигаемся дальше по турнирной сетке!\n\n"
+            f"⚽ <b>Голы:</b> {scorers}{mvp_info}\n\n"
+            f"{outro}\n\n"
             f"{hashtags}"
         )
 
@@ -1006,6 +1198,7 @@ def get_stage_or_round_payload(team_name: str, round_number: int | None = None, 
             """, (m_id,))
             events = cursor.fetchall()
             my_goals, my_assists = [], []
+            opp_goals = []
             for ev in events:
                 p_name = ev["player_name"]
                 cnt = ev["count"] or 1
@@ -1014,6 +1207,13 @@ def get_stage_or_round_payload(team_name: str, round_number: int | None = None, 
                         my_goals.append(f"{p_name} ({cnt})" if cnt > 1 else p_name)
                     elif ev["event_type"] == "assist":
                         my_assists.append(f"{p_name} ({cnt})" if cnt > 1 else p_name)
+                elif teams_match(ev["team_name"], opponent):
+                    if ev["event_type"] == "goal":
+                        opp_goals.append(f"{p_name} ({cnt})" if cnt > 1 else p_name)
+
+            mvp_resolved = None
+            if r["mvp_player"]:
+                mvp_resolved = database.resolve_match_mvp(cursor, m_id, r["mvp_player"], canon, opponent)
 
             matches_data.append({
                 "match_id": m_id,
@@ -1023,8 +1223,10 @@ def get_stage_or_round_payload(team_name: str, round_number: int | None = None, 
                 "opp_score": opp_score,
                 "status": r["status"],
                 "mvp_player": r["mvp_player"],
+                "mvp": mvp_resolved,
                 "club_goals": my_goals,
                 "club_assists": my_assists,
+                "opp_goals": opp_goals,
                 "date": r["match_date"],
                 "time": r["match_time"],
             })
@@ -1042,6 +1244,10 @@ def get_stage_or_round_payload(team_name: str, round_number: int | None = None, 
         "cup_stage": cup_stage,
         "matches": matches_data,
         "standings": base_payload.get("standings"),
+        "recent_matches": base_payload.get("recent_matches"),
+        "recent_channel_posts": base_payload.get("recent_channel_posts"),
+        "streak_context": base_payload.get("streak_context"),
+        "full_squad": base_payload.get("full_squad"),
     }
 
 
@@ -1104,14 +1310,45 @@ def generate_stage_post(
         # Тур чемпионата
         m = first_m
         if m["status"] in ("confirmed", "completed"):
-            res = "победа" if (m["my_score"] or 0) > (m["opp_score"] or 0) else ("ничья" if m["my_score"] == m["opp_score"] else "поражение")
+            my_sc = m["my_score"] or 0
+            opp_sc = m["opp_score"] or 0
+            res = "победа" if my_sc > opp_sc else ("ничья" if my_sc == opp_sc else "поражение")
             scorers_str = ", ".join(m["club_goals"]) or "команда"
-            mvp_str = f", MVP матча: {m['mvp_player']}" if m.get("mvp_player") else ""
-            task_text = (
-                f"ЗАДАЧА: Напиши КОРОТКИЙ обзор сыгранного Тура {round_number} против {opp}!\n"
-                f"Факты: результат — {res}, счёт {m['my_score']}:{m['opp_score']}. Авторы голов: {scorers_str}{mvp_str}.\n"
-                "ТРЕБОВАНИЕ К ФОРМАТУ: Заголовок (1 строка) -> 1 плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги. Пиши сразу готовый текст поста."
-            )
+
+            mvp_info = ""
+            mvp_obj = m.get("mvp")
+            if mvp_obj and mvp_obj.get("name"):
+                if mvp_obj.get("is_our_club"):
+                    mvp_info = f"\n⭐ MVP встречи: НАШ игрок {mvp_obj['name']} — обязательно отметь его яркую игру!"
+                else:
+                    mvp_info = (
+                        f"\n⚠️ ВНИМАНИЕ: MVP встречи получил игрок СОПЕРНИКА {mvp_obj['name']} ({mvp_obj.get('team', opp)}). "
+                        f"СТРОГО: {mvp_obj['name']} — футболист соперника, он НЕ играет за наш клуб! "
+                        f"Категорически запрещено называть его нашим или хвалить как своего. В посте пиши только о наших ребятах (голы: {scorers_str})."
+                    )
+            elif m.get("mvp_player"):
+                mvp_info = f", MVP матча: {m['mvp_player']}"
+
+            if res == "поражение":
+                task_text = (
+                    f"ЗАДАЧА: Напиши боевой обзор Тура {round_number} (поражение {my_sc}:{opp_sc} против {opp}).\n"
+                    f"Факты: обидный счёт {my_sc}:{opp_sc}, авторы наших голов: {scorers_str}. "
+                    f"Несгибаемый характер, работа над ошибками и решимость взять реванш в следующих турах. "
+                    f"СТРОГО: никаких «победных эмоций» и эйфории!{mvp_info}\n"
+                    "ТРЕБОВАНИЕ К ФОРМАТУ: Заголовок (1 строка) -> 1 плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги. Пиши сразу готовый текст поста."
+                )
+            elif res == "ничья":
+                task_text = (
+                    f"ЗАДАЧА: Напиши обзор упорной боевой ничьей в Туре {round_number} ({my_sc}:{opp_sc} против {opp}).\n"
+                    f"Факты: ничейный исход {my_sc}:{opp_sc}, авторы голов: {scorers_str}. Характер и выводы перед следующим туром.{mvp_info}\n"
+                    "ТРЕБОВАНИЕ К ФОРМАТУ: Заголовок (1 строка) -> 1 плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги. Пиши сразу готовый текст поста."
+                )
+            else:
+                task_text = (
+                    f"ЗАДАЧА: Напиши победный обзор сыгранного Тура {round_number} (победа {my_sc}:{opp_sc} против {opp})!\n"
+                    f"Факты: победа {my_sc}:{opp_sc}, авторы голов: {scorers_str}.{mvp_info}\n"
+                    "ТРЕБОВАНИЕ К ФОРМАТУ: Заголовок (1 строка) -> 1 плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги. Пиши сразу готовый текст поста."
+                )
         else:
             task_text = (
                 f"ЗАДАЧА: Напиши КОРОТКИЙ боевой анонс предстоящего Тура {round_number} против {opp}!\n"
@@ -1119,7 +1356,8 @@ def generate_stage_post(
                 "ТРЕБОВАНИЕ К ФОРМАТУ: Заголовок (1 строка) -> 1 плотный абзац (3-4 предложения, до 350 символов) -> Хэштеги. Пиши сразу готовый текст поста."
             )
 
-    user_text = f"{task_text}\n\nДАННЫЕ (JSON):\n{json.dumps(stage_payload, ensure_ascii=False)}"
+    context_text = _format_recent_context_for_prompt(stage_payload)
+    user_text = f"{task_text}\n\n{context_text}\n\nДАННЫЕ (JSON):\n{json.dumps(stage_payload, ensure_ascii=False)}"
     limit = CAPTION_MAX_CHARS if for_caption else POST_MAX_CHARS
     max_tokens = 220 if for_caption else 350
 

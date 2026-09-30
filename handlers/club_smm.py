@@ -1065,13 +1065,30 @@ async def cb_smm_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 parse_mode="HTML"
             )
 
+        # Сохраняем опубликованный пост в историю публикаций канала
+        if sent_msg is not None:
+            post_type_saved = draft.get("post_type", "custom")
+            try:
+                await asyncio.to_thread(
+                    database.save_published_club_smm_post,
+                    team_name,
+                    str(channel),
+                    sent_msg.message_id,
+                    post_type_saved,
+                    text_content,
+                    mode,
+                )
+            except Exception as save_err:
+                logger.warning(f"Club SMM: Failed to save post history: {save_err}")
+
         # Формирование прямой ссылки на пост
         post_link = None
-        if channel.startswith("@"):
-            post_link = f"https://t.me/{channel.lstrip('@')}/{sent_msg.message_id}"
-        elif str(channel).startswith("-100"):
-            clean_id = str(channel)[4:]
-            post_link = f"https://t.me/c/{clean_id}/{sent_msg.message_id}"
+        if sent_msg is not None:
+            if channel.startswith("@"):
+                post_link = f"https://t.me/{channel.lstrip('@')}/{sent_msg.message_id}"
+            elif str(channel).startswith("-100"):
+                clean_id = str(channel)[4:]
+                post_link = f"https://t.me/c/{clean_id}/{sent_msg.message_id}"
 
         success_text = f"✅ <b>Пост успешно опубликован в канале!</b>"
         keyboard = []
@@ -1103,3 +1120,53 @@ async def cancel_smm_flow(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.callback_query.answer()
     await cmd_smm_hub(update, context)
     return ConversationHandler.END
+
+async def on_channel_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    Перехватывает сообщения, опубликованные напрямую в привязанном канале клуба
+    (не через SMM-центр), и сохраняет их в историю публикаций club_smm_posts.
+    Это позволяет ИИ при следующей генерации видеть хронологию всех постов в канале,
+    включая написанные вручную.
+    """
+    msg = update.channel_post or update.message
+    if not msg:
+        return
+
+    # Обрабатываем только посты из нашего привязанного канала
+    channel = get_target_channel()
+    if not channel:
+        return
+
+    chat = update.effective_chat
+    if not chat:
+        return
+
+    # Сопоставляем канал: @username или -100... ID
+    chat_match = False
+    if channel.startswith("@") and chat.username and f"@{chat.username}" == channel:
+        chat_match = True
+    elif str(chat.id) == str(channel):
+        chat_match = True
+
+    if not chat_match:
+        return
+
+    text = msg.text or msg.caption or ""
+    if not text.strip():
+        return
+
+    # Определяем команду клуба по каналу
+    team_name = database.get_config("my_club_team") or "Бешикташ"
+
+    try:
+        await asyncio.to_thread(
+            database.save_published_club_smm_post,
+            team_name,
+            str(chat.id),
+            msg.message_id,
+            "channel_post",
+            text,
+            None,
+        )
+    except Exception as e:
+        logger.debug(f"Club SMM on_channel_post: failed to save: {e}")

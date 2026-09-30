@@ -306,6 +306,7 @@ from handlers.club_smm import (
     handle_photo_input_invalid,
     cb_smm_remove_photo,
     cb_smm_attach_match_photos,
+    on_channel_post,
     SMM_STATE_WAIT_PROMPT,
     SMM_STATE_WAIT_EDIT,
     SMM_STATE_WAIT_CHANNEL,
@@ -646,6 +647,8 @@ def _register_cabinet_handlers(app: Application) -> None:
         conversation_timeout=300
     )
     app.add_handler(smm_conv)
+    # Перехват постов, опубликованных напрямую в канале клуба (не через SMM-центр)
+    app.add_handler(MessageHandler(filters.ChatType.CHANNEL, on_channel_post))
 
 def _register_admin_handlers(app: Application) -> None:
     """Register administrator panel, tournament management, and dispute resolution handlers."""
