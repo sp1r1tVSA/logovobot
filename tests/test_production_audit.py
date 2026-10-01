@@ -472,9 +472,32 @@ class _AuditIndex:
                         scope.setdefault(target.id, []).append(node.value)
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name) and node.value:
                 scope.setdefault(node.target.id, []).append(node.value)
+            elif isinstance(node, (ast.For, ast.AsyncFor, ast.comprehension)):
+                self._bind_loop(scope, node.target, node.iter)
 
         self._scopes[id(func)] = scope
         return scope
+
+    def _bind_loop(self, scope, target, iterable):
+        """`for pat, cb in ROUTES:` над литеральной таблицей кортежей.
+
+        Так регистрирует свои кнопки SMM-центр (SMM_BUTTON_ROUTES): без этого
+        переменная цикла непрозрачна и все его паттерны выпадали из аудита.
+        """
+        tables = [iterable]
+        if isinstance(iterable, ast.Name):
+            tables = self.consts.get(iterable.id) or []
+        for table in tables:
+            if not isinstance(table, (ast.List, ast.Tuple)):
+                continue
+            for row in table.elts:
+                if isinstance(target, ast.Name):
+                    scope.setdefault(target.id, []).append(row)
+                elif (isinstance(target, ast.Tuple) and isinstance(row, ast.Tuple)
+                        and len(target.elts) == len(row.elts)):
+                    for name, value in zip(target.elts, row.elts):
+                        if isinstance(name, ast.Name):
+                            scope.setdefault(name.id, []).append(value)
 
 
 def _audit_union(left, right):
