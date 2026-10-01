@@ -166,6 +166,18 @@ def frozen_seconds(match: Mapping[str, Any], now: _dt.datetime) -> float:
     return max(0.0, total)
 
 
+def match_clock(match: Mapping[str, Any], now: _dt.datetime) -> _dt.datetime:
+    """Часы матча: `now` минус время, которое матч простоял замороженным.
+
+    Заморозка сдвигает все сроки матча, и дедлайн тура в том числе: матч,
+    замороженный ДО дедлайна (клуб исключённого игрока ждёт замену), станет
+    долгом на столько же позже, и новый тренер получит ровно тот остаток, что
+    был у клуба в момент исключения. Для заморозки, начатой уже после дедлайна
+    (продление долга), ничего не меняется: `deadline + frozen <= now` по-прежнему.
+    """
+    return now - _dt.timedelta(seconds=frozen_seconds(match, now))
+
+
 def effective_escalate_at(terms: DebtTerms, frozen: float) -> _dt.datetime:
     """Заморозка и продление сдвигают эскалацию ровно на замороженное время."""
     return terms.escalate_at + _dt.timedelta(seconds=frozen)
@@ -243,14 +255,15 @@ def is_debt(
 
     Статус матча здесь не главный: функцию зовут и после внесения результата,
     чтобы понять, положена ли награда за сыгранный долг. Поэтому матч, сыгранный
-    до того, как стал долгом, долгом не считается.
+    до того, как стал долгом, долгом не считается. Дедлайн тура сдвигается на
+    время заморозки матча (`match_clock`); сыгранный матч меряется часами на
+    момент игры, иначе матч, сыгранный в сдвинутое окно, позже стал бы долгом.
     """
     if debt_row is not None:
         return True
-    terms = debt_terms(round_row, now)
-    if terms is None:
-        return False
-    if _get(match, "status", "pending") == "pending":
-        return True
     played_at = parse_msk(_get(match, "played_at"))
-    return played_at is None or played_at >= terms.became_debt_at
+    if _get(match, "status", "pending") == "pending" or played_at is None:
+        return debt_terms(round_row, match_clock(match, now)) is not None
+    clock = match_clock(match, played_at)
+    terms = debt_terms(round_row, clock)
+    return terms is not None and clock >= terms.became_debt_at

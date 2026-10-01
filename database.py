@@ -944,6 +944,10 @@ def init_db() -> None:
             # и `settlement_engine`, что и рынки на матч: «счёт» заголовка — победы
             # в серии. Каждому читателю реальных игр такая строка не видна.
             ("is_series_header", "INTEGER NOT NULL DEFAULT 0"),
+            # Матч заморожен, потому что его клуб остался без тренера (игрок
+            # исключён по варнам). Снимается, когда клуб получает нового тренера
+            # (`set_player_club`); заморозки админа (продления) флаг не несут.
+            ("vacancy_frozen", "INTEGER NOT NULL DEFAULT 0"),
         )
         for col_name, col_type in SAFE_COLUMNS:
             try:
@@ -4754,6 +4758,71 @@ def _apply_freeze_state(cursor: sqlite3.Cursor, match_id: int, new_val: int) -> 
         )
 
 
+_CLUB_PENDING_MATCHES_SQL = (
+    "SELECT id, player1_team, player2_team FROM matches "
+    "WHERE status = 'pending' AND COALESCE(is_series_header, 0) = 0 "
+    "AND (LOWER(TRIM(player1_team)) = LOWER(TRIM(?)) OR LOWER(TRIM(player2_team)) = LOWER(TRIM(?)))"
+)
+
+
+def _freeze_vacant_club_matches(cursor: sqlite3.Cursor, club: str) -> int:
+    """Заморозить несыгранные матчи клуба, оставшегося без тренера.
+
+    Лига и кубок одинаково: играть их некому, пока клуб не получит замену. Матч
+    заморожен бессрочно — продление админа, если оно шло, поглощается
+    (`extended_until` снимается, иначе трекер разморозил бы матч по его истечении).
+    Сторона клуба теряет `player*_id`: матч больше не принадлежит исключённому,
+    и ни варн за вердикт, ни ЛС о долге ему не уйдут. Ставки и рынки не трогаются —
+    они ждут результата. Возвращает число замороженных матчей.
+    """
+    if not club or not club.strip():
+        return 0
+    cursor.execute(_CLUB_PENDING_MATCHES_SQL, (club, club))
+    rows = cursor.fetchall()
+    key = club.strip().lower()
+    for row in rows:
+        _apply_freeze_state(cursor, row["id"], 1)
+        cursor.execute(
+            "UPDATE matches SET vacancy_frozen = 1, extended_until = NULL WHERE id = ?",
+            (row["id"],)
+        )
+        if (row["player1_team"] or "").strip().lower() == key:
+            cursor.execute("UPDATE matches SET player1_id = NULL WHERE id = ?", (row["id"],))
+        if (row["player2_team"] or "").strip().lower() == key:
+            cursor.execute("UPDATE matches SET player2_id = NULL WHERE id = ?", (row["id"],))
+    return len(rows)
+
+
+def _unfreeze_vacant_club_matches(cursor: sqlite3.Cursor, club: str, coach_id: int) -> int:
+    """Клуб получил тренера: разморозить матчи, замороженные из-за вакансии.
+
+    Замороженное время уходит в `frozen_seconds`, поэтому дедлайн тура и все
+    сроки долга сдвигаются ровно на время вакансии (`debt_policy.match_clock`):
+    новый тренер получает тот остаток, что был у клуба в момент исключения.
+    Сторона клуба переходит к `coach_id`, а цикл напоминаний по долгу
+    начинается заново — первое ЛС придёт уже новому тренеру. Матчи, замороженные
+    админом, не трогаются. Возвращает число размороженных матчей.
+    """
+    cursor.execute(_CLUB_PENDING_MATCHES_SQL + " AND vacancy_frozen = 1", (club, club))
+    rows = cursor.fetchall()
+    key = club.strip().lower()
+    for row in rows:
+        _apply_freeze_state(cursor, row["id"], 0)
+        cursor.execute("UPDATE matches SET vacancy_frozen = 0 WHERE id = ?", (row["id"],))
+        if (row["player1_team"] or "").strip().lower() == key:
+            cursor.execute("UPDATE matches SET player1_id = ? WHERE id = ?", (coach_id, row["id"]))
+        if (row["player2_team"] or "").strip().lower() == key:
+            cursor.execute("UPDATE matches SET player2_id = ? WHERE id = ?", (coach_id, row["id"]))
+        cursor.execute("DELETE FROM debt_reminders WHERE match_id = ?", (row["id"],))
+        cursor.execute(
+            "UPDATE match_debts SET state = 'active', last_reminder_at = NULL, soft_warned_at = NULL, "
+            "escalated_at = NULL, last_escalation_at = NULL, escalation_count = 0, global_escalated_at = NULL "
+            "WHERE match_id = ? AND state IN ('active', 'escalated')",
+            (row["id"],)
+        )
+    return len(rows)
+
+
 def extend_match_deadline_by_hours(match_id: int, hours: int) -> str | None:
     """Grant a debt match a fixed extension of `hours` (24 or 48).
 
@@ -5290,7 +5359,12 @@ def set_player_club(player_ref: str, new_club: str) -> tuple[bool, str]:
                 (new_club.strip(), new_club.strip())
             )
 
+        # Клуб ждал замену после исключения прежнего тренера: его матчи оттаивают.
+        unfrozen = _unfreeze_vacant_club_matches(cursor, new_club_clean, p_id)
+
         message = f"Клуб игрока {p_label} изменён на «{new_club_clean}»."
+        if unfrozen:
+            message += f" Разморожено матчей клуба: {unfrozen} — сроки сдвинуты на время без тренера."
         if previous_owners:
             taken_from = ", ".join(
                 f"@{o['username']}" if o["username"] else f"ID {o['telegram_id']}"
@@ -5557,6 +5631,11 @@ def get_user_warns(user_id: int) -> list[dict]:
 
 
 def ban_and_remove_from_league(user_id: int) -> str | None:
+    """Исключение по варнам: клуб освобождается, его несыгранные матчи замораживаются.
+
+    Матчи ждут замену (`_freeze_vacant_club_matches`) и оттаивают, когда клуб
+    получит тренера в `set_player_club`. Возвращает освобождённый клуб.
+    """
     from config import MAX_WARNS_LIMIT
     with transaction() as conn:
         cursor = conn.cursor()
@@ -5570,6 +5649,8 @@ def ban_and_remove_from_league(user_id: int) -> str | None:
             "INSERT INTO user_warns (user_id, admin_id, reason, type, created_at) VALUES (?, NULL, ?, 'AUTO_KICK', ?)",
             (user_id, f"Превышен лимит варнов ({MAX_WARNS_LIMIT}/{MAX_WARNS_LIMIT}). Авто-удаление из клуба.", now_str)
         )
+        if team_name:
+            _freeze_vacant_club_matches(cursor, team_name)
         return team_name
 
 
@@ -10121,7 +10202,8 @@ def get_club_card_data(team_name: str) -> dict:
         cursor.execute("""
             SELECT 
                 m.id, m.round_number, m.tournament_type, m.cup_stage, m.game_num_in_series,
-                m.player1_team, m.player2_team, m.division_id, m.status, m.played_at
+                m.player1_team, m.player2_team, m.division_id, m.status, m.played_at,
+                m.is_extended, m.frozen_at, m.frozen_seconds
             FROM matches m
             WHERE m.status = 'pending'
             ORDER BY 
@@ -11053,7 +11135,8 @@ def sync_match_debts(now: datetime.datetime | None = None, season_id: int | None
         cursor = conn.cursor()
         rounds = _load_round_states(_fetch_round_rows(cursor, s_id))
         cursor.execute("""
-            SELECT id, round_number, division_id, season_id, status
+            SELECT id, round_number, division_id, season_id, status,
+                   is_extended, frozen_at, frozen_seconds
             FROM matches
             WHERE status = 'pending'
               AND (tournament_type IS NULL OR tournament_type = 'league')
@@ -11065,7 +11148,11 @@ def sync_match_debts(now: datetime.datetime | None = None, season_id: int | None
         for m in matches:
             if m["id"] in existing:
                 continue
-            terms = debt_policy.debt_terms(rounds.get((m.get("division_id") or 1, m["round_number"])), now)
+            # Заморозка сдвигает и дедлайн: матч клуба, ждущего замену, долгом не становится.
+            terms = debt_policy.debt_terms(
+                rounds.get((m.get("division_id") or 1, m["round_number"])),
+                debt_policy.match_clock(m, now),
+            )
             if terms is not None and _upsert_debt_row(cursor, m, terms, now):
                 created += 1
 
@@ -11132,7 +11219,8 @@ def mark_debt_stage(match_id: int, stage: str, now: datetime.datetime | None = N
 def _debt_match(cursor, match_id: int) -> dict | None:
     cursor.execute(
         "SELECT id, round_number, division_id, season_id, status, played_at, tournament_type, "
-        "player1_id, player2_id, player1_team, player2_team FROM matches WHERE id = ?",
+        "player1_id, player2_id, player1_team, player2_team, "
+        "is_extended, frozen_at, frozen_seconds FROM matches WHERE id = ?",
         (match_id,)
     )
     row = cursor.fetchone()
@@ -11672,7 +11760,8 @@ def is_match_overdue(match_id: int) -> bool:
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT id, round_number, division_id, season_id, status, played_at, tournament_type "
+            "SELECT id, round_number, division_id, season_id, status, played_at, tournament_type, "
+            "is_extended, frozen_at, frozen_seconds "
             "FROM matches WHERE id = ?",
             (match_id,)
         )

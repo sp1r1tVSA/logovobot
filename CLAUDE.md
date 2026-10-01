@@ -7,8 +7,8 @@ e-sports championships: divisions and rounds, match result intake via AI screens
 standings and Pillow-rendered infographics, a debt/warn discipline system, and a virtual
 prediction market ("Logovo.bet") exposed through a Telegram Mini App.
 
-The project is well past MVP — 397 Python files (174 application modules and scripts +
-223 pytest files), 73 SQLite tables (migrations through `032`), and ten completed development phases documented in the
+The project is well past MVP — 399 Python files (174 application modules and scripts +
+225 pytest files), 73 SQLite tables (migrations through `032`), and ten completed development phases documented in the
 `PHASE_*.md` reports under `reports/`. Post-phase work is logged in the numbered
 `FIX_*.md` notes and the `*_AUDIT.md` reports beside them.
 
@@ -119,7 +119,7 @@ never prevents the bot itself from starting. Preserve that isolation.
 | `web/` | Mini App frontend (static `index.html`, `css/`, `js/` — `api`, `app`, `admin` (the Logovo.bet panel), `charts`, `effects`, `outrights`, `store`, `tg`, `ui`) |
 | `utils/` | `media_utils.py`, a thin re-export wrapper over `services/animation_sender.py` |
 | `scripts/` (28 scripts) | One-off operational scripts (DB audit, backfills, imports, bulk club binding, cup bracket seeding, cache refresh, season reset, previews and checkers) |
-| `tests/` | 223 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
+| `tests/` | 225 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
 | `assets/` | **Not in git** — emptied on 2026-09-18 with the КПЛ season. Runtime recreates `avatars/` and `players/` on demand; `logos/` must be refilled by hand (see below) |
 | `reports/` | Historical `PHASE_*.md` plans/matrices/reports, `FIX_0*.md` notes and `*_AUDIT.md` audits, moved off the repo root |
 | `tasks/`, `docs/` | Working plan/todo notes and `PURGE_SEASON_GUIDE.md` |
@@ -391,6 +391,19 @@ became a debt just sets the score. A played debt gives both players −1 through
 `claim_debt_played_reward`, once per match via `reward_given_at`. Deadline reminders run
 every 30 min too, and a debts digest goes to the ПРЕДЫ thread every 12 h.
 `MAX_WARNS_LIMIT = 4`.
+
+Reaching the limit auto-kicks the coach (`ban_and_remove_from_league`), and the club's
+unplayed matches — league and cup — **wait for a replacement**: they are frozen with
+`matches.vacancy_frozen = 1`, the club side's `player*_id` is cleared (no DMs, no warns to
+the kicked coach) and a running admin extension is absorbed (`extended_until` → NULL).
+Freezing shifts the round deadline itself, not only the escalation: `debt_policy.match_clock`
+subtracts the frozen time before `debt_terms` is asked, so a match frozen before its
+deadline does not become a debt during the vacancy, and the new coach gets exactly the time
+that was left at the kick. Binding a coach to the club (`set_player_club`) unfreezes only
+the `vacancy_frozen` matches — an admin freeze stays — hands the club side to the new coach
+and restarts the debt reminders. Bets on those matches are not touched and wait for the
+result. `clear_player_club` (a manual release) does not freeze. `tests/test_vacant_club_freeze.py`
+covers it.
 
 `register_jobs()` in `main.py` schedules more beyond those three, each in its own
 try/except block: live provider sync (45 s), intelligence cache (5 min), the notification

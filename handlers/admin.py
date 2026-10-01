@@ -7776,7 +7776,9 @@ async def _auto_kick_player(context: ContextTypes.DEFAULT_TYPE, user_id: int, us
         f"👤 Игрок: <b>{html.escape(uname)}</b>\n"
         f"🏟 Клуб: <b>{team_display}</b>\n"
         f"Причина: Превышен лимит варнов ({MAX_WARNS_LIMIT}/{MAX_WARNS_LIMIT}) из-за несыгранных долгов.\n\n"
-        f"📢 Клуб <b>{team_display}</b> свободен и открыт для замены!"
+        f"📢 Клуб <b>{team_display}</b> свободен и открыт для замены!\n"
+        f"❄️ Его несыгранные матчи заморожены до прихода нового тренера: дедлайны сдвинутся "
+        f"на время без тренера, ставки на эти матчи ждут результата."
     )
     await _send_to_warns_thread(context, thread_text, division_id)
 
