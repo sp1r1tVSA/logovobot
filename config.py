@@ -105,7 +105,7 @@ GEMINI_IMAGE_MODELS = _get_gemini_image_models()
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "").strip()
 OPENROUTER_MODEL = os.getenv(
     "OPENROUTER_MODEL",
-    "qwen/qwen3.8-27b:free,stealth/space-bunny-alpha,google/gemma-4-31b-it:free,openrouter/free",
+    "qwen/qwen3.8-27b:free,stealth/space-bunny-alpha,google/gemma-4-31b-it:free,nvidia/nemotron-3-super-120b-a12b:free,google/gemma-4-26b-a4b-it:free,openrouter/free",
 ).strip()
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
 # ─── Phase 8: Real Sports Provider Configuration ──────────────────────────────

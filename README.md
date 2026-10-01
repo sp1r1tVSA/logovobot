@@ -137,7 +137,7 @@ GEMINI_CHAT_API_KEY=AIzaSy_chat_key1
 
 # OpenRouter — «ИИ-прогноз» в панели Logovo.bet. Бесплатные модели (:free, stealth/*), несколько через запятую.
 OPENROUTER_API_KEY=sk-or-v1-your_key_here
-OPENROUTER_MODEL=qwen/qwen3.8-27b:free,stealth/space-bunny-alpha,google/gemma-4-31b-it:free,openrouter/free
+OPENROUTER_MODEL=qwen/qwen3.8-27b:free,stealth/space-bunny-alpha,google/gemma-4-31b-it:free,nvidia/nemotron-3-super-120b-a12b:free,google/gemma-4-26b-a4b-it:free,openrouter/free
 
 # Mini App (Logovo.bet)
 WEBAPP_URL=https://your-domain.example
