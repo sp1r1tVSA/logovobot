@@ -9,7 +9,9 @@ tests/test_ai_picks.py
 import hashlib
 import hmac
 import io
+import http.server
 import json
+import threading
 import time
 import types
 import unittest
@@ -395,6 +397,43 @@ class TestOpenRouterCall(PicksCase):
         self.assertEqual(timeouts, [bet_picks.REQUEST_TIMEOUT_SECONDS,
                                     bet_picks.CHAIN_BUDGET_SECONDS - bet_picks.REQUEST_TIMEOUT_SECONDS])
         self.assertLessEqual(sum(timeouts), bet_picks.CHAIN_BUDGET_SECONDS)
+
+    def test_a_trickling_response_does_not_outlive_the_budget(self):
+        # Пробелы по соединению не дают сработать таймауту urlopen: без дедлайна на
+        # чтение тела цепочка ждала модель сколько угодно, а туннель рвал запрос.
+        class Trickle(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                try:
+                    for _ in range(100):
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+                        time.sleep(0.1)
+                except OSError:
+                    pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Trickle)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        config.OPENROUTER_API_KEY = FAKE_KEY
+        config.OPENROUTER_MODEL = "slow/model:free"
+        started = time.monotonic()
+        base_url = f"http://127.0.0.1:{server.server_port}"
+        with patch.object(config, "OPENROUTER_BASE_URL", base_url), \
+             patch.object(bet_picks, "REQUEST_TIMEOUT_SECONDS", 1), \
+             patch.object(bet_picks, "CHAIN_BUDGET_SECONDS", 1), \
+             patch.object(bet_picks, "MIN_ATTEMPT_SECONDS", 0.5), \
+             self.assertLogs("services.ai.bet_picks", level="WARNING") as logs:
+            self.assertEqual(bet_picks.call_model_chain("s", "u"), (None, None))
+        self.assertLess(time.monotonic() - started, 3)
+        self.assertTrue(any("timed out" in line for line in logs.output))
 
     def test_answer_left_in_reasoning_is_still_read(self):
         config.OPENROUTER_API_KEY = FAKE_KEY

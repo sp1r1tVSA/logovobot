@@ -56,6 +56,7 @@ REQUEST_TIMEOUT_SECONDS = 60   # потолок одной модели
 # запрос через 100 с, и панель так и висела на «ИИ анализирует линию…».
 CHAIN_BUDGET_SECONDS = 75
 MIN_ATTEMPT_SECONDS = 10       # меньше осталось — следующую модель не трогаем
+MAX_RESPONSE_BYTES = 4 * 1024 * 1024
 # Модель, ответившая 429 или не успевшая, какое-то время не спрашиваем:
 # иначе каждый запрос заново ждёт заведомо занятые модели.
 RATE_LIMIT_COOLDOWN_SECONDS = 10 * 60
@@ -520,7 +521,7 @@ def call_model_chain(system: str, user: str, tag: str = "AI picks") -> tuple[dic
         )
         try:
             with urllib.request.urlopen(req, timeout=timeout) as resp:
-                result = json.loads(resp.read().decode("utf-8"))
+                result = json.loads(_read_body(resp, now + timeout).decode("utf-8"))
         except urllib.error.HTTPError as e:
             err_msg = ""
             try:
@@ -561,6 +562,31 @@ def call_model_chain(system: str, user: str, tag: str = "AI picks") -> tuple[dic
             model, choice.get("finish_reason"), len(text) if isinstance(text, str) else 0, snippet,
         )
     return None, None
+
+
+def _read_body(resp, deadline: float) -> bytes:
+    """Тело ответа с жёстким дедлайном (time.monotonic).
+
+    timeout у urlopen — это пауза между пакетами, а не общее время: пока по
+    соединению идут байты (keep-alive пробелы, медленная выдача), чтение не
+    прервётся и цепочка моделей выходит за CHAIN_BUDGET_SECONDS — туннель
+    рвёт запрос раньше. Поэтому читаем кусками и сверяемся с часами.
+    """
+    sock = getattr(getattr(getattr(resp, "fp", None), "raw", None), "_sock", None)
+    chunks, size = [], 0
+    while True:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            raise TimeoutError("response deadline exceeded")
+        if sock is not None:
+            sock.settimeout(left)   # молчание тоже не ждёт дольше остатка
+        chunk = resp.read1(65536)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_RESPONSE_BYTES:
+            raise ValueError("response too large")
 
 
 def _http_cooldown(e: urllib.error.HTTPError) -> int:
