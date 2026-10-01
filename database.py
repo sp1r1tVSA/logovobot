@@ -3111,12 +3111,110 @@ def archive_season(season_id: int, actor_user_id: int | None = None) -> tuple[bo
         return True, f"Сезон #{season_id} перенесён в архив."
 
 
+def _new_standings_row(telegram_id, team_name: str, username: str) -> dict:
+    return {
+        "telegram_id": telegram_id,
+        "team_name": team_name,
+        "username": username,
+        "played": 0,
+        "wins": 0,
+        "draws": 0,
+        "losses": 0,
+        "goals_scored": 0,
+        "goals_conceded": 0,
+        "points": 0,
+    }
+
+
+def _h2h_complete(names: list[str], h2h: dict) -> bool:
+    """Every pair in `names` has met, and none of their scheduled meetings is still unplayed."""
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            pair = h2h.get(frozenset((a, b)))
+            if not pair or not pair["results"] or pair["unplayed"]:
+                return False
+    return True
+
+
+def _rank_tied_on_points(group: list[dict], h2h: dict) -> list[dict]:
+    """Order clubs level on points: head-to-head first, then the overall table.
+
+    Head-to-head is a mini-league of the matches between the tied clubs only —
+    points, then goal difference, then goals scored. It counts only once all their
+    meetings with each other are played: mid-season a club that has not met its
+    rival yet would otherwise lose the tie to one that already has. When the
+    mini-league splits the group, it is re-applied to every sub-group still level
+    (UEFA style), since the matches against the clubs just separated no longer
+    matter. When it separates nobody, overall goal difference, goals scored and
+    wins decide, and a full tie keeps the existing order.
+    """
+    if len(group) < 2:
+        return group
+
+    names = [row["team_name"] for row in group]
+    if _h2h_complete(names, h2h):
+        mini = {name: [0, 0, 0] for name in names}  # points, goal difference, goals scored
+        for i, a in enumerate(names):
+            for b in names[i + 1:]:
+                for t1, g1, t2, g2 in h2h[frozenset((a, b))]["results"]:
+                    mini[t1][1] += g1 - g2
+                    mini[t2][1] += g2 - g1
+                    mini[t1][2] += g1
+                    mini[t2][2] += g2
+                    if g1 > g2:
+                        mini[t1][0] += 3
+                    elif g2 > g1:
+                        mini[t2][0] += 3
+                    else:
+                        mini[t1][0] += 1
+                        mini[t2][0] += 1
+
+        ordered = sorted(group, key=lambda row: tuple(mini[row["team_name"]]), reverse=True)
+        buckets: list[list[dict]] = []
+        for row in ordered:
+            if buckets and mini[buckets[-1][0]["team_name"]] == mini[row["team_name"]]:
+                buckets[-1].append(row)
+            else:
+                buckets.append([row])
+        if len(buckets) > 1:
+            return [row for bucket in buckets for row in _rank_tied_on_points(bucket, h2h)]
+
+    return sorted(
+        group,
+        key=lambda row: (row["goals_scored"] - row["goals_conceded"], row["goals_scored"], row["wins"]),
+        reverse=True,
+    )
+
+
+def sort_standings(rows: list[dict], h2h: dict) -> list[dict]:
+    """Sort a league table: points, then `_rank_tied_on_points` for clubs level on points.
+
+    `h2h` maps `frozenset({club_a, club_b})` to `{"results": [(club1, goals1, club2,
+    goals2), …], "unplayed": n}` — the confirmed meetings of the pair and how many of
+    their scheduled league matches are not played yet.
+    """
+    by_points = sorted(rows, key=lambda row: row["points"], reverse=True)
+    result: list[dict] = []
+    i = 0
+    while i < len(by_points):
+        j = i
+        while j < len(by_points) and by_points[j]["points"] == by_points[i]["points"]:
+            j += 1
+        result.extend(_rank_tied_on_points(by_points[i:j], h2h))
+        i = j
+    return result
+
+
 def get_standings(division_id: int | None = None, season_id: int | None = None, up_to_round: int | None = None) -> list[dict]:
     """Calculate the standings of registered players dynamically, strictly scoped by division and season.
 
     up_to_round caps the table at that round inclusive, so callers can compare
     "before" and "after" snapshots (used by the round digest to draw movement
     arrows). None keeps the full-season behaviour.
+
+    Order: points, then head-to-head between the clubs level on points once all
+    their meetings are played, then goal difference, goals scored and wins
+    (`sort_standings`).
     """
     with transaction() as conn:
         cursor = conn.cursor()
@@ -3136,30 +3234,21 @@ def get_standings(division_id: int | None = None, season_id: int | None = None, 
             div_users = cursor.fetchall()
             for row in div_users:
                 canon = resolve_team_name(row["team_name"]) or row["team_name"]
-                teams[canon] = {
-                    "telegram_id": row["telegram_id"],
-                    "team_name": canon,
-                    "username": row["username"] if row["username"] else "",
-                    "played": 0,
-                    "wins": 0,
-                    "draws": 0,
-                    "losses": 0,
-                    "goals_scored": 0,
-                    "goals_conceded": 0,
-                    "points": 0,
-                }
-            
-            # Fetch confirmed league matches strictly for this division & season
+                teams[canon] = _new_standings_row(row["telegram_id"], canon, row["username"] or "")
+
+            # League matches strictly for this division & season. Unplayed ones are read
+            # too: head-to-head only applies once every meeting of the tied clubs is played.
             cursor.execute("""
-                SELECT 
-                    COALESCE(m.player1_team, u1.team_name) AS player1_team, 
-                    COALESCE(m.player2_team, u2.team_name) AS player2_team, 
-                    m.player1_score, 
-                    m.player2_score 
+                SELECT
+                    COALESCE(m.player1_team, u1.team_name) AS player1_team,
+                    COALESCE(m.player2_team, u2.team_name) AS player2_team,
+                    m.player1_score,
+                    m.player2_score,
+                    m.status
                 FROM matches m
                 LEFT JOIN users u1 ON LOWER(m.player1_team) = LOWER(u1.team_name)
                 LEFT JOIN users u2 ON LOWER(m.player2_team) = LOWER(u2.team_name)
-                WHERE m.status = 'confirmed'
+                WHERE m.status != 'cancelled'
                   AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
                   AND m.division_id = ?
                   AND (m.season_id = ? OR m.season_id IS NULL)
@@ -3170,37 +3259,50 @@ def get_standings(division_id: int | None = None, season_id: int | None = None, 
             all_users = cursor.fetchall()
             for row in all_users:
                 canon = resolve_team_name(row["team_name"]) or row["team_name"]
-                teams[canon] = {
-                    "telegram_id": row["telegram_id"],
-                    "team_name": canon,
-                    "username": row["username"] if row["username"] else "",
-                    "played": 0,
-                    "wins": 0,
-                    "draws": 0,
-                    "losses": 0,
-                    "goals_scored": 0,
-                    "goals_conceded": 0,
-                    "points": 0,
-                }
+                teams[canon] = _new_standings_row(row["telegram_id"], canon, row["username"] or "")
 
-            # Get all confirmed matches for this season
+            # All league matches for this season (unplayed ones feed the head-to-head check)
             cursor.execute("""
-                SELECT 
-                    COALESCE(m.player1_team, u1.team_name) AS player1_team, 
-                    COALESCE(m.player2_team, u2.team_name) AS player2_team, 
-                    m.player1_score, 
-                    m.player2_score 
+                SELECT
+                    COALESCE(m.player1_team, u1.team_name) AS player1_team,
+                    COALESCE(m.player2_team, u2.team_name) AS player2_team,
+                    m.player1_score,
+                    m.player2_score,
+                    m.status
                 FROM matches m
                 LEFT JOIN users u1 ON LOWER(m.player1_team) = LOWER(u1.team_name)
                 LEFT JOIN users u2 ON LOWER(m.player2_team) = LOWER(u2.team_name)
-                WHERE m.status = 'confirmed'
+                WHERE m.status != 'cancelled'
                   AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
                   AND (m.season_id = ? OR m.season_id IS NULL)
                   AND (m.division_id = 1 OR m.division_id IS NULL)
                   AND (? IS NULL OR m.round_number <= ?)
             """, (target_season_id, up_to_round, up_to_round))
-        
-        matches = cursor.fetchall()
+
+        rows = cursor.fetchall()
+
+        def is_played(match) -> bool:
+            return (match["status"] == "confirmed"
+                    and match["player1_score"] is not None and match["player2_score"] is not None)
+
+        # Played matches first, so a club added on the fly below already has its row
+        # when an unplayed fixture of the same club is resolved.
+        matches = [m for m in rows if is_played(m)]
+        unplayed = [m for m in rows if not is_played(m)]
+
+        def lookup(team: str) -> dict | None:
+            found = teams.get(team)
+            if found:
+                return found
+            for k, obj in teams.items():
+                if teams_match(k, team):
+                    return obj
+            return None
+
+        h2h: dict[frozenset, dict] = {}
+
+        def h2h_pair(a: str, b: str) -> dict:
+            return h2h.setdefault(frozenset((a, b)), {"results": [], "unplayed": 0})
 
         for match in matches:
             raw_t1 = match["player1_team"] or ""
@@ -3210,56 +3312,18 @@ def get_standings(division_id: int | None = None, season_id: int | None = None, 
             p1_score = match["player1_score"]
             p2_score = match["player2_score"]
 
-            if p1_score is None or p2_score is None:
-                continue
-
-            # Match t1
-            matched_u1 = teams.get(t1)
-            if not matched_u1:
-                for k, obj in teams.items():
-                    if teams_match(k, t1):
-                        matched_u1 = obj
-                        break
-
-            # Match t2
-            matched_u2 = teams.get(t2)
-            if not matched_u2:
-                for k, obj in teams.items():
-                    if teams_match(k, t2):
-                        matched_u2 = obj
-                        break
+            matched_u1 = lookup(t1)
+            matched_u2 = lookup(t2)
 
             # Team played a confirmed match but has no row in users: add it on the fly.
             # Both branches seed `teams` from users only, so a club whose coach has not
             # registered yet would otherwise drop its matches out of the table silently.
             if matched_u1 is None and t1:
-                teams[t1] = {
-                    "telegram_id": None,
-                    "team_name": t1,
-                    "username": "",
-                    "played": 0,
-                    "wins": 0,
-                    "draws": 0,
-                    "losses": 0,
-                    "goals_scored": 0,
-                    "goals_conceded": 0,
-                    "points": 0,
-                }
+                teams[t1] = _new_standings_row(None, t1, "")
                 matched_u1 = teams[t1]
 
             if matched_u2 is None and t2:
-                teams[t2] = {
-                    "telegram_id": None,
-                    "team_name": t2,
-                    "username": "",
-                    "played": 0,
-                    "wins": 0,
-                    "draws": 0,
-                    "losses": 0,
-                    "goals_scored": 0,
-                    "goals_conceded": 0,
-                    "points": 0,
-                }
+                teams[t2] = _new_standings_row(None, t2, "")
                 matched_u2 = teams[t2]
 
             if matched_u1:
@@ -3288,18 +3352,20 @@ def get_standings(division_id: int | None = None, season_id: int | None = None, 
                     matched_u2["draws"] += 1
                     matched_u2["points"] += 1
 
-        # Convert to list and sort
-        standings_list = list(teams.values())
-        standings_list.sort(
-            key=lambda x: (
-                x["points"],
-                x["goals_scored"] - x["goals_conceded"],
-                x["goals_scored"],
-                x["wins"]
-            ),
-            reverse=True
-        )
-        return standings_list
+            if matched_u1 and matched_u2 and matched_u1 is not matched_u2:
+                n1, n2 = matched_u1["team_name"], matched_u2["team_name"]
+                h2h_pair(n1, n2)["results"].append((n1, p1_score, n2, p2_score))
+
+        for match in unplayed:
+            raw_t1 = match["player1_team"] or ""
+            raw_t2 = match["player2_team"] or ""
+            t1 = resolve_team_name(raw_t1) or raw_t1
+            t2 = resolve_team_name(raw_t2) or raw_t2
+            u1, u2 = lookup(t1), lookup(t2)
+            if u1 and u2 and u1 is not u2:
+                h2h_pair(u1["team_name"], u2["team_name"])["unplayed"] += 1
+
+        return sort_standings(list(teams.values()), h2h)
 
 def clear_all_matches() -> None:
     """Delete all matches from the matches table."""

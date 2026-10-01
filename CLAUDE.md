@@ -221,6 +221,16 @@ left «Дивизион 6» with an empty string and a random `DIV_XXXX` that ma
 **League play** runs through `rounds` / `rounds_v` and `matches`. **Cup play** uses
 `cup_series` (stage, series number, per-side win counts, winner, status).
 
+The **league table** (`database.get_standings` → `sort_standings`) orders by points, then
+**head-to-head** among the clubs level on points — a mini-league of their meetings: points,
+goal difference, goals scored — then overall goal difference, goals scored and wins.
+Head-to-head counts only once every scheduled league meeting between the tied clubs is
+played (cancelled fixtures don't count, `up_to_round` caps it), so mid-season a club that
+has not met its rival yet is not penalised. When the mini-league splits a group it is
+re-applied to each sub-group still level (UEFA style). The Mini App keeps the server order
+on ties; the outright simulation (`outright_engine.simulate_league_winner`) ignores
+head-to-head as an approximation. `tests/test_standings_head_to_head.py` covers it.
+
 Besides the general cup, each division has its **own cup** (migration `027`): its 16 clubs,
 1/8 → 1/4 → 1/2 → final, best of three, betting like the general cup, no debts. The owning cup
 is `cup_stages.division_id` (NULL = the general cup). The stage key in `cup_stages.stage` is
