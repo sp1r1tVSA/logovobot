@@ -135,14 +135,25 @@ class TestBackfillMigration(GeneratedMatchesTestBase):
                 "DELETE FROM schema_migrations WHERE version = '013_backfill_match_team_names'"
             )
 
-        before = database.get_matches_by_round(7, division_id=self.div_id, season_id=self.season_id)[0]
-        self.assertEqual(before["player1_team"], "Команда 1")
+        # Проверяем саму колонку, а не get_matches_by_round: читатель теперь
+        # добирает клуб ещё и по playerN_id, так что пустая колонка в нём не видна,
+        # а остальные читатели (JOIN по имени клуба) без неё по-прежнему слепнут.
+        self.assertEqual(self._stored_teams(7), (None, None))
 
         database.init_db()
 
+        self.assertEqual(self._stored_teams(7), (self._team_of(p1), self._team_of(p2)))
         after = database.get_matches_by_round(7, division_id=self.div_id, season_id=self.season_id)[0]
         self.assertEqual(after["player1_team"], self._team_of(p1))
         self.assertEqual(after["player2_team"], self._team_of(p2))
+
+    def _stored_teams(self, round_number: int) -> tuple:
+        with database.transaction() as conn:
+            row = conn.cursor().execute(
+                "SELECT player1_team, player2_team FROM matches WHERE round_number = ? AND division_id = ?",
+                (round_number, self.div_id)
+            ).fetchone()
+        return row["player1_team"], row["player2_team"]
 
     def test_backfill_does_not_touch_rows_that_already_have_a_club(self):
         with database.transaction() as conn:
