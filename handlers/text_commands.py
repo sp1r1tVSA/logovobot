@@ -146,7 +146,103 @@ async def _division_name(division_id: int) -> str:
     return (division or {}).get("name") or f"Дивизион {division_id}"
 
 
-TOTW_ACTIONS = ("сборная", "сборную", "тотв", "totw", "символическая", "символичка")
+def _debt_lines_by_round(debts: list[dict]) -> list[str]:
+    """Строки списка долгов, сгруппированные по турам, с тегами тренеров."""
+    rounds_map: dict[int, list[dict]] = {}
+    for d in debts:
+        rounds_map.setdefault(d.get("round_number") or 0, []).append(d)
+
+    lines = []
+    for rn in sorted(rounds_map.keys()):
+        lines.append(f"📌 <b>Тур {rn}:</b>")
+        for m in rounds_map[rn]:
+            t1 = html.escape(m.get("player1_team") or "—")
+            t2 = html.escape(m.get("player2_team") or "—")
+            p1_u = f"@{m['p1_username']}" if m.get("p1_username") else t1
+            p2_u = f"@{m['p2_username']}" if m.get("p2_username") else t2
+            lines.append(f"• {t1} ({p1_u}) 🆚 {t2} ({p2_u})")
+        lines.append("")
+    return lines
+
+
+# Слова-связки вокруг названия клуба: «долги у Ренна», «долги клуба Ренн».
+_CLUB_FILLER_REGEX = re.compile(
+    r"(?<!\w)(?:у|по|для|клуб|клуба|клубу|команда|команды|команде|команду)(?!\w)",
+    re.IGNORECASE,
+)
+_OWN_CLUB_WORDS = frozenset({"мои", "мой", "моя", "моего", "моей", "моих", "мне", "меня", "my", "me"})
+
+
+def _clean_club_query(text: str) -> str:
+    """Название клуба из остатка аргументов, без связок и знаков препинания."""
+    text = _CLUB_FILLER_REGEX.sub(" ", text or "")
+    text = re.sub(r"[«»\"'!?.,:;()]+", " ", text)
+    return " ".join(text.split())
+
+
+def _matches_word(n: int) -> str:
+    """«1 матч», «2 матча», «5 матчей»."""
+    n = abs(n)
+    if n % 10 == 1 and n % 100 != 11:
+        return "матч"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return "матча"
+    return "матчей"
+
+
+async def _reply_club_debts(msg, user_id: int, query: str) -> None:
+    """Долги одного клуба — по всем дивизионам, имена клубов в лиге уникальны.
+
+    Название пишут люди: с падежом («Ренна»), без «Аль-», с опечатками. Его
+    разбирает `club_registry.resolve_club_query`; если клуб не узнан однозначно,
+    бот переспрашивает с подсказками, а не показывает чужой список.
+    """
+    from club_registry import resolve_club_query
+
+    if query.lower() in _OWN_CLUB_WORDS:
+        club = await asyncio.to_thread(database.get_user_team, user_id)
+        if not club:
+            await msg.reply_text(
+                "🤷 <b>За вами не закреплён клуб.</b>\n"
+                "Укажите клуб в команде: <code>Темшик долги Ренн</code>",
+                parse_mode="HTML",
+            )
+            return
+    else:
+        resolved = resolve_club_query(query)
+        club = resolved.canonical
+        if club is None:
+            lines = [f"🤷 <b>Не нашёл клуб «{html.escape(query)}».</b>"]
+            if resolved.suggestions:
+                lines.append("\nВозможно, вы имели в виду:")
+                lines.extend(
+                    f"• <code>Темшик долги {html.escape(name)}</code>" for name in resolved.suggestions
+                )
+            else:
+                lines.append(
+                    "Проверьте название, например: <code>Темшик долги Ренн</code>, "
+                    "или посмотрите долги дивизиона: <code>Темшик долги Дивизион 2</code>"
+                )
+            await msg.reply_text("\n".join(lines), parse_mode="HTML")
+            return
+
+    all_debts = await asyncio.to_thread(database.get_all_unplayed_league_matches)
+    debts = [
+        m for m in all_debts
+        if database.teams_match(club, m.get("player1_team") or "")
+        or database.teams_match(club, m.get("player2_team") or "")
+    ]
+    club_html = html.escape(club)
+    if not debts:
+        await msg.reply_text(f"✅ <b>У клуба {club_html} нет долгов!</b>", parse_mode="HTML")
+        return
+
+    lines = [f"⏳ <b>ДОЛГИ КЛУБА {club_html.upper()}</b> — {len(debts)} {_matches_word(len(debts))}:\n"]
+    lines.extend(_debt_lines_by_round(debts))
+    await msg.reply_text("\n".join(lines), parse_mode="HTML")
+
+
+TOTW_ACTIONS = ("сборная","сборную", "тотв", "totw", "символическая", "символичка")
 _SEASON_WORD_REGEX = re.compile(r"(?<!\w)(?:сезон\w*|season|весь|всё|все)(?!\w)", re.IGNORECASE)
 
 
@@ -238,6 +334,8 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
             "• <code>Темшик бомбардиры [число] [дивизион]</code> — топ бомбардиров (карточка или список)\n"
             "• <code>Темшик ассистенты [число] [дивизион]</code> — топ ассистентов\n"
             "• <code>Темшик долги [дивизион]</code> — несыгранные матчи дивизиона с тегами участников\n"
+            "• <code>Темшик долги [клуб]</code> — долги одного клуба (<code>Темшик долги Ренн</code>, "
+            "<code>Темшик долги мои</code>)\n"
             "• <code>Темшик состав [клуб]</code> — фото и состав заявленного клуба\n"
             "• <code>Темшик карточка [клуб]</code> — инфокарточка клуба\n"
             "• <code>Темшик позвать [клуб]</code> — позвать тренера клуба на матч (тегнет тренера)\n"
@@ -398,7 +496,11 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
         return True
 
     if action in ("долги", "debts", "должники"):
-        division_id, _, divisions = await resolve_command_division(update, args_str)
+        division_id, leftover, divisions = await resolve_command_division(update, args_str)
+        club_query = _clean_club_query(leftover)
+        if club_query:
+            await _reply_club_debts(msg, user_id, club_query)
+            return True
         if division_id is None:
             await msg.reply_text(
                 _division_hint(divisions, "Темшик долги Дивизион 2"),
@@ -415,22 +517,7 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
             )
             return True
         lines = [f"⏳ <b>НЕЗАКРЫТЫЕ МАТЧИ — {html.escape(division_name).upper()}:</b>\n"]
-        rounds_map = {}
-        for d in debts:
-            rn = d.get("round_number", 0)
-            if rn not in rounds_map:
-                rounds_map[rn] = []
-            rounds_map[rn].append(d)
-
-        for rn in sorted(rounds_map.keys()):
-            lines.append(f"📌 <b>Тур {rn}:</b>")
-            for m in rounds_map[rn]:
-                t1 = html.escape(m.get("player1_team") or "—")
-                t2 = html.escape(m.get("player2_team") or "—")
-                p1_u = f"@{m['p1_username']}" if m.get("p1_username") else t1
-                p2_u = f"@{m['p2_username']}" if m.get("p2_username") else t2
-                lines.append(f"• {t1} ({p1_u}) 🆚 {t2} ({p2_u})")
-            lines.append("")
+        lines.extend(_debt_lines_by_round(debts))
         await msg.reply_text("\n".join(lines), parse_mode="HTML")
         return True
 

@@ -533,4 +533,102 @@ def resolve_team_name(name: str | None) -> str:
     return resolved.canonical if resolved.canonical is not None else str(name).strip()
 
 
+# ---------------------------------------------------------------------------
+# Human-typed club queries
+#
+# «Темшик долги Ренна» is not OCR output: people decline names («Валенсии»),
+# drop the article («Кадисия»), and misspell. A miss here costs nothing worse
+# than showing the wrong club's list, with the club named in the header, so the
+# fuzzy bar sits lower than the OCR tiers. A near tie still asks back with
+# suggestions instead of guessing. Nothing here merges or writes anything: it
+# is for lookups only, never for deciding which club a match belongs to.
+# ---------------------------------------------------------------------------
+
+QUERY_FUZZY_THRESHOLD = 0.72  # «кадисия» против «аль кадисия» — 0.78
+QUERY_FUZZY_MARGIN = 0.06
+QUERY_SUGGEST_THRESHOLD = 0.5
+QUERY_MIN_LEN = 4
+QUERY_MAX_SUGGESTIONS = 3
+
+# Падежные окончания, длинные первыми: «Валенсии» → «валенси», «Ренна» → «ренн».
+_CASE_ENDINGS = (
+    "ами", "ями", "ого", "его", "ому", "ему",
+    "ой", "ей", "ом", "ем", "ах", "ях", "ов", "ев",
+    "ы", "и", "а", "я", "у", "ю", "е",
+)
+# Приставка «Аль-» общая для пяти клубов, поэтому её часто опускают.
+_ARTICLE_PREFIXES = ("аль ",)
+
+
+@dataclass(frozen=True, slots=True)
+class ClubQuery:
+    """A club typed by a person: the club, or the closest names to ask back with."""
+    canonical: str | None
+    suggestions: tuple[str, ...] = ()
+
+
+def _query_fuzzy_scores(norm: str) -> list[tuple[str, float]]:
+    """Like `_fuzzy_scores`, but also against names without the «Аль-» article."""
+    scores = dict(_fuzzy_scores(norm))
+    for candidate_norm, canonical in _registry_index.items():
+        for prefix in _ARTICLE_PREFIXES:
+            if candidate_norm.startswith(prefix):
+                ratio = difflib.SequenceMatcher(None, norm, candidate_norm[len(prefix):]).ratio()
+                if ratio > scores.get(canonical, 0.0):
+                    scores[canonical] = ratio
+    return sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
+
+
+def resolve_club_query(text: str | None) -> ClubQuery:
+    """Find the club a person meant, tolerating declension and typos.
+
+    Order: the strict resolver; the same with a case ending cut off; a looser
+    fuzzy pass. An ambiguity at any step returns no club, only suggestions.
+    """
+    raw = str(text).strip() if text else ""
+    norm = normalize_team_name(raw)
+    if not norm:
+        return ClubQuery(None)
+
+    strict = resolve_team_name_ex(raw)
+    if strict.canonical is not None:
+        return ClubQuery(strict.canonical)
+
+    # Склонение: отрезаем окончание у последнего слова и пробуем строгий резолвер.
+    # Разные окончания могут привести к разным клубам — тогда переспрашиваем.
+    stems: dict[str, None] = {}
+    ambiguous: dict[str, None] = dict.fromkeys(strict.candidates)
+    for ending in _CASE_ENDINGS:
+        if norm.endswith(ending) and len(norm) - len(ending) >= PREFIX_MIN_LEN:
+            stem = resolve_team_name_ex(norm[: -len(ending)])
+            if stem.canonical is not None:
+                stems[stem.canonical] = None
+            else:
+                ambiguous.update(dict.fromkeys(stem.candidates))  # «Реала» → «реал»
+    if len(stems) == 1:
+        return ClubQuery(next(iter(stems)))
+    if stems:
+        return ClubQuery(None, tuple(stems)[:QUERY_MAX_SUGGESTIONS])
+
+    if ambiguous:
+        return ClubQuery(None, tuple(ambiguous)[:QUERY_MAX_SUGGESTIONS])
+
+    if len(norm) < QUERY_MIN_LEN:
+        return ClubQuery(None)
+
+    ranked = _query_fuzzy_scores(norm)
+    if not ranked:
+        return ClubQuery(None)
+    best_canon, best_score = ranked[0]
+    second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+    if best_score >= QUERY_FUZZY_THRESHOLD and best_score - second_score >= QUERY_FUZZY_MARGIN:
+        return ClubQuery(best_canon)
+
+    suggestions = tuple(
+        canon for canon, score in ranked[:QUERY_MAX_SUGGESTIONS]
+        if score >= QUERY_SUGGEST_THRESHOLD
+    )
+    return ClubQuery(None, suggestions)
+
+
 reload_registry()

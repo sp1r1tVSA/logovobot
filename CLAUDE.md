@@ -323,6 +323,12 @@ Russian speakers actually type — `Фулхем`, `Вест Хем`, `Тотт�
 rescued the long ones). The `э` fold is safe because no two clubs in the roster collapse
 into one canon under it; `TestTotalityInvariant` is what keeps that true as clubs change.
 
+Human-typed names (`Темшик долги Ренна`) go through `resolve_club_query` instead: the strict
+tiers first, then the same with a Russian case ending cut off, then a looser fuzzy pass
+(`QUERY_FUZZY_THRESHOLD = 0.72`, margin 0.06, also matched against names without the «Аль-»
+article). An ambiguity returns no club, only `suggestions`, so the bot asks back. It is for
+lookups only and never decides which club a match belongs to.
+
 **Adding a club to the tournament means adding its name to the right division in
 `DIVISION_CLUBS`.** `python scripts/audit_team_resolution.py` reports
 registry↔`users.team_name` drift, name collisions and clubs that sit too close to the fuzzy
