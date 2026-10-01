@@ -3,7 +3,8 @@ services/betting_notifications.py
 
 Уведомления об открытии и закрытии линии ставок Logovo.bet:
 - Отправка в ЛС игрокам дивизиона с инлайн-кнопкой "🎰 Сделать ставку", открывающей Telegram Mini App.
-- Дублирование объявления в топик «📊 Аналитика» (или «📋 Отчёты») дивизиона.
+- В топики группы объявления не дублируются: открытие и закрытие линии на каждый тур
+  засоряли топик «📊 Аналитика».
 """
 
 from __future__ import annotations
@@ -88,51 +89,15 @@ def build_line_closed_text(division_name: str, round_number: int) -> str:
     return "\n".join(lines)
 
 
-async def _post_to_division_topic(
-    context: ContextTypes.DEFAULT_TYPE,
-    division_id: int,
-    text: str,
-    is_open: bool = True,
-) -> bool:
-    """Отправить объявление в топик «Аналитика» (или «Отчёты») дивизиона."""
-    from handlers.admin import _division_reports_topic, _resolve_analytics_topic
-
-    topic = await _resolve_analytics_topic(division_id)
-    if not topic:
-        topic = await _division_reports_topic(division_id)
-    if not topic or not topic[0] or not topic[1]:
-        return False
-
-    group_id, thread_id = int(topic[0]), int(topic[1])
-    bot = context.bot
-    bot_username = getattr(bot, "username", None)
-    markup = get_betting_webapp_markup(is_private=False, bot_username=bot_username) if is_open else None
-
-    try:
-        await bot.send_message(
-            chat_id=group_id,
-            message_thread_id=thread_id,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=markup,
-        )
-        return True
-    except Exception as e:
-        logger.warning(f"Failed to post betting line announcement to topic ({group_id}, {thread_id}): {e}")
-        return False
-
-
 async def notify_division_betting_line_opened(
     context: ContextTypes.DEFAULT_TYPE,
     division_id: int,
     round_number: int,
-    notify_topic: bool = True,
 ) -> int:
     """
     Уведомить игроков дивизиона в ЛС об открытии линии ставок:
     - Сообщение с перечнем матчей тура;
-    - Инлайн-кнопка "🎰 Сделать ставку", открывающая Telegram Mini App;
-    - Дублирование в топик «Аналитика»/«Отчёты» дивизиона.
+    - Инлайн-кнопка "🎰 Сделать ставку", открывающая Telegram Mini App.
 
     Возвращает количество успешно доставленных ЛС-сообщений.
     """
@@ -166,9 +131,6 @@ async def notify_division_betting_line_opened(
         except Exception as e:
             logger.debug(f"Failed to send betting line open PM to {uid}: {e}")
 
-    if notify_topic:
-        await _post_to_division_topic(context, division_id, pm_text, is_open=True)
-
     logger.info(
         f"Betting line open notification for div {division_id} round {round_number}: sent to {sent_count} player(s)."
     )
@@ -180,13 +142,11 @@ async def notify_division_betting_line_closed(
     division_id: int,
     round_number: int,
     check_was_open: bool = False,
-    notify_topic: bool = True,
     was_open: bool | None = None,
 ) -> int:
     """
     Уведомить игроков дивизиона в ЛС о закрытии линии ставок:
-    - Сообщение о завершении приёма прогнозов и старте матчей;
-    - Дублирование в топик дивизиона.
+    - Сообщение о завершении приёма прогнозов и старте матчей.
 
     `was_open` — явный флаг того, была ли линия открыта до закрытия тура.
     `check_was_open=True` — проверяет `bets_open` в БД, если `was_open` не указан.
@@ -225,9 +185,6 @@ async def notify_division_betting_line_closed(
             await asyncio.sleep(0.04)
         except Exception as e:
             logger.debug(f"Failed to send betting line close PM to {uid}: {e}")
-
-    if notify_topic:
-        await _post_to_division_topic(context, division_id, close_text, is_open=False)
 
     logger.info(
         f"Betting line close notification for div {division_id} round {round_number}: sent to {sent_count} player(s)."

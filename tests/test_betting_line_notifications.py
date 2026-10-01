@@ -4,7 +4,7 @@ tests/test_betting_line_notifications.py
 Comprehensive test suite for Logovo.bet betting line notifications:
 - Opening line notification in PM with inline button "🎰 Сделать ставку" (Telegram Mini App WebAppInfo)
 - Closing line notification in PM
-- Dual-posting to division analytics/reports topic
+- No posting to the division analytics/reports topic (PM only)
 - Rate limit handling, cooldown throttling, and user filtering (positive telegram_id only)
 """
 
@@ -95,11 +95,10 @@ class TestBettingLineNotifications(unittest.IsolatedAsyncioTestCase):
                 (-555, "placeholder", "Draft", division_id)
             )
 
-        with patch("services.betting_notifications.safe_send_notification", new_callable=AsyncMock) as mock_send, \
-             patch("services.betting_notifications._post_to_division_topic", new_callable=AsyncMock) as mock_topic:
+        with patch("services.betting_notifications.safe_send_notification", new_callable=AsyncMock) as mock_send:
             mock_send.return_value = True
 
-            sent_count = await notify_division_betting_line_opened(mock_context, division_id, 1, notify_topic=True)
+            sent_count = await notify_division_betting_line_opened(mock_context, division_id, 1)
 
             self.assertEqual(sent_count, 2)
             self.assertEqual(mock_send.call_count, 2)
@@ -117,7 +116,8 @@ class TestBettingLineNotifications(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(markup.inline_keyboard[0][0].text, "🎰 Сделать ставку")
                 self.assertIsNotNone(markup.inline_keyboard[0][0].web_app)
 
-            mock_topic.assert_called_once()
+            # В топик группы объявление не уходит — только ЛС.
+            mock_bot.send_message.assert_not_called()
 
     async def test_05_notify_line_closed_delivers_to_players(self):
         """Закрытие линии отправляет уведомления игрокам."""
@@ -137,8 +137,7 @@ class TestBettingLineNotifications(unittest.IsolatedAsyncioTestCase):
                 (20001, "player_close", "Milan", division_id)
             )
 
-        with patch("services.betting_notifications.safe_send_notification", new_callable=AsyncMock) as mock_send, \
-             patch("services.betting_notifications._post_to_division_topic", new_callable=AsyncMock) as mock_topic:
+        with patch("services.betting_notifications.safe_send_notification", new_callable=AsyncMock) as mock_send:
             mock_send.return_value = True
 
             sent = await notify_division_betting_line_closed(mock_context, division_id, 3, was_open=True)
@@ -147,7 +146,7 @@ class TestBettingLineNotifications(unittest.IsolatedAsyncioTestCase):
             mock_send.assert_called_once()
             self.assertEqual(mock_send.call_args.args[1], 20001)
             self.assertIn("Линия ставок закрыта", mock_send.call_args.args[2])
-            mock_topic.assert_called_once()
+            mock_bot.send_message.assert_not_called()
 
     async def test_06_was_open_false_skips_closed_notification(self):
         """Если линия не была открыта, уведомление о закрытии не отправляется."""
@@ -160,15 +159,14 @@ class TestBettingLineNotifications(unittest.IsolatedAsyncioTestCase):
     async def test_07_cooldown_throttles_duplicate_notifications(self):
         """Повторный вызов уведомления в течение 30 секунд глушится кулдауном."""
         mock_context = MagicMock()
-        with patch("services.betting_notifications.safe_send_notification", new_callable=AsyncMock) as mock_send, \
-             patch("services.betting_notifications._post_to_division_topic", new_callable=AsyncMock):
+        with patch("services.betting_notifications.safe_send_notification", new_callable=AsyncMock) as mock_send:
             mock_send.return_value = True
 
             # Первый вызов проходит
-            c1 = await notify_division_betting_line_opened(mock_context, 1, 99, notify_topic=False)
+            c1 = await notify_division_betting_line_opened(mock_context, 1, 99)
 
             # Немедленный второй вызов отсекается кулдауном
-            c2 = await notify_division_betting_line_opened(mock_context, 1, 99, notify_topic=False)
+            c2 = await notify_division_betting_line_opened(mock_context, 1, 99)
             self.assertEqual(c2, 0)
 
 
