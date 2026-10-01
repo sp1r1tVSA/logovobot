@@ -136,13 +136,79 @@ class TestJournalModule:
             "old_value": "0/4", "new_value": "1/4", "reason": "<грубость>",
         })
         lines = text.split("\n")
-        assert lines[0] == "<b>30.09 21:05</b> @boss — Выдан варн · user #12 · див. 3"
-        assert lines[1].strip() == "0/4 → 1/4"
-        assert lines[2].strip() == "💬 &lt;грубость&gt;"
+        assert lines[0] == "🕑 30.09 21:05 · @boss"
+        assert lines[1] == "<b>Выдан варн</b> · игрок #12 · див. 3"
+        assert lines[2].strip() == "0/4 → 1/4"
+        assert lines[3].strip() == "💬 &lt;грубость&gt;"
 
         bare = admin_journal.format_entry({"created_at": "2026-09-30 21:05:11", "actor_id": 77,
                                            "action": "round_closed", "old_value": "open"})
-        assert "<code>77</code>" in bare and "было: open" in bare
+        assert "ID <code>77</code>" in bare and "было: open" in bare
+
+    def test_format_entry_humanizes_values(self):
+        voided = admin_journal.format_entry({
+            "created_at": "2026-09-30 19:55:00", "actor_username": "Flasin5", "actor_id": 1,
+            "action": "market_voided", "target_type": "market", "target_id": 10018,
+            "old_value": '{"status": "closed"}', "new_value": '{"status": "voided"}',
+        })
+        assert "<b>Рынок аннулирован</b> · рынок #10018" in voided
+        assert "закрыт → аннулирован" in voided and "{" not in voided
+
+        wallet = admin_journal.format_entry({
+            "created_at": "2026-09-30 19:55:00", "actor_id": 1, "action": "wallet_admin_credit",
+            "target_type": "user", "target_id": 5, "old_value": '{"balance": 677}',
+            "new_value": '{"balance": 777, "amount": 100, "reason": "приз"}',
+        })
+        assert "баланс: 677 → 777 · сумма: 100 · причина: приз" in wallet
+
+        limit = admin_journal.format_entry({
+            "created_at": "2026-09-30 19:55:00", "actor_id": 1, "action": "limit_set",
+            "target_type": "risk_limit", "target_id": 3, "division_id": 3,
+            "old_value": '{"scope_type": "division", "limit_key": "max_bet", "value": null}',
+            "new_value": '{"scope_type": "division", "limit_key": "max_bet", "value": 500}',
+        })
+        assert "<b>Установлен лимит</b> · див. 3" in limit
+        assert "область: дивизион · лимит: макс. ставка · значение: — → 500" in limit
+
+        refund = admin_journal.format_entry({
+            "created_at": "2026-09-30 19:55:00", "actor_id": 1, "action": "bet_voided",
+            "target_type": "bet", "target_id": 9, "old_value": '{"status": "pending", "amount": 50}',
+            "new_value": '{"status": "refunded", "refund": 50}',
+        })
+        assert "статус: в игре → возвращена" in refund
+
+        backup = admin_journal.format_entry({
+            "created_at": "2026-10-01 02:25:00", "actor_id": 1, "action": "db_backup_created",
+            "target_type": "backup", "new_value": "league-20261001-022532.db.gz",
+        })
+        assert "backup" not in backup.split("\n")[1]
+
+        deadline = admin_journal.format_entry({
+            "created_at": "2026-10-01 02:25:00", "actor_id": 1, "action": "match_deadline_extended",
+            "target_type": "match", "target_id": 5388, "new_value": "+24 ч, до 2026-10-02 02:25:44",
+        })
+        assert "матч #5388" in deadline and "+24 ч, до 02.10 02:25" in deadline
+
+        unknown = admin_journal.format_entry({"created_at": "2026-10-01 02:25:00", "actor_id": 1,
+                                              "action": "brand_new_action"})
+        assert "<code>brand_new_action</code>" in unknown
+
+    def test_group_entries_merges_one_batch(self):
+        def row(target_id, minute="19:55:01", actor=1, new='{"status": "voided"}'):
+            return {"created_at": f"2026-09-30 {minute}", "actor_id": actor, "actor_username": "a",
+                    "action": "market_voided", "target_type": "market", "target_id": target_id,
+                    "old_value": '{"status": "closed"}', "new_value": new}
+
+        rows = [row(i) for i in range(10018, 10012, -1)]
+        rows += [row(10396, minute="19:14:00"), row(10395, minute="19:14:30"),
+                 row(500, minute="19:14:30", actor=2)]
+        groups = admin_journal.group_entries(rows)
+        assert [g["count"] for g in groups] == [6, 2, 1]
+        text = admin_journal.format_entry(groups[0])
+        assert "<b>Рынок аннулирован</b> ×6 · рынки #10013–#10018" in text
+        assert "рынки #10395, #10396" in admin_journal.format_entry(groups[1])
+        # Different values are not one batch.
+        assert len(admin_journal.group_entries([row(1), row(2, new='{"status": "open"}')])) == 2
 
     def test_record_writes_and_skips_missing_actor(self):
         asyncio.run(admin_journal.record(ADMIN_WITH_ROW, "match_reset", "match", 9,

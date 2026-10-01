@@ -291,7 +291,7 @@ async def _render_audit(update: Update, category: str, page: int, actor_id: int)
     if actor_id:
         head.append(f"Админ: <code>{actor_id}</code>")
     head.append(f"Записей: {total}, стр. {page + 1}/{pages}")
-    body = [admin_journal.format_entry(r) for r in rows] or ["Записей нет."]
+    body = [admin_journal.format_entry(r) for r in admin_journal.group_entries(rows)] or ["Записей нет."]
     text = "\n".join(head) + "\n\n" + "\n\n".join(body)
     # Drop whole entries rather than cut the text: a cut can split an HTML tag.
     while len(text) > 4000 and len(body) > 1:

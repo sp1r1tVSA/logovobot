@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import logging
+import re
 
 import database
 
@@ -43,6 +45,7 @@ ACTIONS: dict[str, tuple[str, str]] = {
     "draft_confirmed": ("matches", "Подтверждён черновик"),
     "draft_rejected": ("matches", "Отклонён черновик"),
     "generate_round_robin": ("matches", "Сгенерировано расписание"),
+    "result_correction": ("matches", "Исправлен результат (live)"),
     # Дисциплина
     "warn_added": ("discipline", "Выдан варн"),
     "warn_removed": ("discipline", "Снят варн"),
@@ -97,6 +100,10 @@ ACTIONS: dict[str, tuple[str, str]] = {
     "market_closed": ("bets", "Рынок закрыт"),
     "market_settled": ("bets", "Рынок рассчитан"),
     "market_void": ("bets", "Рынок аннулирован"),
+    "market_voided": ("bets", "Рынок аннулирован"),
+    "market_suspend_reason": ("bets", "Причина приостановки рынка"),
+    "market_resume_reason": ("bets", "Причина возобновления рынка"),
+    "market_close_reason": ("bets", "Причина закрытия рынка"),
     "wallet_admin_credit": ("bets", "Начислены монеты"),
     "wallet_admin_debit": ("bets", "Списаны монеты"),
     # Сезоны
@@ -120,6 +127,8 @@ NOISY_ACTIONS: tuple[str, ...] = (
     "rule_market_suspension",
     "tracker_session_start",
     "tracker_session_finish",
+    # Дубль match_result_correction: routes_admin_live пишет правку в обе таблицы.
+    "result_correction",
 )
 
 
@@ -153,31 +162,234 @@ def _short(value, limit: int = 120) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+# Объект действия: (единственное, множественное). Пустая строка — не показывать:
+# у бэкапа и лиги нет номера, а у лимита и паузы ставок номер — это область,
+# которая и так видна в значениях и в «див.».
+TARGETS: dict[str, tuple[str, str]] = {
+    "match": ("матч", "матчи"),
+    "market": ("рынок", "рынки"),
+    "selection": ("исход", "исходы"),
+    "bet": ("купон", "купоны"),
+    "user": ("игрок", "игроки"),
+    "round": ("тур", "туры"),
+    "division": ("дивизион", "дивизионы"),
+    "season": ("сезон", "сезоны"),
+    "cup_stage": ("стадия кубка", "стадии кубка"),
+    "integrity_case": ("дело", "дела"),
+    "backup": ("", ""),
+    "league": ("", ""),
+    "risk_limit": ("", ""),
+    "betting": ("", ""),
+}
+
+_KEYS: dict[str, str] = {
+    "status": "статус",
+    "odds_value": "коэф.",
+    "amount": "сумма",
+    "refund": "возврат",
+    "balance": "баланс",
+    "reason": "причина",
+    "market_id": "рынок",
+    "scope_type": "область",
+    "limit_key": "лимит",
+    "value": "значение",
+    "player1_score": "голы 1",
+    "player2_score": "голы 2",
+    "paused": "пауза",
+}
+
+_STATUSES: dict[str, str] = {
+    # рынки
+    "open": "открыт",
+    "suspended": "приостановлен",
+    "closed": "закрыт",
+    "settled": "рассчитан",
+    "voided": "аннулирован",
+    # матчи
+    "scheduled": "запланирован",
+    "pending": "не сыгран",
+    "reported": "ждёт подтверждения",
+    "disputed": "спорный",
+    "confirmed": "подтверждён",
+    "completed": "сыгран",
+    "technical": "техрезультат",
+    "live": "идёт",
+    "finished": "завершён",
+    # исходы
+    "active": "активен",
+    "locked": "заблокирован",
+}
+
+# Купон — это ставка, поэтому его статусы в женском роде.
+_BET_STATUSES: dict[str, str] = {
+    "pending": "в игре",
+    "won": "выиграла",
+    "lost": "проиграла",
+    "refunded": "возвращена",
+    "cancelled": "отменена",
+    "cashed_out": "выкуплена",
+}
+
+_SCOPES: dict[str, str] = {"global": "вся лига", "division": "дивизион", "user": "игрок"}
+
+_LIMITS: dict[str, str] = {
+    "max_bet": "макс. ставка",
+    "max_payout": "макс. выплата",
+    "max_open_bets": "макс. открытых купонов",
+    "max_daily_stake": "макс. ставок за день",
+    "max_daily_loss": "макс. проигрыш за день",
+    "max_open_exposure": "макс. открытый риск",
+    "market_exposure_limit": "лимит риска рынка",
+    "division_exposure_limit": "лимит риска дивизиона",
+    "max_express_events": "макс. событий в экспрессе",
+    "express_margin_pct": "надбавка на экспресс, %",
+    "initial_balance": "стартовый баланс",
+}
+
+_DATETIME = re.compile(
+    r"(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?"
+)
+
+
+def _dates(text: str) -> str:
+    """'2026-10-02 02:25:44' → '02.10 02:25' wherever it occurs in the text."""
+    return _DATETIME.sub(lambda m: f"{m[3]}.{m[2]} {m[4]}:{m[5]}", text)
+
+
+def _parse(value):
+    """A JSON object stored by the betting audit, or the value as it is."""
+    if isinstance(value, str) and value[:1] in ("{", "["):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _scalar(key: str, value, target_type: str) -> str:
+    if value is None or value == "":
+        return "—"
+    if isinstance(value, bool):
+        return "да" if value else "нет"
+    if key == "status" and isinstance(value, str):
+        table = _BET_STATUSES if target_type == "bet" else _STATUSES
+        return table.get(value, value)
+    if key == "scope_type":
+        return _SCOPES.get(str(value), str(value))
+    if key == "limit_key":
+        text = str(value)
+        if text.startswith("ban_"):
+            return f"запрет «{text[4:]}»"
+        return _LIMITS.get(text, text)
+    if key == "market_id":
+        return f"#{value}"
+    if isinstance(value, (dict, list)):
+        return json.dumps(value, ensure_ascii=False)
+    return _dates(str(value))
+
+
+def _changes(old, new, target_type: str) -> str:
+    """old/new as one line. A status change reads «закрыт → аннулирован», a
+    dict reads «ключ: было → стало · ключ: значение»."""
+    old, new = _parse(old), _parse(new)
+    empty = (None, "")
+    if isinstance(old, dict) or isinstance(new, dict):
+        o = old if isinstance(old, dict) else {}
+        n = new if isinstance(new, dict) else {}
+        if set(o) | set(n) == {"status"}:
+            return (f"{_scalar('status', o.get('status'), target_type)} → "
+                    f"{_scalar('status', n.get('status'), target_type)}")
+        parts = []
+        for key in list(o) + [k for k in n if k not in o]:
+            label = _KEYS.get(key, key)
+            if key in o and key in n and o[key] != n[key]:
+                parts.append(f"{label}: {_scalar(key, o[key], target_type)} → "
+                             f"{_scalar(key, n[key], target_type)}")
+            else:
+                parts.append(f"{label}: {_scalar(key, n[key] if key in n else o[key], target_type)}")
+        text = " · ".join(parts)
+        return f"было: {text}" if o and not n else text
+    if old not in empty and new not in empty:
+        return f"{_dates(str(old))} → {_dates(str(new))}"
+    if new not in empty:
+        return _dates(str(new))
+    if old not in empty:
+        return f"было: {_dates(str(old))}"
+    return ""
+
+
+def _ids(ids: list) -> str:
+    """#5, #7 — or #10013–#10018 for a run of consecutive numbers."""
+    nums = sorted({int(i) for i in ids if str(i).lstrip("-").isdigit()})
+    if not nums:
+        return ""
+    if len(nums) > 2 and nums[-1] - nums[0] == len(nums) - 1:
+        return f"#{nums[0]}–#{nums[-1]}"
+    shown = ", ".join(f"#{n}" for n in nums[:8])
+    return shown + (f" и ещё {len(nums) - 8}" if len(nums) > 8 else "")
+
+
+_BATCH_KEYS = ("actor_id", "action", "target_type", "division_id", "old_value", "new_value", "reason")
+
+
+def _same_batch(a: dict, b: dict) -> bool:
+    return (
+        bool(a.get("target_id")) and bool(b.get("target_id"))
+        and all(a.get(k) == b.get(k) for k in _BATCH_KEYS)
+        and str(a.get("created_at") or "")[:16] == str(b.get("created_at") or "")[:16]
+    )
+
+
+def group_entries(rows: list[dict]) -> list[dict]:
+    """Merge neighbouring rows that are one action applied to many objects in
+    the same minute (six markets voided at once) into one row carrying
+    `target_ids` and `count`."""
+    out: list[dict] = []
+    for row in rows:
+        if out and _same_batch(out[-1], row):
+            out[-1]["target_ids"].append(row["target_id"])
+            out[-1]["count"] += 1
+            continue
+        out.append({**row, "target_ids": [row.get("target_id")], "count": 1})
+    return out
+
+
 def format_entry(row: dict) -> str:
-    """One journal row as HTML: when, who, what, on what, old → new, reason."""
+    """One journal row (or a group from `group_entries`) as HTML: when and who
+    on the first line, what and on what on the second, then old → new and the
+    reason."""
     esc = html.escape
     stamp = str(row.get("created_at") or "")
     # 'YYYY-MM-DD HH:MM:SS' (MSK) → 'DD.MM HH:MM'
     when = f"{stamp[8:10]}.{stamp[5:7]} {stamp[11:16]}" if len(stamp) >= 16 else stamp
     username = row.get("actor_username")
-    who = f"@{esc(username)}" if username else f"<code>{row.get('actor_id')}</code>"
-    target = ""
-    if row.get("target_type"):
-        target = f" · {esc(str(row['target_type']))}"
-        if row.get("target_id"):
-            target += f" #{row['target_id']}"
+    who = f"@{esc(username)}" if username else f"ID <code>{row.get('actor_id')}</code>"
+    action = str(row.get("action") or "?")
+    what = f"<b>{esc(action_label(action))}</b>" if action in ACTIONS else f"<code>{esc(action)}</code>"
+    count = int(row.get("count") or 1)
+    if count > 1:
+        what += f" ×{count}"
+
+    details = []
+    target_type = str(row.get("target_type") or "")
+    if target_type:
+        one, many = TARGETS.get(target_type, (target_type, target_type))
+        ids = [i for i in (row.get("target_ids") or [row.get("target_id")]) if i]
+        if one and ids:
+            details.append(f"{many if len(ids) > 1 else one} {_ids(ids)}")
+        elif one:
+            details.append(one)
     if row.get("division_id"):
-        target += f" · див. {row['division_id']}"
-    lines = [f"<b>{esc(when)}</b> {who} — {esc(action_label(str(row.get('action') or '?')))}{target}"]
-    old, new = row.get("old_value"), row.get("new_value")
-    if old not in (None, "") and new not in (None, ""):
-        lines.append(f"   {esc(_short(old))} → {esc(_short(new))}")
-    elif new not in (None, ""):
-        lines.append(f"   {esc(_short(new))}")
-    elif old not in (None, ""):
-        lines.append(f"   было: {esc(_short(old))}")
+        details.append(f"див. {row['division_id']}")
+    if details:
+        what += " · " + esc(" · ".join(details))
+
+    lines = [f"🕑 {esc(when)} · {who}", what]
+    change = _changes(row.get("old_value"), row.get("new_value"), target_type)
+    if change:
+        lines.append(f"   {esc(_short(change, 200))}")
     if row.get("reason"):
-        lines.append(f"   💬 {esc(_short(row['reason']))}")
+        lines.append(f"   💬 {esc(_short(_dates(str(row['reason']))))}")
     return "\n".join(lines)
 
 
