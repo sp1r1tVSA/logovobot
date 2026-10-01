@@ -8,7 +8,7 @@ standings and Pillow-rendered infographics, a debt/warn discipline system, and a
 prediction market ("Logovo.bet") exposed through a Telegram Mini App.
 
 The project is well past MVP — 396 Python files (173 application modules and scripts +
-223 pytest files), 73 SQLite tables (migrations through `031`), and ten completed development phases documented in the
+223 pytest files), 73 SQLite tables (migrations through `032`), and ten completed development phases documented in the
 `PHASE_*.md` reports under `reports/`. Post-phase work is logged in the numbered
 `FIX_*.md` notes and the `*_AUDIT.md` reports beside them.
 
@@ -589,8 +589,10 @@ admin's actions.
   labels known actions; an unknown one shows up as is under «Прочее», so a forgotten catalog
   line hides nothing. `NOISY_ACTIONS` (repricing `odds_changed`, tracker/live transitions)
   are left out of «Все». `database.get_admin_journal` reads `admin_audit_log` ∪
-  `bet_audit_log` and drops actor 0 (the system). `log_admin_action` falls back to
-  `bet_audit_log` when the insert hits the users FK — a global admin from `ADMIN_IDS` who
+  `bet_audit_log` and drops actor 0 (the system), so automatic actions must be written as
+  actor 0 — the early-series void in `advance_cup_series` once carried the reporting player's
+  id and made a participant look like an admin (migration `032` reattributed those rows).
+  `log_admin_action` falls back to `bet_audit_log` when the insert hits the users FK — a global admin from `ADMIN_IDS` who
   never pressed /start has no users row, and their actions used to be lost silently. When
   you add an admin action, journal it and add it to `ACTIONS`.
 

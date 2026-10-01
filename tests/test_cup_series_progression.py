@@ -187,11 +187,43 @@ class CupProgressionTestCase(unittest.TestCase):
         self.assertEqual(header["status"], "confirmed")
         self.assertEqual((header["player1_score"], header["player2_score"]), (2, 0))
         self.assertEqual(self._item(header_bet)["status"], "won")
+        # Аннулирование — действие системы, а не игрока, внёсшего решающий счёт:
+        # иначе в /audit участник выглядит админом, аннулировавшим рынки.
+        audit = self._rows(
+            "SELECT action, actor_id FROM bet_audit_log "
+            "WHERE action IN ('market_voided', 'market_void_bet_refund', 'bet_voided')")
+        self.assertTrue(audit)
+        self.assertEqual({a["actor_id"] for a in audit}, {0})
         # Возврат третьей игры + выигрыш серии: деньги проведены один раз каждая.
         entries = self._rows(
             "SELECT transaction_type FROM coin_transactions WHERE user_id = 9 "
             "AND transaction_type IN ('bet_won','admin_refund') ORDER BY id")
         self.assertEqual([e["transaction_type"] for e in entries], ["admin_refund", "bet_won"])
+
+    def test_05b_migration_reattributes_old_auto_voids_to_the_system(self):
+        database.place_user_bet(9, 100, [{"match_id": self.game[(1, 3)], "outcome": "p1"}])
+        self._confirm(self.game[(1, 1)], 2, 0)
+        self._confirm(self.game[(1, 2)], 1, 0)
+        manual_market = self._row(
+            "SELECT id FROM markets WHERE match_id = ? LIMIT 1", (self.game[(2, 1)],))["id"]
+        database.void_market(manual_market, 1, "ручное аннулирование")
+        with database.transaction() as conn:
+            # Как писалось до исправления: от имени игрока, внёсшего счёт.
+            conn.execute("UPDATE bet_audit_log SET actor_id = 1 WHERE actor_id = 0")
+            conn.execute("DELETE FROM schema_migrations WHERE version = ?",
+                         (database.MIGRATION_032_AUTO_VOID_SYSTEM_ACTOR,))
+            database._reattribute_series_auto_voids(conn.cursor())
+
+        rows = self._rows(
+            "SELECT action, entity_id, actor_id FROM bet_audit_log "
+            "WHERE action IN ('market_voided', 'market_void_bet_refund', 'bet_voided')")
+        manual = [r for r in rows if r["action"] == "market_voided" and r["entity_id"] == manual_market]
+        auto = [r for r in rows if r not in manual]
+        self.assertEqual({r["action"] for r in auto},
+                         {"market_voided", "market_void_bet_refund", "bet_voided"})
+        self.assertEqual({r["actor_id"] for r in auto}, {0})
+        # Ручное аннулирование рынка другой серии остаётся за тем, кто его сделал.
+        self.assertEqual([r["actor_id"] for r in manual], [1])
 
     def test_06_voided_leg_pays_express_as_one(self):
         """Нога аннулированной игры в экспрессе = 1.00, купон живёт на второй ноге."""

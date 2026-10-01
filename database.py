@@ -2310,6 +2310,9 @@ def init_db() -> None:
         # ─── 031: прогоны OCR скриншотов для метрик распознавания ─────────────
         _ensure_ocr_runs_schema(cursor)
 
+        # ─── 032: автоаннулирование рынков серии — от системы, не от игрока ───
+        _reattribute_series_auto_voids(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -3417,7 +3420,7 @@ def confirm_and_finalize_match(match_id: int, p1_score: int, p2_score: int, even
         # матчем. Скоуп тот же, что у записи счёта: подтверждённая игра с
         # нерешённой серией — это сетка, в следующий этап по которой прошёл не
         # тот клуб. Ошибка здесь откатывает подтверждение целиком.
-        advance_cup_series(cursor, match_id, actor_id=reporter_id)
+        advance_cup_series(cursor, match_id)
         try:
             settle_match_bets(match_id, p1_score, p2_score)
         except Exception as e:
@@ -9505,7 +9508,10 @@ def _reopen_cup_series_games(cursor, series_id: int) -> int:
     return cursor.rowcount
 
 
-def advance_cup_series(cursor, match_id: int, actor_id: int | None = None) -> dict | None:
+SERIES_ENDED_VOID_REASON = "Серия завершена досрочно — игра не была сыграна"
+
+
+def advance_cup_series(cursor, match_id: int) -> dict | None:
     """Двигать серию после подтверждения её игры; если серия решена — закрыть её.
 
     Вызывается на курсоре `confirm_and_finalize_match`, то есть в той же
@@ -9584,8 +9590,10 @@ def advance_cup_series(cursor, match_id: int, actor_id: int | None = None) -> di
             )
             market_ids = [int(r["id"]) for r in cursor.fetchall()]
             cursor.execute("UPDATE matches SET status = 'cancelled' WHERE id = ?", (game_id,))
+            # Аннулирует система (actor 0), а не игрок, внёсший решающий счёт:
+            # иначе в журнале админов это выглядело как его ручное действие.
             for market_id in market_ids:
-                void_market(market_id, actor_id or 0, "Серия завершена досрочно — игра не была сыграна")
+                void_market(market_id, 0, SERIES_ENDED_VOID_REASON)
             summary["voided_games"].append({"match_id": game_id, "voided_markets": len(market_ids)})
 
     summary["header_settled"] = _sync_cup_series_header(cursor, series_id, state) is not None
@@ -18170,6 +18178,7 @@ MIGRATION_028_OUTRIGHTS = "028_outright_markets"
 MIGRATION_029_FREEBETS = "029_freebets"
 MIGRATION_030_CLUB_SMM_POSTS = "030_club_smm_posts"
 MIGRATION_031_OCR_RUNS = "031_ocr_runs"
+MIGRATION_032_AUTO_VOID_SYSTEM_ACTOR = "032_auto_void_system_actor"
 OUTRIGHT_MARKET_TYPES = ("division_winner", "cup_winner", "division_top_scorer", "league_top_scorer")
 OUTRIGHT_OTHER_KEY = "__other__"
 MAX_OPEN_OUTRIGHT_BETS = 20
@@ -18371,6 +18380,65 @@ def _ensure_ocr_runs_schema(cursor: sqlite3.Cursor) -> None:
     cursor.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
         (MIGRATION_031_OCR_RUNS, "ocr_runs: screenshot OCR runs for recognition metrics"),
+    )
+
+
+def _reattribute_series_auto_voids(cursor: sqlite3.Cursor) -> None:
+    """Миграция 032: аннулирование рынков несыгранной игры серии — действие системы.
+
+    `advance_cup_series` передавал в `void_market` id игрока, внёсшего решающий
+    счёт, и в /audit обычный участник выглядел админом, аннулировавшим рынки.
+    Теперь там actor 0; здесь — однократно — то же для старых записей:
+
+    * `market_void_bet_refund` — по причине в new_value;
+    * `bet_voided` — парная запись того же купона тем же актором в те же секунды;
+    * `market_voided` — рынок снятой (cancelled) игры серии, а актор — тот, кто
+      вносил счёт одной из игр этой серии.
+    """
+    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?",
+                   (MIGRATION_032_AUTO_VOID_SYSTEM_ACTOR,))
+    if cursor.fetchone():
+        return
+    cursor.execute(
+        """
+        UPDATE bet_audit_log SET actor_id = 0
+        WHERE action = 'bet_voided' AND actor_id > 0 AND EXISTS (
+            SELECT 1 FROM bet_audit_log r
+            WHERE r.action = 'market_void_bet_refund'
+              AND r.entity_id = bet_audit_log.entity_id
+              AND r.actor_id = bet_audit_log.actor_id
+              AND instr(r.new_value, ?) > 0
+              AND ABS(julianday(r.created_at) - julianday(bet_audit_log.created_at)) * 86400 <= 5
+        )
+        """,
+        (SERIES_ENDED_VOID_REASON,),
+    )
+    cursor.execute(
+        "UPDATE bet_audit_log SET actor_id = 0 "
+        "WHERE action = 'market_void_bet_refund' AND actor_id > 0 AND instr(new_value, ?) > 0",
+        (SERIES_ENDED_VOID_REASON,),
+    )
+    cursor.execute(
+        """
+        UPDATE bet_audit_log SET actor_id = 0
+        WHERE action = 'market_voided' AND actor_id > 0 AND EXISTS (
+            SELECT 1 FROM markets mk
+            JOIN matches g ON g.id = mk.match_id
+            WHERE mk.id = bet_audit_log.entity_id
+              AND g.status = 'cancelled' AND g.cup_series_id IS NOT NULL
+              AND COALESCE(g.is_series_header, 0) = 0
+              AND EXISTS (
+                  SELECT 1 FROM matches s
+                  WHERE s.cup_series_id = g.cup_series_id
+                    AND s.reported_by = bet_audit_log.actor_id
+              )
+        )
+        """
+    )
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_032_AUTO_VOID_SYSTEM_ACTOR,
+         "bet_audit_log: series auto-voids attributed to the system, not the reporter"),
     )
 
 
