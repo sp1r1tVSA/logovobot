@@ -5,6 +5,7 @@
 Сеть и Gemini не трогаются: рендер и отправка замоканы.
 """
 
+import inspect
 import io
 import unittest
 import uuid
@@ -354,7 +355,9 @@ class TestRegistration(unittest.TestCase):
 
         app = MagicMock()
         main.register_jobs(app)
-        callbacks = [c.args[0] for c in app.job_queue.run_repeating.call_args_list]
+        # Задачи регистрируются через job_health.tracked — в очередь уходит
+        # обёртка, сам колбэк лежит в её __wrapped__.
+        callbacks = [inspect.unwrap(c.args[0]) for c in app.job_queue.run_repeating.call_args_list]
         self.assertIn(admin_handlers.job_post_totw, callbacks)
 
 
