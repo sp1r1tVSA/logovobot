@@ -363,6 +363,15 @@ def set_transfer_warnings(transfer_id: int, warnings: Iterable[Mapping]) -> None
         )
 
 
+def set_transfer_photo(transfer_id: int, file_id: str | None) -> None:
+    """`file_id` фото заявки — Telegram его выдаёт, когда карточка уже отправлена."""
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE transfers SET photo_file_id = ?, updated_at = ? WHERE id = ?",
+            (file_id, now_msk_str(), transfer_id),
+        )
+
+
 def mark_squad_applied(transfer_id: int) -> None:
     with transaction() as conn:
         conn.execute(

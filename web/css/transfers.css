@@ -1,0 +1,534 @@
+/* web/css/transfers.css — Стили трансферного окна Mini App */
+
+.transfers-pill {
+  color: var(--accent-gold, #f5b027);
+  background: rgba(245, 176, 39, 0.1);
+  border: 1px solid rgba(245, 176, 39, 0.25);
+  transition: all 0.2s ease;
+}
+.transfers-pill:hover,
+.transfers-pill.active {
+  background: rgba(245, 176, 39, 0.25);
+  border-color: var(--accent-gold, #f5b027);
+  box-shadow: 0 0 12px rgba(245, 176, 39, 0.35);
+}
+
+.transfers-wrap {
+  padding: 12px 14px 80px;
+  max-width: 600px;
+  margin: 0 auto;
+}
+
+.transfers-header-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.transfers-page-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.25rem;
+  font-weight: 900;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.transfers-refresh-btn {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 8px;
+  color: var(--text-secondary, #94a3b8);
+  padding: 6px 10px;
+  font-size: 0.85rem;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+.transfers-refresh-btn:hover {
+  color: #fff;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+/* Навигация по вкладкам (Статус / Заявка / Урна / История) */
+.transfers-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+  background: rgba(14, 18, 27, 0.8);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  padding: 4px;
+  border-radius: 12px;
+  margin-bottom: 16px;
+}
+.transfers-tab-btn {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary, #94a3b8);
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.78rem;
+  font-weight: 700;
+  padding: 8px 4px;
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: center;
+  transition: all 0.2s ease;
+  white-space: nowrap;
+}
+.transfers-tab-btn.active {
+  background: rgba(245, 176, 39, 0.15);
+  color: var(--accent-gold, #f5b027);
+  border: 1px solid rgba(245, 176, 39, 0.3);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.4);
+}
+
+/* Карточки и баннеры */
+.transfers-card {
+  background: rgba(14, 18, 27, 0.92);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin-bottom: 14px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.35);
+  position: relative;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+
+.window-banner-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 10px;
+}
+.window-status-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.75rem;
+  font-weight: 800;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.badge-open {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--color-success, #10b981);
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+.badge-draft {
+  background: rgba(245, 176, 39, 0.15);
+  color: var(--accent-gold, #f5b027);
+  border: 1px solid rgba(245, 176, 39, 0.3);
+}
+.badge-closed {
+  background: rgba(148, 163, 184, 0.15);
+  color: var(--text-muted, #64748b);
+  border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.window-meta-time {
+  font-size: 0.78rem;
+  color: var(--text-secondary, #94a3b8);
+  margin-top: 4px;
+}
+
+/* Кошелек и слоты клуба */
+.ledger-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.04);
+  border-radius: 12px;
+  padding: 10px;
+  margin: 10px 0;
+  text-align: center;
+}
+.ledger-stat-label {
+  font-size: 0.68rem;
+  color: var(--text-muted, #64748b);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin-bottom: 2px;
+}
+.ledger-stat-val {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: #fff;
+}
+.ledger-stat-val.gold {
+  color: var(--accent-gold, #f5b027);
+}
+
+.slots-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.slot-pill {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 0.75rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+.slot-pill-label {
+  color: var(--text-secondary, #94a3b8);
+}
+.slot-pill-val {
+  font-family: 'Outfit', sans-serif;
+  font-weight: 800;
+  color: #fff;
+}
+
+/* Секция входящих предложений */
+.incoming-deals-box {
+  background: linear-gradient(135deg, rgba(245, 176, 39, 0.08), rgba(0, 210, 255, 0.05));
+  border: 1px solid rgba(245, 176, 39, 0.3);
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin-bottom: 16px;
+}
+.incoming-deals-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.92rem;
+  font-weight: 800;
+  color: var(--accent-gold, #f5b027);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+/* Элемент заявки */
+.req-item {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 12px;
+  padding: 12px;
+  margin-bottom: 10px;
+  transition: border-color 0.2s ease;
+}
+.req-item:hover {
+  border-color: rgba(255, 255, 255, 0.12);
+}
+.req-item-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.req-item-title {
+  font-weight: 800;
+  color: #fff;
+  font-size: 0.9rem;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.req-ovr-tag {
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 0.72rem;
+  font-family: 'Outfit', sans-serif;
+  font-weight: 800;
+  color: var(--accent-gold, #f5b027);
+}
+.req-route {
+  font-size: 0.8rem;
+  color: var(--text-secondary, #94a3b8);
+  margin-bottom: 6px;
+}
+.req-route b {
+  color: #fff;
+}
+.req-footer {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.04);
+}
+.req-price {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: var(--accent-gold, #f5b027);
+}
+
+.req-actions {
+  display: flex;
+  gap: 6px;
+}
+.btn-confirm {
+  background: rgba(16, 185, 129, 0.15);
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  color: var(--color-success, #10b981);
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+.btn-confirm:hover {
+  background: rgba(16, 185, 129, 0.3);
+}
+.btn-decline {
+  background: rgba(239, 68, 68, 0.12);
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: var(--color-danger, #ef4444);
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 0.78rem;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+.btn-decline:hover {
+  background: rgba(239, 68, 68, 0.25);
+}
+.btn-withdraw {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-muted, #64748b);
+  padding: 5px 10px;
+  border-radius: 8px;
+  font-weight: 600;
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+.btn-withdraw:hover {
+  color: var(--color-danger, #ef4444);
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+/* Формы заявок */
+.form-group {
+  margin-bottom: 12px;
+}
+.form-label {
+  display: block;
+  font-size: 0.75rem;
+  font-weight: 700;
+  color: var(--text-secondary, #94a3b8);
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  margin-bottom: 6px;
+}
+.form-input,
+.form-select {
+  width: 100%;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  border-radius: 10px;
+  color: #fff;
+  font-size: 0.9rem;
+  padding: 10px 12px;
+  box-sizing: border-box;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+.form-input:focus,
+.form-select:focus {
+  border-color: var(--accent-gold, #f5b027);
+  box-shadow: 0 0 8px rgba(245, 176, 39, 0.2);
+}
+
+.kind-toggle-row {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 14px;
+}
+.kind-toggle-btn {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 10px;
+  color: var(--text-secondary, #94a3b8);
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 8px;
+  cursor: pointer;
+  text-align: center;
+  transition: 0.15s ease;
+}
+.kind-toggle-btn.active {
+  background: rgba(245, 176, 39, 0.12);
+  color: var(--accent-gold, #f5b027);
+  border-color: rgba(245, 176, 39, 0.35);
+}
+
+.role-toggle-row {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.role-toggle-btn {
+  flex: 1;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  color: var(--text-secondary, #94a3b8);
+  font-size: 0.8rem;
+  font-weight: 700;
+  padding: 8px;
+  cursor: pointer;
+  text-align: center;
+  transition: 0.15s ease;
+}
+.role-toggle-btn.active.buy {
+  background: rgba(16, 185, 129, 0.15);
+  color: var(--color-success, #10b981);
+  border-color: rgba(16, 185, 129, 0.35);
+}
+.role-toggle-btn.active.sell {
+  background: rgba(239, 68, 68, 0.15);
+  color: var(--color-danger, #ef4444);
+  border-color: rgba(239, 68, 68, 0.35);
+}
+
+/* Загрузка фото */
+.photo-upload-zone {
+  border: 1px dashed rgba(255, 255, 255, 0.18);
+  border-radius: 12px;
+  padding: 14px;
+  text-align: center;
+  cursor: pointer;
+  transition: 0.15s ease;
+  position: relative;
+  background: rgba(255, 255, 255, 0.01);
+}
+.photo-upload-zone:hover {
+  border-color: var(--accent-gold, #f5b027);
+  background: rgba(245, 176, 39, 0.02);
+}
+.photo-upload-zone input[type="file"] {
+  display: none;
+}
+.photo-preview-box {
+  position: relative;
+  display: inline-block;
+  margin-top: 8px;
+}
+.photo-preview-img {
+  max-width: 100%;
+  max-height: 160px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: block;
+}
+.photo-remove-btn {
+  position: absolute;
+  top: -8px;
+  right: -8px;
+  background: #ef4444;
+  color: #fff;
+  border: none;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  font-size: 0.75rem;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.submit-request-btn {
+  width: 100%;
+  background: linear-gradient(135deg, #f5b027, #f7c948);
+  color: #000;
+  border: none;
+  border-radius: 12px;
+  padding: 12px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.95rem;
+  font-weight: 800;
+  cursor: pointer;
+  margin-top: 10px;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+  box-shadow: 0 4px 15px rgba(245, 176, 39, 0.25);
+}
+.submit-request-btn:active {
+  transform: scale(0.98);
+}
+.submit-request-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Урна */
+.urn-item-card {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  padding: 12px 14px;
+  margin-bottom: 10px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  transition: border-color 0.2s ease;
+}
+.urn-item-card:hover {
+  border-color: rgba(245, 176, 39, 0.3);
+}
+.urn-item-info {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.urn-item-name {
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: #fff;
+}
+.urn-item-club {
+  font-size: 0.78rem;
+  color: var(--text-secondary, #94a3b8);
+}
+.urn-item-price {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.82rem;
+  color: var(--accent-gold, #f5b027);
+  font-weight: 700;
+}
+.btn-buyout {
+  background: linear-gradient(135deg, #f5b027, #f7c948);
+  color: #000;
+  border: none;
+  border-radius: 8px;
+  padding: 8px 14px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+.btn-buyout:hover {
+  box-shadow: 0 0 10px rgba(245, 176, 39, 0.4);
+}
+
+/* Пустые состояния */
+.transfers-empty {
+  text-align: center;
+  padding: 40px 16px;
+  color: var(--text-muted, #64748b);
+  border: 1px dashed rgba(255, 255, 255, 0.06);
+  border-radius: 14px;
+  margin: 10px 0;
+}
+.transfers-empty-icon {
+  font-size: 2rem;
+  margin-bottom: 6px;
+}

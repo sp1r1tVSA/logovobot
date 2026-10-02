@@ -418,10 +418,12 @@ async def handle_versioned_asset(request: web.Request) -> web.FileResponse:
 
 
 
-def create_app() -> web.Application:
+def create_app(bot=None) -> web.Application:
     """Construct and configure the aiohttp Application."""
     # cors остаётся снаружи, чтобы 429 и 401 тоже уходили с CORS-заголовками.
     app = web.Application(middlewares=[cors_middleware, compression_middleware, rate_limit_middleware, lockdown_middleware])
+    if bot is not None:
+        app["bot"] = bot
 
     # 1. Wallet & Bootstrap
     app.router.add_get("/api/bootstrap", handle_bootstrap)
@@ -577,6 +579,10 @@ def create_app() -> web.Application:
     app.router.add_post("/api/tracker/session/event", handle_tracker_session_event)
     app.router.add_post("/api/tracker/session/finish", handle_tracker_session_finish)
 
+    # 13b. Трансферное окно («ТО»): сделки, доплаты, урна, история
+    from transfers import register_routes as register_transfer_routes
+    register_transfer_routes(app)
+
     # Static SPA Frontend & Assets
     app.router.add_get("/", handle_index)
     app.router.add_get("/app", handle_index)
@@ -594,15 +600,16 @@ def create_app() -> web.Application:
     return app
 
 
-async def start_api_server_background(host: str = "0.0.0.0", port: int = 8080) -> web.AppRunner:
+async def start_api_server_background(host: str = "0.0.0.0", port: int = 8080, bot=None) -> web.AppRunner:
     """Start embedded API server in background within current asyncio loop."""
-    app = create_app()
+    app = create_app(bot=bot)
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, host, port)
     await site.start()
     logger.info(f"🎰 Logovo.bet Mini App Server running at http://{host}:{port}")
     return runner
+
 
 
 if __name__ == "__main__":

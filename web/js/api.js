@@ -35,6 +35,9 @@ class ApiClient {
       'X-Telegram-Init-Data': initData,
       ...(options.headers || {})
     };
+    if (options.body instanceof FormData) {
+      delete headers['Content-Type'];
+    }
 
     const promise = (async () => {
       try {
@@ -498,6 +501,59 @@ class ApiClient {
       method: 'POST',
       body: JSON.stringify({ match_id: matchId, action: 'accept' })
     });
+  }
+
+  // 14. Transfers — трансферное окно
+  getTransferStatus() {
+    return this.request('/api/transfers/status');
+  }
+
+  getTransferHistory() {
+    return this.request('/api/transfers/history');
+  }
+
+  getTransferUrn() {
+    return this.request('/api/transfers/urn');
+  }
+
+  createTransferDeal(payload, isMultipart = false) {
+    return this.request('/api/transfers/deal', {
+      method: 'POST',
+      body: isMultipart ? payload : JSON.stringify(payload)
+    });
+  }
+
+  createTransferSurcharge(payload, isMultipart = false) {
+    return this.request('/api/transfers/surcharge', {
+      method: 'POST',
+      body: isMultipart ? payload : JSON.stringify(payload)
+    });
+  }
+
+  createTransferUrnSale(payload, isMultipart = false) {
+    return this.request('/api/transfers/urn/sale', {
+      method: 'POST',
+      body: isMultipart ? payload : JSON.stringify(payload)
+    });
+  }
+
+  createTransferUrnBuy(urnItemId) {
+    return this.request('/api/transfers/urn/buy', {
+      method: 'POST',
+      body: JSON.stringify({ urn_item_id: urnItemId })
+    });
+  }
+
+  confirmTransfer(id) {
+    return this.request(`/api/transfers/${id}/confirm`, { method: 'POST' });
+  }
+
+  declineTransfer(id) {
+    return this.request(`/api/transfers/${id}/decline`, { method: 'POST' });
+  }
+
+  withdrawTransfer(id) {
+    return this.request(`/api/transfers/${id}/withdraw`, { method: 'POST' });
   }
 }
 

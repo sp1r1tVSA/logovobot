@@ -10,6 +10,7 @@ import { UIRenderer, escapeHtml, cupStageLabel, cupMetaName } from './ui.js';
 import { ParticleEffects } from './effects.js';
 import { AdminPanel } from './admin.js';
 import { outrightsView } from './outrights.js';
+import { transfersView } from './transfers.js';
 
 class AppController {
   constructor() {
@@ -589,6 +590,11 @@ class AppController {
     // 1c. Магазин: кнопка 🛒 и клик по балансу в шапке
     ['header-shop-btn', 'header-balance-btn'].forEach(id => {
       document.getElementById(id)?.addEventListener('click', () => this.switchView('shop'));
+    });
+
+    // 1d. Трансферное окно: кнопка 🔁 в шапке
+    document.getElementById('header-transfers-btn')?.addEventListener('click', () => {
+      this.switchView('transfers');
     });
     document.getElementById('shop-category-pills')?.addEventListener('click', (e) => {
       const pill = e.target.closest('.category-pill');
@@ -1575,10 +1581,13 @@ class AppController {
       this.ensureMatchCenterMatch();
     } else if (viewName === 'admin') {
       this.openAdminPanel();
+    } else if (viewName === 'transfers') {
+      transfersView.init();
     }
 
     document.getElementById('header-admin-btn')?.classList.toggle('active', viewName === 'admin');
     document.getElementById('header-shop-btn')?.classList.toggle('active', viewName === 'shop');
+    document.getElementById('header-transfers-btn')?.classList.toggle('active', viewName === 'transfers');
     tgBridge.hapticImpact('light');
   }
 

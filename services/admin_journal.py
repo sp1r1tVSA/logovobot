@@ -126,7 +126,15 @@ ACTIONS: dict[str, tuple[str, str]] = {
     "transfer_budgets_applied": ("transfers", "Бюджеты выданы по правилам"),
     "transfer_topic_bound": ("transfers", "Привязана тема ТО"),
     "transfer_core_snapshot": ("transfers", "Дописан снимок составов"),
+    "transfer_free_agent_recorded": ("transfers", "Записан свободный агент"),
+    "transfer_free_agent_reassigned": ("transfers", "Переписан свободный агент"),
+    "transfer_free_agent_rejected": ("transfers", "Отклонён свободный агент"),
+    "transfer_request_created": ("transfers", "Подана заявка на трансфер"),
+    "transfer_request_confirmed": ("transfers", "Подтверждена заявка (сторона)"),
+    "transfer_request_declined": ("transfers", "Отклонена заявка (сторона)"),
+    "transfer_request_withdrawn": ("transfers", "Отозвана заявка"),
 }
+
 
 # Записи с реальным actor_id, которые засоряли бы журнал админов: пересчёт
 # линии пишет odds_changed на каждый исход, трекер и live-автомат — переходы

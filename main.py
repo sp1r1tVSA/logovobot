@@ -34,11 +34,14 @@ async def post_init(application: Application) -> None:
     try:
         from api.server import start_api_server_background
         import config
-        await start_api_server_background(host=config.API_HOST, port=config.API_PORT)
+        from transfers import set_bot as set_transfer_bot
+        set_transfer_bot(application.bot)
+        await start_api_server_background(host=config.API_HOST, port=config.API_PORT, bot=application.bot)
         job_health.record_component("api_server", True, f"порт {config.API_PORT}")
     except Exception as e:
         logger.warning(f"Failed to start Logovo.bet Mini App server: {e}")
         job_health.record_component("api_server", False, f"{type(e).__name__}: {e}")
+
 
     # 📱 Configure Telegram WebApp Menu Button
     try:

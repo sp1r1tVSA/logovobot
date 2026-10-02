@@ -136,6 +136,12 @@ def _squads_by_club() -> dict[str, dict[str, tuple[str, str | None]]]:
     return squads
 
 
+def club_squad(club: str) -> list[str] | None:
+    """Текущий состав клуба (имена). None — состав в боте не загружен."""
+    roster = _squads_by_club().get(norm_club(club))
+    return [name for name, _ in roster.values()] if roster else None
+
+
 def _undo_window_ops(window_id: int, squads: dict) -> None:
     """Откатить в `squads` изменения состава, уже сделанные этим окном.
 
@@ -450,7 +456,7 @@ def overview(window_id: int) -> dict:
 
 __all__ = [
     "AUTO_REJECT_REASON", "SYSTEM_ACTOR", "InputError", "is_transfer_manager", "can_manage_window",
-    "parse_window_datetime", "create_window", "league_clubs", "snapshot_core", "open_window",
+    "parse_window_datetime", "create_window", "league_clubs", "club_squad", "snapshot_core", "open_window",
     "close_window", "due_auto_close", "set_auto_close", "update_setting", "default_budgets",
     "apply_default_budgets", "resolve_club", "set_budget", "budget_table", "budget_pages", "parse_topic_link",
     "overview", "format_k",

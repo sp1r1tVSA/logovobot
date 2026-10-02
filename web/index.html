@@ -22,6 +22,7 @@
   <link rel="stylesheet" href="/css/main.css?v=3.5.1">
   <link rel="stylesheet" href="/css/components.css?v=3.5.1">
   <link rel="stylesheet" href="/css/coupon.css?v=3.5.1">
+  <link rel="stylesheet" href="/css/transfers.css?v=3.5.1">
 
   <!-- Critical Coupons & Team Logos Styles -->
   <style id="coupons-critical-css">
@@ -132,6 +133,8 @@
       <button class="admin-pill" id="header-admin-btn" type="button" title="Управление Logovo.bet" hidden>⚙️</button>
       <!-- Shop: награды за монеты (клик по балансу открывает его же) -->
       <button class="admin-pill shop-pill" id="header-shop-btn" type="button" title="Магазин наград" aria-label="Магазин">🛒</button>
+      <!-- Transfers: трансферное окно лиги -->
+      <button class="admin-pill transfers-pill" id="header-transfers-btn" type="button" title="Трансферное окно" aria-label="Трансферы">🔁</button>
       <!-- Level Badge Pill -->
       <div class="level-pill" id="header-level-btn" title="Ваш уровень и опыт">
         <span class="level-badge-icon">🎯</span>
@@ -353,6 +356,11 @@
     <!-- VIEW: ADMIN PANEL (admins only, filled by js/admin.js) -->
     <section id="view-admin" class="view-section">
       <div id="admin-root"></div>
+    </section>
+
+    <!-- VIEW: TRANSFERS WINDOW (filled by js/transfers.js) -->
+    <section id="view-transfers" class="view-section">
+      <div id="transfers-root"></div>
     </section>
 
   </main>

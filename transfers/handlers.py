@@ -17,6 +17,7 @@ import html
 import json
 import logging
 import time
+import uuid
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.error import TelegramError
@@ -24,7 +25,7 @@ from telegram.ext import ContextTypes, filters
 
 from services import admin_journal
 from time_utils import MSK_LABEL, fmt_msk
-from transfers import notify, repo, service
+from transfers import notify, repo, requests as req_mod, service
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -593,6 +594,279 @@ async def cb_settings(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await _show(update, "\n".join(lines), InlineKeyboardMarkup([_back()]))
 
 
+# ─── Свободные агенты: приём комментариев от ответственного ────────────────
+
+# draft_id -> {"draft": FaDraft, "preview": FaPreview, "user_id": int, "expires": float}
+_fa_drafts: dict[str, dict] = {}
+
+
+def _save_fa_draft(draft: req_mod.FaDraft, preview: req_mod.FaPreview, user_id: int) -> str:
+    draft_id = uuid.uuid4().hex[:10]
+    _fa_drafts[draft_id] = {
+        "draft": draft,
+        "preview": preview,
+        "user_id": user_id,
+        "expires": time.monotonic() + 1800,
+    }
+    return draft_id
+
+
+def _get_fa_draft(draft_id: str) -> dict | None:
+    entry = _fa_drafts.get(draft_id)
+    if entry and entry["expires"] < time.monotonic():
+        _fa_drafts.pop(draft_id, None)
+        return None
+    return entry
+
+
+def _format_fa_preview(preview: req_mod.FaPreview, draft_id: str) -> tuple[str, InlineKeyboardMarkup]:
+    draft = preview.draft
+    ev = preview.evaluation
+    lines = [
+        "⚡️ <b>Свободный агент — проверка комментария</b>", "",
+        f"Игрок: <b>{html.escape(draft.player_name)}</b>" + (f" (OVR {draft.ovr})" if draft.ovr else ""),
+        f"Куда: <b>{html.escape(draft.to_club)}</b>" + (f" (тренер: {draft.to_user})" if draft.to_user else " (⚠️ нет тренера в боте)"),
+        f"Откуда: {html.escape(draft.from_club or '—')}",
+        f"Сумма: <b>{format_k(draft.price_k)}</b>",
+    ]
+    if draft.reported_budget_k is not None or ev.budget_remaining_after_k is not None:
+        rep = format_k(draft.reported_budget_k) if draft.reported_budget_k is not None else "—"
+        calc = format_k(ev.budget_remaining_after_k) if ev.budget_remaining_after_k is not None else "—"
+        lines.append(f"Остаток бюджета: заявлен <b>{rep}</b> | расчётный <b>{calc}</b>")
+
+    if draft.commented_at:
+        lines.append(f"Время комментария: <b>{fmt_msk(draft.commented_at)} {MSK_LABEL}</b>")
+    else:
+        lines.append("Время комментария: ⚠️ <i>не определено (перешлите исходный комментарий)</i>")
+
+    if preview.duplicate:
+        lines += ["", f"❌ <b>Этот комментарий уже записан (заявка #{preview.duplicate['id']})</b>"]
+    elif preview.conflict:
+        lines += [
+            "",
+            f"⚠️ <b>Игрок уже записан за {html.escape(preview.conflict['to_club'])} (заявка #{preview.conflict['id']})</b>",
+            f"Но этот комментарий оставлен РАНЬШЕ ({fmt_msk(draft.commented_at)} < {fmt_msk(preview.conflict['commented_at'])}).",
+            "Вы можете переписать игрока на более ранний комментарий.",
+        ]
+
+    if ev.blocks:
+        lines.append("")
+        lines.append("⛔️ <b>Блокировки:</b>")
+        for b in ev.blocks:
+            lines.append(f"• {html.escape(b.message)}")
+
+    if ev.warnings:
+        lines.append("")
+        lines.append("⚠️ <b>Предупреждения:</b>")
+        for w in ev.warnings:
+            lines.append(f"• {html.escape(w.message)}")
+
+    if preview.notes:
+        lines.append("")
+        lines.append("ℹ️ <b>Заметки:</b>")
+        for n in preview.notes:
+            lines.append(f"• {html.escape(n.message)}")
+
+    buttons = []
+    if preview.can_record:
+        buttons.append([InlineKeyboardButton("✅ Записать", callback_data=f"tw:fa:rec:{draft_id}")])
+    elif preview.can_reassign and preview.conflict:
+        buttons.append([InlineKeyboardButton("✅ Переписать игрока", callback_data=f"tw:fa:rea:{draft_id}:{preview.conflict['id']}")])
+
+    buttons.append([
+        InlineKeyboardButton("✏️ Исправить", callback_data=f"tw:fa:edit:{draft_id}"),
+        InlineKeyboardButton("❌ Отклонить", callback_data=f"tw:fa:rej:{draft_id}"),
+    ])
+    return "\n".join(lines), InlineKeyboardMarkup(buttons)
+
+
+class _FaCommentFilter(filters.MessageFilter):
+    def filter(self, message) -> bool:
+        if not message.chat or message.chat.type != "private":
+            return False
+        user = message.from_user
+        if not user or not service.can_manage_window(user.id):
+            return False
+        if _get_pending(user.id) is not None:
+            return False
+        text = message.text or message.caption or ""
+        return req_mod.looks_like_fa(text)
+
+
+FA_COMMENT_FILTER = _FaCommentFilter(name="transfers.fa_comment")
+
+
+async def on_fa_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Приём пересланного комментария свободного агента из канала."""
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user or not service.can_manage_window(user.id):
+        return
+
+    text = msg.text or msg.caption or ""
+    photo_file_id = msg.photo[-1].file_id if msg.photo else None
+
+    moment = None
+    if getattr(msg, "forward_origin", None) and hasattr(msg.forward_origin, "date"):
+        moment = msg.forward_origin.date
+    elif getattr(msg, "forward_date", None):
+        moment = msg.forward_date
+    commented_at = req_mod.commented_at_msk(moment)
+
+    try:
+        draft = req_mod.parse_fa_comment(text, commented_at=commented_at, photo_file_id=photo_file_id)
+        preview = req_mod.fa_preview(draft)
+    except service.InputError as exc:
+        await msg.reply_text(f"⚠️ Не удалось разобрать заявку СА:\n\n{exc}", parse_mode="HTML")
+        return
+    except Exception as exc:
+        logger.exception("transfers: fa parsing failed")
+        await msg.reply_text(f"⚠️ Ошибка разбора комментария: {html.escape(str(exc))}", parse_mode="HTML")
+        return
+
+    draft_id = _save_fa_draft(draft, preview, user.id)
+    card_text, kb = _format_fa_preview(preview, draft_id)
+    if photo_file_id:
+        try:
+            await msg.reply_photo(photo=photo_file_id, caption=card_text, reply_markup=kb, parse_mode="HTML")
+            return
+        except Exception:
+            pass
+    await msg.reply_text(card_text, reply_markup=kb, parse_mode="HTML")
+
+
+async def cb_fa_record(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not await _guard(update, context):
+        return
+    await query.answer()
+    import re
+    match = re.match(r"^tw:fa:rec:([a-f0-9]+)$", query.data)
+    if not match:
+        return
+    draft_id = match.group(1)
+    entry = _get_fa_draft(draft_id)
+    if not entry:
+        await query.edit_message_text("Черновик устарел — перешлите комментарий заново.")
+        return
+
+    user = update.effective_user
+    draft = entry["draft"]
+    try:
+        rec = await asyncio.to_thread(req_mod.record_free_agent, draft, user.id)
+    except service.InputError as exc:
+        await query.edit_message_text(f"⚠️ {exc}")
+        return
+
+    _fa_drafts.pop(draft_id, None)
+    await admin_journal.record(user.id, "transfer_free_agent_recorded", "transfer", rec.transfer["id"],
+                               new={"player": draft.player_name, "club": draft.to_club, "price_k": draft.price_k})
+
+    await notify.announce_free_agent(context.bot, rec.transfer)
+    await notify.notify_free_agent_recorded(context.bot, rec.transfer)
+
+    text = (f"✅ <b>Свободный агент #{rec.transfer['id']} записан и опубликован!</b>\n\n"
+            f"Игрок: <b>{html.escape(rec.transfer['player_name'])}</b>\n"
+            f"Клуб: <b>{html.escape(rec.transfer['to_club'])}</b>\n"
+            f"Сумма: <b>{format_k(rec.transfer['price_k'])}</b>")
+    await query.edit_message_text(text, parse_mode="HTML")
+
+
+async def cb_fa_reassign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not await _guard(update, context):
+        return
+    await query.answer()
+    import re
+    match = re.match(r"^tw:fa:rea:([a-f0-9]+):(\d+)$", query.data)
+    if not match:
+        return
+    draft_id, replace_id = match.group(1), int(match.group(2))
+    entry = _get_fa_draft(draft_id)
+    if not entry:
+        await query.edit_message_text("Черновик устарел — перешлите комментарий заново.")
+        return
+
+    user = update.effective_user
+    draft = entry["draft"]
+    try:
+        rec = await asyncio.to_thread(req_mod.record_free_agent, draft, user.id, replace_id=replace_id)
+    except service.InputError as exc:
+        await query.edit_message_text(f"⚠️ {exc}")
+        return
+
+    _fa_drafts.pop(draft_id, None)
+    await admin_journal.record(user.id, "transfer_free_agent_reassigned", "transfer", rec.transfer["id"],
+                               old={"replaced_id": replace_id},
+                               new={"player": draft.player_name, "club": draft.to_club, "price_k": draft.price_k})
+
+    await notify.announce_free_agent(context.bot, rec.transfer)
+    await notify.notify_free_agent_recorded(context.bot, rec.transfer)
+    if rec.replaced:
+        await notify.notify_free_agent_reassigned(context.bot, rec.transfer, rec.replaced)
+
+    text = (f"✅ <b>Игрок переписан!</b>\n\n"
+            f"Заявка #{rec.replaced['id'] if rec.replaced else replace_id} отменена.\n"
+            f"Новая заявка #{rec.transfer['id']} одобрена:\n"
+            f"• Игрок: <b>{html.escape(rec.transfer['player_name'])}</b>\n"
+            f"• Клуб: <b>{html.escape(rec.transfer['to_club'])}</b>\n"
+            f"• Сумма: <b>{format_k(rec.transfer['price_k'])}</b>")
+    await query.edit_message_text(text, parse_mode="HTML")
+
+
+async def cb_fa_edit(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not await _guard(update, context):
+        return
+    await query.answer()
+    import re
+    match = re.match(r"^tw:fa:edit:([a-f0-9]+)$", query.data)
+    if not match:
+        return
+    draft_id = match.group(1)
+    entry = _get_fa_draft(draft_id)
+    if not entry:
+        await query.edit_message_text("Черновик устарел — перешлите комментарий заново.")
+        return
+
+    user = update.effective_user
+    _set_pending(user.id, "fa_edit", draft_id=draft_id)
+    draft = entry["draft"]
+    prompt = (
+        f"✏️ <b>Исправление заявки СА ({html.escape(draft.player_name)})</b>\n\n"
+        f"Пришлите исправленный текст комментария (пункты 1–6).\n"
+        f"Время исходного сообщения ({fmt_msk(draft.commented_at) if draft.commented_at else '—'} {MSK_LABEL}) "
+        f"и прикреплённое фото сохранятся.\n\n"
+        f"Или нажмите «Отмена»."
+    )
+    await query.message.reply_text(
+        prompt,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("✖️ Отмена", callback_data=f"tw:fa:can:{draft_id}")]]),
+    )
+
+
+async def cb_fa_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query = update.callback_query
+    if not query or not await _guard(update, context):
+        return
+    await query.answer()
+    import re
+    match = re.match(r"^tw:fa:(rej|can):([a-f0-9]+)$", query.data)
+    if not match:
+        return
+    draft_id = match.group(2)
+    entry = _get_fa_draft(draft_id)
+    if entry:
+        draft = entry["draft"]
+        await admin_journal.record(update.effective_user.id, "transfer_free_agent_rejected", "transfer", None,
+                                   new={"player": draft.player_name, "club": draft.to_club})
+        _fa_drafts.pop(draft_id, None)
+        await query.edit_message_text(f"❌ <b>Заявка СА отклонена</b> ({html.escape(draft.player_name)} → {html.escape(draft.to_club)}).", parse_mode="HTML")
+    else:
+        await query.edit_message_text("Черновик уже закрыт.")
+
+
 # ─── Ввод значения ───────────────────────────────────────────────────────────
 
 def _cancel_target(entry: dict) -> str:
@@ -626,6 +900,19 @@ async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _input_autoclose(update, entry, text)
         elif entry["kind"] == "topic":
             await _input_topic(update, context, entry, text)
+        elif entry["kind"] == "fa_edit":
+            old_entry = _get_fa_draft(entry["draft_id"])
+            if not old_entry:
+                _pending.pop(user.id, None)
+                await msg.reply_text("Черновик устарел — перешлите комментарий заново.")
+                return
+            draft = req_mod.edit_fa_draft(old_entry["draft"], text)
+            preview = req_mod.fa_preview(draft)
+            draft_id = _save_fa_draft(draft, preview, user.id)
+            card_text, kb = _format_fa_preview(preview, draft_id)
+            _pending.pop(user.id, None)
+            await msg.reply_text(f"✅ Текст исправлен:\n\n{card_text}", reply_markup=kb, parse_mode="HTML")
+            return
     except service.InputError as exc:
         # Ожидание остаётся: можно сразу прислать исправленное значение.
         _set_pending(user.id, **{k: v for k, v in entry.items() if k != "expires"})
@@ -640,6 +927,8 @@ def register_handlers(app) -> None:
 
     app.add_handler(CommandHandler("to", cmd_hub))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & AWAITING_INPUT, on_input))
+    app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND & FA_COMMENT_FILTER, on_fa_comment))
+
     app.add_handler(CallbackQueryHandler(cmd_hub, pattern=r"^tw:hub$"))
     app.add_handler(CallbackQueryHandler(cb_create, pattern=r"^tw:create$"))
     app.add_handler(CallbackQueryHandler(cb_open, pattern=r"^tw:open$"))
@@ -656,3 +945,10 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_topics, pattern=r"^tw:topics$"))
     app.add_handler(CallbackQueryHandler(cb_topic, pattern=r"^tw:topic:[a-z]+$"))
     app.add_handler(CallbackQueryHandler(cb_settings, pattern=r"^tw:settings$"))
+
+    # Свободные агенты
+    app.add_handler(CallbackQueryHandler(cb_fa_record, pattern=r"^tw:fa:rec:[a-f0-9]+$"))
+    app.add_handler(CallbackQueryHandler(cb_fa_reassign, pattern=r"^tw:fa:rea:[a-f0-9]+:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_fa_edit, pattern=r"^tw:fa:edit:[a-f0-9]+$"))
+    app.add_handler(CallbackQueryHandler(cb_fa_reject, pattern=r"^tw:fa:(rej|can):[a-f0-9]+$"))
+
