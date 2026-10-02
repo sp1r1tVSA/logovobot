@@ -166,6 +166,205 @@ class TestReopenAndDeadlineChange(RoundFixture):
             database.reopen_round(self.ROUND, self.div_id, "01.01.2020 10:00", season_id=self.season_id)
 
 
+class TestExtendRoundDeadline(RoundFixture):
+    """Продление открытого тура — только срок, без повторного открытия."""
+    NEW_DEADLINE = datetime.datetime(2026, 9, 30, 22, 0)
+
+    def extend(self, deadline=None, moment=datetime.datetime(2026, 9, 22, 0, 0)):
+        deadline = deadline or self.NEW_DEADLINE
+        with self.at(moment):
+            return database.extend_round_deadline(
+                self.ROUND, self.div_id, deadline.strftime(FMT), season_id=self.season_id
+            )
+
+    def _set_bets_open(self, round_number, value):
+        with database.transaction() as conn:
+            conn.execute(
+                "UPDATE rounds SET bets_open = ? WHERE division_id = ? AND round_number = ?",
+                (value, self.div_id, round_number),
+            )
+
+    def test_changes_only_the_deadline_and_returns_the_old_one(self):
+        self.open_round()
+        before = self.round_info()
+
+        old = self.extend()
+
+        after = self.round_info()
+        self.assertEqual(old, DEADLINE.strftime(FMT))
+        self.assertEqual(after["deadline"], self.NEW_DEADLINE.strftime(FMT))
+        self.assertEqual(after["status"], "open")
+        self.assertEqual(after["is_open"], 1)
+        self.assertEqual(after["bets_open"], before["bets_open"])
+        self.assertEqual(after["closed_at"], before["closed_at"])
+
+    def test_does_not_touch_betting_lines_or_advance_the_pair(self):
+        self.open_round()
+        with database.transaction() as conn:
+            conn.execute(
+                "INSERT INTO rounds (season_id, division_id, round_number, is_open, deadline, status, bets_open) "
+                "VALUES (?, ?, 2, 0, NULL, 'scheduled', 1)",
+                (self.season_id, self.div_id),
+            )
+
+        with patch("database.advance_betting_line_pair") as advance, \
+             patch("database.close_round_betting_line") as close_line, \
+             patch("database.set_round_bets_open") as set_line:
+            self.extend()
+
+        advance.assert_not_called()
+        close_line.assert_not_called()
+        set_line.assert_not_called()
+        nxt = database.get_round_info(2, self.div_id, season_id=self.season_id)
+        self.assertEqual(nxt["bets_open"], 1, "линия соседнего тура остаётся открытой")
+
+    def test_extension_after_deadline_cancels_the_debt(self):
+        self.open_round()
+        with self.at(DEADLINE + datetime.timedelta(hours=1)):
+            database.sync_match_debts(season_id=self.season_id)
+        self.assertEqual(database.get_match_debt(self.pending_id)["state"], "active")
+
+        self.extend(moment=DEADLINE + datetime.timedelta(hours=2))
+
+        debt = database.get_match_debt(self.pending_id)
+        self.assertEqual(debt["state"], "cancelled")
+        self.assertEqual(debt["resolution"], "deadline_moved")
+        self.assertEqual(debt_policy.round_status(self.round_info()), debt_policy.ROUND_OPEN)
+
+    def test_keeps_debt_with_applied_verdict(self):
+        self.open_round()
+        with self.at(DEADLINE + datetime.timedelta(hours=1)):
+            database.sync_match_debts(season_id=self.season_id)
+        with database.transaction() as conn:
+            conn.execute("UPDATE match_debts SET verdict_applied_at = ? WHERE match_id = ?",
+                         ("23.09.2026 23:30", self.pending_id))
+
+        self.extend(moment=DEADLINE + datetime.timedelta(hours=2))
+
+        self.assertEqual(database.get_match_debt(self.pending_id)["state"], "active")
+
+    def test_resets_deadline_reminders(self):
+        self.open_round()
+        with database.transaction() as conn:
+            conn.execute(
+                "INSERT INTO round_reminders (division_id, round_number, reminder_type, sent_at) "
+                "VALUES (?, ?, '24h', '21.09.2026 10:00')",
+                (self.div_id, self.ROUND),
+            )
+
+        self.extend()
+
+        with database.transaction() as conn:
+            left = conn.execute(
+                "SELECT COUNT(*) FROM round_reminders WHERE round_number = ? AND division_id = ?",
+                (self.ROUND, self.div_id),
+            ).fetchone()[0]
+        self.assertEqual(left, 0)
+
+    def test_rejects_closed_and_scheduled_rounds(self):
+        with self.assertRaises(database.RoundNotOpenError):
+            self.extend()  # тура ещё нет
+
+        self.open_round()
+        self.close(datetime.datetime(2026, 9, 22, 22, 0))
+        with self.assertRaises(database.RoundNotOpenError):
+            self.extend(moment=datetime.datetime(2026, 9, 23, 0, 0))
+        self.assertEqual(self.round_info()["status"], "closed")
+
+    def test_requires_a_future_deadline(self):
+        self.open_round()
+        with self.assertRaises(database.RoundDeadlineError):
+            self.extend(deadline=datetime.datetime(2026, 9, 20, 10, 0))
+        self.assertEqual(self.round_info()["deadline"], DEADLINE.strftime(FMT))
+
+
+class TestExtendDeadlineHandler(unittest.IsolatedAsyncioTestCase):
+    """«Открыть тур» на уже открытом туре: объявление и ЛС, но без смены линий."""
+
+    async def asyncSetUp(self):
+        code = f"LC_{uuid.uuid4().hex[:6].upper()}"
+        self.div_id = database.create_division(f"Lifecycle {code}", code)
+        self.season_id = int(database._resolve_season_id(None))
+        self.p1, self.p2 = 870000 + self.div_id, 871000 + self.div_id
+        with database.transaction() as conn:
+            for tg, name in ((self.p1, "ext_a"), (self.p2, "ext_b")):
+                conn.execute(
+                    "INSERT INTO users (telegram_id, username, team_name, division_id) VALUES (?, ?, ?, ?)",
+                    (tg, name, f"Клуб {name} {code}", self.div_id),
+                )
+            conn.execute(
+                "INSERT INTO matches (round_number, division_id, season_id, player1_id, player2_id, "
+                "player1_team, player2_team, status, tournament_type) "
+                "VALUES (4, ?, ?, ?, ?, 'Эй', 'Би', 'pending', 'league')",
+                (self.div_id, self.season_id, self.p1, self.p2),
+            )
+            conn.execute(
+                "INSERT INTO matches (round_number, division_id, season_id, player1_id, player2_id, "
+                "player1_team, player2_team, status, tournament_type) "
+                "VALUES (4, ?, ?, NULL, NULL, 'Си', 'Ди', 'confirmed', 'league')",
+                (self.div_id, self.season_id),
+            )
+        old = (database.now_msk() + datetime.timedelta(hours=5)).strftime(FMT)
+        database.update_round_status(4, True, deadline=old, division_id=self.div_id, season_id=self.season_id)
+        self.old_deadline = old
+        self.new_deadline = (database.now_msk() + datetime.timedelta(days=3)).strftime(FMT)
+
+    async def _save(self):
+        from handlers import admin
+
+        update = MagicMock()
+        update.effective_user.id = 1
+        update.message.text = self.new_deadline
+        update.message.reply_text = AsyncMock()
+        context = MagicMock()
+        context.user_data = {"admin_round_to_open": 4, "admin_round_open_div": self.div_id}
+
+        with patch("handlers.admin.is_admin", return_value=True), \
+             patch("handlers.admin._announce_rounds_opened", new=AsyncMock(return_value=True)) as announce, \
+             patch("handlers.admin.safe_send_notification", new=AsyncMock(return_value=True)) as dm, \
+             patch("handlers.admin.notify_players_rounds_opened", new=AsyncMock()) as opened, \
+             patch("database.update_round_status") as update_status, \
+             patch("services.betting_notifications.notify_division_betting_line_closed",
+                   new=AsyncMock()) as line_closed, \
+             patch("services.betting_notifications.notify_division_betting_line_opened",
+                   new=AsyncMock()) as line_opened:
+            await admin.admin_open_round_save(update, context)
+        return update, announce, dm, opened, update_status, line_closed, line_opened
+
+    async def test_extension_notifies_topic_and_pending_players_only(self):
+        update, announce, dm, opened, update_status, line_closed, line_opened = await self._save()
+
+        info = database.get_round_info(4, self.div_id, season_id=self.season_id)
+        self.assertEqual(info["deadline"], self.new_deadline)
+        self.assertEqual(info["status"], "open")
+
+        announce.assert_awaited_once()
+        self.assertIn("продлён", announce.await_args.args[2])
+        self.assertIn(self.new_deadline, announce.await_args.args[2])
+        self.assertFalse(announce.await_args.kwargs.get("include_table"))
+
+        # ЛС — только двум игрокам несыгранного матча, сыгранный пропущен.
+        self.assertEqual({c.args[1] for c in dm.await_args_list}, {self.p1, self.p2})
+        self.assertIn("продлён", dm.await_args_list[0].args[2])
+
+        self.assertIn("продлён", update.message.reply_text.await_args.args[0])
+
+    async def test_extension_does_not_reopen_the_round_or_touch_lines(self):
+        _, _, _, opened, update_status, line_closed, line_opened = await self._save()
+
+        update_status.assert_not_called()
+        opened.assert_not_awaited()
+        line_closed.assert_not_awaited()
+        line_opened.assert_not_awaited()
+
+    async def test_shortening_is_announced_as_moved(self):
+        self.new_deadline = (database.now_msk() + datetime.timedelta(hours=1)).strftime(FMT)
+        _, announce, dm, *_ = await self._save()
+
+        self.assertIn("перенесён", announce.await_args.args[2])
+        self.assertIn("перенесён", dm.await_args_list[0].args[2])
+
+
 class TestSyncMatchDebts(RoundFixture):
     def test_sync_creates_debt_after_deadline_and_resolves_when_played(self):
         self.open_round()

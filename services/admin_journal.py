@@ -59,6 +59,7 @@ ACTIONS: dict[str, tuple[str, str]] = {
     # Туры
     "round_opened": ("rounds", "Открыт тур / новый дедлайн"),
     "rounds_opened_batch": ("rounds", "Открыты туры пачкой"),
+    "round_deadline_extended": ("rounds", "Продлён дедлайн тура"),
     "round_closed": ("rounds", "Закрыт тур"),
     # Игроки и клубы
     "player_added": ("clubs", "Добавлен игрок"),

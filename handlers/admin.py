@@ -2852,6 +2852,13 @@ async def admin_open_round_save(update: Update, context: ContextTypes.DEFAULT_TY
         await update.message.reply_text("⛔ Тур уже закрыт. Переоткрыть его может только глобальный админ.")
         return ConversationHandler.END
 
+    # Уже открытый тур — это продление: меняется только срок. Линии ставок,
+    # статус тура и «два через два» не трогаем, иначе продление ведёт себя как
+    # повторное открытие.
+    if prev_phase in (debt_policy.ROUND_OPEN, debt_policy.ROUND_OVERDUE):
+        await _extend_round_deadline_flow(update, context, round_number, div_id, deadline_text, r_info)
+        return ConversationHandler.END
+
     try:
         advanced = await asyncio.to_thread(
             database.update_round_status, round_number, is_open=True, deadline=deadline_text, division_id=div_id
@@ -2881,9 +2888,7 @@ async def admin_open_round_save(update: Update, context: ContextTypes.DEFAULT_TY
         new=f"дедлайн {deadline_text}", division_id=div_id,
     )
 
-    if prev_phase in (debt_policy.ROUND_OPEN, debt_policy.ROUND_OVERDUE):
-        headline = f"🕒 <b>Дедлайн {round_number}-го тура изменён</b>"
-    elif prev_phase == debt_policy.ROUND_CLOSED:
+    if prev_phase == debt_policy.ROUND_CLOSED:
         headline = f"♻️ <b>{round_number}-й Тур переоткрыт!</b>"
     else:
         headline = f"🟢 <b>Открыт {round_number}-й Тур!</b>"
@@ -2922,6 +2927,63 @@ async def admin_open_round_save(update: Update, context: ContextTypes.DEFAULT_TY
         except Exception as e:
             logger.warning(f"Failed to notify betting line opened for advanced round {adv_r}: {e}")
     return ConversationHandler.END
+
+async def _extend_round_deadline_flow(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    round_number: int,
+    div_id: int,
+    deadline_text: str,
+    r_info: dict | None,
+) -> None:
+    """Продлить дедлайн открытого тура: объявление в топик «ОТЧЁТЫ» и ЛС игрокам.
+
+    Линии ставок и статус тура остаются как были — см. `database.extend_round_deadline`.
+    """
+    user = update.effective_user
+    keyboard = [[InlineKeyboardButton("« К туру", callback_data=f"admin_div_round:{div_id}:{round_number}")]]
+    try:
+        old_deadline = await asyncio.to_thread(
+            database.extend_round_deadline, round_number, div_id, deadline_text
+        )
+    except database.RoundNotOpenError:
+        await update.message.reply_text(
+            "⛔ Тур уже не открыт — продлевать нечего. Откройте его заново из меню тура.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+        )
+        return
+
+    await admin_journal.record(
+        user.id, "round_deadline_extended", "round", round_number,
+        old=old_deadline, new=deadline_text, division_id=div_id,
+    )
+
+    old_dt = database.parse_flexible_datetime(old_deadline) if old_deadline else None
+    new_dt = database.parse_flexible_datetime(deadline_text)
+    extended = old_dt is None or new_dt is None or new_dt >= old_dt
+    verb = "продлён" if extended else "перенесён"
+    old_line = f"\nБыл: {html.escape(str(old_deadline))}" if old_deadline else ""
+    announced = await _announce_rounds_opened(
+        context,
+        div_id,
+        f"🕒 <b>Дедлайн {round_number}-го тура {verb}</b>\n\n"
+        f"Новый дедлайн: <b>{html.escape(deadline_text)}</b>{old_line}\n\n"
+        "Если вы ещё не сыграли свой матч — у вас появилось больше времени.",
+        include_table=False,
+    )
+    notice = (
+        "Уведомление отправлено в топик «📞 ОТЧЁТЫ» дивизиона и игрокам в ЛС!"
+        if announced
+        else "⚠️ Топик «📞 ОТЧЁТЫ» у дивизиона не настроен — объявление в группу не отправлено. Игроки уведомлены в ЛС."
+    )
+    await update.message.reply_text(
+        f"✅ Дедлайн {round_number}-го тура {verb}: {deadline_text}\n{notice}",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    await notify_players_deadline_extended(
+        context, round_number, deadline_text, division_id=div_id, extended=extended
+    )
+
 
 @admin_only
 async def admin_open_batch_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -6248,6 +6310,40 @@ async def admin_stub(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
     keyboard = [[InlineKeyboardButton("« Назад в админку", callback_data="admin_main_menu")]]
     text = "🚧 <b>В разработке</b>\n\nЭтот раздел находится в разработке."
     await query.edit_message_text(text, parse_mode="HTML", reply_markup=InlineKeyboardMarkup(keyboard))
+
+async def notify_players_deadline_extended(
+    context: ContextTypes.DEFAULT_TYPE,
+    round_number: int,
+    deadline_text: str,
+    division_id: int | None = None,
+    extended: bool = True,
+) -> int:
+    """ЛС игрокам с несыгранным матчем тура: дедлайн изменился. Возвращает число отправок."""
+    matches = await asyncio.to_thread(database.get_matches_in_rounds, [round_number], division_id)
+    verb = "продлён" if extended else "перенесён"
+    sent = 0
+    for m in matches:
+        if m.get("status") != "pending":
+            continue
+        for pid, team, opp_team in (
+            (m["player1_id"], m["player1_team"], m["player2_team"]),
+            (m["player2_id"], m["player2_team"], m["player1_team"]),
+        ):
+            if not pid:
+                continue
+            text = (
+                f"🕒 <b>Дедлайн {round_number}-го тура {verb}</b>\n\n"
+                f"Ваш матч: <b>{html.escape(team or 'неизвестно')}</b> vs "
+                f"<b>{html.escape(opp_team or 'неизвестно')}</b>\n"
+                f"⏳ <b>Новый дедлайн:</b> {html.escape(deadline_text)}"
+            )
+            kb = InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📝 Ввести результат", callback_data=f"cabinet_report_score_{m['id']}")]]
+            )
+            if await safe_send_notification(context.bot, pid, text, kb):
+                sent += 1
+    return sent
+
 
 async def notify_players_rounds_opened(
     context: ContextTypes.DEFAULT_TYPE,

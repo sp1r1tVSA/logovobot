@@ -11567,6 +11567,48 @@ def reopen_round(round_number: int, division_id: int, deadline: str,
                                division_id=division_id, season_id=season_id)
 
 
+class RoundNotOpenError(ValueError):
+    """Продлевать можно только тур, который сейчас открыт для игры."""
+
+
+def extend_round_deadline(round_number: int, division_id: int, deadline: str,
+                          season_id: int | None = None) -> str | None:
+    """Передвинуть дедлайн уже открытого тура — и больше ничего.
+
+    В отличие от `update_round_status(is_open=True)` не трогает ни `is_open`,
+    ни `bets_open`, ни линию ставок (своего тура и соседних): продление не
+    «открывает тур заново». Меняется только срок: долги тура, начатые по
+    прежнему сроку и ещё без вердикта, снимаются (`deadline_moved`), вехи
+    напоминаний пересчитываются под новый дедлайн. Возвращает прежний дедлайн.
+
+    Закрытый или ещё не открытый тур — `RoundNotOpenError`: его открытие это
+    другая операция (`reopen_round` / `update_round_status`).
+    """
+    validate_round_deadline(deadline)
+    s_id = _resolve_season_id(season_id)
+    now = now_msk()
+    with transaction() as conn:
+        cursor = conn.cursor()
+        row = _round_row(cursor, round_number, division_id, s_id)
+        if row is None or debt_policy.round_status(row) != debt_policy.ROUND_OPEN:
+            raise RoundNotOpenError(f"round {round_number} of division {division_id} is not open")
+        old_deadline = row.get("deadline")
+        cursor.execute(
+            "UPDATE rounds SET deadline = ? "
+            "WHERE (season_id = ? OR season_id IS NULL) AND division_id = ? AND round_number = ?",
+            (deadline, s_id, division_id, round_number)
+        )
+        cursor.execute(
+            "DELETE FROM round_reminders WHERE round_number = ? AND (division_id = ? OR division_id IS NULL)",
+            (round_number, division_id)
+        )
+        _cancel_round_debts(cursor, round_number, division_id, s_id, now, "deadline_moved")
+        dl = parse_flexible_datetime(deadline)
+        if dl is not None:
+            _mark_passed_milestones(cursor, round_number, division_id, dl, now)
+    return old_deadline
+
+
 def get_rounds_awaiting_close(now: datetime.datetime | None = None) -> list[dict]:
     """Открытые туры, дедлайн которых прошёл, а админы об этом ещё не уведомлены."""
     now = now or now_msk()

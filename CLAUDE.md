@@ -371,6 +371,12 @@ App and betting read it. "Deadline passed" is a *computed* phase (`open` + `dead
 never stored. A round cannot be opened without a deadline. `close_round` is allowed at any
 time and goes through a confirmation screen; reopening a closed round is global-admin only.
 Moving a deadline or reopening cancels the debts the old deadline created.
+Moving the deadline of a round that is already open (or overdue) is a plain extension —
+`database.extend_round_deadline`, reached through the same «Открыть тур» flow: it changes only
+`rounds.deadline`, resets the reminders and cancels the old debts, and never touches `is_open`,
+`bets_open`, the betting lines or `advance_betting_line_pair`. It posts one «дедлайн продлён»
+message to the ОТЧЁТЫ topic and DMs the players with a pending match. Only a closed or scheduled
+round goes through `update_round_status(is_open=True)`.
 
 **Discipline:** whether a match is a debt is decided in exactly one place,
 `services/debt_policy.py` (`is_debt`, `debt_terms`), used alike by the match card, the
