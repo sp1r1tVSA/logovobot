@@ -46,6 +46,13 @@ class TestManager:
         assert not service.is_transfer_manager(555)
         assert not service.is_transfer_manager(config.ADMIN_IDS[0] if config.ADMIN_IDS else 1)
 
+    def test_panel_also_for_env_admins(self, monkeypatch):
+        monkeypatch.setattr(config, "TRANSFER_MANAGER_ID", 555, raising=False)
+        monkeypatch.setattr(config, "ADMIN_IDS", [990001])
+        assert service.can_manage_window(555) and service.can_manage_window(990001)
+        assert not service.is_transfer_manager(990001)     # уведомления — только ответственному
+        assert not service.can_manage_window(556) and not service.can_manage_window(None)
+
 
 class TestDatetime:
     @pytest.mark.parametrize("text, expected", [

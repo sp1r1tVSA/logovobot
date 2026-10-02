@@ -81,6 +81,13 @@ class TestRefreshAdminMenu(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(bot.set_my_commands.call_args.args[0],
                          bot_menu.ADMIN_COMMANDS + bot_menu.TRANSFER_MANAGER_COMMANDS)
 
+    async def test_env_admin_gets_to(self):
+        bot = _bot()
+        with patch.object(bot_menu.config, "ADMIN_IDS", [42]),              patch.object(bot_menu.config, "TRANSFER_MANAGER_ID", None, create=True),              patch.object(bot_menu, "can_view_overview", return_value=True):
+            self.assertTrue(await bot_menu.refresh_admin_menu(bot, 42))
+        self.assertEqual(bot.set_my_commands.call_args.args[0],
+                         bot_menu.GLOBAL_ADMIN_COMMANDS + bot_menu.TRANSFER_MANAGER_COMMANDS)
+
     async def test_default_menu_uses_default_scope(self):
         bot = _bot()
         await bot_menu.set_default_menu(bot)

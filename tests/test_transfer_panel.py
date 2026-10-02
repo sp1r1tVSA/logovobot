@@ -172,6 +172,13 @@ class TestPanel:
         patterns = [h.pattern.pattern for h in added if isinstance(h, CallbackQueryHandler)]
         assert all(p.startswith("^tw:") for p in patterns)
 
+    def test_env_admin_uses_panel(self, monkeypatch):
+        monkeypatch.setattr(config, "ADMIN_IDS", [990001])
+        service.create_window(10)
+        _press(handlers.cb_auto_set, "tw:auto_set", user_id=990001)
+        upd = _send("10.10.2099 20:00", user_id=990001)
+        assert "✅" in _last(upd) and repo.get_active_window()["auto_close_at"] == "2099-10-10 20:00:00"
+
     def test_strangers_get_nothing(self):
         upd = _press(handlers.cb_topic, "tw:topic:feed", user_id=1)
         assert upd.callback_query.alerts and not handlers._pending

@@ -42,6 +42,16 @@ def is_transfer_manager(user_id: int | None) -> bool:
     return manager is not None and user_id is not None and int(user_id) == int(manager)
 
 
+def can_manage_window(user_id: int | None) -> bool:
+    """Панель `/to`: ответственный за ТО и админы из `ADMIN_IDS` (только env, без ролей в БД).
+
+    Уведомления «ответственному» по-прежнему идут одному `TRANSFER_MANAGER_ID`.
+    """
+    if user_id is None:
+        return False
+    return is_transfer_manager(user_id) or int(user_id) in config.ADMIN_IDS
+
+
 # ─── Дата и время ────────────────────────────────────────────────────────────
 
 _DT_INPUT_FORMATS = (
@@ -439,7 +449,7 @@ def overview(window_id: int) -> dict:
 
 
 __all__ = [
-    "AUTO_REJECT_REASON", "SYSTEM_ACTOR", "InputError", "is_transfer_manager",
+    "AUTO_REJECT_REASON", "SYSTEM_ACTOR", "InputError", "is_transfer_manager", "can_manage_window",
     "parse_window_datetime", "create_window", "league_clubs", "snapshot_core", "open_window",
     "close_window", "due_auto_close", "set_auto_close", "update_setting", "default_budgets",
     "apply_default_budgets", "resolve_club", "set_budget", "budget_table", "budget_pages", "parse_topic_link",

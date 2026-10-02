@@ -3,7 +3,8 @@
 Всё управление — кнопками одной панели: окно, автозакрытие, бюджеты, темы
 группы, правила окна. Где нужно значение (сумма, время, ссылка на тему), панель
 спрашивает его и ждёт следующее сообщение — других команд нет. Только для
-`TRANSFER_MANAGER_ID` и только в личке. Заявки тренеры подают в Mini App.
+ответственного (`TRANSFER_MANAGER_ID`) и админов из `ADMIN_IDS`, только в личке.
+Заявки тренеры подают в Mini App.
 
 Ожидание ввода хранится в памяти процесса (`_pending`) и живёт
 `INPUT_TTL_SECONDS`; любое нажатие в панели или `/to` его сбрасывает.
@@ -95,19 +96,19 @@ AWAITING_INPUT = _AwaitingInput(name="transfers.awaiting_input")
 # ─── Доступ и вывод ──────────────────────────────────────────────────────────
 
 async def _guard(update: Update, context: ContextTypes.DEFAULT_TYPE) -> bool:
-    """Только ответственный за ТО и только в ЛС; иначе ответить и вернуть False.
+    """Только ответственный за ТО или админ из `ADMIN_IDS` и только в ЛС; иначе ответить и вернуть False.
 
     Пропущенному сбрасывает ожидание ввода: нажал другую кнопку — передумал.
     """
     chat, user, query = update.effective_chat, update.effective_user, update.callback_query
     if not chat or not user:
         return False
-    if not service.is_transfer_manager(user.id):
+    if not service.can_manage_window(user.id):
         if query:
-            await query.answer("⛔ Только для ответственного за ТО", show_alert=True)
+            await query.answer("⛔ Только для ответственного за ТО и админов лиги", show_alert=True)
         elif chat.type == "private":
             await update.effective_message.reply_text(
-                "⛔ <b>Доступ запрещён</b>\n\nТрансферным окном управляет только ответственный.",
+                "⛔ <b>Доступ запрещён</b>\n\nТрансферным окном управляют ответственный и админы лиги.",
                 parse_mode="HTML")
         return False
     if chat.type != "private":
@@ -607,7 +608,7 @@ async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     entry = _get_pending(user.id if user else None)
     if entry is None or not msg:
         return
-    if not service.is_transfer_manager(user.id):
+    if not service.can_manage_window(user.id):
         _pending.pop(user.id, None)
         return
     if entry["kind"] in ("budget", "autoclose"):

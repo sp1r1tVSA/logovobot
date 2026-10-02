@@ -23,7 +23,7 @@ import config
 import database
 from handlers.base import is_global_admin
 from handlers.league_overview import can_view_overview
-from transfers.service import is_transfer_manager
+from transfers.service import can_manage_window
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ GLOBAL_ADMIN_COMMANDS = ADMIN_COMMANDS + [
     BotCommand("audit", "Журнал действий админов"),
 ]
 
-# Ответственному за трансферное окно — его панель, даже если он не админ.
+# Панель трансферного окна: ответственному (даже если он не админ) и админам из ADMIN_IDS.
 TRANSFER_MANAGER_COMMANDS = [
     BotCommand("to", "Трансферное окно"),
 ]
@@ -56,8 +56,8 @@ async def set_default_menu(bot) -> None:
 async def refresh_admin_menu(bot, user_id: int) -> bool:
     """Выставить пользователю меню по его текущим правам. True — меню админа.
 
-    Ответственный за ТО получает ещё `/to`; если он не админ, меню у него
-    личное, но функция всё равно вернёт False.
+    Ответственный за ТО и админы из `ADMIN_IDS` получают ещё `/to`; если
+    ответственный не админ, меню у него личное, но функция вернёт False.
 
     Никогда не бросает: вызывается после назначения / снятия админа, и сбой
     меню не должен ломать сам этот экран.
@@ -71,9 +71,10 @@ async def refresh_admin_menu(bot, user_id: int) -> bool:
             commands = GLOBAL_ADMIN_COMMANDS if is_global_admin(user_id) else ADMIN_COMMANDS
         else:
             commands = DEFAULT_COMMANDS
-        if is_transfer_manager(user_id):
+        can_transfer = can_manage_window(user_id)
+        if can_transfer:
             commands = commands + TRANSFER_MANAGER_COMMANDS
-        if is_admin or is_transfer_manager(user_id):
+        if is_admin or can_transfer:
             await bot.set_my_commands(commands, scope=scope)
         else:
             await bot.delete_my_commands(scope=scope)
