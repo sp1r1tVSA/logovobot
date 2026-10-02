@@ -508,3 +508,116 @@ class TestCloseConfirmHandler(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestDebtsDigestRepostAfterDeadline(unittest.IsolatedAsyncioTestCase):
+    """Сводка долгов после дедлайна тура: заново и закреплённой, один раз на тур."""
+
+    async def _open_overdue_round(self, number=3):
+        code = f"LC_{uuid.uuid4().hex[:6].upper()}"
+        div_id = database.create_division(f"Lifecycle {code}", code)
+        season_id = int(database._resolve_season_id(None))
+        past = (database.now_msk() - datetime.timedelta(hours=2)).strftime(FMT)
+        with database.transaction() as conn:
+            conn.execute(
+                "INSERT INTO matches (round_number, division_id, season_id, player1_team, player2_team, "
+                "status, tournament_type) VALUES (?, ?, ?, 'А', 'Б', 'pending', 'league')",
+                (number, div_id, season_id),
+            )
+            conn.execute(
+                "INSERT INTO rounds (season_id, division_id, round_number, is_open, deadline, status) "
+                "VALUES (?, ?, ?, 1, ?, 'open')",
+                (season_id, div_id, number, past),
+            )
+        return div_id
+
+    async def test_deadline_job_reposts_summary_once(self):
+        from handlers import admin
+
+        div_id = await self._open_overdue_round()
+        with patch("handlers.admin._resolve_debt_admins", new=AsyncMock(return_value=[])), \
+             patch("handlers.admin.send_round_reminders", new=AsyncMock()), \
+             patch("handlers.admin._post_or_update_debts_in_warns", new=AsyncMock(return_value=True)) as post:
+            await admin.job_check_deadlines_and_remind(MagicMock())
+            await admin.job_check_deadlines_and_remind(MagicMock())
+
+        own = [c for c in post.await_args_list if c.kwargs.get("only_division_id") == div_id]
+        self.assertEqual(len(own), 1, "заново — ровно один раз после дедлайна")
+        self.assertTrue(own[0].kwargs.get("repost"))
+
+    async def test_new_deadline_after_extension_reposts_again(self):
+        from handlers import admin
+
+        div_id = await self._open_overdue_round()
+        with patch("handlers.admin._resolve_debt_admins", new=AsyncMock(return_value=[])), \
+             patch("handlers.admin.send_round_reminders", new=AsyncMock()), \
+             patch("handlers.admin._post_or_update_debts_in_warns", new=AsyncMock(return_value=True)) as post:
+            await admin.job_check_deadlines_and_remind(MagicMock())
+            # продление сбрасывает отметки тура; новый дедлайн тоже пройдёт
+            with database.transaction() as conn:
+                conn.execute("DELETE FROM round_reminders WHERE division_id = ?", (div_id,))
+            await admin.job_check_deadlines_and_remind(MagicMock())
+
+        own = [c for c in post.await_args_list if c.kwargs.get("only_division_id") == div_id]
+        self.assertEqual(len(own), 2)
+
+    async def test_repost_deletes_old_sends_new_and_pins(self):
+        from handlers import admin
+
+        context = MagicMock()
+        context.bot.delete_message = AsyncMock()
+        context.bot.edit_message_text = AsyncMock()
+        context.bot.pin_chat_message = AsyncMock()
+        context.bot.send_message = AsyncMock(return_value=MagicMock(message_id=900))
+
+        with patch("handlers.admin._build_debts_summary",
+                   new=AsyncMock(return_value=("🗂 <b>ДОЛГИ</b>\n\nтело\n\nподвал", 1))), \
+             patch("handlers.admin.resolve_division_target", new=AsyncMock(return_value=(-100500, 77))), \
+             patch("database.get_config", return_value="801"), \
+             patch("database.set_config") as set_cfg:
+            await admin._post_or_update_debts_for_division(context, 5, "Див", repost=True)
+
+        context.bot.edit_message_text.assert_not_awaited()
+        context.bot.delete_message.assert_awaited_once_with(chat_id=-100500, message_id=801)
+        context.bot.send_message.assert_awaited_once()
+        context.bot.pin_chat_message.assert_awaited_once_with(
+            chat_id=-100500, message_id=900, disable_notification=True
+        )
+        set_cfg.assert_called_with("div_debts_msg_5", "900")
+
+    async def test_regular_update_edits_in_place_without_repinning(self):
+        from handlers import admin
+
+        context = MagicMock()
+        context.bot.edit_message_text = AsyncMock()
+        context.bot.send_message = AsyncMock()
+        context.bot.pin_chat_message = AsyncMock()
+
+        with patch("handlers.admin._build_debts_summary",
+                   new=AsyncMock(return_value=("🗂 <b>ДОЛГИ</b>\n\nтело\n\nподвал", 1))), \
+             patch("handlers.admin.resolve_division_target", new=AsyncMock(return_value=(-100500, 77))), \
+             patch("database.get_config", return_value="801"), \
+             patch("database.set_config"):
+            await admin._post_or_update_debts_for_division(context, 5, "Див")
+
+        context.bot.edit_message_text.assert_awaited_once()
+        context.bot.send_message.assert_not_awaited()
+        context.bot.pin_chat_message.assert_not_awaited()
+
+    async def test_pin_failure_does_not_break_the_post(self):
+        from handlers import admin
+
+        context = MagicMock()
+        context.bot.delete_message = AsyncMock()
+        context.bot.pin_chat_message = AsyncMock(side_effect=RuntimeError("not enough rights"))
+        context.bot.send_message = AsyncMock(return_value=MagicMock(message_id=900))
+
+        with patch("handlers.admin._build_debts_summary",
+                   new=AsyncMock(return_value=("🗂 <b>ДОЛГИ</b>\n\nтело\n\nподвал", 1))), \
+             patch("handlers.admin.resolve_division_target", new=AsyncMock(return_value=(-100500, 77))), \
+             patch("database.get_config", return_value=""), \
+             patch("database.set_config"):
+            ok, count = await admin._post_or_update_debts_for_division(context, 5, "Див")
+
+        self.assertTrue(ok)
+        self.assertEqual(count, 1)

@@ -402,6 +402,10 @@ only for a debt, once per debt via `verdict_applied_at` — a verdict before the
 became a debt just sets the score. A played debt gives both players −1 through
 `claim_debt_played_reward`, once per match via `reward_given_at`. Deadline reminders run
 every 30 min too, and a debts digest goes to the ПРЕДЫ thread every 12 h.
+The digest's first message is **pinned** (`_pin_debts_message`, needs the bot's pin-messages right; a failure only logs), and
+when a round's deadline passes the deadline job re-sends it anew — old messages deleted, new ones posted and pinned
+(`repost=True`) — once per round deadline for that division (`debts_reposted` reminder tag, re-armed with the other
+tags when the deadline moves). Between those the 12 h digest edits it in place.
 `MAX_WARNS_LIMIT = 4`.
 
 Reaching the limit auto-kicks the coach (`ban_and_remove_from_league`), and the club's

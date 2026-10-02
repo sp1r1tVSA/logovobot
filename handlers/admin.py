@@ -755,9 +755,23 @@ async def _delete_any_message(context, group_id: int, ids: list[int]) -> None:
             pass
 
 
-async def _post_or_update_debts_for_division(context: ContextTypes.DEFAULT_TYPE, division_id: int, division_name: str) -> tuple[bool, int]:
+async def _pin_debts_message(context, group_id: int, message_id: int) -> None:
+    """Закрепить свежую сводку долгов (без уведомления). Нет права на закрепление — не беда."""
+    try:
+        await context.bot.pin_chat_message(
+            chat_id=group_id, message_id=message_id, disable_notification=True
+        )
+    except Exception as e:
+        logger.warning(f"Could not pin debts summary {message_id} in chat {group_id}: {e}")
+
+
+async def _post_or_update_debts_for_division(
+    context: ContextTypes.DEFAULT_TYPE, division_id: int, division_name: str, repost: bool = False
+) -> tuple[bool, int]:
     """
     Send or update debts summary for a specific division in its bound forum topic (previews or warns).
+    Новые сообщения закрепляются; `repost=True` не правит старые на месте, а удаляет их и
+    присылает сводку заново (после дедлайна тура).
     Returns (success, debts_count).
     """
     text, total_debts = await _build_debts_summary(division_id=division_id, division_name=division_name)
@@ -782,7 +796,7 @@ async def _post_or_update_debts_for_division(context: ContextTypes.DEFAULT_TYPE,
     chunks = _chunk_debts_text(text)
 
     # Fast path: in-place edit
-    if len(chunks) == len(existing_ids):
+    if len(chunks) == len(existing_ids) and not repost:
         try:
             new_ids: list[int] = []
             for i, chunk in enumerate(chunks):
@@ -818,18 +832,28 @@ async def _post_or_update_debts_for_division(context: ContextTypes.DEFAULT_TYPE,
         return False, total_debts
 
     await asyncio.to_thread(database.set_config, config_key, ",".join(map(str, new_ids)))
+    await _pin_debts_message(context, group_id, new_ids[0])
     return True, total_debts
 
 
-async def _post_or_update_debts_in_warns(context: ContextTypes.DEFAULT_TYPE) -> bool:
+async def _post_or_update_debts_in_warns(
+    context: ContextTypes.DEFAULT_TYPE, only_division_id: int | None = None, repost: bool = False
+) -> bool:
     """
     Send debts summary to division topics or global warns thread, or edit the previously sent messages.
+    `only_division_id` ограничивает обновление одним дивизионом, `repost` — присылает сводку заново.
     """
     divisions = await asyncio.to_thread(database.get_active_divisions)
+    if only_division_id is not None:
+        divisions = [d for d in (divisions or []) if d["id"] == only_division_id]
+        if not divisions:
+            return False
     if divisions:
         success_any = False
         for d in divisions:
-            s, _ = await _post_or_update_debts_for_division(context, d["id"], d.get("name") or f"Дивизион {d['id']}")
+            s, _ = await _post_or_update_debts_for_division(
+                context, d["id"], d.get("name") or f"Дивизион {d['id']}", repost=repost
+            )
             if s:
                 success_any = True
         return success_any
@@ -851,7 +875,7 @@ async def _post_or_update_debts_in_warns(context: ContextTypes.DEFAULT_TYPE) -> 
 
     chunks = _chunk_debts_text(text)
 
-    if len(chunks) == len(existing_ids):
+    if len(chunks) == len(existing_ids) and not repost:
         try:
             new_ids: list[int] = []
             for i, chunk in enumerate(chunks):
@@ -886,6 +910,7 @@ async def _post_or_update_debts_in_warns(context: ContextTypes.DEFAULT_TYPE) -> 
         return False
 
     await asyncio.to_thread(database.set_config, "warns_debts_msg_id", ",".join(map(str, new_ids)))
+    await _pin_debts_message(context, group_id, new_ids[0])
     return True
 
 # --- Match Generation Handlers ---
@@ -6760,6 +6785,7 @@ async def job_check_deadlines_and_remind(context: ContextTypes.DEFAULT_TYPE) -> 
         return
 
     now = now_msk()
+    reposted_divisions: set[int] = set()
     for r in open_rounds:
         try:
             r_num = r["round_number"]
@@ -6775,6 +6801,16 @@ async def job_check_deadlines_and_remind(context: ContextTypes.DEFAULT_TYPE) -> 
                 if "deadline_passed_admin" not in sent:
                     await _notify_admins_round_awaits_close(context, r_num, div_id, r["deadline"])
                     await asyncio.to_thread(database.record_reminder_sent, r_num, "deadline_passed_admin", div_id)
+                if "debts_reposted" not in sent:
+                    # Сводка долгов после дедлайна — новым сообщением (и закреплённой), а не правкой
+                    # старого. Одна попытка на тур; дальше её ведёт обычный 12-часовой дайджест.
+                    if div_id not in reposted_divisions:
+                        reposted_divisions.add(div_id)
+                        try:
+                            await _post_or_update_debts_in_warns(context, only_division_id=div_id, repost=True)
+                        except Exception:
+                            logger.exception(f"Failed to repost debts summary for division {div_id}")
+                    await asyncio.to_thread(database.record_reminder_sent, r_num, "debts_reposted", div_id)
                 continue
 
             plan = debt_policy.plan_deadline_reminder(hours_left, sent)
