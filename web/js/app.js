@@ -41,6 +41,8 @@ class AppController {
       this.renderBlock('adminBtn', [Boolean(state.user?.is_panel_admin)], () => {
         const btn = document.getElementById('header-admin-btn');
         if (btn) btn.hidden = !state.user?.is_panel_admin;
+        const transBtn = document.getElementById('header-transfers-btn');
+        if (transBtn) transBtn.hidden = !state.user?.is_panel_admin;
       });
       this.renderBlock('navClubIcon', [myClub.overview],
         () => UIRenderer.updateNavClubIcon(myClub.overview));
@@ -1553,6 +1555,9 @@ class AppController {
   }
 
   switchView(viewName) {
+    if (viewName === 'transfers' && !store.state.user?.is_panel_admin) {
+      viewName = 'lobby';
+    }
     store.setActiveView(viewName);
 
     // Update bottom nav
