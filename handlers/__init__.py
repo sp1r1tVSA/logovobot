@@ -964,6 +964,10 @@ def _register_admin_handlers(app: Application) -> None:
     from handlers.admin_ops import register_admin_ops_handlers
     register_admin_ops_handlers(app)
 
+    # 🔁 Трансферное окно: /to и /set_transfer_topic — только ответственный за ТО
+    from transfers.handlers import register_handlers as register_transfer_handlers
+    register_transfer_handlers(app)
+
 def register_all_handlers(application: Application) -> None:
     """Register all command, message, and callback handlers to the application."""
     # 0. Global lockdown guard at group -1 (runs before all standard handlers)

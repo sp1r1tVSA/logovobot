@@ -144,6 +144,13 @@ def register_jobs(application: Application) -> None:
     except Exception as e:
         logger.warning(f"Could not register backup job: {e}")
 
+    # Трансферное окно: автозакрытие по времени из настроек окна
+    try:
+        from transfers.jobs import job_auto_close
+        _run_repeating(application, "transfer_auto_close", job_auto_close, 60, 100)
+    except Exception as e:
+        logger.warning(f"Could not register transfer auto-close job: {e}")
+
 def main() -> None:
     """Initialize and run the Telegram bot application."""
     if not TOKEN:

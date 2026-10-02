@@ -185,8 +185,9 @@ transfers/
 
 ## Этапы
 
-1. **База и движок.** Миграция `transfers/schema.py`, `transfers/repo.py`, `transfers/engine.py` + тесты.
-2. **Окно.** Открытие/закрытие, автозакрытие, снимок ядра состава, выдача бюджетов клубам.
+1. **База и движок.** Миграция `transfers/schema.py`, `transfers/repo.py`, `transfers/engine.py` + тесты. ✅
+2. **Окно.** Открытие/закрытие, автозакрытие, снимок ядра состава, выдача бюджетов клубам. ✅ `transfers/service.py`, `notify.py`, `jobs.py`,
+   `handlers.py` (`/to` у ответственного, `/set_transfer_topic`).
 3. **Заявки.** API + Mini App: сделка, свободный агент, доплата, урна (продажа и выкуп), отзыв, подтверждение стороной.
 4. **Одобрение.** Админ-тема, кнопки, уведомления сторонам, публикация в тему «Трансферы», журнал.
 5. **Состав.** Применить/откатить `squad_players`, жёсткое правило «5 игроков».
@@ -194,7 +195,7 @@ transfers/
 7. **История и санкции.** Раздел истории в Mini App, санкции.
 8. **Документация.** Раздел в `CLAUDE.md`, обновить список тестов.
 
-Тесты по подсистемам, без полного прогона: `test_transfer_engine`, `test_transfer_window`,
+Тесты по подсистемам, без полного прогона: `test_transfer_engine`, `test_transfer_window`, `test_transfer_service`,
 `test_transfer_requests`, `test_transfer_squad` + `test_production_audit` для новых кнопок.
 
 ## Открытые вопросы

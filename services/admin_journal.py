@@ -30,6 +30,7 @@ CATEGORIES: dict[str, str] = {
     "bets": "🎰 Ставки",
     "seasons": "🗓 Сезоны",
     "service": "🛠 Сервис",
+    "transfers": "🔁 Трансферы",
     "other": "📌 Прочее",
 }
 
@@ -116,6 +117,15 @@ ACTIONS: dict[str, tuple[str, str]] = {
     # Сервис
     "db_backup_created": ("service", "Сделан бэкап базы"),
     "db_backup_downloaded": ("service", "Скачан бэкап базы"),
+    # Трансферное окно
+    "transfer_window_created": ("transfers", "Создано трансферное окно"),
+    "transfer_window_opened": ("transfers", "Открыто трансферное окно"),
+    "transfer_window_closed": ("transfers", "Закрыто трансферное окно"),
+    "transfer_window_settings": ("transfers", "Изменены настройки окна"),
+    "transfer_budget_set": ("transfers", "Задан бюджет клуба"),
+    "transfer_budgets_applied": ("transfers", "Бюджеты выданы по правилам"),
+    "transfer_topic_bound": ("transfers", "Привязана тема ТО"),
+    "transfer_core_snapshot": ("transfers", "Дописан снимок составов"),
 }
 
 # Записи с реальным actor_id, которые засоряли бы журнал админов: пересчёт

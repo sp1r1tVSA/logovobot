@@ -16,7 +16,7 @@ import sqlite3
 from collections.abc import Iterable, Mapping
 
 from database import transaction
-from time_utils import now_msk_str
+from time_utils import DT_FORMAT, now_msk_str, parse_msk
 from transfers import config as tcfg
 from transfers.engine import (
     ACTIVE_STATUSES,
@@ -41,6 +41,7 @@ INT_SETTINGS = (
 )
 LIST_SETTINGS = ("fa_forbidden_clubs", "fa_restricted_clubs", "urn_restricted_clubs")
 TEXT_SETTINGS = ("title", "fa_opens_at", "auto_close_at")
+DATETIME_SETTINGS = ("fa_opens_at", "auto_close_at")
 TABLE_SETTINGS = ("surcharge_table",)
 SETTINGS_KEYS = INT_SETTINGS + LIST_SETTINGS + TEXT_SETTINGS + TABLE_SETTINGS
 
@@ -133,7 +134,15 @@ def _clean_setting(key: str, value):
     if value is None:
         return None
     text = str(value).strip()
-    return text or None
+    if not text:
+        return None
+    if key in DATETIME_SETTINGS:
+        # Время сравнивается строками с now_msk_str(), поэтому только формат хранения.
+        moment = parse_msk(text)
+        if moment is None:
+            raise ValueError(f"{key}: unreadable datetime")
+        return moment.strftime(DT_FORMAT)
+    return text
 
 
 def update_window_settings(window_id: int, changes: Mapping) -> dict:
@@ -578,6 +587,27 @@ def get_core_snapshot(window_id: int, club_name: str) -> list[dict]:
     return [dict(r) for r in rows if norm_club(r["club_name"]) == key]
 
 
+def core_snapshot_clubs(window_id: int) -> set[str]:
+    """Клубы (нормализованные имена), у которых снимок уже есть."""
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT club_name FROM transfer_core_snapshot WHERE window_id = ?", (window_id,)
+        ).fetchall()
+    return {norm_club(r["club_name"]) for r in rows}
+
+
+def list_squad_players() -> list[dict]:
+    """Все строки `squad_players` как есть — источник снимка состава.
+
+    Позиции читаются без «самолечения» `database.get_squad_with_positions`:
+    там пустая позиция уходит искать себя в интернет, а снимку она не нужна.
+    """
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT team_name, player_name, position FROM squad_players ORDER BY id"
+        ).fetchall()]
+
+
 def has_core_snapshot(window_id: int) -> bool:
     with transaction() as conn:
         return conn.execute(
@@ -607,6 +637,16 @@ def list_squad_ops(transfer_id: int, *, include_reverted: bool = False) -> list[
             "SELECT * FROM transfer_squad_ops WHERE transfer_id = ? ORDER BY id", (transfer_id,)
         ).fetchall()]
     return rows if include_reverted else [r for r in rows if r["reverted_at"] is None]
+
+
+def list_window_squad_ops(window_id: int) -> list[dict]:
+    """Не откаченные изменения состава по всем заявкам окна, по порядку."""
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT o.* FROM transfer_squad_ops o JOIN transfers t ON t.id = o.transfer_id "
+            "WHERE t.window_id = ? AND o.reverted_at IS NULL ORDER BY o.id",
+            (window_id,),
+        ).fetchall()]
 
 
 def mark_squad_ops_reverted(transfer_id: int) -> int:

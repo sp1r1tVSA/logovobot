@@ -370,3 +370,8 @@ BACKUP_TELEGRAM_CHAT_ID = os.getenv("BACKUP_TELEGRAM_CHAT_ID", "").strip()
 # падений подряд глобальные админы получают сообщение в ЛС, не чаще раза в N часов.
 JOB_ALERT_AFTER_FAILURES = max(1, int(os.getenv("JOB_ALERT_AFTER_FAILURES", "3")))
 JOB_ALERT_COOLDOWN_HOURS = float(os.getenv("JOB_ALERT_COOLDOWN_HOURS", "6"))
+
+# Трансферное окно (transfers/): единственный ответственный — его Telegram ID.
+# Подменить его нельзя никому, аварийного доступа нет; пусто — ответственного нет.
+_env_transfer_manager = os.getenv("TRANSFER_MANAGER_ID", "").strip()
+TRANSFER_MANAGER_ID = int(_env_transfer_manager) if _env_transfer_manager.isdigit() else None
