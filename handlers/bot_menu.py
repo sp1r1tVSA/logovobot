@@ -23,6 +23,7 @@ import config
 import database
 from handlers.base import is_global_admin
 from handlers.league_overview import can_view_overview
+from transfers.service import is_transfer_manager
 
 logger = logging.getLogger(__name__)
 
@@ -42,6 +43,11 @@ GLOBAL_ADMIN_COMMANDS = ADMIN_COMMANDS + [
     BotCommand("audit", "Журнал действий админов"),
 ]
 
+# Ответственному за трансферное окно — его панель, даже если он не админ.
+TRANSFER_MANAGER_COMMANDS = [
+    BotCommand("to", "Трансферное окно"),
+]
+
 
 async def set_default_menu(bot) -> None:
     await bot.set_my_commands(DEFAULT_COMMANDS, scope=BotCommandScopeDefault())
@@ -49,6 +55,9 @@ async def set_default_menu(bot) -> None:
 
 async def refresh_admin_menu(bot, user_id: int) -> bool:
     """Выставить пользователю меню по его текущим правам. True — меню админа.
+
+    Ответственный за ТО получает ещё `/to`; если он не админ, меню у него
+    личное, но функция всё равно вернёт False.
 
     Никогда не бросает: вызывается после назначения / снятия админа, и сбой
     меню не должен ломать сам этот экран.
@@ -60,6 +69,11 @@ async def refresh_admin_menu(bot, user_id: int) -> bool:
         is_admin = await asyncio.to_thread(can_view_overview, user_id)
         if is_admin:
             commands = GLOBAL_ADMIN_COMMANDS if is_global_admin(user_id) else ADMIN_COMMANDS
+        else:
+            commands = DEFAULT_COMMANDS
+        if is_transfer_manager(user_id):
+            commands = commands + TRANSFER_MANAGER_COMMANDS
+        if is_admin or is_transfer_manager(user_id):
             await bot.set_my_commands(commands, scope=scope)
         else:
             await bot.delete_my_commands(scope=scope)
@@ -75,6 +89,9 @@ async def sync_admin_menus(bot) -> int:
     """На старте: меню админа всем, у кого сейчас есть права. Возвращает, скольким выставлено."""
     candidates = set(await asyncio.to_thread(database.get_admin_candidate_ids))
     candidates.update(int(uid) for uid in config.ADMIN_IDS)
+    manager = getattr(config, "TRANSFER_MANAGER_ID", None)
+    if manager:
+        candidates.add(int(manager))
     applied = 0
     for user_id in sorted(candidates):
         if await refresh_admin_menu(bot, user_id):

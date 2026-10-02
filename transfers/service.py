@@ -351,17 +351,73 @@ def set_budget(window_id: int, club_text: str, amount_text: str, actor_id: int) 
     return club, amount, old
 
 
+def _budget_row(club: str, budget: dict | None) -> dict:
+    return {"club": club, "budget_k": budget["budget_k"] if budget else None,
+            "source": budget["source"] if budget else None}
+
+
 def budget_table(window_id: int) -> list[dict]:
     """Все клубы лиги с бюджетом (None — не задан), по алфавиту."""
     budgets = {norm_club(b["club_name"]): b for b in repo.get_club_budgets(window_id)}
-    rows = []
-    for club in league_clubs():
-        b = budgets.pop(norm_club(club), None)
-        rows.append({"club": club, "budget_k": b["budget_k"] if b else None,
-                     "source": b["source"] if b else None})
-    for b in budgets.values():          # бюджет клуба, которого уже нет в лиге
-        rows.append({"club": b["club_name"], "budget_k": b["budget_k"], "source": b["source"]})
+    rows = [_budget_row(club, budgets.pop(norm_club(club), None)) for club in league_clubs()]
+    rows += [_budget_row(b["club_name"], b) for b in budgets.values()]   # клуб, которого уже нет в лиге
     return sorted(rows, key=lambda r: norm_club(r["club"]))
+
+
+OUTSIDE_LEAGUE = "Вне лиги"
+
+
+def budget_pages(window_id: int) -> list[tuple[str, list[dict]]]:
+    """Бюджеты по дивизионам для панели: [(дивизион, строки по алфавиту)].
+
+    Клуб с бюджетом, которого в лиге уже нет, попадает на последнюю страницу
+    «Вне лиги». Порядок дивизионов — как в `get_divisions`.
+    """
+    budgets = {norm_club(b["club_name"]): b for b in repo.get_club_budgets(window_id)}
+    pages: list[tuple[str, list[dict]]] = []
+    seen: set[str] = set()
+    for division in database.get_divisions(is_active=True):
+        rows = []
+        for club in database.get_division_teams(division["id"]):
+            key = norm_club(club)
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            rows.append(_budget_row(club, budgets.pop(key, None)))
+        if rows:
+            pages.append((division["name"], sorted(rows, key=lambda r: norm_club(r["club"]))))
+    if budgets:
+        pages.append((OUTSIDE_LEAGUE, sorted((_budget_row(b["club_name"], b) for b in budgets.values()),
+                                             key=lambda r: norm_club(r["club"]))))
+    return pages
+
+
+# ─── Темы группы ─────────────────────────────────────────────────────────────
+
+# Ссылка на тему (⋯ → «Копировать ссылку») или на сообщение в ней:
+#   t.me/c/<id>/<тема>  ·  t.me/c/<id>/<тема>/<сообщение>  ·  t.me/c/<id>/<сообщение>?thread=<тема>
+#   и то же с @username публичной группы вместо c/<id>.
+_TOPIC_LINK = re.compile(
+    r"^(?:https?://)?(?:www\.)?(?:t\.me|telegram\.me)/"
+    r"(?:c/(?P<cid>\d+)|(?P<user>[A-Za-z][A-Za-z0-9_]{3,31}))"
+    r"/(?P<first>\d+)(?:/(?P<second>\d+))?/?(?:\?(?P<query>\S*))?$")
+
+
+def parse_topic_link(text: str | None) -> tuple[int | str, int]:
+    """Ссылка на тему форума → (chat_id или «@username», id темы)."""
+    match = _TOPIC_LINK.match((text or "").strip())
+    if not match:
+        raise InputError("Это не ссылка на тему. В теме нажмите ⋯ → «Копировать ссылку» "
+                         "и пришлите её сюда.")
+    thread = int(match["first"])
+    for part in (match["query"] or "").split("&"):
+        key, _, value = part.partition("=")
+        if key in ("thread", "topic") and value.isdigit():
+            thread = int(value)
+    if thread <= 1:
+        raise InputError("Это «Общая» тема группы — нужна отдельная тема.")
+    chat: int | str = int(f"-100{match['cid']}") if match["cid"] else f"@{match['user']}"
+    return chat, thread
 
 
 def overview(window_id: int) -> dict:
@@ -386,5 +442,6 @@ __all__ = [
     "AUTO_REJECT_REASON", "SYSTEM_ACTOR", "InputError", "is_transfer_manager",
     "parse_window_datetime", "create_window", "league_clubs", "snapshot_core", "open_window",
     "close_window", "due_auto_close", "set_auto_close", "update_setting", "default_budgets",
-    "apply_default_budgets", "resolve_club", "set_budget", "budget_table", "overview", "format_k",
+    "apply_default_budgets", "resolve_club", "set_budget", "budget_table", "budget_pages", "parse_topic_link",
+    "overview", "format_k",
 ]

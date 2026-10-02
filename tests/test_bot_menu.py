@@ -64,6 +64,23 @@ class TestRefreshAdminMenu(unittest.IsolatedAsyncioTestCase):
         bot.set_my_commands.assert_not_awaited()
         bot.delete_my_commands.assert_not_awaited()
 
+    async def test_transfer_manager_gets_to_even_without_admin_rights(self):
+        bot = _bot()
+        with patch.object(bot_menu.config, "TRANSFER_MANAGER_ID", 42, create=True), \
+             patch.object(bot_menu, "can_view_overview", return_value=False):
+            self.assertFalse(await bot_menu.refresh_admin_menu(bot, 42))
+        self.assertEqual(bot.set_my_commands.call_args.args[0],
+                         bot_menu.DEFAULT_COMMANDS + bot_menu.TRANSFER_MANAGER_COMMANDS)
+        bot.delete_my_commands.assert_not_awaited()
+
+    async def test_transfer_manager_admin_gets_both(self):
+        bot = _bot()
+        with patch.object(bot_menu.config, "TRANSFER_MANAGER_ID", 42, create=True), \
+             patch.object(bot_menu, "can_view_overview", return_value=True):
+            self.assertTrue(await bot_menu.refresh_admin_menu(bot, 42))
+        self.assertEqual(bot.set_my_commands.call_args.args[0],
+                         bot_menu.ADMIN_COMMANDS + bot_menu.TRANSFER_MANAGER_COMMANDS)
+
     async def test_default_menu_uses_default_scope(self):
         bot = _bot()
         await bot_menu.set_default_menu(bot)
@@ -83,6 +100,15 @@ class TestSyncAdminMenus(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(granted, [7001, 7002])
         # Бывший админ, у которого прав больше нет, получает общее меню обратно.
         self.assertEqual([c.kwargs["scope"].chat_id for c in bot.delete_my_commands.call_args_list], [7003])
+
+    async def test_includes_transfer_manager(self):
+        bot = _bot()
+        with patch.object(bot_menu.database, "get_admin_candidate_ids", return_value=[]), \
+             patch.object(bot_menu.config, "ADMIN_IDS", []), \
+             patch.object(bot_menu.config, "TRANSFER_MANAGER_ID", 7010, create=True), \
+             patch.object(bot_menu, "can_view_overview", return_value=False):
+            await bot_menu.sync_admin_menus(bot)
+        self.assertEqual([c.kwargs["scope"].chat_id for c in bot.set_my_commands.call_args_list], [7010])
 
 
 class TestAdminCandidateIds(unittest.TestCase):
