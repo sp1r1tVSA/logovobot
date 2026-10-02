@@ -713,3 +713,10 @@ data and is likewise never committed.
   root on 2026-09-18; only `CLAUDE.md`, `README.md` and the two `SPEC*.md` stay there.
 - `.claude/` (agents, commands, skills, prds) and `.apm/` hold agent tooling, not runtime
   code. `.claude/worktrees/` contains throwaway git worktrees.
+- `.claude/hooks/protect_guard.py` — a PreToolUse hook (wired in `.claude/settings.json`) that denies
+  edits of `.env*`, SQLite files and `backups/`, reading a real `.env` (Read/Grep/shell), staging them
+  with git, and `--apply` runs of the destructive `scripts/*.py`. It fails open on unparsable input;
+  `tests/test_protect_guard.py` covers it. If the script path stops resolving, the hook exits 2 and
+  blocks every tool, so keep the file in step with the `settings.json` command.
+- `.mcp.json` — the `context7` MCP server (`@upstash/context7-mcp`, tools `resolve-library-id` and
+  `query-docs`) for current library docs; enabled through `enabledMcpjsonServers` in `.claude/settings.json`.
