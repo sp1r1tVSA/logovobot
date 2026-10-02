@@ -49,6 +49,8 @@ ACTIONS: dict[str, tuple[str, str]] = {
     "result_correction": ("matches", "Исправлен результат (live)"),
     # Дисциплина
     "warn_added": ("discipline", "Выдан варн"),
+    "chat_mute": ("discipline", "Мут в чате"),
+    "chat_unmute": ("discipline", "Снят мут в чате"),
     "warn_removed": ("discipline", "Снят варн"),
     "warn_amnesty": ("discipline", "Амнистия"),
     "warns_reset_user": ("discipline", "Сброшены варны игрока"),

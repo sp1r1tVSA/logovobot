@@ -360,6 +360,10 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
                 "• <code>Темшик снять варн @username</code> — снять варн\n"
                 "• <code>Темшик варны</code> — список игроков с варнами\n"
                 "• <code>Темшик автоварны</code> — прогнать проверку долгов\n\n"
+                "<i>Порядок в чате дивизиона:</i>\n"
+                "• <code>Темшик мут [срок] [причина]</code> — ответом на сообщение нарушителя "
+                "(<code>15м</code>, <code>2ч</code>, <code>1д</code>; без срока — 1 час)\n"
+                "• <code>Темшик размут</code> — ответом на сообщение или <code>@username</code>\n\n"
                 "<i>Слеш-команды топиков:</i>\n"
                 "• <code>/naznachit_topik &lt;div_id&gt;</code> — привязать текущий топик к дивизиону\n"
                 "• <code>/topiki &lt;div_id&gt;</code> — статус топиков дивизиона\n"
@@ -818,6 +822,21 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
 
         from handlers.cabinet import send_or_edit_club_card
         await send_or_edit_club_card(update, context, canon, back_cb="cb_clubs_catalog")
+        return True
+
+    if action in ("мут", "замуть", "mute"):
+        from handlers.chat_moderation import handle_mute_command
+        await handle_mute_command(update, context, args_str)
+        return True
+
+    unmute_words = args_str.split(None, 1)
+    if action in ("размут", "размуть", "unmute") or (
+        action == "снять" and unmute_words[:1] and unmute_words[0].lower() == "мут"
+    ):
+        from handlers.chat_moderation import handle_unmute_command
+        if action == "снять":
+            args_str = unmute_words[1] if len(unmute_words) > 1 else ""
+        await handle_unmute_command(update, context, args_str)
         return True
 
     if action in ("варн", "warn"):

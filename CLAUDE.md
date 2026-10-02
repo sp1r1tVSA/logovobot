@@ -636,6 +636,18 @@ admin's actions.
 Tests: `test_db_backup`, `test_job_health`, `test_bot_health`, `test_ocr_metrics`,
 `test_admin_journal`.
 
+**Chat moderation** (`handlers/chat_moderation.py`, test `test_chat_moderation`) — «Темшик мут [срок]
+[причина]» ответом на сообщение нарушителя (или `@username`), «Темшик размут» / «снять мут». It is
+Telegram's own `restrict_chat_member` in the division's supergroup, so Telegram expires it by
+`until_date`: no table, no scheduler. Срок 1 мин – 30 дней, без срока — 1 час. Global admins act in
+any chat; a division admin only in the chat whose group/topic binding is their division (the binding
+only — never `resolve_division_id`, whose fallback to the user's own division would leak rights).
+League admins, chat admins, bots and oneself can't be muted. Unmute restores the group's default
+permissions from `get_chat()`. `until_date` must be aware (`now_msk().replace(tzinfo=MSK)`) — PTB
+reads a naive one as UTC. Muting is separate from warns and debts. Journaled as `chat_mute` /
+`chat_unmute`. Dispatched from `handle_temshik_command`; the bot needs the «Блокировка
+пользователей» admin right.
+
 ---
 
 ## Roles and access
