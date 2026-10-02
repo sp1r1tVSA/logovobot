@@ -2317,6 +2317,10 @@ def init_db() -> None:
         # ─── 032: автоаннулирование рынков серии — от системы, не от игрока ───
         _reattribute_series_auto_voids(cursor)
 
+        # ─── 033: трансферное окно (схема живёт в пакете transfers/) ──────────
+        from transfers.schema import apply_schema as _apply_transfer_schema
+        _apply_transfer_schema(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 

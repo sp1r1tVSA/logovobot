@@ -27,7 +27,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SQL_NOW = "datetime('now', '+3 hours')"
 
 # Каталоги с исполняемым кодом бота. `tests/` и агентская обвязка не сканируются.
-SOURCE_DIRS = ("api", "handlers", "services", "scripts", "utils")
+SOURCE_DIRS = ("api", "handlers", "services", "scripts", "utils", "transfers")
 SOURCE_ROOT_FILES = ("database.py", "main.py", "config.py", "purge_old_season.py")
 
 

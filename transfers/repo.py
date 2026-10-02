@@ -1,0 +1,618 @@
+"""SQL трансферного окна. Весь доступ к таблицам миграции 033 — только здесь.
+
+Работает через `database.transaction()` (реентерабельный: вложенный вызов
+присоединяется к внешней транзакции), запросы только параметризованные, без
+подстановки имён колонок. Время — МСК (`time_utils`), и каждый INSERT явно
+пишет свои временные колонки.
+
+Клубы хранятся каноническими именами, но сравниваются через
+`normalize_team_name` там, где имя пришло от человека.
+"""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+from collections.abc import Iterable, Mapping
+
+from database import transaction
+from time_utils import now_msk_str
+from transfers import config as tcfg
+from transfers.engine import (
+    ACTIVE_STATUSES,
+    ClubLedger,
+    WindowSettings,
+    compute_ledger,
+    norm_club,
+    norm_player,
+)
+from transfers.schema import TOPIC_TYPES, TRANSFER_KINDS, TRANSFER_STATUSES
+
+
+class WindowConflict(Exception):
+    """Уже есть незакрытое окно — второе создать нельзя."""
+
+
+# Настройки окна, которые меняет ответственный. Значение — тип поля.
+INT_SETTINGS = (
+    "max_buys", "max_sells", "max_extra_slots", "slot_price_coins", "ovr_cap",
+    "min_core_players", "fa_ovr_cap", "urn_divisor_sellable", "urn_divisor_unsellable",
+    "urn_max_per_club", "surcharge_min_ovr",
+)
+LIST_SETTINGS = ("fa_forbidden_clubs", "fa_restricted_clubs", "urn_restricted_clubs")
+TEXT_SETTINGS = ("title", "fa_opens_at", "auto_close_at")
+TABLE_SETTINGS = ("surcharge_table",)
+SETTINGS_KEYS = INT_SETTINGS + LIST_SETTINGS + TEXT_SETTINGS + TABLE_SETTINGS
+
+_POSITIVE_SETTINGS = ("urn_divisor_sellable", "urn_divisor_unsellable")
+
+
+def _row(row: sqlite3.Row | None) -> dict | None:
+    return dict(row) if row is not None else None
+
+
+# ─── Окна ────────────────────────────────────────────────────────────────────
+
+def create_window(season_id: int | None, created_by: int | None, title: str | None = None) -> int:
+    """Создать окно в статусе `draft` с настройками по умолчанию.
+
+    Пока есть незакрытое окно — `WindowConflict` (это держит частичный
+    уникальный индекс, а не проверка в коде).
+    """
+    now = now_msk_str()
+    table = json.dumps({str(k): v for k, v in tcfg.DEFAULT_SURCHARGE_TABLE.items()})
+    try:
+        with transaction() as conn:
+            cur = conn.execute(
+                """INSERT INTO transfer_windows (
+                       season_id, title, status, created_by,
+                       max_buys, max_sells, max_extra_slots, slot_price_coins, ovr_cap,
+                       min_core_players, fa_ovr_cap, urn_divisor_sellable,
+                       urn_divisor_unsellable, urn_max_per_club, surcharge_min_ovr,
+                       surcharge_table, created_at, updated_at
+                   ) VALUES (?, ?, 'draft', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (season_id, title, created_by,
+                 tcfg.DEFAULT_MAX_BUYS, tcfg.DEFAULT_MAX_SELLS, tcfg.DEFAULT_MAX_EXTRA_SLOTS,
+                 tcfg.DEFAULT_SLOT_PRICE_COINS, tcfg.DEFAULT_OVR_CAP, tcfg.DEFAULT_MIN_CORE_PLAYERS,
+                 tcfg.DEFAULT_FA_OVR_CAP, tcfg.DEFAULT_URN_DIVISOR_SELLABLE,
+                 tcfg.DEFAULT_URN_DIVISOR_UNSELLABLE, tcfg.DEFAULT_URN_MAX_PER_CLUB,
+                 tcfg.DEFAULT_SURCHARGE_MIN_OVR, table, now, now),
+            )
+            return int(cur.lastrowid)
+    except sqlite3.IntegrityError as exc:
+        raise WindowConflict("an unclosed transfer window already exists") from exc
+
+
+def get_window(window_id: int) -> dict | None:
+    with transaction() as conn:
+        return _row(conn.execute("SELECT * FROM transfer_windows WHERE id = ?", (window_id,)).fetchone())
+
+
+def get_active_window() -> dict | None:
+    """Незакрытое окно (`draft` или `open`) — оно максимум одно."""
+    with transaction() as conn:
+        return _row(conn.execute(
+            "SELECT * FROM transfer_windows WHERE status != 'closed' ORDER BY id DESC LIMIT 1"
+        ).fetchone())
+
+
+def get_latest_window() -> dict | None:
+    with transaction() as conn:
+        return _row(conn.execute("SELECT * FROM transfer_windows ORDER BY id DESC LIMIT 1").fetchone())
+
+
+def get_window_settings(window_id: int) -> WindowSettings | None:
+    row = get_window(window_id)
+    return WindowSettings.from_row(row) if row else None
+
+
+def _clean_setting(key: str, value):
+    if key in INT_SETTINGS:
+        if isinstance(value, bool):
+            raise ValueError(f"{key}: integer expected")
+        number = int(value)
+        if number < 0 or (key in _POSITIVE_SETTINGS and number == 0):
+            raise ValueError(f"{key}: out of range")
+        return number
+    if key in LIST_SETTINGS:
+        if isinstance(value, str):
+            value = [part for part in value.split(",")]
+        clubs = [str(c).strip() for c in value if str(c).strip()]
+        return json.dumps(clubs, ensure_ascii=False)
+    if key in TABLE_SETTINGS:
+        if value is None:
+            return None
+        table = {}
+        for ovr, price in dict(value).items():
+            ovr_i, price_i = int(ovr), int(price)
+            if ovr_i <= 0 or price_i < 0:
+                raise ValueError(f"{key}: out of range")
+            table[str(ovr_i)] = price_i
+        return json.dumps(dict(sorted(table.items(), key=lambda kv: int(kv[0]))))
+    # TEXT_SETTINGS
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def update_window_settings(window_id: int, changes: Mapping) -> dict:
+    """Поменять настройки окна. Неизвестный ключ или плохое значение — ValueError.
+
+    Читаем строку, сливаем изменения и пишем все поля одним статическим
+    запросом: имена колонок в SQL не подставляются.
+    """
+    unknown = set(changes) - set(SETTINGS_KEYS)
+    if unknown:
+        raise ValueError(f"unknown settings: {sorted(unknown)}")
+    cleaned = {key: _clean_setting(key, value) for key, value in changes.items()}
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM transfer_windows WHERE id = ?", (window_id,)).fetchone()
+        if row is None:
+            raise ValueError("window not found")
+        merged = dict(row)
+        merged.update(cleaned)
+        conn.execute(
+            """UPDATE transfer_windows SET
+                   title = ?, fa_opens_at = ?, auto_close_at = ?,
+                   max_buys = ?, max_sells = ?, max_extra_slots = ?, slot_price_coins = ?,
+                   ovr_cap = ?, min_core_players = ?, fa_ovr_cap = ?,
+                   urn_divisor_sellable = ?, urn_divisor_unsellable = ?, urn_max_per_club = ?,
+                   surcharge_min_ovr = ?, fa_forbidden_clubs = ?, fa_restricted_clubs = ?,
+                   urn_restricted_clubs = ?, surcharge_table = ?, updated_at = ?
+               WHERE id = ?""",
+            (merged["title"], merged["fa_opens_at"], merged["auto_close_at"],
+             merged["max_buys"], merged["max_sells"], merged["max_extra_slots"],
+             merged["slot_price_coins"], merged["ovr_cap"], merged["min_core_players"],
+             merged["fa_ovr_cap"], merged["urn_divisor_sellable"], merged["urn_divisor_unsellable"],
+             merged["urn_max_per_club"], merged["surcharge_min_ovr"], merged["fa_forbidden_clubs"],
+             merged["fa_restricted_clubs"], merged["urn_restricted_clubs"],
+             merged["surcharge_table"], now_msk_str(), window_id),
+        )
+        return dict(conn.execute("SELECT * FROM transfer_windows WHERE id = ?", (window_id,)).fetchone())
+
+
+def open_window(window_id: int, actor_id: int | None) -> bool:
+    """`draft` → `open`. False, если окно не в черновике."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE transfer_windows SET status = 'open', opened_at = ?, opened_by = ?, updated_at = ? "
+            "WHERE id = ? AND status = 'draft'",
+            (now_msk_str(), actor_id, now_msk_str(), window_id),
+        )
+        return cur.rowcount == 1
+
+
+def close_window(window_id: int, actor_id: int | None) -> bool:
+    """`draft`/`open` → `closed`. False, если окно уже закрыто."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE transfer_windows SET status = 'closed', closed_at = ?, closed_by = ?, updated_at = ? "
+            "WHERE id = ? AND status != 'closed'",
+            (now_msk_str(), actor_id, now_msk_str(), window_id),
+        )
+        return cur.rowcount == 1
+
+
+# ─── Бюджеты ─────────────────────────────────────────────────────────────────
+
+def set_club_budget(window_id: int, club_name: str, budget_k: int,
+                    updated_by: int | None, source: str = "manual") -> None:
+    if source not in ("rule", "manual"):
+        raise ValueError("source must be 'rule' or 'manual'")
+    if int(budget_k) < 0:
+        raise ValueError("budget must not be negative")
+    with transaction() as conn:
+        existing = _find_budget_row(conn, window_id, club_name)
+        if existing is not None:
+            conn.execute(
+                "UPDATE transfer_club_budgets SET budget_k = ?, source = ?, updated_by = ?, updated_at = ? "
+                "WHERE id = ?",
+                (int(budget_k), source, updated_by, now_msk_str(), existing["id"]),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO transfer_club_budgets (window_id, club_name, budget_k, source, updated_by, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (window_id, club_name.strip(), int(budget_k), source, updated_by, now_msk_str()),
+            )
+
+
+def _find_budget_row(conn, window_id: int, club_name: str):
+    key = norm_club(club_name)
+    for row in conn.execute(
+        "SELECT * FROM transfer_club_budgets WHERE window_id = ?", (window_id,)
+    ).fetchall():
+        if norm_club(row["club_name"]) == key:
+            return row
+    return None
+
+
+def get_club_budget(window_id: int, club_name: str) -> int | None:
+    """Бюджет клуба или None, если его не задали (расчёт считает это нулём)."""
+    with transaction() as conn:
+        row = _find_budget_row(conn, window_id, club_name)
+        return int(row["budget_k"]) if row is not None else None
+
+
+def get_club_budgets(window_id: int) -> list[dict]:
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM transfer_club_budgets WHERE window_id = ? ORDER BY club_name", (window_id,)
+        ).fetchall()]
+
+
+# ─── Заявки ──────────────────────────────────────────────────────────────────
+
+_TRANSFER_FIELDS = (
+    "from_club", "to_club", "from_user", "to_user", "price_k", "ovr", "tm_price_k",
+    "special_price_k", "sellable", "urn_item_id", "source_text", "commented_at",
+    "reported_budget_k", "photo_file_id", "initiator_id",
+)
+
+
+def insert_transfer(window_id: int, kind: str, player_name: str, status: str,
+                    warnings: Iterable[Mapping] = (), **fields) -> int:
+    if kind not in TRANSFER_KINDS:
+        raise ValueError(f"unknown transfer kind: {kind}")
+    if status not in TRANSFER_STATUSES:
+        raise ValueError(f"unknown transfer status: {status}")
+    unknown = set(fields) - set(_TRANSFER_FIELDS)
+    if unknown:
+        raise ValueError(f"unknown transfer fields: {sorted(unknown)}")
+    name = (player_name or "").strip()
+    if not norm_player(name):
+        raise ValueError("player name is empty")
+    values = {key: fields.get(key) for key in _TRANSFER_FIELDS}
+    if values["price_k"] is None:
+        values["price_k"] = 0
+    if values["sellable"] is not None:
+        values["sellable"] = 1 if values["sellable"] else 0
+    now = now_msk_str()
+    with transaction() as conn:
+        cur = conn.execute(
+            """INSERT INTO transfers (
+                   window_id, kind, player_name, norm_name, from_club, to_club, from_user, to_user,
+                   price_k, ovr, tm_price_k, special_price_k, sellable, urn_item_id, source_text,
+                   commented_at, reported_budget_k, photo_file_id, initiator_id, status, warnings,
+                   created_at, updated_at
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (window_id, kind, name, norm_player(name),
+             values["from_club"], values["to_club"], values["from_user"], values["to_user"],
+             int(values["price_k"]), values["ovr"], values["tm_price_k"], values["special_price_k"],
+             values["sellable"], values["urn_item_id"], values["source_text"],
+             values["commented_at"], values["reported_budget_k"], values["photo_file_id"],
+             values["initiator_id"], status, json.dumps(list(warnings), ensure_ascii=False),
+             now, now),
+        )
+        return int(cur.lastrowid)
+
+
+def get_transfer(transfer_id: int) -> dict | None:
+    with transaction() as conn:
+        return _row(conn.execute("SELECT * FROM transfers WHERE id = ?", (transfer_id,)).fetchone())
+
+
+def list_transfers(window_id: int, *, club: str | None = None,
+                   statuses: Iterable[str] | None = None,
+                   kinds: Iterable[str] | None = None,
+                   player_name: str | None = None) -> list[dict]:
+    """Заявки окна по порядку подачи. Фильтры — в Python: окно невелико."""
+    with transaction() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM transfers WHERE window_id = ? ORDER BY id", (window_id,)
+        ).fetchall()]
+    if statuses is not None:
+        allowed = set(statuses)
+        rows = [r for r in rows if r["status"] in allowed]
+    if kinds is not None:
+        allowed_kinds = set(kinds)
+        rows = [r for r in rows if r["kind"] in allowed_kinds]
+    if club is not None:
+        key = norm_club(club)
+        rows = [r for r in rows if key and key in (norm_club(r["from_club"]), norm_club(r["to_club"]))]
+    if player_name is not None:
+        pkey = norm_player(player_name)
+        rows = [r for r in rows if r["norm_name"] == pkey]
+    return rows
+
+
+def set_transfer_status(transfer_id: int, new_status: str, *, expected: Iterable[str],
+                        actor_id: int | None = None, reason: str | None = None) -> bool:
+    """Сменить статус, только если текущий — один из `expected`.
+
+    Возвращает False, если заявку уже перевели (двойное нажатие, гонка двух
+    админов). Окончательные статусы пишут, кто и когда решил.
+    """
+    if new_status not in TRANSFER_STATUSES:
+        raise ValueError(f"unknown transfer status: {new_status}")
+    allowed = set(expected)
+    with transaction() as conn:
+        row = conn.execute("SELECT status FROM transfers WHERE id = ?", (transfer_id,)).fetchone()
+        if row is None or row["status"] not in allowed:
+            return False
+        now = now_msk_str()
+        if new_status in ("approved", "rejected", "cancelled"):
+            conn.execute(
+                "UPDATE transfers SET status = ?, decided_by = ?, decided_at = ?, decided_reason = ?, "
+                "updated_at = ? WHERE id = ? AND status = ?",
+                (new_status, actor_id, now, reason, now, transfer_id, row["status"]),
+            )
+        else:
+            conn.execute(
+                "UPDATE transfers SET status = ?, updated_at = ? WHERE id = ? AND status = ?",
+                (new_status, now, transfer_id, row["status"]),
+            )
+        return True
+
+
+def set_transfer_warnings(transfer_id: int, warnings: Iterable[Mapping]) -> None:
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE transfers SET warnings = ?, updated_at = ? WHERE id = ?",
+            (json.dumps(list(warnings), ensure_ascii=False), now_msk_str(), transfer_id),
+        )
+
+
+def mark_squad_applied(transfer_id: int) -> None:
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE transfers SET squad_applied_at = ?, updated_at = ? WHERE id = ?",
+            (now_msk_str(), now_msk_str(), transfer_id),
+        )
+
+
+def get_club_ledger(window_id: int, club_name: str,
+                    exclude_transfer_id: int | None = None) -> ClubLedger:
+    """Бюджет и слоты клуба по данным окна — одна точка для бота и Mini App."""
+    settings = get_window_settings(window_id)
+    if settings is None:
+        raise ValueError("window not found")
+    with transaction():
+        budget = get_club_budget(window_id, club_name)
+        transfers = list_transfers(window_id, statuses=ACTIVE_STATUSES)
+        purchases = list_slot_purchases(window_id)
+    return compute_ledger(club_name, budget, transfers, settings,
+                          slot_purchases=purchases, exclude_transfer_id=exclude_transfer_id)
+
+
+# ─── Доп. слоты ──────────────────────────────────────────────────────────────
+
+def add_slot_purchase(window_id: int, club_name: str, slot_type: str, price_coins: int,
+                      user_id: int | None, coin_tx_id: int | None = None) -> int:
+    if slot_type not in ("buy", "sell"):
+        raise ValueError("slot_type must be 'buy' or 'sell'")
+    with transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO transfer_slot_purchases "
+            "(window_id, club_name, slot_type, price_coins, user_id, coin_tx_id, status, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
+            (window_id, club_name, slot_type, int(price_coins), user_id, coin_tx_id, now_msk_str()),
+        )
+        return int(cur.lastrowid)
+
+
+def list_slot_purchases(window_id: int, club_name: str | None = None) -> list[dict]:
+    with transaction() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM transfer_slot_purchases WHERE window_id = ? ORDER BY id", (window_id,)
+        ).fetchall()]
+    if club_name is not None:
+        key = norm_club(club_name)
+        rows = [r for r in rows if norm_club(r["club_name"]) == key]
+    return rows
+
+
+def refund_slot_purchase(purchase_id: int) -> bool:
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE transfer_slot_purchases SET status = 'refunded' WHERE id = ? AND status = 'active'",
+            (purchase_id,),
+        )
+        return cur.rowcount == 1
+
+
+# ─── Санкции ─────────────────────────────────────────────────────────────────
+
+def add_sanction(*, club_name: str | None, user_id: int | None, from_season_id: int,
+                 until_season_id: int, reason: str | None, created_by: int | None) -> int:
+    if not (club_name or user_id):
+        raise ValueError("sanction needs a club or a user")
+    if until_season_id < from_season_id:
+        raise ValueError("until_season_id must not precede from_season_id")
+    with transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO transfer_sanctions "
+            "(club_name, user_id, from_season_id, until_season_id, reason, created_by, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (club_name, user_id, int(from_season_id), int(until_season_id), reason, created_by,
+             now_msk_str()),
+        )
+        return int(cur.lastrowid)
+
+
+def lift_sanction(sanction_id: int, lifted_by: int | None) -> bool:
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE transfer_sanctions SET lifted_at = ?, lifted_by = ? WHERE id = ? AND lifted_at IS NULL",
+            (now_msk_str(), lifted_by, sanction_id),
+        )
+        return cur.rowcount == 1
+
+
+def list_active_sanctions(season_id: int) -> list[dict]:
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM transfer_sanctions WHERE lifted_at IS NULL "
+            "AND from_season_id <= ? AND until_season_id >= ? ORDER BY id",
+            (int(season_id), int(season_id)),
+        ).fetchall()]
+
+
+def is_sanctioned(season_id: int, club_name: str | None = None, user_id: int | None = None) -> bool:
+    key = norm_club(club_name)
+    for s in list_active_sanctions(season_id):
+        if user_id is not None and s["user_id"] == user_id:
+            return True
+        if key and s["club_name"] and norm_club(s["club_name"]) == key:
+            return True
+    return False
+
+
+# ─── Справочник игроков ──────────────────────────────────────────────────────
+
+def get_player(player_name: str) -> dict | None:
+    key = norm_player(player_name)
+    if not key:
+        return None
+    with transaction() as conn:
+        return _row(conn.execute("SELECT * FROM transfer_players WHERE norm_name = ?", (key,)).fetchone())
+
+
+def upsert_player(player_name: str, *, last_club: str | None = None, ovr: int | None = None,
+                  price_k: int | None = None) -> None:
+    """Запомнить последнюю известную карту игрока. None не затирает прежнее."""
+    key = norm_player(player_name)
+    if not key:
+        raise ValueError("player name is empty")
+    now = now_msk_str()
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM transfer_players WHERE norm_name = ?", (key,)).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO transfer_players "
+                "(norm_name, player_name, last_club, ovr, price_k, banned, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, 0, ?, ?)",
+                (key, player_name.strip(), last_club, ovr, price_k, now, now),
+            )
+            return
+        conn.execute(
+            "UPDATE transfer_players SET player_name = ?, last_club = ?, ovr = ?, price_k = ?, "
+            "updated_at = ? WHERE id = ?",
+            (player_name.strip(),
+             last_club if last_club is not None else row["last_club"],
+             ovr if ovr is not None else row["ovr"],
+             price_k if price_k is not None else row["price_k"],
+             now, row["id"]),
+        )
+
+
+def set_player_ban(player_name: str, banned: bool, reason: str | None = None) -> None:
+    key = norm_player(player_name)
+    if not key:
+        raise ValueError("player name is empty")
+    now = now_msk_str()
+    with transaction() as conn:
+        row = conn.execute("SELECT id FROM transfer_players WHERE norm_name = ?", (key,)).fetchone()
+        if row is None:
+            conn.execute(
+                "INSERT INTO transfer_players "
+                "(norm_name, player_name, banned, ban_reason, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (key, player_name.strip(), 1 if banned else 0, reason if banned else None, now, now),
+            )
+        else:
+            conn.execute(
+                "UPDATE transfer_players SET banned = ?, ban_reason = ?, updated_at = ? WHERE id = ?",
+                (1 if banned else 0, reason if banned else None, now, row["id"]),
+            )
+
+
+# ─── Топики ──────────────────────────────────────────────────────────────────
+
+def bind_topic(topic_type: str, group_chat_id: int, message_thread_id: int | None,
+               bound_by: int | None) -> None:
+    if topic_type not in TOPIC_TYPES:
+        raise ValueError(f"unknown topic type: {topic_type}")
+    with transaction() as conn:
+        conn.execute(
+            "INSERT INTO transfer_topics (topic_type, group_chat_id, message_thread_id, bound_by, bound_at) "
+            "VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(topic_type) DO UPDATE SET group_chat_id = excluded.group_chat_id, "
+            "message_thread_id = excluded.message_thread_id, bound_by = excluded.bound_by, "
+            "bound_at = excluded.bound_at",
+            (topic_type, int(group_chat_id), message_thread_id, bound_by, now_msk_str()),
+        )
+
+
+def get_topic(topic_type: str) -> dict | None:
+    with transaction() as conn:
+        return _row(conn.execute(
+            "SELECT * FROM transfer_topics WHERE topic_type = ?", (topic_type,)
+        ).fetchone())
+
+
+def get_topics() -> dict[str, dict]:
+    with transaction() as conn:
+        return {r["topic_type"]: dict(r) for r in conn.execute("SELECT * FROM transfer_topics").fetchall()}
+
+
+# ─── Исходный состав ─────────────────────────────────────────────────────────
+
+def save_core_snapshot(window_id: int, club_name: str,
+                       players: Iterable[tuple[str, str | None]]) -> int:
+    """Записать состав клуба на открытие окна. Повтор не дублирует игроков."""
+    now = now_msk_str()
+    added = 0
+    with transaction() as conn:
+        for name, position in players:
+            key = norm_player(name)
+            if not key:
+                continue
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO transfer_core_snapshot "
+                "(window_id, club_name, player_name, norm_name, position, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (window_id, club_name, name.strip(), key, position, now),
+            )
+            added += cur.rowcount
+    return added
+
+
+def get_core_snapshot(window_id: int, club_name: str) -> list[dict]:
+    key = norm_club(club_name)
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT * FROM transfer_core_snapshot WHERE window_id = ? ORDER BY id", (window_id,)
+        ).fetchall()
+    return [dict(r) for r in rows if norm_club(r["club_name"]) == key]
+
+
+def has_core_snapshot(window_id: int) -> bool:
+    with transaction() as conn:
+        return conn.execute(
+            "SELECT 1 FROM transfer_core_snapshot WHERE window_id = ? LIMIT 1", (window_id,)
+        ).fetchone() is not None
+
+
+# ─── Изменения состава ───────────────────────────────────────────────────────
+
+def insert_squad_op(transfer_id: int, op: str, team_name: str, player_name: str,
+                    position: str | None, applied_by: int | None) -> int:
+    if op not in ("add", "remove"):
+        raise ValueError("op must be 'add' or 'remove'")
+    with transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO transfer_squad_ops "
+            "(transfer_id, op, team_name, player_name, position, applied_by, applied_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (transfer_id, op, team_name, player_name, position, applied_by, now_msk_str()),
+        )
+        return int(cur.lastrowid)
+
+
+def list_squad_ops(transfer_id: int, *, include_reverted: bool = False) -> list[dict]:
+    with transaction() as conn:
+        rows = [dict(r) for r in conn.execute(
+            "SELECT * FROM transfer_squad_ops WHERE transfer_id = ? ORDER BY id", (transfer_id,)
+        ).fetchall()]
+    return rows if include_reverted else [r for r in rows if r["reverted_at"] is None]
+
+
+def mark_squad_ops_reverted(transfer_id: int) -> int:
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE transfer_squad_ops SET reverted_at = ? WHERE transfer_id = ? AND reverted_at IS NULL",
+            (now_msk_str(), transfer_id),
+        )
+        return cur.rowcount
