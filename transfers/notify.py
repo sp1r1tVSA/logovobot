@@ -154,6 +154,8 @@ async def post_request_card(bot, transfer: dict, *, photo_bytes: bytes | None = 
 
     text = format_request_card(transfer)
     label = TOPIC_LABELS.get("requests", "Заявки")
+    if reply_markup is None and transfer.get("status") == "pending_manager":
+        reply_markup = approval_keyboard(transfer["id"])
     try:
         topic = repo.get_topic("requests")
     except Exception:
@@ -161,7 +163,8 @@ async def post_request_card(bot, transfer: dict, *, photo_bytes: bytes | None = 
         topic = None
 
     if not topic:
-        await dm_manager(bot, f"⚠️ Тема «{label}» не привязана — заявка #{transfer['id']} не отправлена в группу:\n\n{text}")
+        await dm_manager(bot, f"⚠️ Тема «{label}» не привязана — заявка #{transfer['id']} не отправлена в группу:\n\n{text}",
+                         reply_markup)
         return False
 
     chat_id = topic["group_chat_id"]
@@ -204,7 +207,7 @@ async def post_request_card(bot, transfer: dict, *, photo_bytes: bytes | None = 
     except Exception as exc:
         logger.warning("transfers: failed to post request card #%s: %s", transfer["id"], exc)
         await dm_manager(bot, f"⚠️ Не удалось отправить заявку #{transfer['id']} в тему «{label}»: "
-                              f"{html.escape(str(exc))}\n\n{text}")
+                              f"{html.escape(str(exc))}\n\n{text}", reply_markup)
         return False
 
 
@@ -373,3 +376,69 @@ async def announce_close(bot, window: dict, rejected: list[dict], *, auto: bool)
                      + ", ".join(f"<code>{uid}</code>" for uid in failed))
     await post_to_topic(bot, "alerts", "\n".join(lines))
 
+
+
+# ─── Решение ответственного ──────────────────────────────────────────────────
+
+def approval_keyboard(transfer_id: int):
+    """✅/❌ под карточкой заявки. Нажимает только ответственный."""
+    from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+    return InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Одобрить", callback_data=f"tw:ap:{transfer_id}"),
+        InlineKeyboardButton("❌ Отклонить", callback_data=f"tw:rj:{transfer_id}"),
+    ]])
+
+
+def parties(t: dict) -> list[int]:
+    """Тренеры заявки: обе стороны сделки и подавший, без повторов."""
+    seen: list[int] = []
+    for uid in (t.get("from_user"), t.get("to_user"), t.get("initiator_id")):
+        if uid and int(uid) not in seen:
+            seen.append(int(uid))
+    return seen
+
+
+def _decision_lines(t: dict) -> list[str]:
+    lines = [f"Игрок: <b>{html.escape(t.get('player_name') or '')}</b>"
+             + (f" (OVR {t['ovr']})" if t.get("ovr") else "")]
+    kind = t.get("kind")
+    if kind == "deal":
+        lines.append(f"{html.escape(t.get('from_club') or '—')} → {html.escape(t.get('to_club') or '—')}, "
+                     f"<b>{format_k(t.get('price_k'))}</b>")
+    elif kind == "surcharge":
+        lines.append(f"Клуб: {html.escape(t.get('to_club') or '—')}, доплата <b>{format_k(t.get('price_k'))}</b>")
+    elif kind == "urn_sale":
+        lines.append(f"Клуб: {html.escape(t.get('from_club') or '—')}, выплата из урны "
+                     f"<b>{format_k(t.get('price_k'))}</b>")
+    elif kind == "urn_buy":
+        lines.append(f"Покупатель: {html.escape(t.get('to_club') or '—')}, выкуп из урны "
+                     f"<b>{format_k(t.get('price_k'))}</b>")
+    return lines
+
+
+async def _dm_parties(bot, transfer: dict, text: str) -> None:
+    """ЛС сторонам; кому не дошло — в `alerts`, чтобы ответственный знал."""
+    failed = [uid for uid in parties(transfer) if not await dm_user(bot, uid, text)]
+    if failed:
+        await post_to_topic(
+            bot, "alerts",
+            f"⚠️ По заявке #{transfer['id']} не дошло в ЛС (бот заблокирован или не запущен): "
+            + ", ".join(f"<code>{uid}</code>" for uid in failed))
+
+
+async def notify_approved(bot, transfer: dict) -> bool:
+    """Одобрено: ЛС сторонам и публикация в ленту. True — лента получила пост."""
+    kind = KIND_LABELS.get(transfer.get("kind"), "")
+    body = "\n".join(_decision_lines(transfer))
+    await _dm_parties(bot, transfer, f"✅ <b>Заявка #{transfer['id']} одобрена</b> ({kind})\n\n{body}")
+    return await post_to_topic(bot, "feed", f"✅ <b>Одобрен трансфер #{transfer['id']}</b> ({kind})\n\n{body}")
+
+
+async def notify_rejected(bot, transfer: dict) -> bool:
+    """Отклонено ответственным: ЛС сторонам с причиной и пост в ленту."""
+    kind = KIND_LABELS.get(transfer.get("kind"), "")
+    body = "\n".join(_decision_lines(transfer))
+    reason = transfer.get("decided_reason")
+    why = f"\n\nПричина: {html.escape(reason)}" if reason else ""
+    await _dm_parties(bot, transfer, f"❌ <b>Заявка #{transfer['id']} отклонена</b> ({kind})\n\n{body}{why}")
+    return await post_to_topic(bot, "feed", f"❌ <b>Отклонён трансфер #{transfer['id']}</b> ({kind})\n\n{body}{why}")

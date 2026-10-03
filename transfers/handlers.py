@@ -25,7 +25,7 @@ from telegram.ext import ContextTypes, filters
 
 from services import admin_journal
 from time_utils import MSK_LABEL, fmt_msk
-from transfers import notify, repo, requests as req_mod, service
+from transfers import approval, notify, repo, requests as req_mod, service
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -867,6 +867,123 @@ async def cb_fa_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         await query.edit_message_text("Черновик уже закрыт.")
 
 
+# ─── Решение по заявке: ✅/❌ на карточке ────────────────────────────────────
+
+async def _alert(query, text: str) -> None:
+    try:
+        await query.answer(text[:190], show_alert=True)
+    except Exception:
+        pass
+
+
+async def _close_card(bot, chat_id: int, message_id: int, text: str) -> None:
+    """Снять кнопки с карточки и ответить под ней итогом (подпись фото править не нужно)."""
+    try:
+        await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
+    except Exception as exc:
+        logger.debug("transfers: could not clear card buttons: %s", exc)
+    try:
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML",
+                               reply_to_message_id=message_id, allow_sending_without_reply=True)
+    except Exception as exc:
+        logger.debug("transfers: could not reply under card: %s", exc)
+
+
+def _decision_summary(t: dict, word: str) -> str:
+    return f"{word} <b>#{t['id']}</b> — {html.escape(t.get('player_name') or '')}"
+
+
+async def cb_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """✅ на карточке. Только ответственный; работает и в теме группы, и в ЛС."""
+    query, user = update.callback_query, update.effective_user
+    if not query or not user:
+        return
+    if not service.is_transfer_manager(user.id):
+        await _alert(query, "⛔ Заявки решает только ответственный за трансферы")
+        return
+    transfer_id = int(query.data.rsplit(":", 1)[1])
+    try:
+        decision = await asyncio.to_thread(approval.approve, user.id, transfer_id)
+    except service.InputError as exc:
+        await _alert(query, str(exc))
+        return
+    t = decision.transfer
+    await query.answer("✅ Одобрено")
+    await admin_journal.record(
+        user.id, "transfer_request_approved", "transfer", t["id"],
+        old={"status": "pending_manager"},
+        new={"status": "approved", "kind": t["kind"], "player": t["player_name"],
+             "from": t["from_club"], "to": t["to_club"], "price_k": t["price_k"],
+             "warnings": [w["code"] for w in decision.warnings]})
+    warn = f"\n⚠️ Предупреждений: {len(decision.warnings)}" if decision.warnings else ""
+    await _close_card(context.bot, query.message.chat.id, query.message.message_id,
+                      _decision_summary(t, "✅ Одобрена заявка") + warn)
+    await notify.notify_approved(context.bot, t)
+
+
+async def cb_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """❌: причину спрашиваем у ответственного в ЛС — в теме ждать текст негде."""
+    query, user = update.callback_query, update.effective_user
+    if not query or not user:
+        return
+    if not service.is_transfer_manager(user.id):
+        await _alert(query, "⛔ Заявки решает только ответственный за трансферы")
+        return
+    transfer_id = int(query.data.rsplit(":", 1)[1])
+    t = repo.get_transfer(transfer_id)
+    if t is None or t["status"] != "pending_manager":
+        await _alert(query, f"Заявка #{transfer_id} уже не ждёт решения.")
+        return
+    prompt = (f"❌ <b>Отклонить заявку #{t['id']}?</b>\n{notify.describe_transfer(t)}\n\n"
+              "Пришлите причину — она уйдёт сторонам заявки. Или нажмите «Без причины».")
+    kb = InlineKeyboardMarkup([[_btn("Без причины", f"tw:rjn:{t['id']}"), _btn("✖️ Отмена", "tw:rjc")]])
+    if not await notify.dm_user(context.bot, user.id, prompt, kb):
+        await _alert(query, "Откройте личный чат с ботом (/start) и нажмите ❌ ещё раз.")
+        return
+    _set_pending(user.id, "reject", transfer_id=t["id"], card_chat_id=query.message.chat.id,
+                 card_message_id=query.message.message_id)
+    await query.answer("Причину спросил в личных сообщениях")
+
+
+async def _finish_reject(bot, user_id: int, entry: dict, reason: str | None) -> str:
+    t = await asyncio.to_thread(approval.reject, user_id, entry["transfer_id"], reason)
+    await admin_journal.record(
+        user_id, "transfer_request_rejected", "transfer", t["id"],
+        old={"status": "pending_manager"},
+        new={"status": "rejected", "kind": t["kind"], "player": t["player_name"],
+             "reason": t["decided_reason"]})
+    why = f"\nПричина: {html.escape(t['decided_reason'])}" if t["decided_reason"] else ""
+    await _close_card(bot, entry["card_chat_id"], entry["card_message_id"],
+                      _decision_summary(t, "❌ Отклонена заявка") + why)
+    await notify.notify_rejected(bot, t)
+    return f"❌ Заявка #{t['id']} отклонена."
+
+
+async def cb_reject_no_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query, user = update.callback_query, update.effective_user
+    if not query or not user or not service.is_transfer_manager(user.id):
+        return
+    transfer_id = int(query.data.rsplit(":", 1)[1])
+    entry = _get_pending(user.id)
+    if not entry or entry["kind"] != "reject" or entry["transfer_id"] != transfer_id:
+        await _alert(query, "Запрос устарел — нажмите ❌ на карточке заявки ещё раз.")
+        return
+    _pending.pop(user.id, None)
+    try:
+        text = await _finish_reject(context.bot, user.id, entry, None)
+    except service.InputError as exc:
+        text = f"⚠️ {exc}"
+    await _show(update, text, None)
+
+
+async def cb_reject_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    query, user = update.callback_query, update.effective_user
+    if not query or not user or not service.is_transfer_manager(user.id):
+        return
+    _pending.pop(user.id, None)
+    await _show(update, "Отклонение отменено — заявка осталась без решения.", None)
+
+
 # ─── Ввод значения ───────────────────────────────────────────────────────────
 
 def _cancel_target(entry: dict) -> str:
@@ -884,6 +1001,13 @@ async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         return
     if not service.can_manage_window(user.id):
         _pending.pop(user.id, None)
+        return
+    if entry["kind"] == "reject":
+        _pending.pop(user.id, None)
+        try:
+            await msg.reply_text(await _finish_reject(context.bot, user.id, entry, (msg.text or "").strip()))
+        except service.InputError as exc:
+            await msg.reply_text(f"⚠️ {exc}")
         return
     if entry["kind"] in ("budget", "autoclose"):
         window = repo.get_active_window()
@@ -945,6 +1069,12 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_topics, pattern=r"^tw:topics$"))
     app.add_handler(CallbackQueryHandler(cb_topic, pattern=r"^tw:topic:[a-z]+$"))
     app.add_handler(CallbackQueryHandler(cb_settings, pattern=r"^tw:settings$"))
+
+    # Решение по заявке
+    app.add_handler(CallbackQueryHandler(cb_approve, pattern=r"^tw:ap:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_reject, pattern=r"^tw:rj:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_reject_no_reason, pattern=r"^tw:rjn:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_reject_cancel, pattern=r"^tw:rjc$"))
 
     # Свободные агенты
     app.add_handler(CallbackQueryHandler(cb_fa_record, pattern=r"^tw:fa:rec:[a-f0-9]+$"))
