@@ -15,11 +15,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 import config
+from time_utils import parse_msk
 from services.sports.adapters.base import SportsDataProvider
 from services.sports.cache import ProviderCache
 from services.sports.circuit import ProviderCircuitBreaker
@@ -29,6 +31,8 @@ from services.sports.models import (
     LiveEvent,
     LiveMatchState,
     LiveStatistics,
+    MatchWinnerOdds,
+    PrematchFixture,
     ProviderEvent,
     ProviderInjury,
     ProviderLineup,
@@ -137,8 +141,9 @@ class APISportsProvider(SportsDataProvider):
                                 status_code=status_code,
                                 records_count=records
                             )
-                            # Cache response
-                            self.cache.set(self.provider_name, cache_key, data, ttl_seconds=cache_ttl)
+                            # Cache response (an `errors` payload is a plan/limit failure, not data)
+                            if not data.get("errors"):
+                                self.cache.set(self.provider_name, cache_key, data, ttl_seconds=cache_ttl)
                             return data
 
                         elif resp.status == 429:
@@ -284,6 +289,144 @@ class APISportsProvider(SportsDataProvider):
         except Exception as e:
             logger.warning(f"Could not fetch standings from APISports: {e}")
             return []
+
+    # ── IRL betting: pre-match fixtures, 1X2 odds, main-time result ──────────
+    # Unlike the live methods above these distinguish "provider failed" (None)
+    # from "nothing there" ([]): a job must not announce an empty day on an outage.
+
+    MATCH_WINNER_BET_ID = 1
+    _ODD_MAX = 1000.0
+
+    async def _fetch_checked(
+        self, endpoint: str, params: dict[str, Any], cache_ttl: Optional[float]
+    ) -> Optional[list[dict[str, Any]]]:
+        """`response` list of a 200 payload, or None on a transport error or an `errors` payload."""
+        if not self.api_key:
+            return None
+        try:
+            payload = await self._fetch_json(endpoint, params=params, cache_ttl=cache_ttl)
+        except Exception as e:
+            logger.warning(f"APISports {endpoint} failed: {e}")
+            return None
+        if not isinstance(payload, dict) or payload.get("errors"):
+            # Plan/limit/parameter errors come as HTTP 200; never log the key (it is not in `errors`).
+            logger.warning(f"APISports {endpoint} returned errors: {str(payload.get('errors'))[:200] if isinstance(payload, dict) else 'bad payload'}")
+            return None
+        resp = payload.get("response")
+        return resp if isinstance(resp, list) else None
+
+    async def get_prematch_fixtures(
+        self, date: str, league_ids: Optional[list[int]] = None
+    ) -> Optional[list[PrematchFixture]]:
+        """All fixtures of one MSK day (one request), filtered to `league_ids` locally."""
+        resp = await self._fetch_checked(
+            "fixtures", {"date": date, "timezone": "Europe/Moscow"}, cache_ttl=300
+        )
+        if resp is None:
+            return None
+        wanted = {int(x) for x in league_ids} if league_ids else None
+        result = []
+        for item in resp:
+            fx = self._normalize_prematch_fixture(item)
+            if fx is not None and (wanted is None or fx.league_id in wanted):
+                result.append(fx)
+        return result
+
+    async def get_prematch_fixture(self, fixture_id: int | str) -> Optional[PrematchFixture]:
+        resp = await self._fetch_checked(
+            "fixtures", {"id": fixture_id, "timezone": "Europe/Moscow"}, cache_ttl=20
+        )
+        if not resp:
+            return None
+        return self._normalize_prematch_fixture(resp[0])
+
+    async def get_match_winner_odds(
+        self, fixture_id: int | str, bookmaker_id: int
+    ) -> Optional[MatchWinnerOdds]:
+        """Pre-match 1X2 of exactly `bookmaker_id`; None unless all three prices are valid."""
+        resp = await self._fetch_checked(
+            "odds", {"fixture": fixture_id, "bookmaker": bookmaker_id}, cache_ttl=60
+        )
+        if not resp:
+            return None
+        for item in resp:
+            for bm in item.get("bookmakers") or []:
+                if str(bm.get("id")) != str(bookmaker_id):
+                    continue
+                for bet in bm.get("bets") or []:
+                    if bet.get("id") == self.MATCH_WINNER_BET_ID                             or str(bet.get("name", "")).strip().lower() == "match winner":
+                        prices = self._parse_match_winner(bet.get("values") or [])
+                        if prices is None:
+                            return None
+                        return MatchWinnerOdds(
+                            fixture_id=int(fixture_id),
+                            bookmaker_id=int(bookmaker_id),
+                            home=prices[0], draw=prices[1], away=prices[2],
+                            updated_at=parse_msk(item.get("update")),
+                        )
+        return None
+
+    @classmethod
+    def _parse_odd(cls, value: Any) -> Optional[float]:
+        try:
+            odd = float(value)
+        except (TypeError, ValueError):
+            return None
+        if not math.isfinite(odd) or odd <= 1.0 or odd > cls._ODD_MAX:
+            return None
+        return round(odd, 2)
+
+    @classmethod
+    def _parse_match_winner(cls, values: list[dict[str, Any]]) -> Optional[tuple[float, float, float]]:
+        """Home/Draw/Away → prices; a missing, repeated, unknown or invalid value voids the whole market."""
+        found: dict[str, float] = {}
+        for v in values:
+            key = str(v.get("value", "")).strip().lower()
+            if key not in ("home", "draw", "away") or key in found:
+                return None
+            odd = cls._parse_odd(v.get("odd"))
+            if odd is None:
+                return None
+            found[key] = odd
+        if len(found) != 3:
+            return None
+        return found["home"], found["draw"], found["away"]
+
+    def _normalize_prematch_fixture(self, f: dict[str, Any]) -> Optional[PrematchFixture]:
+        if not isinstance(f, dict):
+            return None
+        fixture = f.get("fixture") or {}
+        league = f.get("league") or {}
+        teams = f.get("teams") or {}
+        home = (teams.get("home") or {}).get("name")
+        away = (teams.get("away") or {}).get("name")
+        kickoff = parse_msk(fixture.get("date"))
+        try:
+            fixture_id = int(fixture.get("id"))
+            league_id = int(league.get("id"))
+        except (TypeError, ValueError):
+            return None
+        if not home or not away or kickoff is None:
+            return None
+
+        def _goal(value: Any) -> Optional[int]:
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
+
+        # `score.fulltime` is the 90-minute score even when the match went to AET/PEN.
+        fulltime = (f.get("score") or {}).get("fulltime") or {}
+        return PrematchFixture(
+            fixture_id=fixture_id,
+            league_id=league_id,
+            league_name=str(league.get("name") or ""),
+            country=str(league.get("country") or ""),
+            season=league.get("season") if isinstance(league.get("season"), int) else None,
+            home=str(home),
+            away=str(away),
+            kickoff=kickoff,
+            status_short=str((fixture.get("status") or {}).get("short") or "NS").upper(),
+            home_goals=_goal(fulltime.get("home")),
+            away_goals=_goal(fulltime.get("away")),
+        )
 
     # ── Legacy & Live Match Lifecycle Support (Phase 6 / 7) ──────────────────
 

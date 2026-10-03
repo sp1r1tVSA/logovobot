@@ -2324,6 +2324,9 @@ def init_db() -> None:
         # ─── 034: активность участников в чатах лиги ─────────────────────────
         _ensure_user_chat_activity_schema(cursor)
 
+        # ─── 035: IRL-ставки на реальные матчи ────────────────────────────────
+        _ensure_irl_betting(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -20189,3 +20192,506 @@ def get_user_chat_profile_data(user_id: int) -> dict:
         "medals": medals,
     }
 
+# ─── 035: IRL-ставки — реальные матчи по кэфам одного букмекера ──────────────
+# Отдельные таблицы, а не `markets`/`matches`: markets.match_id — FK на матчи
+# FIFA-лиги. Только 1X2 по счёту основного времени, ординары, ≤ IRL_MAX_BET на
+# матч и одна ставка игрока на матч (UNIQUE в самой БД). Правила выбора и расчёта
+# — в services/irl_betting.py, здесь только SQL и деньги. Лимиты «Лимиты»/«Анализ
+# рынка» сюда не входят; из BettingLimitsService берётся только потолок выплаты.
+
+MIGRATION_035_IRL_BETTING = "035_irl_betting"
+IRL_TX_BET = "irl_bet_placed"
+IRL_TX_WIN = "irl_bet_won"
+IRL_TX_REFUND = "irl_bet_refund"
+IRL_BET_KEY_PREFIX = "ibet"
+IRL_ALREADY_BET_ERROR = "IRL_ALREADY_BET"
+IRL_BETTING_CLOSED_ERROR = "IRL_BETTING_CLOSED"
+
+
+def _ensure_irl_betting(cursor: sqlite3.Cursor) -> None:
+    """Миграция 035: `irl_matches` и `irl_bets`.
+
+    Имена команд и лиги хранятся как их отдал провайдер и не проходят через
+    `resolve_team_name`. `irl_bets` без FK на users: как и у остальных ставок,
+    история не должна пропадать вместе с игроком.
+    """
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS irl_matches (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider_fixture_id TEXT NOT NULL UNIQUE,
+            league_id INTEGER,
+            league_name TEXT,
+            home TEXT NOT NULL,
+            away TEXT NOT NULL,
+            kickoff_at TIMESTAMP NOT NULL,
+            status TEXT NOT NULL DEFAULT 'draft'
+                CHECK(status IN ('draft', 'open', 'closed', 'settled', 'void')),
+            odd_home REAL,
+            odd_draw REAL,
+            odd_away REAL,
+            odds_updated_at TIMESTAMP,
+            result TEXT CHECK(result IS NULL OR result IN ('home', 'draw', 'away')),
+            home_goals INTEGER,
+            away_goals INTEGER,
+            bet_day TEXT NOT NULL,
+            picked_by TEXT NOT NULL DEFAULT 'auto',
+            void_reason TEXT,
+            settled_by INTEGER,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+            settled_at TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS irl_bets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            irl_match_id INTEGER NOT NULL REFERENCES irl_matches(id),
+            outcome TEXT NOT NULL CHECK(outcome IN ('home', 'draw', 'away')),
+            amount INTEGER NOT NULL CHECK(amount BETWEEN 1 AND 1000),
+            odd REAL NOT NULL,
+            potential_win INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'won', 'lost', 'refunded')),
+            actual_payout INTEGER,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+            settled_at TIMESTAMP,
+            UNIQUE(user_id, irl_match_id)
+        )
+    """)
+    # Одноразовые уведомления джобов (превью дня, «матчей нет», ручной расчёт): ключ → когда доставлено.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS irl_notices (
+            notice_key TEXT PRIMARY KEY,
+            sent_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_irl_matches_day ON irl_matches(bet_day, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_irl_matches_kickoff ON irl_matches(status, kickoff_at)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_irl_bets_match ON irl_bets(irl_match_id, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_irl_bets_user ON irl_bets(user_id, id DESC)")
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_035_IRL_BETTING, "irl_matches / irl_bets: 1X2 bets on real football matches"),
+    )
+
+
+def get_irl_match(irl_match_id: int) -> dict | None:
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM irl_matches WHERE id = ?", (irl_match_id,)).fetchone()
+        return dict(row) if row else None
+
+
+def get_irl_match_by_fixture(provider_fixture_id) -> dict | None:
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT * FROM irl_matches WHERE provider_fixture_id = ?", (str(provider_fixture_id),)
+        ).fetchone()
+        return dict(row) if row else None
+
+
+def list_irl_matches(bet_day: str | None = None, statuses: tuple[str, ...] | None = None,
+                     limit: int = 50) -> list[dict]:
+    """Матчи дня (или всех дней) по времени начала; `statuses` — фильтр по статусу."""
+    where, params = [], []
+    if bet_day:
+        where.append("bet_day = ?")
+        params.append(bet_day)
+    if statuses:
+        where.append(f"status IN ({','.join('?' * len(statuses))})")
+        params.extend(statuses)
+    sql = "SELECT * FROM irl_matches"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY kickoff_at, id LIMIT ?"
+    params.append(int(limit))
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def create_irl_draft(provider_fixture_id, league_id: int | None, league_name: str | None,
+                     home: str, away: str, kickoff_at, odd_home: float, odd_draw: float,
+                     odd_away: float, bet_day: str | None = None,
+                     picked_by: str = "auto") -> tuple[int, bool]:
+    """Черновик IRL-матча → `(id, создан_ли_сейчас)`.
+
+    Повторный выбор того же матча идемпотентен: вернётся существующая строка, а у
+    черновика только обновятся кэфы. Опубликованный матч не трогается.
+    """
+    from services.irl_betting import valid_odds
+    start = parse_msk(kickoff_at)
+    if start is None:
+        raise ValueError(f"Некорректное время начала матча: {kickoff_at!r}")
+    if not valid_odds(odd_home, odd_draw, odd_away):
+        raise ValueError("У матча нет полного набора коэффициентов.")
+    day = bet_day or start.date().isoformat()
+    fixture = str(provider_fixture_id)
+    odds = (round(float(odd_home), 2), round(float(odd_draw), 2), round(float(odd_away), 2))
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id, status FROM irl_matches WHERE provider_fixture_id = ?", (fixture,))
+        row = cursor.fetchone()
+        if row:
+            if row["status"] == "draft":
+                cursor.execute(
+                    "UPDATE irl_matches SET odd_home = ?, odd_draw = ?, odd_away = ?, "
+                    "odds_updated_at = datetime('now', '+3 hours') WHERE id = ?",
+                    (*odds, row["id"]),
+                )
+            return int(row["id"]), False
+        cursor.execute("""
+            INSERT INTO irl_matches
+                (provider_fixture_id, league_id, league_name, home, away, kickoff_at, status,
+                 odd_home, odd_draw, odd_away, odds_updated_at, bet_day, picked_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, 'draft', ?, ?, ?, datetime('now', '+3 hours'), ?, ?,
+                    datetime('now', '+3 hours'))
+        """, (fixture, league_id, league_name, home, away, start.strftime("%Y-%m-%d %H:%M:%S"),
+              *odds, day, picked_by))
+        return int(cursor.lastrowid), True
+
+
+def publish_irl_match(irl_match_id: int) -> tuple[bool, str]:
+    """draft → open. Нужны полные кэфы и ещё не начавшийся матч."""
+    from services.irl_betting import valid_odds
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM irl_matches WHERE id = ?", (irl_match_id,))
+        match = cursor.fetchone()
+        if not match:
+            return False, "Матч не найден."
+        if match["status"] != "draft":
+            return False, "Матч уже опубликован или завершён."
+        if not valid_odds(match["odd_home"], match["odd_draw"], match["odd_away"]):
+            return False, "У матча нет коэффициентов."
+        start = parse_msk(match["kickoff_at"])
+        if start is None or start <= now_msk():
+            return False, "Матч уже начался."
+        cursor.execute("UPDATE irl_matches SET status = 'open' WHERE id = ? AND status = 'draft'",
+                       (irl_match_id,))
+        return cursor.rowcount > 0, "open"
+
+
+def update_irl_odds(irl_match_id: int, odd_home: float, odd_draw: float, odd_away: float) -> bool:
+    """Обновить кэфы черновика или открытого матча; битые цены игнорируются."""
+    from services.irl_betting import valid_odds
+    if not valid_odds(odd_home, odd_draw, odd_away):
+        return False
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE irl_matches SET odd_home = ?, odd_draw = ?, odd_away = ?, "
+            "odds_updated_at = datetime('now', '+3 hours') "
+            "WHERE id = ? AND status IN ('draft', 'open')",
+            (round(float(odd_home), 2), round(float(odd_draw), 2), round(float(odd_away), 2), irl_match_id),
+        )
+        return cur.rowcount > 0
+
+
+def close_started_irl_matches() -> int:
+    """open → closed для матчей, время начала которых наступило. Возвращает число закрытых."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE irl_matches SET status = 'closed' WHERE status = 'open' AND kickoff_at <= ?",
+            (now_msk_str(),),
+        )
+        return cur.rowcount
+
+
+def irl_notice_sent(notice_key: str) -> bool:
+    with transaction() as conn:
+        return conn.execute(
+            "SELECT 1 FROM irl_notices WHERE notice_key = ?", (notice_key,)
+        ).fetchone() is not None
+
+
+def mark_irl_notice(notice_key: str) -> bool:
+    """Запомнить, что уведомление доставлено. True — отметка поставлена сейчас."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO irl_notices (notice_key, sent_at) VALUES (?, datetime('now', '+3 hours'))",
+            (notice_key,),
+        )
+        return cur.rowcount > 0
+
+
+def expire_irl_drafts() -> int:
+    """Неопубликованные черновики, чей матч уже начался, → void (ставок на них не было)."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE irl_matches SET status = 'void', void_reason = 'Не опубликован до начала матча', "
+            "settled_at = datetime('now', '+3 hours') WHERE status = 'draft' AND kickoff_at <= ?",
+            (now_msk_str(),),
+        )
+        return cur.rowcount
+
+
+def get_irl_match_bet_stats(irl_match_id: int) -> dict:
+    """Сколько ставок и на какую сумму лежит на матче (для сообщений админам)."""
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total FROM irl_bets "
+            "WHERE irl_match_id = ? AND status = 'pending'", (irl_match_id,)
+        ).fetchone()
+        return {"count": int(row["n"]), "total": int(row["total"])}
+
+
+def _irl_pick_label(match, outcome: str) -> str:
+    names = {"home": match["home"], "away": match["away"], "draw": "Ничья"}
+    return (f"{html.escape(str(match['home']))} — {html.escape(str(match['away']))}: "
+            f"<b>{html.escape(str(names.get(outcome, outcome)))}</b>")
+
+
+def place_irl_bet(user_id: int, irl_match_id, outcome, amount,
+                  client_odd: float | None = None) -> tuple[bool, dict]:
+    """Ординар на исход IRL-матча. Одна ставка на игрока на матч, сумма ≤ IRL_MAX_BET.
+
+    Порядок: блокировка → формат → матч открыт и не начался → бан/пауза → цена
+    клиента → повторная ставка → списание. Все отказы идут ДО первой записи
+    (возврат внутри `with transaction()` её закоммитил бы). Выигрыш режется до
+    потолка выплаты уже на самой ставке, поэтому расчёт платит ровно `potential_win`.
+    Что не удалось проверить — отказ (fail-closed).
+    """
+    import config
+    from services import irl_betting as irl
+
+    try:
+        if config.is_global_lockdown_enabled():
+            from handlers.base import is_global_admin
+            if not is_global_admin(user_id):
+                return False, {"error": "LOGOVO_LOCKDOWN", "message": "Logovo.bet временно закрыт для пользователей"}
+    except Exception:
+        logger.exception("Lockdown check failed for IRL bet of user_id=%s; bet rejected", user_id)
+        return False, {"error": "BETTING_UNAVAILABLE", "message": "Приём ставок временно недоступен."}
+
+    key = irl.normalize_outcome(outcome)
+    if key is None:
+        return False, {"error": "INVALID_SELECTION", "message": "Некорректный исход."}
+    try:
+        irl_match_id = int(irl_match_id)
+    except (ValueError, TypeError):
+        return False, {"error": "INVALID_SELECTION", "message": "Некорректный матч."}
+    ok, parsed = irl.parse_stake(amount, config.IRL_MAX_BET)
+    if not ok:
+        return False, parsed  # type: ignore[return-value]
+    amount = int(parsed)  # type: ignore[arg-type]
+
+    try:
+        with _bet_placement_lock, transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM irl_matches WHERE id = ?", (irl_match_id,))
+            match = cursor.fetchone()
+            if not match:
+                return False, {"error": "INVALID_SELECTION", "message": "Матч не найден."}
+
+            if not irl.betting_open(match["status"], match["kickoff_at"], now_msk()):
+                return False, {"error": IRL_BETTING_CLOSED_ERROR,
+                               "message": "Приём ставок на этот матч закрыт."}
+
+            try:
+                block = _betting_block_reason(cursor, user_id, [])
+            except Exception:
+                logger.exception("IRL block check failed for user_id=%s; bet rejected", user_id)
+                block = {"error": "BETTING_UNAVAILABLE",
+                         "message": "Приём ставок временно недоступен. Попробуйте позже."}
+            if block is not None:
+                return False, block
+
+            odd = irl.odd_for(dict(match), key)
+            if odd is None:
+                return False, {"error": "MARKET_SUSPENDED", "message": "Коэффициенты на матч недоступны."}
+            if client_odd is not None:
+                try:
+                    client = round(float(client_odd), 2)
+                except (ValueError, TypeError):
+                    client = None
+                if client is None or abs(client - odd) > 0.001:
+                    return False, {"error": "ODDS_CHANGED", "outcome": key,
+                                   "old_odd": client, "new_odd": odd,
+                                   "message": f"Коэффициент изменился: {client} → {odd}"}
+
+            try:
+                from services.betting_limits import BettingLimitsService
+                limits = BettingLimitsService.get_user_effective_limits(user_id, None)
+                max_payout = min(_MAX_PAYOUT, int(limits.get("max_payout") or _MAX_PAYOUT))
+            except Exception:
+                logger.exception("IRL limits unavailable for user_id=%s; bet rejected", user_id)
+                return False, {"error": "RISK_CHECK_UNAVAILABLE",
+                               "message": "Не удалось проверить ставку. Ставка не принята, монеты не списаны."}
+
+            cursor.execute("SELECT id FROM irl_bets WHERE user_id = ? AND irl_match_id = ?",
+                           (user_id, irl_match_id))
+            if cursor.fetchone():
+                return False, {"error": IRL_ALREADY_BET_ERROR,
+                               "message": "На этот матч у вас уже есть ставка."}
+
+            potential = irl.potential_win(amount, odd, max_payout)
+            get_or_create_wallet(user_id)
+            cursor.execute("""
+                UPDATE user_wallets
+                SET balance = balance - ?, total_wagered = total_wagered + ?, bets_count = bets_count + 1,
+                    updated_at = datetime('now', '+3 hours')
+                WHERE user_id = ? AND balance >= ?
+            """, (amount, amount, user_id, amount))
+            if cursor.rowcount == 0:
+                cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+                bal = cursor.fetchone()
+                return False, {"error": "INSUFFICIENT_BALANCE",
+                               "message": f"Недостаточно монет на балансе (Баланс: {bal['balance'] if bal else 0} 🪙)."}
+
+            cursor.execute("""
+                INSERT INTO irl_bets
+                    (user_id, irl_match_id, outcome, amount, odd, potential_win, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', datetime('now', '+3 hours'))
+            """, (user_id, irl_match_id, key, amount, odd, potential))
+            bet_id = cursor.lastrowid
+            cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+            balance = cursor.fetchone()["balance"]
+            cursor.execute("""
+                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
+                                               balance_after, created_at)
+                VALUES (?, ?, ?, ?, 'irl_bet', ?, datetime('now', '+3 hours'))
+            """, (user_id, -amount, IRL_TX_BET, bet_id, balance))
+    except sqlite3.IntegrityError:
+        # Страховка UNIQUE(user_id, irl_match_id): транзакция уже откатила списание.
+        return False, {"error": IRL_ALREADY_BET_ERROR, "message": "На этот матч у вас уже есть ставка."}
+
+    return True, {"bet_id": bet_id, "odd": odd, "amount": amount, "potential_win": potential,
+                  "payout_capped": potential < int(round(amount * odd)), "balance": balance}
+
+
+def get_user_irl_bets(user_id: int, limit: int = 100) -> list[dict]:
+    with transaction() as conn:
+        rows = conn.execute("""
+            SELECT b.*, m.home, m.away, m.league_name, m.kickoff_at, m.status AS match_status,
+                   m.result, m.home_goals, m.away_goals
+            FROM irl_bets b JOIN irl_matches m ON m.id = b.irl_match_id
+            WHERE b.user_id = ? ORDER BY b.id DESC LIMIT ?
+        """, (user_id, int(limit))).fetchall()
+        return [dict(r) for r in rows]
+
+
+def get_user_irl_bet_for_match(user_id: int, irl_match_id: int) -> dict | None:
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM irl_bets WHERE user_id = ? AND irl_match_id = ?",
+                           (user_id, irl_match_id)).fetchone()
+        return dict(row) if row else None
+
+
+def _credit_irl(cursor, user_id: int, amount: int, tx_type: str, bet_id: int, won: bool) -> None:
+    if amount <= 0:
+        return
+    get_or_create_wallet(user_id)
+    if won:
+        cursor.execute("""
+            UPDATE user_wallets SET balance = balance + ?, total_won = total_won + ?, bets_won = bets_won + 1,
+                updated_at = datetime('now', '+3 hours')
+            WHERE user_id = ?
+        """, (amount, amount, user_id))
+    else:
+        cursor.execute("""
+            UPDATE user_wallets SET balance = balance + ?, updated_at = datetime('now', '+3 hours')
+            WHERE user_id = ?
+        """, (amount, user_id))
+    cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+    row = cursor.fetchone()
+    cursor.execute("""
+        INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
+                                       balance_after, created_at)
+        VALUES (?, ?, ?, ?, 'irl_bet', ?, datetime('now', '+3 hours'))
+    """, (user_id, amount, tx_type, bet_id, row["balance"] if row else None))
+
+
+def _notify_irl(cursor, match, bet, status: str, payout: int) -> None:
+    pick = f"{_irl_pick_label(match, bet['outcome'])} @ {float(bet['odd']):.2f}"
+    if status == "won":
+        title, body = f"✅ Ставка на реальный матч выиграла: +{payout} 🪙", pick
+    elif status == "refunded":
+        title = f"↩️ Ставка на реальный матч возвращена: {payout} 🪙"
+        body = pick + "\nМатч не состоялся или аннулирован."
+    else:
+        title, body = f"❌ Ставка на реальный матч не сыграла: −{int(bet['amount'])} 🪙", pick
+    enqueue_bet_settled_notice(cursor, bet["user_id"], bet["id"], title, body,
+                               key_prefix=IRL_BET_KEY_PREFIX)
+
+
+def settle_irl_match(irl_match_id: int, result: str, home_goals: int | None = None,
+                     away_goals: int | None = None,
+                     actor_id: int | None = None) -> tuple[bool, dict | str]:
+    """Рассчитать матч по исходу основного времени (`home|draw|away`).
+
+    Платит выигравшим `potential_win`, остальные проигрывают. Повтор безопасен:
+    матч принимает расчёт только из open/closed, а ставка меняет статус только из
+    `pending`.
+    """
+    if result not in ("home", "draw", "away"):
+        return False, "Некорректный исход матча."
+    with _bet_placement_lock, transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM irl_matches WHERE id = ?", (irl_match_id,))
+        match = cursor.fetchone()
+        if not match:
+            return False, "Матч не найден."
+        if match["status"] not in ("open", "closed"):
+            return False, "Матч уже рассчитан, аннулирован или не опубликован."
+        cursor.execute(
+            "SELECT * FROM irl_bets WHERE irl_match_id = ? AND status = 'pending'", (irl_match_id,)
+        )
+        won = lost = paid = 0
+        for bet in cursor.fetchall():
+            if bet["outcome"] == result:
+                payout = int(bet["potential_win"])
+                cursor.execute(
+                    "UPDATE irl_bets SET status = 'won', actual_payout = ?, "
+                    "settled_at = datetime('now', '+3 hours') WHERE id = ? AND status = 'pending'",
+                    (payout, bet["id"]),
+                )
+                _credit_irl(cursor, bet["user_id"], payout, IRL_TX_WIN, bet["id"], won=True)
+                _notify_irl(cursor, match, bet, "won", payout)
+                won += 1
+                paid += payout
+            else:
+                cursor.execute(
+                    "UPDATE irl_bets SET status = 'lost', actual_payout = 0, "
+                    "settled_at = datetime('now', '+3 hours') WHERE id = ? AND status = 'pending'",
+                    (bet["id"],),
+                )
+                _notify_irl(cursor, match, bet, "lost", 0)
+                lost += 1
+        cursor.execute("""
+            UPDATE irl_matches SET status = 'settled', result = ?, home_goals = ?, away_goals = ?,
+                settled_by = ?, settled_at = datetime('now', '+3 hours')
+            WHERE id = ?
+        """, (result, home_goals, away_goals, actor_id, irl_match_id))
+    logger.info("IRL match #%s settled (%s): won=%s lost=%s paid=%s", irl_match_id, result, won, lost, paid)
+    return True, {"won": won, "lost": lost, "paid": paid}
+
+
+def void_irl_match(irl_match_id: int, reason: str | None = None,
+                   actor_id: int | None = None) -> tuple[bool, dict | str]:
+    """Аннулировать матч (перенос, отмена, замена админом): ставки возвращаются целиком."""
+    with _bet_placement_lock, transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM irl_matches WHERE id = ?", (irl_match_id,))
+        match = cursor.fetchone()
+        if not match:
+            return False, "Матч не найден."
+        if match["status"] in ("settled", "void"):
+            return False, "Матч уже рассчитан или аннулирован."
+        cursor.execute(
+            "SELECT * FROM irl_bets WHERE irl_match_id = ? AND status = 'pending'", (irl_match_id,)
+        )
+        refunded = 0
+        for bet in cursor.fetchall():
+            cursor.execute(
+                "UPDATE irl_bets SET status = 'refunded', actual_payout = ?, "
+                "settled_at = datetime('now', '+3 hours') WHERE id = ? AND status = 'pending'",
+                (bet["amount"], bet["id"]),
+            )
+            _credit_irl(cursor, bet["user_id"], int(bet["amount"]), IRL_TX_REFUND, bet["id"], won=False)
+            _notify_irl(cursor, match, bet, "refunded", int(bet["amount"]))
+            refunded += 1
+        cursor.execute("""
+            UPDATE irl_matches SET status = 'void', void_reason = ?, settled_by = ?,
+                settled_at = datetime('now', '+3 hours')
+            WHERE id = ?
+        """, ((reason or "").strip()[:300] or None, actor_id, irl_match_id))
+    logger.info("IRL match #%s voided: refunded=%s", irl_match_id, refunded)
+    return True, {"refunded": refunded}

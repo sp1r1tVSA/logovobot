@@ -10,6 +10,7 @@ import { UIRenderer, escapeHtml, cupStageLabel, cupMetaName } from './ui.js';
 import { ParticleEffects } from './effects.js';
 import { AdminPanel } from './admin.js';
 import { outrightsView } from './outrights.js';
+import { irlView } from './irl.js';
 import { transfersView } from './transfers.js';
 import { shopTransfers } from './shop.js';
 
@@ -49,8 +50,8 @@ class AppController {
         () => UIRenderer.updateNavClubIcon(myClub.overview));
 
       if (view === 'lobby') {
-        this.renderBlock('lobbyDivTabs', [state.divisions, state.selectedDivisionId, state.lobbyMode],
-          () => UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'lobby-division-tabs-container', state.lobbyMode));
+        this.renderBlock('lobbyDivTabs', [state.divisions, state.selectedDivisionId, state.lobbyMode, Boolean(state.user?.irl_enabled)],
+          () => UIRenderer.renderDivisionTabs(state.divisions, state.selectedDivisionId, 'lobby-division-tabs-container', state.lobbyMode, Boolean(state.user?.irl_enabled)));
         this.renderBlock('hotMatches', [state.hotMatches],
           () => UIRenderer.renderHotMatches(state.hotMatches));
         this.renderBlock('oddsMovers', [state.oddsMovers],
@@ -623,6 +624,12 @@ class AppController {
           tgBridge.hapticImpact('light');
           store.setLobbyMode('outrights');
           await outrightsView.open();
+          return;
+        }
+        if (e.target.closest('.irl-tab-btn')) {
+          tgBridge.hapticImpact('light');
+          store.setLobbyMode('irl');
+          await irlView.open();
           return;
         }
         const btn = e.target.closest('.division-tab-btn');

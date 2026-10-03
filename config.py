@@ -123,6 +123,51 @@ SPORTS_RATE_LIMIT_RPM = int(os.getenv("SPORTS_RATE_LIMIT_RPM", "60"))
 LIVE_DATA_STALE_AFTER_SECONDS = int(os.getenv("LIVE_DATA_STALE_AFTER_SECONDS", "120"))
 LIVE_DATA_EXPIRED_AFTER_SECONDS = int(os.getenv("LIVE_DATA_EXPIRED_AFTER_SECONDS", "300"))
 
+# ─── IRL-ставки: реальные матчи по коэффициентам одного букмекера ────────────
+# Всё за флагом: без IRL_ENABLED=true роуты отдают 404, джобы не регистрируются.
+# IRL_COMPETITION_PRIORITY — единый список league_id API-Sports по убыванию
+# приоритета, клубные и сборные вперемешку. IRL_TOP_TEAMS — имена команд так, как
+# их отдаёт провайдер (английские); регистр и пробелы не важны.
+def _get_int_list(name: str, default: str) -> list[int]:
+    out: list[int] = []
+    for part in os.getenv(name, default).split(","):
+        part = part.strip()
+        if part.isdigit() and int(part) not in out:
+            out.append(int(part))
+    return out
+
+
+def _get_str_list(name: str, default: str) -> list[str]:
+    return [p.strip() for p in os.getenv(name, default).split(",") if p.strip()]
+
+
+def _get_int_env(name: str, default: int) -> int:
+    try:
+        return int(os.getenv(name, str(default)).strip())
+    except ValueError:
+        return default
+
+
+IRL_ENABLED = os.getenv("IRL_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+IRL_BOOKMAKER_ID = _get_int_env("IRL_BOOKMAKER_ID", 0)
+# ЧМ, Евро, Кубок Америки, ЛЧ, Лига наций, АПЛ, Ла Лига, Серия А, Бундеслига, Лига 1,
+# отбор ЧМ (Европа), отбор Евро, товарищеские матчи.
+IRL_COMPETITION_PRIORITY = _get_int_list(
+    "IRL_COMPETITION_PRIORITY", "1,4,9,2,5,39,140,135,78,61,32,960,10"
+)
+IRL_TOP_TEAMS = _get_str_list(
+    "IRL_TOP_TEAMS",
+    "Real Madrid,Barcelona,Manchester City,Liverpool,Arsenal,Bayern Munich,Paris Saint Germain,"
+    "Inter,Juventus,AC Milan,Manchester United,Chelsea,Atletico Madrid,Borussia Dortmund,"
+    "Brazil,Argentina,France,England,Germany,Spain,Portugal,Italy,Netherlands",
+)
+IRL_MAX_BET = _get_int_env("IRL_MAX_BET", 1000)
+IRL_MAX_MATCHES_PER_DAY = max(1, _get_int_env("IRL_MAX_MATCHES_PER_DAY", 2))
+IRL_PREVIEW_HOUR_MSK = _get_int_env("IRL_PREVIEW_HOUR_MSK", 9)
+IRL_AUTO_PUBLISH_HOUR_MSK = _get_int_env("IRL_AUTO_PUBLISH_HOUR_MSK", 12)
+# false = dry-run: матчи выбираются и уходят админам превью, но сами не публикуются.
+IRL_AUTO_PUBLISH = os.getenv("IRL_AUTO_PUBLISH", "true").strip().lower() in ("true", "1", "yes")
+
 # ─── Phase 6: Smart Notifications Service (В разработке - отключено) ─────────
 SMART_NOTIFICATIONS_ENABLED = os.getenv("SMART_NOTIFICATIONS_ENABLED", "0").lower() in ("1", "true", "yes")
 

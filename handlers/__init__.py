@@ -990,6 +990,10 @@ def _register_admin_handlers(app: Application) -> None:
     from handlers.admin_ops import register_admin_ops_handlers
     register_admin_ops_handlers(app)
 
+    # ⚽ IRL-ставки: /irl, /irl_settle и кнопки превью — глобальные админы, только ЛС
+    from handlers.admin_irl import register_admin_irl_handlers
+    register_admin_irl_handlers(app)
+
     # 🔁 Трансферное окно: панель /to — только ответственный за ТО, в ЛС
     from transfers.handlers import register_handlers as register_transfer_handlers
     register_transfer_handlers(app)

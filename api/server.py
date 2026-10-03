@@ -561,6 +561,10 @@ def create_app(bot=None) -> web.Application:
     # 10b. Долгосрочные ставки: победители дивизионов и кубков, бомбардиры
     register_outright_routes(app)
 
+    # 10c. Ставки на реальные матчи (за флагом IRL_ENABLED, иначе 404)
+    from api.routes_irl import register_irl_routes
+    register_irl_routes(app)
+
     # 11b. Вкладка «Управление» в Mini App — панель Logovo.bet
     register_admin_panel_routes(app)
 

@@ -324,7 +324,7 @@ class StateStore {
 
   // --- Кубки ---
   setLobbyMode(mode) {
-    this.state.lobbyMode = ['cup', 'outrights'].includes(mode) ? mode : 'league';
+    this.state.lobbyMode = ['cup', 'outrights', 'irl'].includes(mode) ? mode : 'league';
     this.notify();
   }
 

@@ -518,7 +518,7 @@ export class UIRenderer {
     }
   }
 
-  static renderDivisionTabs(divisions, selectedDivisionId, containerId = 'lobby-division-tabs-container', lobbyMode = null) {
+  static renderDivisionTabs(divisions, selectedDivisionId, containerId = 'lobby-division-tabs-container', lobbyMode = null, irlEnabled = false) {
     const container = document.getElementById(containerId);
     if (!container) return;
 
@@ -533,7 +533,13 @@ export class UIRenderer {
     // Чипы кубка и долгосрочных есть только в лобби: турнирные таблицы их не показывают.
     const isCup = lobbyMode === 'cup';
     const isOutrights = lobbyMode === 'outrights';
-    const isLeague = !isCup && !isOutrights;
+    const isIrl = lobbyMode === 'irl';
+    const isLeague = !isCup && !isOutrights && !isIrl;
+    const irlChip = irlEnabled ? `
+      <button class="division-tab-btn irl-tab-btn ${isIrl ? 'active' : ''}" data-irl-tab="1">
+        🌍 IRL
+      </button>
+    ` : '';
     const cupChip = lobbyMode !== null ? `
       <button class="division-tab-btn cup-tab-btn ${isCup ? 'active' : ''}" data-cup-tab="1">
         🏆 Кубок
@@ -541,6 +547,7 @@ export class UIRenderer {
       <button class="division-tab-btn outright-tab-btn ${isOutrights ? 'active' : ''}" data-outright-tab="1">
         📈 Долгосрочные
       </button>
+      ${irlChip}
     ` : '';
 
     container.innerHTML = cupChip + divs.map(d => `
@@ -727,7 +734,7 @@ export class UIRenderer {
 
   /** Лобби в режиме кубка или долгосрочных прячет линию дивизиона и хабы лиги. */
   static renderLobbyMode(mode) {
-    const isLeague = mode !== 'cup' && mode !== 'outrights';
+    const isLeague = mode !== 'cup' && mode !== 'outrights' && mode !== 'irl';
     ['matches-list-container', 'hot-matches-container', 'odds-movers-container', 'recommendations-container']
       .forEach(id => {
         const el = document.getElementById(id);
@@ -737,6 +744,8 @@ export class UIRenderer {
     if (cupEl) cupEl.style.display = mode === 'cup' ? '' : 'none';
     const outEl = document.getElementById('outrights-view-container');
     if (outEl) outEl.style.display = mode === 'outrights' ? '' : 'none';
+    const irlEl = document.getElementById('irl-view-container');
+    if (irlEl) irlEl.style.display = mode === 'irl' ? '' : 'none';
   }
 
   /**

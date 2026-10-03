@@ -154,6 +154,19 @@ def register_jobs(application: Application) -> None:
     except Exception as e:
         logger.warning(f"Could not register transfer auto-close job: {e}")
 
+    # Ставки на реальные матчи: выбор матча дня, кэфы букмекера, расчёт по счёту провайдера.
+    try:
+        import config
+        if config.IRL_ENABLED:
+            from services.irl_jobs import job_irl_pick, job_irl_odds_refresh, job_irl_settle
+            _run_repeating(application, "irl_pick", job_irl_pick, 600, 110)
+            _run_repeating(application, "irl_odds_refresh", job_irl_odds_refresh, 1800, 130)
+            _run_repeating(application, "irl_settle", job_irl_settle, 300, 160)
+        else:
+            logger.info("IRL betting disabled (IRL_ENABLED=false)")
+    except Exception as e:
+        logger.warning(f"Could not register IRL betting jobs: {e}")
+
 def main() -> None:
     """Initialize and run the Telegram bot application."""
     if not TOKEN:
