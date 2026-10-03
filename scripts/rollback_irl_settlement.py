@@ -276,12 +276,27 @@ def main():
                 VALUES (?, ?, ?, ?, 'irl_bet', ?, datetime('now', '+3 hours'))
             """, (u_id, -deduct, IRL_TX_REVERT, b_id, bal_after))
 
-        # 2. Очистка неотправленных уведомлений по ставкам этого матча
+        # 2. Очистка старых уведомлений по ставкам этого матча
+        # Это необходимо, чтобы при новом расчёте INSERT OR IGNORE не блокировался старыми записями
         for b in bets:
             cursor.execute("""
                 DELETE FROM notification_events
-                WHERE source_event_id LIKE ? AND status = 'pending'
+                WHERE source_event_id LIKE ?
             """, (f"ibet_{b['id']}%",))
+
+        # 3. Отправка уведомления о корректировке игрокам, у которых аннулирован ошибочный выигрыш
+        for act in revert_actions:
+            rev_title = "⚠️ Корректировка ставки на реальный футбол"
+            rev_body = (
+                f"Матч <b>{home} — {away}</b> завершился со счётом <b>{resettle_home_goals}:{resettle_away_goals}</b> (Победа: {home}).\n"
+                f"Ошибочно начисленный выигрыш по исходу {away} (−{act['amount_to_deduct']} 🪙) был аннулирован."
+            )
+            cursor.execute("""
+                INSERT OR IGNORE INTO notification_events
+                    (user_id, event_type, source_event_id, title, body, priority, status, created_at)
+                SELECT ?, 'BET_SETTLED', ?, ?, ?, 'high', 'pending', datetime('now', '+3 hours')
+                WHERE EXISTS (SELECT 1 FROM users WHERE telegram_id = ?)
+            """, (act["user_id"], f"ibet_{act['bet_id']}_rev", rev_title, rev_body, act["user_id"]))
 
         if args.mode == "rollback":
             # Возврат всех ставок в pending
@@ -324,7 +339,7 @@ def main():
                     VALUES (?, ?, ?, ?, 'irl_bet', ?, datetime('now', '+3 hours'))
                 """, (u_id, credit, IRL_TX_WIN, b_id, bal_after))
 
-            # Обновление статусов ставок
+            # Обновление статусов ставок и постановка уведомлений победителям
             for b in bets:
                 if b["outcome"] == args.result:
                     payout = int(b["potential_win"])
@@ -333,6 +348,18 @@ def main():
                         SET status = 'won', actual_payout = ?, settled_at = datetime('now', '+3 hours')
                         WHERE id = ?
                     """, (payout, b["id"]))
+
+                    win_title = f"✅ Ставка на реальный матч выиграла: +{payout} 🪙"
+                    win_body = (
+                        f"{home} — {away}: <b>Победа {home}</b> @ {float(b['odd']):.2f}\n"
+                        f"(Произведён корректный перерасчёт матча)"
+                    )
+                    cursor.execute("""
+                        INSERT OR IGNORE INTO notification_events
+                            (user_id, event_type, source_event_id, title, body, priority, status, created_at)
+                        SELECT ?, 'BET_SETTLED', ?, ?, ?, 'high', 'pending', datetime('now', '+3 hours')
+                        WHERE EXISTS (SELECT 1 FROM users WHERE telegram_id = ?)
+                    """, (b["user_id"], f"ibet_{b['id']}", win_title, win_body, b["user_id"]))
                 else:
                     cursor.execute("""
                         UPDATE irl_bets
