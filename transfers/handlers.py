@@ -25,7 +25,7 @@ from telegram.ext import ContextTypes, filters
 
 from services import admin_journal
 from time_utils import MSK_LABEL, fmt_msk
-from transfers import approval, notify, repo, requests as req_mod, service
+from transfers import approval, notify, repo, requests as req_mod, service, squad
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -175,9 +175,11 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
         lines = ["🔁 <b>Трансферное окно</b>", "", "Незакрытого окна нет."]
         if latest:
             lines.append(f"Последнее: {_window_name(latest)}, закрыто {fmt_msk(latest.get('closed_at'))} {MSK_LABEL}.")
-        return "\n".join(lines), InlineKeyboardMarkup([
-            [_btn("➕ Создать окно", "tw:create")],
-            [_btn("🧵 Темы группы", "tw:topics")]])
+        rows = [[_btn("➕ Создать окно", "tw:create")]]
+        if _approved_items(latest):
+            rows.append([_btn("📋 Одобренные заявки", "tw:appr:0")])
+        rows.append([_btn("🧵 Темы группы", "tw:topics")])
+        return "\n".join(lines), InlineKeyboardMarkup(rows)
 
     info = service.overview(window["id"])
     status = window["status"]
@@ -201,6 +203,11 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
     if status == "draft":
         rows.append([_btn("🔓 Открыть окно", "tw:open")])
     rows.append([_btn("💰 Бюджеты", "tw:budgets:0"), _btn("⏰ Автозакрытие", "tw:auto")])
+    approved = _approved_items(window)
+    if approved:
+        unapplied = sum(1 for t in approved if squad.needs_apply(t))
+        rows.append([_btn(f"📋 Одобренные заявки ({unapplied} без состава)" if unapplied
+                          else "📋 Одобренные заявки", "tw:appr:0")])
     rows.append([_btn("🧵 Темы группы", "tw:topics"), _btn("📋 Правила окна", "tw:settings")])
     if status == "open" and info["snapshot"] < info["clubs"]:
         rows.append([_btn("📸 Дописать снимок составов", "tw:snap")])
@@ -876,14 +883,14 @@ async def _alert(query, text: str) -> None:
         pass
 
 
-async def _close_card(bot, chat_id: int, message_id: int, text: str) -> None:
+async def _close_card(bot, chat_id: int, message_id: int, text: str, reply_markup=None) -> None:
     """Снять кнопки с карточки и ответить под ней итогом (подпись фото править не нужно)."""
     try:
         await bot.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup=None)
     except Exception as exc:
         logger.debug("transfers: could not clear card buttons: %s", exc)
     try:
-        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML",
+        await bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML", reply_markup=reply_markup,
                                reply_to_message_id=message_id, allow_sending_without_reply=True)
     except Exception as exc:
         logger.debug("transfers: could not reply under card: %s", exc)
@@ -916,8 +923,10 @@ async def cb_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
              "from": t["from_club"], "to": t["to_club"], "price_k": t["price_k"],
              "warnings": [w["code"] for w in decision.warnings]})
     warn = f"\n⚠️ Предупреждений: {len(decision.warnings)}" if decision.warnings else ""
+    note = "\nСостав клуба пока не менялся — применить его можно кнопкой ниже." if squad.changes_squad(t) else ""
     await _close_card(context.bot, query.message.chat.id, query.message.message_id,
-                      _decision_summary(t, "✅ Одобрена заявка") + warn)
+                      _decision_summary(t, "✅ Одобрена заявка") + warn + note,
+                      _transfer_keyboard(t, back=False))
     await notify.notify_approved(context.bot, t)
 
 
@@ -982,6 +991,239 @@ async def cb_reject_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     _pending.pop(user.id, None)
     await _show(update, "Отклонение отменено — заявка осталась без решения.", None)
+
+
+# ─── Состав: применить, откатить, отменить одобренную ───────────────────────
+
+APPROVED_PAGE = 8
+
+
+def _transfer_keyboard(t: dict, *, back: bool) -> InlineKeyboardMarkup | None:
+    rows = []
+    if t["status"] == "approved":
+        if squad.needs_apply(t):
+            rows.append([_btn("📋 Применить к составу", f"tw:sq:{t['id']}")])
+        elif t.get("squad_applied_at"):
+            rows.append([_btn("↩️ Откатить состав", f"tw:sr:{t['id']}")])
+        rows.append([_btn("🛑 Отменить заявку", f"tw:cx:{t['id']}")])
+    if back:
+        rows.append(_back("tw:appr:0", "⬅️ К одобренным"))
+    return InlineKeyboardMarkup(rows) if rows else None
+
+
+def _transfer_view(t: dict, *, back: bool) -> tuple[str, InlineKeyboardMarkup | None]:
+    lines = [f"📋 {notify.describe_transfer(t)}",
+             f"Статус: {TRANSFER_STATUS_LABELS.get(t['status'], t['status'])}"]
+    if t.get("price_k"):
+        lines.append(f"Сумма: {format_k(t['price_k'])}")
+    if t["status"] == "approved":
+        if not squad.changes_squad(t):
+            lines.append("Состав: доплата состав не меняет")
+        elif t.get("squad_applied_at"):
+            lines.append(f"Состав: применён {fmt_msk(t['squad_applied_at'])} {MSK_LABEL}")
+        else:
+            lines.append("Состав: не применён")
+            lines.extend(html.escape(step) for step in squad.preview(t))
+    if t.get("decided_reason"):
+        lines.append(f"Причина: {html.escape(t['decided_reason'])}")
+    return "\n".join(lines), _transfer_keyboard(t, back=back)
+
+
+def _is_private(update: Update) -> bool:
+    chat = update.effective_chat
+    return bool(chat and chat.type == "private")
+
+
+async def _manager_press(update: Update) -> tuple[int, int] | None:
+    """(user_id, transfer_id) из нажатия ответственного; чужому — отказ и None."""
+    query, user = update.callback_query, update.effective_user
+    if not query or not user:
+        return None
+    if not service.is_transfer_manager(user.id):
+        await _alert(query, "⛔ Составом и отменой заявок занимается только ответственный за трансферы")
+        return None
+    return user.id, int(query.data.rsplit(":", 1)[1])
+
+
+def _result_text(result: squad.SquadResult, head: str) -> str:
+    lines = [head, ""]
+    lines.extend(html.escape(line) for line in result.lines)
+    lines.extend(f"ℹ️ {html.escape(note)}" for note in result.notes)
+    return "\n".join(lines)
+
+
+async def cb_squad_apply(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    press = await _manager_press(update)
+    if press is None:
+        return
+    user_id, transfer_id = press
+    try:
+        result = await asyncio.to_thread(squad.apply, user_id, transfer_id)
+    except service.InputError as exc:
+        await _alert(update.callback_query, str(exc))
+        return
+    t = result.transfer
+    await admin_journal.record(
+        user_id, "transfer_squad_applied", "transfer", t["id"],
+        new={"player": t["player_name"], "changes": result.lines, "notes": result.notes})
+    text, kb = _transfer_view(t, back=_is_private(update))
+    await _show(update, _result_text(result, f"✅ <b>Состав обновлён по заявке #{t['id']}</b>") + "\n\n" + text, kb)
+    await notify.notify_squad(context.bot, t, result.lines)
+
+
+async def cb_squad_rollback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    press = await _manager_press(update)
+    if press is None:
+        return
+    user_id, transfer_id = press
+    try:
+        result = await asyncio.to_thread(squad.rollback, user_id, transfer_id)
+    except service.InputError as exc:
+        await _alert(update.callback_query, str(exc))
+        return
+    t = result.transfer
+    await admin_journal.record(
+        user_id, "transfer_squad_reverted", "transfer", t["id"],
+        new={"player": t["player_name"], "changes": result.lines, "notes": result.notes})
+    text, kb = _transfer_view(t, back=_is_private(update))
+    await _show(update, _result_text(result, f"↩️ <b>Состав возвращён по заявке #{t['id']}</b>") + "\n\n" + text, kb)
+    await notify.notify_squad(context.bot, t, result.lines, reverted=True)
+
+
+async def cb_cancel_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    press = await _manager_press(update)
+    if press is None:
+        return
+    _, transfer_id = press
+    t = repo.get_transfer(transfer_id)
+    if t is None or t["status"] != "approved":
+        await _alert(update.callback_query, f"Заявка #{transfer_id} уже не одобрена — отменять нечего.")
+        return
+    rollback_note = ("\nСостав клубов будет возвращён." if t.get("squad_applied_at") else "")
+    kb = InlineKeyboardMarkup([[_btn("🛑 Да, отменить", f"tw:cxy:{t['id']}"), _btn("Назад", f"tw:cxn:{t['id']}")]])
+    await _show(update, f"🛑 <b>Отменить одобренную заявку?</b>\n{notify.describe_transfer(t)}\n\n"
+                        f"Бюджет и слоты вернутся сторонам.{rollback_note}", kb)
+
+
+async def cb_cancel_back(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    press = await _manager_press(update)
+    if press is None:
+        return
+    t = repo.get_transfer(press[1])
+    if t is None:
+        await _alert(update.callback_query, "Заявка не найдена.")
+        return
+    text, kb = _transfer_view(t, back=_is_private(update))
+    await _show(update, text, kb)
+
+
+async def cb_cancel_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    press = await _manager_press(update)
+    if press is None:
+        return
+    user_id, transfer_id = press
+    try:
+        t, rolled = await asyncio.to_thread(squad.cancel, user_id, transfer_id)
+    except service.InputError as exc:
+        await _alert(update.callback_query, str(exc))
+        return
+    lines = rolled.lines if rolled else []
+    await admin_journal.record(
+        user_id, "transfer_request_cancelled", "transfer", t["id"],
+        old={"status": "approved"},
+        new={"status": "cancelled", "kind": t["kind"], "player": t["player_name"],
+             "from": t["from_club"], "to": t["to_club"], "price_k": t["price_k"], "squad_reverted": lines})
+    summary = _decision_summary(t, "🛑 Отменена заявка") + ("\n" + "\n".join(html.escape(x) for x in lines) if lines else "")
+    kb = InlineKeyboardMarkup([_back("tw:appr:0", "⬅️ К одобренным")]) if _is_private(update) else None
+    await _show(update, summary, kb)
+    await notify.notify_cancelled(context.bot, t, lines)
+
+
+def _approved_window() -> dict | None:
+    return repo.get_active_window() or repo.get_latest_window()
+
+
+def _approved_items(window: dict | None) -> list[dict]:
+    if window is None:
+        return []
+    items = repo.list_transfers(window["id"], statuses=("approved",))
+    return sorted(items, key=lambda t: (not squad.needs_apply(t), t["id"]))
+
+
+def _approved_view(page: int) -> tuple[str, InlineKeyboardMarkup]:
+    window = _approved_window()
+    items = _approved_items(window)
+    if not items:
+        return "📋 Одобренных заявок нет.", InlineKeyboardMarkup([_back()])
+    pending = sum(1 for t in items if squad.needs_apply(t))
+    pages = (len(items) + APPROVED_PAGE - 1) // APPROVED_PAGE
+    page = max(0, min(page, pages - 1))
+    lines = [f"📋 <b>Одобренные заявки</b> — окно {_window_name(window)}", "",
+             f"Всего: {len(items)}, не применено к составам: {pending}",
+             "⏳ ждёт применения · ✔️ применено · ➖ состав не меняет"]
+    rows = []
+    for t in items[page * APPROVED_PAGE:(page + 1) * APPROVED_PAGE]:
+        mark = "⏳" if squad.needs_apply(t) else ("✔️" if t.get("squad_applied_at") else "➖")
+        label = f"{mark} #{t['id']} {t.get('player_name') or ''}"
+        rows.append([_btn(label[:60], f"tw:tr:{t['id']}")])
+    if pending:
+        rows.append([_btn(f"📋 Применить все ({pending})", "tw:sqall")])
+    nav = []
+    if page > 0:
+        nav.append(_btn("◀️", f"tw:appr:{page - 1}"))
+    if page < pages - 1:
+        nav.append(_btn("▶️", f"tw:appr:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append(_back())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def cb_approved(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    page = int(update.callback_query.data.rsplit(":", 1)[1])
+    text, kb = await asyncio.to_thread(_approved_view, page)
+    await _show(update, text, kb)
+
+
+async def cb_open_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    t = repo.get_transfer(int(update.callback_query.data.rsplit(":", 1)[1]))
+    if t is None:
+        await update.callback_query.answer("Заявка не найдена", show_alert=True)
+        return
+    text, kb = _transfer_view(t, back=True)
+    await _show(update, text, kb)
+
+
+async def cb_squad_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Применить к составам все одобренные заявки окна. Одна не прошла — остальные идут дальше."""
+    query, user = update.callback_query, update.effective_user
+    if not query or not user:
+        return
+    if not service.is_transfer_manager(user.id):
+        await _alert(query, "⛔ Составом занимается только ответственный за трансферы")
+        return
+    window = _approved_window()
+    done, failed = 0, []
+    for t in [x for x in _approved_items(window) if squad.needs_apply(x)]:
+        try:
+            result = await asyncio.to_thread(squad.apply, user.id, t["id"])
+        except service.InputError as exc:
+            failed.append(f"#{t['id']} {t['player_name']}: {exc}")
+            continue
+        done += 1
+        await admin_journal.record(
+            user.id, "transfer_squad_applied", "transfer", t["id"],
+            new={"player": t["player_name"], "changes": result.lines, "notes": result.notes})
+        await notify.notify_squad(context.bot, result.transfer, result.lines)
+    text, kb = await asyncio.to_thread(_approved_view, 0)
+    head = f"✅ Применено к составам: {done}."
+    if failed:
+        head += "\n⚠️ Не применено:\n" + "\n".join(html.escape(f) for f in failed)
+    await _show(update, head + "\n\n" + text, kb)
 
 
 # ─── Ввод значения ───────────────────────────────────────────────────────────
@@ -1075,6 +1317,16 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_reject, pattern=r"^tw:rj:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_reject_no_reason, pattern=r"^tw:rjn:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_reject_cancel, pattern=r"^tw:rjc$"))
+
+    # Состав и отмена одобренных
+    app.add_handler(CallbackQueryHandler(cb_approved, pattern=r"^tw:appr:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_open_transfer, pattern=r"^tw:tr:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_squad_apply, pattern=r"^tw:sq:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_squad_rollback, pattern=r"^tw:sr:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_squad_all, pattern=r"^tw:sqall$"))
+    app.add_handler(CallbackQueryHandler(cb_cancel_ask, pattern=r"^tw:cx:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_cancel_yes, pattern=r"^tw:cxy:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_cancel_back, pattern=r"^tw:cxn:\d+$"))
 
     # Свободные агенты
     app.add_handler(CallbackQueryHandler(cb_fa_record, pattern=r"^tw:fa:rec:[a-f0-9]+$"))

@@ -15,7 +15,8 @@ import json
 import sqlite3
 from collections.abc import Iterable, Mapping
 
-from database import transaction
+from club_registry import resolve_team_name
+from database import normalize_player_name_key, normalize_team_name, transaction
 from time_utils import DT_FORMAT, now_msk_str, parse_msk
 from transfers import config as tcfg
 from transfers.engine import (
@@ -380,6 +381,15 @@ def mark_squad_applied(transfer_id: int) -> None:
         )
 
 
+def clear_squad_applied(transfer_id: int) -> None:
+    """Состав по заявке откатили — она снова «не применена»."""
+    with transaction() as conn:
+        conn.execute(
+            "UPDATE transfers SET squad_applied_at = NULL, updated_at = ? WHERE id = ?",
+            (now_msk_str(), transfer_id),
+        )
+
+
 def get_club_ledger(window_id: int, club_name: str,
                     exclude_transfer_id: int | None = None) -> ClubLedger:
     """Бюджет и слоты клуба по данным окна — одна точка для бота и Mini App."""
@@ -625,6 +635,48 @@ def has_core_snapshot(window_id: int) -> bool:
 
 
 # ─── Изменения состава ───────────────────────────────────────────────────────
+
+def squad_rows(club: str) -> list[dict]:
+    """Строки `squad_players` клуба (с id): клуб узнаётся через реестр, как в снимке состава."""
+    key = norm_club(club)
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT id, team_name, player_name, position FROM squad_players ORDER BY id"
+        ).fetchall()
+    return [dict(r) for r in rows
+            if norm_club(resolve_team_name(r["team_name"]) or r["team_name"]) == key]
+
+
+def squad_delete(row_id: int) -> None:
+    with transaction() as conn:
+        conn.execute("DELETE FROM squad_players WHERE id = ?", (row_id,))
+
+
+def squad_insert(club: str, player_name: str, position: str | None) -> str | None:
+    """Добавить игрока в состав клуба. Возвращает `team_name` строки или None, если он там уже есть.
+
+    Имя клуба берётся из его же строк: `squad_players` уникален по `team_name` + игроку, а
+    регистр и написание у старых записей могут отличаться от канонического.
+    """
+    existing = squad_rows(club)
+    team = existing[0]["team_name"] if existing else club.strip()
+    with transaction() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO squad_players (team_name, player_name, position, norm_name, norm_team_name) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (team, player_name.strip(), position, normalize_player_name_key(player_name),
+             normalize_team_name(resolve_team_name(team) or team)),
+        )
+        return team if cur.rowcount else None
+
+
+def later_squad_ops(op_id: int, transfer_id: int) -> list[dict]:
+    """Не откаченные изменения состава других заявок, сделанные после `op_id`."""
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM transfer_squad_ops WHERE id > ? AND transfer_id != ? AND reverted_at IS NULL "
+            "ORDER BY id", (op_id, transfer_id)).fetchall()]
+
 
 def insert_squad_op(transfer_id: int, op: str, team_name: str, player_name: str,
                     position: str | None, applied_by: int | None) -> int:

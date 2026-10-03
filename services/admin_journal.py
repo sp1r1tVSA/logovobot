@@ -138,6 +138,9 @@ ACTIONS: dict[str, tuple[str, str]] = {
     "transfer_request_withdrawn": ("transfers", "Отозвана заявка"),
     "transfer_request_approved": ("transfers", "Одобрена заявка на трансфер"),
     "transfer_request_rejected": ("transfers", "Отклонена заявка на трансфер"),
+    "transfer_squad_applied": ("transfers", "Трансфер применён к составу"),
+    "transfer_squad_reverted": ("transfers", "Состав по трансферу откачен"),
+    "transfer_request_cancelled": ("transfers", "Отменена одобренная заявка на трансфер"),
 }
 
 

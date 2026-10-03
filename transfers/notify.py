@@ -442,3 +442,25 @@ async def notify_rejected(bot, transfer: dict) -> bool:
     why = f"\n\nПричина: {html.escape(reason)}" if reason else ""
     await _dm_parties(bot, transfer, f"❌ <b>Заявка #{transfer['id']} отклонена</b> ({kind})\n\n{body}{why}")
     return await post_to_topic(bot, "feed", f"❌ <b>Отклонён трансфер #{transfer['id']}</b> ({kind})\n\n{body}{why}")
+
+
+async def notify_squad(bot, transfer: dict, lines: list[str], *, reverted: bool = False) -> None:
+    """Состав клуба изменили или вернули — ЛС сторонам со списком изменений."""
+    if not lines:
+        return
+    head = "↩️ <b>Состав возвращён</b>" if reverted else "📋 <b>Состав обновлён</b>"
+    body = "\n".join(html.escape(line) for line in lines)
+    await _dm_parties(bot, transfer, f"{head} по заявке #{transfer['id']}\n\n{body}")
+
+
+async def notify_cancelled(bot, transfer: dict, lines: list[str]) -> bool:
+    """Одобренную заявку отменили: ЛС сторонам и пост в ленту."""
+    kind = KIND_LABELS.get(transfer.get("kind"), "")
+    body = "\n".join(_decision_lines(transfer))
+    if lines:
+        body += "\n\n" + "\n".join(html.escape(line) for line in lines)
+    reason = transfer.get("decided_reason")
+    why = f"\n\nПричина: {html.escape(reason)}" if reason else ""
+    await _dm_parties(bot, transfer, f"🛑 <b>Заявка #{transfer['id']} отменена</b> ({kind})\n\n{body}{why}\n\n"
+                                     "Бюджет и слоты возвращены.")
+    return await post_to_topic(bot, "feed", f"🛑 <b>Отменён трансфер #{transfer['id']}</b> ({kind})\n\n{body}{why}")
