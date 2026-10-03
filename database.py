@@ -20308,6 +20308,16 @@ def list_irl_matches(bet_day: str | None = None, statuses: tuple[str, ...] | Non
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def get_irl_distinct_days(limit: int = 14) -> list[str]:
+    """Список уникальных дней (YYYY-MM-DD), на которые заведены IRL-матчи."""
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT bet_day FROM irl_matches WHERE bet_day IS NOT NULL ORDER BY bet_day DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [r["bet_day"] for r in rows if r["bet_day"]]
+
+
 def create_irl_draft(provider_fixture_id, league_id: int | None, league_name: str | None,
                      home: str, away: str, kickoff_at, odd_home: float, odd_draw: float,
                      odd_away: float, bet_day: str | None = None,
@@ -20431,6 +20441,20 @@ def get_irl_match_bet_stats(irl_match_id: int) -> dict:
             "WHERE irl_match_id = ? AND status = 'pending'", (irl_match_id,)
         ).fetchone()
         return {"count": int(row["n"]), "total": int(row["total"])}
+
+
+def get_irl_match_bets(irl_match_id: int, limit: int = 100) -> list[dict]:
+    """Ставки игроков на конкретный IRL-матч с именами пользователей."""
+    with transaction() as conn:
+        rows = conn.execute("""
+            SELECT b.*, u.username, u.team_name
+            FROM irl_bets b
+            LEFT JOIN users u ON u.telegram_id = b.user_id
+            WHERE b.irl_match_id = ?
+            ORDER BY b.id DESC
+            LIMIT ?
+        """, (int(irl_match_id), int(limit))).fetchall()
+        return [dict(r) for r in rows]
 
 
 def _irl_pick_label(match, outcome: str) -> str:

@@ -41,6 +41,10 @@ from dataclasses import dataclass
 
 from aiohttp import web
 
+import config
+from services import admin_journal
+from time_utils import now_msk, today_msk_str
+
 import database
 from api.auth import get_authenticated_user
 from api.params import body_int, path_int, query_int
@@ -748,8 +752,318 @@ async def handle_panel_analysis(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", **result})
 
 
+
+# ─── IRL (Ставки на реальные матчи) ──────────────────────────────────────────
+
+async def handle_panel_irl_matches(request: web.Request) -> web.Response:
+    """GET /api/admin/panel/irl/matches?day=YYYY-MM-DD"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    day = request.query.get("day") or today_msk_str()
+    matches = await asyncio.to_thread(database.list_irl_matches, bet_day=day, limit=100)
+    for m in matches:
+        m["bet_stats"] = await asyncio.to_thread(database.get_irl_match_bet_stats, m["id"])
+
+    days = await asyncio.to_thread(database.get_irl_distinct_days, 14)
+    today = today_msk_str()
+    if today not in days:
+        days.insert(0, today)
+
+    return web.json_response({
+        "status": "ok",
+        "day": day,
+        "today": today,
+        "days": days,
+        "matches": matches,
+        "irl_enabled": bool(config.IRL_ENABLED),
+        "auto_publish": bool(config.IRL_AUTO_PUBLISH),
+        "bookmaker_id": config.IRL_BOOKMAKER_ID,
+    })
+
+
+async def handle_panel_irl_candidates(request: web.Request) -> web.Response:
+    """GET /api/admin/panel/irl/candidates?day=YYYY-MM-DD"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    day = request.query.get("day") or today_msk_str()
+    from services.sports import get_sports_provider
+    provider = get_sports_provider()
+    priority = list(config.IRL_COMPETITION_PRIORITY)
+    try:
+        fixtures = await provider.get_prematch_fixtures(day, priority)
+    except Exception as e:
+        logger.warning("Failed to fetch prematch fixtures from provider: %s", e)
+        fixtures = None
+
+    if fixtures is None:
+        return _error(503, "provider_unavailable", "Провайдер не вернул расписание матчей.")
+
+    existing_matches = await asyncio.to_thread(database.list_irl_matches, bet_day=day, limit=100)
+    existing_fids = {str(m["provider_fixture_id"]) for m in existing_matches}
+
+    fresh = [f for f in fixtures if str(f.fixture_id) not in existing_fids and f.kickoff > now_msk()]
+    rank = {league: i for i, league in enumerate(priority)}
+    fresh.sort(key=lambda f: (rank.get(f.league_id, len(rank)), f.kickoff))
+
+    return web.json_response({
+        "status": "ok",
+        "day": day,
+        "candidates": [
+            {
+                "fixture_id": f.fixture_id,
+                "league_id": f.league_id,
+                "league_name": f.league_name,
+                "home": f.home,
+                "away": f.away,
+                "kickoff_at": f.kickoff.strftime("%Y-%m-%d %H:%M:%S"),
+            }
+            for f in fresh[:25]
+        ],
+    })
+
+
+async def handle_panel_irl_add_match(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/matches  {fixture_id, day, replace_id?}"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    data = await _json_body(request)
+    if isinstance(data, web.Response):
+        return data
+
+    fixture_id = str(data.get("fixture_id") or "").strip()
+    if not fixture_id:
+        return _error(400, "missing_fixture", "Укажите fixture_id матча.")
+
+    day = str(data.get("day") or today_msk_str()).strip()
+    replace_id = data.get("replace_id")
+    if replace_id is not None:
+        try:
+            replace_id = int(replace_id)
+        except (ValueError, TypeError):
+            replace_id = None
+
+    if not config.IRL_BOOKMAKER_ID:
+        return _error(400, "no_bookmaker", "Не задан IRL_BOOKMAKER_ID в конфигурации.")
+
+    from services.sports import get_sports_provider
+    provider = get_sports_provider()
+    fx = await provider.get_prematch_fixture(fixture_id)
+    if not fx:
+        return _error(404, "fixture_not_found", "Матч не найден у провайдера.")
+
+    odds = await provider.get_match_winner_odds(fx.fixture_id, int(config.IRL_BOOKMAKER_ID))
+    if not odds:
+        return _error(400, "no_odds", "У выбранного букмекера нет коэффициентов 1X2 на этот матч.")
+
+    if replace_id:
+        old = await asyncio.to_thread(database.get_irl_match, replace_id)
+        if old and old["status"] == "draft":
+            await asyncio.to_thread(database.void_irl_match, replace_id, "Заменён админом в панели", actor_id=scope.actor_id)
+            await admin_journal.record(scope.actor_id, "irl_match_replaced", "irl_match", replace_id,
+                                       old=f"{old['home']} — {old['away']}", new=f"{fx.home} — {fx.away}")
+
+    match_id, is_new = await asyncio.to_thread(
+        database.create_irl_draft,
+        fx.fixture_id, fx.league_id, fx.league_name, fx.home, fx.away, fx.kickoff,
+        odds.home, odds.draw, odds.away, bet_day=day, picked_by="admin",
+    )
+    await admin_journal.record(scope.actor_id, "irl_match_added", "irl_match", match_id, new=f"{fx.home} — {fx.away}")
+    return web.json_response({"status": "ok", "match_id": match_id, "is_new": is_new})
+
+
+async def handle_panel_irl_publish(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/matches/{id}/publish"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    match_id = path_int(request, "id")
+    ok, info = await asyncio.to_thread(database.publish_irl_match, match_id)
+    if not ok:
+        return _error(400, "publish_failed", str(info))
+    await admin_journal.record(scope.actor_id, "irl_match_published", "irl_match", match_id)
+    return web.json_response({"status": "ok", "match_id": match_id})
+
+
+async def handle_panel_irl_publish_all(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/matches/publish-all  {day}"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    data = await _json_body(request)
+    if isinstance(data, web.Response):
+        day = today_msk_str()
+    else:
+        day = str(data.get("day") or today_msk_str()).strip()
+
+    drafts = await asyncio.to_thread(database.list_irl_matches, bet_day=day, statuses=("draft",))
+    published = 0
+    for d in drafts:
+        ok, _ = await asyncio.to_thread(database.publish_irl_match, d["id"])
+        if ok:
+            published += 1
+            await admin_journal.record(scope.actor_id, "irl_match_published", "irl_match", d["id"])
+    return web.json_response({"status": "ok", "published": published})
+
+
+async def handle_panel_irl_cancel(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/matches/{id}/cancel  {reason?}"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    match_id = path_int(request, "id")
+    m = await asyncio.to_thread(database.get_irl_match, match_id)
+    if not m:
+        return _error(404, "not_found", "Матч не найден.")
+
+    data = await _json_body(request)
+    reason = "Отменён админом"
+    if not isinstance(data, web.Response) and data.get("reason"):
+        reason = str(data["reason"]).strip()[:300]
+
+    ok, info = await asyncio.to_thread(database.void_irl_match, match_id, reason, actor_id=scope.actor_id)
+    if not ok:
+        return _error(400, "cancel_failed", str(info))
+    refunded = info.get("refunded", 0) if isinstance(info, dict) else 0
+    await admin_journal.record(scope.actor_id, "irl_match_cancelled", "irl_match", match_id,
+                               old=m["status"], new=f"возвращено ставок: {refunded}")
+    return web.json_response({"status": "ok", "refunded": refunded})
+
+
+async def handle_panel_irl_settle(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/matches/{id}/settle  {result, home_goals?, away_goals?}"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    match_id = path_int(request, "id")
+    data = await _json_body(request)
+    if isinstance(data, web.Response):
+        return data
+
+    result = str(data.get("result") or "").lower().strip()
+    if result not in ("home", "draw", "away"):
+        return _error(400, "invalid_result", "Исход должен быть 'home', 'draw' или 'away'.")
+
+    home_goals = data.get("home_goals")
+    away_goals = data.get("away_goals")
+    try:
+        home_goals = int(home_goals) if home_goals is not None and home_goals != "" else None
+        away_goals = int(away_goals) if away_goals is not None and away_goals != "" else None
+    except (ValueError, TypeError):
+        return _error(400, "invalid_goals", "Количество голов должно быть целым числом.")
+
+    ok, info = await asyncio.to_thread(database.settle_irl_match, match_id, result, home_goals, away_goals, actor_id=scope.actor_id)
+    if not ok:
+        return _error(400, "settle_failed", str(info))
+    await admin_journal.record(scope.actor_id, "irl_match_settled", "irl_match", match_id,
+                               new=f"{result} ({home_goals}:{away_goals})")
+    return web.json_response({"status": "ok", "info": info})
+
+
+async def handle_panel_irl_refresh_odds(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/matches/{id}/refresh-odds"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    match_id = path_int(request, "id")
+    m = await asyncio.to_thread(database.get_irl_match, match_id)
+    if not m:
+        return _error(404, "not_found", "Матч не найден.")
+    if m["status"] not in ("draft", "open"):
+        return _error(400, "not_editable", "Кэфы можно обновлять только у черновиков и открытых матчей.")
+
+    from services.sports import get_sports_provider
+    provider = get_sports_provider()
+    odds = await provider.get_match_winner_odds(m["provider_fixture_id"], int(config.IRL_BOOKMAKER_ID))
+    if not odds:
+        return _error(400, "no_odds", "Провайдер не вернул обновлённые коэффициенты.")
+
+    ok = await asyncio.to_thread(database.update_irl_odds, match_id, odds.home, odds.draw, odds.away)
+    return web.json_response({
+        "status": "ok",
+        "updated": ok,
+        "odds": {"home": odds.home, "draw": odds.draw, "away": odds.away},
+    })
+
+
+async def handle_panel_irl_match_bets(request: web.Request) -> web.Response:
+    """GET /api/admin/panel/irl/matches/{id}/bets"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    match_id = path_int(request, "id")
+    m = await asyncio.to_thread(database.get_irl_match, match_id)
+    if not m:
+        return _error(404, "not_found", "Матч не найден.")
+
+    bets = await asyncio.to_thread(database.get_irl_match_bets, match_id, 100)
+    return web.json_response({"status": "ok", "match": m, "bets": bets})
+
+
+async def handle_panel_irl_run_pick(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/run-pick"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    from services import irl_jobs
+    report = await irl_jobs.run_pick(bot=None)
+    return web.json_response({"status": "ok", "report": report})
+
+
 def register_admin_panel_routes(app: web.Application) -> None:
     r = app.router
+    r.add_get("/api/admin/panel/irl/matches", handle_panel_irl_matches)
+    r.add_get("/api/admin/panel/irl/candidates", handle_panel_irl_candidates)
+    r.add_post("/api/admin/panel/irl/matches", handle_panel_irl_add_match)
+    r.add_post("/api/admin/panel/irl/matches/publish-all", handle_panel_irl_publish_all)
+    r.add_post("/api/admin/panel/irl/matches/{id}/publish", handle_panel_irl_publish)
+    r.add_post("/api/admin/panel/irl/matches/{id}/cancel", handle_panel_irl_cancel)
+    r.add_post("/api/admin/panel/irl/matches/{id}/settle", handle_panel_irl_settle)
+    r.add_post("/api/admin/panel/irl/matches/{id}/refresh-odds", handle_panel_irl_refresh_odds)
+    r.add_get("/api/admin/panel/irl/matches/{id}/bets", handle_panel_irl_match_bets)
+    r.add_post("/api/admin/panel/irl/run-pick", handle_panel_irl_run_pick)
     r.add_get("/api/admin/panel/me", handle_panel_me)
     r.add_get("/api/admin/panel/dashboard", handle_panel_dashboard)
     r.add_get("/api/admin/panel/markets", handle_panel_markets)

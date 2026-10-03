@@ -29,6 +29,7 @@ const TABS = [
   { id: 'analysis', label: 'Анализ рынка', globalOnly: true },
   { id: 'bets', label: 'Купоны' },
   { id: 'outrights', label: 'Долгосрочные', globalOnly: true },
+  { id: 'irl', label: '🌍 IRL', globalOnly: true },
   { id: 'players', label: 'Игроки', globalOnly: true },
   { id: 'limits', label: 'Лимиты' },
   { id: 'risk', label: 'Риски' },
@@ -109,7 +110,7 @@ const PLAYER_SORTS = [
 ];
 
 const STATUS_LABELS = {
-  open: 'Открыт', suspended: 'Пауза', closed: 'Закрыт', settled: 'Рассчитан', voided: 'Аннулирован',
+  open: 'Открыт', suspended: 'Пауза', closed: 'Закрыт', settled: 'Рассчитан', voided: 'Аннулирован', draft: 'Черновик', void: 'Аннулирован',
   pending: 'В игре', won: 'Выигрыш', lost: 'Проигрыш', refunded: 'Возврат',
   cancelled: 'Отменён', cashed_out: 'Кэшаут',
   active: 'Активен', acknowledged: 'Принят', resolved: 'Решён', eliminated: 'Выбыл',
@@ -278,6 +279,7 @@ export class AdminPanel {
     this.builder = { mode: 'express', count: 3, strategy: 'safe', items: [] };
     // Анализ рынка: период в днях и последний ответ сервера.
     this.analysis = { days: 14, res: null };
+    this.irl = { day: '', today: '', days: [], matches: [], autoPublish: false, bookmakerId: null, enabled: true };
 
     this._searchTimer = null;
     this._modalSubmit = null;
@@ -416,6 +418,7 @@ export class AdminPanel {
       analysis: () => this.loadAnalysis(false),
       bets: () => this.loadBets(true),
       outrights: () => this.loadOutrights(),
+      irl: () => this.loadIrl(),
       players: () => this.loadPlayers(),
       limits: () => this.loadLimits(),
       risk: () => this.loadRisk(),
@@ -887,6 +890,433 @@ export class AdminPanel {
       if (errorEl) errorEl.textContent = e.message || 'Не получилось';
       else this.toast(e.message || 'Не получилось', true);
       tgBridge.hapticNotification('error');
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  // ─── IRL (Реальные матчи) ────────────────────────────────────────────────
+
+  async loadIrl(day = null) {
+    const params = day ? { day } : (this.irl?.day ? { day: this.irl.day } : {});
+    const res = await this.get(`${PANEL}/irl/matches`, params);
+    if (this.tab !== 'irl') return;
+    this.irl = {
+      day: res.day,
+      today: res.today,
+      days: res.days || [res.day],
+      matches: res.matches || [],
+      autoPublish: res.auto_publish,
+      bookmakerId: res.bookmaker_id,
+      enabled: res.irl_enabled,
+    };
+    this.renderIrl();
+  }
+
+  renderIrl() {
+    const body = this.body();
+    if (!body || this.tab !== 'irl') return;
+    const { day, today, days, matches, autoPublish, bookmakerId, enabled } = this.irl;
+    const drafts = matches.filter(m => m.status === 'draft');
+
+    const dayPills = days.map(d => `
+      <button class="category-pill ${d === day ? 'active' : ''}" data-adm-irl-day="${esc(d)}">
+        ${d === today ? 'Сегодня' : esc(d)}
+      </button>
+    `).join('');
+
+    const bannerHtml = !enabled
+      ? `<div class="adm-banner adm-banner-danger adm-mb">⚠️ Ставки на реальные матчи выключены (IRL_ENABLED=false).</div>`
+      : (!autoPublish
+        ? `<div class="adm-banner adm-mb">ℹ️ Автопубликация выключена — черновики публикуются вручную кнопкой «Опубликовать».</div>`
+        : '');
+
+    const headHtml = `
+      <div class="adm-card adm-mb" style="padding: 12px 16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+          <div>
+            <div class="adm-card-title" style="margin-bottom:2px;">🌍 Ставки на реальные матчи (IRL)</div>
+            <div class="adm-muted">Букмекер: <b>Pinnacle</b> (ID ${bookmakerId || '4'}) · Одиночные ставки 1X2</div>
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            <button class="adm-btn primary sm" data-adm-irl-add>➕ Добавить матч</button>
+            <button class="adm-btn secondary sm" data-adm-irl-autopick title="Запустить фоновый поиск матчей дня сейчас">⚡ Автоподбор</button>
+            ${drafts.length ? `<button class="adm-btn primary sm" data-adm-irl-puball style="background:var(--color-success); border-color:var(--color-success);">✅ Опубликовать все (${drafts.length})</button>` : ''}
+          </div>
+        </div>
+      </div>
+      ${bannerHtml}
+      <div style="display:flex; align-items:center; gap:8px; margin-bottom:12px; overflow-x:auto;">
+        <div class="category-pills" style="margin:0;">
+          ${dayPills}
+        </div>
+        <input type="date" value="${esc(day)}" class="adm-input" data-adm-irl-date style="width:auto; padding:4px 8px; font-size:0.8rem; height:32px;">
+      </div>
+    `;
+
+    if (!matches.length) {
+      body.innerHTML = `
+        ${headHtml}
+        <div class="adm-empty">
+          На ${esc(day)} матчей нет.<br>
+          <button class="adm-btn primary adm-mt" data-adm-irl-add>➕ Добавить матч из списка турниров</button>
+        </div>
+      `;
+      return;
+    }
+
+    const matchesHtml = matches.map(m => this.renderIrlMatchCard(m)).join('');
+    body.innerHTML = headHtml + `<div class="irl-admin-list" style="display:flex; flex-direction:column; gap:12px;">${matchesHtml}</div>`;
+  }
+
+  renderIrlMatchCard(m) {
+    const statusLabels = {
+      draft: '📝 Черновик',
+      open: '🟢 Открыт',
+      closed: '🔒 Закрыт',
+      settled: '✅ Рассчитан',
+      void: '↩️ Аннулирован',
+    };
+    const stBadge = `<span class="adm-badge adm-st-${esc(m.status)}">${esc(statusLabels[m.status] || m.status)}</span>`;
+
+    let resultBanner = '';
+    if (m.status === 'settled') {
+      const resName = m.result === 'home' ? 'П1' : m.result === 'away' ? 'П2' : 'Ничья (X)';
+      const scoreStr = (m.home_goals != null && m.away_goals != null) ? `${m.home_goals} : ${m.away_goals}` : '';
+      resultBanner = `
+        <div style="background: rgba(16, 185, 129, 0.12); border: 1px solid rgba(16, 185, 129, 0.25); border-radius: 8px; padding: 6px 12px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem;">
+          <span>Счёт основного времени: <b>${scoreStr || '—'}</b></span>
+          <span style="font-weight:700; color:var(--color-success);">Победа: ${esc(resName)}</span>
+        </div>`;
+    } else if (m.status === 'void') {
+      resultBanner = `
+        <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.25); border-radius: 8px; padding: 6px 12px; margin-bottom: 10px; color: var(--color-danger); font-size: 0.85rem;">
+          Матч аннулирован (ставки возвращены)${m.void_reason ? `: ${esc(m.void_reason)}` : ''}
+        </div>`;
+    }
+
+    const oddsHome = m.odd_home != null ? Number(m.odd_home).toFixed(2) : '—';
+    const oddsDraw = m.odd_draw != null ? Number(m.odd_draw).toFixed(2) : '—';
+    const oddsAway = m.odd_away != null ? Number(m.odd_away).toFixed(2) : '—';
+
+    let actions = '';
+    if (m.status === 'draft') {
+      actions = `
+        <button class="adm-btn sm primary" data-adm-irl-pub="${m.id}">✅ Опубликовать</button>
+        <button class="adm-btn sm secondary" data-adm-irl-ref="${m.id}" title="Обновить кэфы у букмекера">🔄 Кэфы</button>
+        <button class="adm-btn sm secondary" data-adm-irl-rep="${m.id}" title="Заменить на другой матч">🔁 Заменить</button>
+        <button class="adm-btn sm danger" data-adm-irl-can="${m.id}">🗑 Удалить</button>
+      `;
+    } else if (m.status === 'open' || m.status === 'closed') {
+      actions = `
+        <button class="adm-btn sm primary" data-adm-irl-settle="${m.id}">⚖️ Рассчитать</button>
+        ${m.status === 'open' ? `<button class="adm-btn sm secondary" data-adm-irl-ref="${m.id}" title="Обновить кэфы у букмекера">🔄 Кэфы</button>` : ''}
+        <button class="adm-btn sm danger" data-adm-irl-can="${m.id}">🗑 Отменить (возврат)</button>
+      `;
+    }
+
+    const stats = m.bet_stats || { count: 0, total: 0 };
+    const betsBtn = stats.count > 0
+      ? `<button class="adm-btn sm secondary" data-adm-irl-bets="${m.id}" style="margin-left: 6px;">Показать (${stats.count})</button>`
+      : '';
+
+    return `
+      <div class="adm-card" style="padding: 14px 16px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom: 8px;">
+          <div>
+            <div class="adm-muted">${esc(m.league_name || 'Турнир')} · #${m.id}</div>
+            <div style="font-family:'Outfit',sans-serif; font-weight:800; font-size:1.05rem; color:var(--text-primary); margin: 3px 0;">
+              ${esc(m.home)} — ${esc(m.away)}
+            </div>
+            <div class="adm-muted">🕒 ${esc(shortTime(m.kickoff_at))} МСК</div>
+          </div>
+          <div>${stBadge}</div>
+        </div>
+
+        ${resultBanner}
+
+        <div class="irl-odds" style="margin-bottom: 10px;">
+          <div class="irl-odd locked ${m.status === 'settled' && m.result === 'home' ? 'winner' : ''}">
+            <span class="odd-label">П1</span>
+            <span class="odd-val">${oddsHome}</span>
+          </div>
+          <div class="irl-odd locked ${m.status === 'settled' && m.result === 'draw' ? 'winner' : ''}">
+            <span class="odd-label">X</span>
+            <span class="odd-val">${oddsDraw}</span>
+          </div>
+          <div class="irl-odd locked ${m.status === 'settled' && m.result === 'away' ? 'winner' : ''}">
+            <span class="odd-label">П2</span>
+            <span class="odd-val">${oddsAway}</span>
+          </div>
+        </div>
+
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding-top:8px; border-top:1px solid var(--border-subtle);">
+          <div class="adm-muted" style="display:flex; align-items:center;">
+            Ставок: <b>${stats.count}</b> · На сумму: <b>${coins(stats.total)}</b>
+            ${betsBtn}
+          </div>
+          <div style="display:flex; gap:6px; flex-wrap:wrap;">
+            ${actions}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  async askIrlAdd(replaceId = null) {
+    const day = this.irl?.day || '';
+    this.showModal(this.modalFrame(replaceId ? `Замена матча #${replaceId}` : 'Добавить матч дня', `
+      <div class="adm-empty">Загрузка доступных матчей дня…</div>
+    `));
+
+    try {
+      const res = await this.get(`${PANEL}/irl/candidates`, { day });
+      const candidates = res.candidates || [];
+      if (!candidates.length) {
+        this.showModal(this.modalFrame(replaceId ? `Замена матча #${replaceId}` : 'Добавить матч дня', `
+          <div class="adm-empty">
+            Нет доступных матчей приоритетных лиг на ${esc(day)}.<br>
+            <small class="adm-muted">Матчи могли уже начаться или уже занесены в базу.</small>
+          </div>
+        `));
+        return;
+      }
+
+      const listHtml = candidates.map(c => `
+        <div class="adm-row" style="padding: 10px 12px; display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border-subtle);">
+          <div class="adm-row-main">
+            <div style="font-weight:700; color:var(--text-primary); font-size:0.92rem;">${esc(c.home)} — ${esc(c.away)}</div>
+            <small class="adm-muted">${esc(c.league_name || 'Лига')} · 🕒 ${esc(shortTime(c.kickoff_at))} МСК</small>
+          </div>
+          <button class="adm-btn sm primary" data-adm-irl-pick="${esc(c.fixture_id)}" ${replaceId ? `data-adm-irl-rep-id="${replaceId}"` : ''}>
+            Выбрать
+          </button>
+        </div>
+      `).join('');
+
+      this.showModal(this.modalFrame(replaceId ? `Замена матча #${replaceId}` : 'Добавить матч дня', `
+        <div class="adm-form-desc" style="margin-bottom:8px;">
+          Выберите матч. Коэффициенты 1X2 будут автоматически запрошены у букмекера Pinnacle.
+        </div>
+        <div class="adm-list" style="max-height:360px; overflow-y:auto;">
+          ${listHtml}
+        </div>
+      `));
+    } catch (e) {
+      this.showModal(this.modalFrame('Ошибка', `
+        <div class="adm-empty red">${esc(e.message || 'Не удалось загрузить кандидатов')}</div>
+      `));
+    }
+  }
+
+  async pickIrlCandidate(fixtureId, replaceId = null) {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      this.closeModal();
+      this.toast('Запрашиваем коэффициенты у Pinnacle…');
+      const body = { fixture_id: fixtureId, day: this.irl.day };
+      if (replaceId) body.replace_id = Number(replaceId);
+      const res = await this.post(`${PANEL}/irl/matches`, body);
+      this.toast(`Матч #${res.match_id} добавлен в черновики`);
+      await this.loadIrl();
+    } catch (e) {
+      this.toast(e.message || 'Не удалось добавить матч', true);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  async askIrlSettle(matchId) {
+    const m = (this.irl?.matches || []).find(x => x.id === matchId);
+    if (!m) return;
+    const body = `
+      <form class="adm-form" data-adm-form>
+        <div class="adm-form-desc">
+          <b>${esc(m.home)} — ${esc(m.away)}</b><br>
+          <small class="adm-muted">Укажите исход по счёту 90 минут (основное время).</small>
+        </div>
+        <div class="adm-field" style="margin-bottom:12px;">
+          <span>Исход матча (1X2)</span>
+          <div style="display:flex; gap:8px; margin-top:6px;">
+            <label style="flex:1; display:flex; align-items:center; gap:6px; background:var(--bg-secondary); padding:8px 10px; border-radius:8px; cursor:pointer;">
+              <input type="radio" name="result" value="home" required checked>
+              <span>П1 (${esc(m.home)})</span>
+            </label>
+            <label style="flex:1; display:flex; align-items:center; gap:6px; background:var(--bg-secondary); padding:8px 10px; border-radius:8px; cursor:pointer;">
+              <input type="radio" name="result" value="draw">
+              <span>Ничья (X)</span>
+            </label>
+            <label style="flex:1; display:flex; align-items:center; gap:6px; background:var(--bg-secondary); padding:8px 10px; border-radius:8px; cursor:pointer;">
+              <input type="radio" name="result" value="away">
+              <span>П2 (${esc(m.away)})</span>
+            </label>
+          </div>
+        </div>
+        <div style="display:flex; gap:12px; margin-bottom:12px;">
+          <label class="adm-field" style="flex:1;">
+            <span>Голы ${esc(m.home)}</span>
+            <input class="adm-input" name="home_goals" type="number" min="0" max="99" placeholder="0">
+          </label>
+          <label class="adm-field" style="flex:1;">
+            <span>Голы ${esc(m.away)}</span>
+            <input class="adm-input" name="away_goals" type="number" min="0" max="99" placeholder="0">
+          </label>
+        </div>
+        <div class="adm-form-error"></div>
+        <button type="submit" class="adm-btn wide primary">Подтвердить расчёт и выплатить</button>
+      </form>
+    `;
+
+    this.showModal(this.modalFrame(`Рассчитать матч #${m.id}`, body));
+    this._modalSubmit = async (values) => {
+      const payload = {
+        result: values.result,
+        home_goals: values.home_goals !== '' ? Number(values.home_goals) : null,
+        away_goals: values.away_goals !== '' ? Number(values.away_goals) : null,
+      };
+      const res = await this.post(`${PANEL}/irl/matches/${m.id}/settle`, payload);
+      this.toast(`Матч #${m.id} рассчитан. Выплачено ${coins(res.info?.paid || 0)}`);
+      await this.loadIrl();
+    };
+  }
+
+  async askIrlCancel(matchId) {
+    const m = (this.irl?.matches || []).find(x => x.id === matchId);
+    if (!m) return;
+    const stats = m.bet_stats || { count: 0, total: 0 };
+    const isDraft = m.status === 'draft';
+    const desc = isDraft
+      ? `Удалить черновик матча #${m.id} (${esc(m.home)} — ${esc(m.away)})?`
+      : `Матч #${m.id} (${esc(m.home)} — ${esc(m.away)}) будет аннулирован. Ставок: ${stats.count} на сумму ${coins(stats.total)}. Все ставки будут возвращены игрокам в полном объёме.`;
+
+    this.openForm({
+      title: isDraft ? 'Удалить черновик' : 'Аннулировать матч',
+      desc,
+      fields: isDraft ? [] : [
+        { name: 'reason', label: 'Причина аннулирования', type: 'text', value: 'Отменён администратором' },
+      ],
+      submitLabel: isDraft ? 'Удалить' : 'Аннулировать и вернуть ставки',
+      danger: true,
+      onSubmit: async (values) => {
+        const res = await this.post(`${PANEL}/irl/matches/${m.id}/cancel`, {
+          reason: values.reason || 'Отменён админом',
+        });
+        this.toast(isDraft ? 'Черновик удалён' : `Матч аннулирован, возвращено ставок: ${res.refunded || 0}`);
+        await this.loadIrl();
+      },
+    });
+  }
+
+  async askIrlBets(matchId) {
+    this.showModal(this.modalFrame(`Ставки на матч #${matchId}`, `
+      <div class="adm-empty">Загрузка ставок…</div>
+    `));
+    try {
+      const res = await this.get(`${PANEL}/irl/matches/${matchId}/bets`);
+      const bets = res.bets || [];
+      const m = res.match || {};
+      if (!bets.length) {
+        this.showModal(this.modalFrame(`Ставки #${matchId}`, `
+          <div class="adm-empty">На этот матч пока нет ставок.</div>
+        `));
+        return;
+      }
+
+      const outcomeLabels = { home: `П1 (${m.home || 'Хозяева'})`, draw: 'Ничья (X)', away: `П2 (${m.away || 'Гости'})` };
+      const statusLabels = { pending: 'В игре', won: 'Выигрыш', lost: 'Проигрыш', refunded: 'Возврат' };
+      const rows = bets.map(b => `
+        <div class="adm-row" style="padding: 10px 12px; border-bottom:1px solid var(--border-subtle); display:flex; justify-content:space-between; align-items:center;">
+          <div>
+            <div style="font-weight:700; color:var(--text-primary); font-size:0.9rem;">
+              ${b.username ? `@${esc(b.username)}` : `ID ${b.user_id}`}
+            </div>
+            <small class="adm-muted">
+              ${esc(outcomeLabels[b.outcome] || b.outcome)} @ ${odd(b.odd)} · ${esc(shortTime(b.created_at))}
+            </small>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-weight:700;">${coins(b.amount)}</div>
+            <div>
+              <span class="adm-badge adm-st-${esc(b.status)}" style="font-size:0.68rem;">
+                ${esc(statusLabels[b.status] || b.status)}
+              </span>
+              ${b.actual_payout ? `<small class="green" style="font-weight:700; margin-left:4px;">+${coins(b.actual_payout)}</small>` : ''}
+            </div>
+          </div>
+        </div>
+      `).join('');
+
+      this.showModal(this.modalFrame(`Ставки на #${m.id} (${bets.length})`, `
+        <div class="adm-form-desc" style="margin-bottom:6px;">
+          <b>${esc(m.home)} — ${esc(m.away)}</b>
+        </div>
+        <div class="adm-list" style="max-height:380px; overflow-y:auto;">
+          ${rows}
+        </div>
+      `));
+    } catch (e) {
+      this.showModal(this.modalFrame('Ошибка', `
+        <div class="adm-empty red">${esc(e.message || 'Не удалось загрузить ставки')}</div>
+      `));
+    }
+  }
+
+  async publishIrlMatch(matchId) {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      await this.post(`${PANEL}/irl/matches/${matchId}/publish`);
+      this.toast(`Матч #${matchId} опубликован`);
+      await this.loadIrl();
+    } catch (e) {
+      this.toast(e.message || 'Не удалось опубликовать матч', true);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  async publishAllIrl() {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      const res = await this.post(`${PANEL}/irl/matches/publish-all`, { day: this.irl?.day });
+      this.toast(`Опубликовано матчей: ${res.published || 0}`);
+      await this.loadIrl();
+    } catch (e) {
+      this.toast(e.message || 'Не удалось опубликовать матчи', true);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  async refreshIrlOdds(matchId) {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      this.toast('Обновляем коэффициенты…');
+      const res = await this.post(`${PANEL}/irl/matches/${matchId}/refresh-odds`);
+      const o = res.odds || {};
+      this.toast(`Кэфы обновлены: П1 ${odd(o.home)} · Х ${odd(o.draw)} · П2 ${odd(o.away)}`);
+      await this.loadIrl();
+    } catch (e) {
+      this.toast(e.message || 'Не удалось обновить коэффициенты', true);
+    } finally {
+      this.busy = false;
+    }
+  }
+
+  async runIrlAutoPick() {
+    if (this.busy) return;
+    this.busy = true;
+    try {
+      this.toast('Запущен автоподбор дня…');
+      const res = await this.post(`${PANEL}/irl/run-pick`);
+      const p = res.report?.picked || 0;
+      this.toast(p > 0 ? `Подобрано матчей: ${p}` : (res.report?.note || 'Матчи не добавлены'));
+      await this.loadIrl();
+    } catch (e) {
+      this.toast(e.message || 'Сбой автоподбора', true);
     } finally {
       this.busy = false;
     }
@@ -2166,6 +2596,11 @@ export class AdminPanel {
       e.preventDefault();
       this.submitForm(form);
     });
+    this.root.addEventListener('change', (e) => {
+      if (e.target.dataset && 'admIrlDate' in e.target.dataset) {
+        if (e.target.value) this.loadIrl(e.target.value);
+      }
+    });
     this.root.addEventListener('input', (e) => {
       if (e.target.id === 'adm-market-search') {
         this.debounce(() => { this.markets.q = e.target.value.trim(); this.reloadList('markets'); });
@@ -2203,7 +2638,29 @@ export class AdminPanel {
     const t = (sel) => e.target.closest(sel);
     let el;
 
-    if ((el = t('[data-adm-tab]'))) {
+    if ((el = t('[data-adm-irl-day]'))) {
+      this.loadIrl(el.dataset.admIrlDay);
+    } else if (t('[data-adm-irl-add]')) {
+      this.askIrlAdd();
+    } else if ((el = t('[data-adm-irl-rep]'))) {
+      this.askIrlAdd(Number(el.dataset.admIrlRep));
+    } else if ((el = t('[data-adm-irl-pick]'))) {
+      this.pickIrlCandidate(el.dataset.admIrlPick, el.dataset.admIrlRepId);
+    } else if ((el = t('[data-adm-irl-pub]'))) {
+      this.publishIrlMatch(Number(el.dataset.admIrlPub));
+    } else if (t('[data-adm-irl-puball]')) {
+      this.publishAllIrl();
+    } else if ((el = t('[data-adm-irl-can]'))) {
+      this.askIrlCancel(Number(el.dataset.admIrlCan));
+    } else if ((el = t('[data-adm-irl-settle]'))) {
+      this.askIrlSettle(Number(el.dataset.admIrlSettle));
+    } else if ((el = t('[data-adm-irl-ref]'))) {
+      this.refreshIrlOdds(Number(el.dataset.admIrlRef));
+    } else if ((el = t('[data-adm-irl-bets]'))) {
+      this.askIrlBets(Number(el.dataset.admIrlBets));
+    } else if (t('[data-adm-irl-autopick]')) {
+      this.runIrlAutoPick();
+    } else if ((el = t('[data-adm-tab]'))) {
       this.tab = el.dataset.admTab;
       this.root.querySelectorAll('[data-adm-tab]').forEach(b => b.classList.toggle('active', b === el));
       el.scrollIntoView({ block: 'nearest', inline: 'nearest', behavior: 'smooth' });
