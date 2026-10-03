@@ -25,7 +25,7 @@ from telegram.ext import ContextTypes, filters
 
 from services import admin_journal
 from time_utils import MSK_LABEL, fmt_msk
-from transfers import approval, notify, repo, requests as req_mod, service, squad
+from transfers import approval, notify, repo, requests as req_mod, sanctions, service, squad
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -178,7 +178,7 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
         rows = [[_btn("➕ Создать окно", "tw:create")]]
         if _approved_items(latest):
             rows.append([_btn("📋 Одобренные заявки", "tw:appr:0")])
-        rows.append([_btn("🧵 Темы группы", "tw:topics")])
+        rows.append([_btn("🧵 Темы группы", "tw:topics"), _btn("⛔ Санкции", "tw:sanc")])
         return "\n".join(lines), InlineKeyboardMarkup(rows)
 
     info = service.overview(window["id"])
@@ -209,6 +209,7 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
         rows.append([_btn(f"📋 Одобренные заявки ({unapplied} без состава)" if unapplied
                           else "📋 Одобренные заявки", "tw:appr:0")])
     rows.append([_btn("🧵 Темы группы", "tw:topics"), _btn("📋 Правила окна", "tw:settings")])
+    rows.append([_btn("⛔ Санкции", "tw:sanc")])
     if status == "open" and info["snapshot"] < info["clubs"]:
         rows.append([_btn("📸 Дописать снимок составов", "tw:snap")])
     rows.append([_btn("🔒 Закрыть окно", "tw:close"), _btn("🔄", "tw:hub")])
@@ -1226,13 +1227,200 @@ async def cb_squad_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _show(update, head + "\n\n" + text, kb)
 
 
+# ─── Санкции ─────────────────────────────────────────────────────────────────
+
+SANCTION_SEASON_CHOICES = tuple(range(sanctions.MIN_SEASONS, sanctions.MAX_SEASONS + 1))
+SANCTION_PAST_SHOWN = 5
+
+# draft_id -> {"club_name": str|None, "user_id": int|None, "label": str, "expires": float}
+_sanction_drafts: dict[str, dict] = {}
+
+
+def _save_sanction_draft(club_name: str | None, user_id: int | None, label: str) -> str:
+    draft_id = uuid.uuid4().hex[:10]
+    _sanction_drafts[draft_id] = {"club_name": club_name, "user_id": user_id, "label": label,
+                                  "expires": time.monotonic() + 1800}
+    return draft_id
+
+
+def _get_sanction_draft(draft_id: str) -> dict | None:
+    entry = _sanction_drafts.get(draft_id)
+    if entry and entry["expires"] < time.monotonic():
+        _sanction_drafts.pop(draft_id, None)
+        return None
+    return entry
+
+
+def _sanction_line(s: dict, names: dict[int, str]) -> str:
+    reason = f" — {html.escape(s['reason'])}" if s.get("reason") else ""
+    return f"{html.escape(sanctions.subject_label(s))}: {html.escape(sanctions.span_label(s, names))}{reason}"
+
+
+def _sanctions_view() -> tuple[str, InlineKeyboardMarkup]:
+    data = sanctions.overview()
+    shown_past = data["past"][:SANCTION_PAST_SHOWN]
+    names = repo.season_names(
+        [i for s in data["active"] + shown_past for i in (s["from_season_id"], s["until_season_id"])])
+    lines = ["⛔ <b>Санкции трансферного окна</b>",
+             "Клуб или тренер под санкцией не подаёт заявки и не докупает слоты.", ""]
+    kb: list[list[InlineKeyboardButton]] = []
+    if data["active"]:
+        lines.append("<b>Действуют:</b>")
+        for s in data["active"]:
+            lines.append("• " + _sanction_line(s, names))
+            kb.append([_btn(f"🔓 Снять: {sanctions.subject_label(s)}", f"tw:sl:{s['id']}")])
+    else:
+        lines.append("Действующих санкций нет.")
+    if shown_past:
+        lines += ["", "<b>Снятые и истёкшие:</b>"]
+        for s in shown_past:
+            mark = "снята" if s["lifted_at"] else "истекла"
+            lines.append(f"• {_sanction_line(s, names)} ({mark})")
+    kb.append([_btn("➕ На клуб", "tw:sadd:club"), _btn("➕ На тренера", "tw:sadd:coach")])
+    kb.append(_back())
+    return "\n".join(lines), InlineKeyboardMarkup(kb)
+
+
+async def cb_sanctions(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    text, kb = await asyncio.to_thread(_sanctions_view)
+    await _show(update, text, kb)
+
+
+async def cb_sanction_add(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    target = update.callback_query.data.rsplit(":", 1)[1]
+    _set_pending(update.effective_user.id, "sanc_target", target=target)
+    ask = ("Пришлите название клуба: <code>Челси</code>." if target == "club"
+           else "Пришлите тренера: <code>@username</code> или Telegram ID.")
+    await _show(update, f"⛔ <b>Санкция на {'клуб' if target == 'club' else 'тренера'}</b>\n\n{ask}",
+                InlineKeyboardMarkup([_back("tw:sanc", "✖️ Отмена")]))
+
+
+async def _input_sanction_target(update: Update, entry: dict, text: str) -> None:
+    if entry["target"] == "club":
+        club = await asyncio.to_thread(sanctions.find_club, text)
+        draft_id = _save_sanction_draft(club, None, f"клуб {club}")
+        who = f"клуб <b>{html.escape(club)}</b>"
+    else:
+        coach = await asyncio.to_thread(sanctions.find_coach, text)
+        name = f"@{coach['username']}" if coach["username"] else str(coach["user_id"])
+        draft_id = _save_sanction_draft(None, coach["user_id"], f"тренер {name}")
+        club = f" ({html.escape(coach['club'])})" if coach["club"] else ""
+        who = f"тренер <b>{html.escape(name)}</b>{club}"
+    kb = [[_btn(f"{n} {'сезон' if n == 1 else 'сезона' if n < 5 else 'сезонов'}", f"tw:sn:{draft_id}:{n}")
+           for n in SANCTION_SEASON_CHOICES],
+          _back("tw:sanc", "✖️ Отмена")]
+    await update.effective_message.reply_text(
+        f"⛔ Санкция: {who}.\n\nНа сколько сезонов, считая текущий?",
+        reply_markup=InlineKeyboardMarkup(kb), parse_mode="HTML")
+
+
+async def cb_sanction_seasons(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    _, _, draft_id, seasons_s = update.callback_query.data.split(":")
+    draft = _get_sanction_draft(draft_id)
+    if draft is None:
+        await _show(update, "Черновик санкции устарел — начните заново.",
+                    InlineKeyboardMarkup([_back("tw:sanc")]))
+        return
+    _set_pending(update.effective_user.id, "sanc_reason", draft_id=draft_id, seasons=int(seasons_s))
+    await _show(update, f"⛔ {html.escape(draft['label'])}, на {seasons_s} сез.\n\n"
+                        "Пришлите причину одним сообщением или пропустите её.",
+                InlineKeyboardMarkup([[_btn("Без причины", f"tw:snr:{draft_id}:{seasons_s}")],
+                                      _back("tw:sanc", "✖️ Отмена")]))
+
+
+async def _finish_sanction(bot, actor_id: int, draft_id: str, seasons: int, reason: str | None) -> str:
+    draft = _get_sanction_draft(draft_id)
+    if draft is None:
+        raise service.InputError("Черновик санкции устарел — начните заново.")
+    sanction = await asyncio.to_thread(
+        lambda: sanctions.add(actor_id, club_name=draft["club_name"], user_id=draft["user_id"],
+                              seasons=seasons, reason=reason))
+    _sanction_drafts.pop(draft_id, None)
+    await admin_journal.record(
+        actor_id, "transfer_sanction_added", "transfer_sanction", sanction["id"],
+        new={"club": sanction["club_name"], "user_id": sanction["user_id"],
+             "from_season": sanction["from_season_id"], "until_season": sanction["until_season_id"]},
+        reason=reason)
+    recipients = await asyncio.to_thread(sanctions.coaches_to_notify, sanction)
+    names = await asyncio.to_thread(
+        repo.season_names, [sanction["from_season_id"], sanction["until_season_id"]])
+    subject, span = sanctions.subject_label(sanction), sanctions.span_label(sanction, names)
+    delivered = await notify.notify_sanction(bot, sanction, recipients, subject=subject, span=span)
+    note = f"Уведомлено в ЛС: {delivered} из {len(recipients)}." if recipients else "Тренеров для уведомления нет."
+    return f"✅ Санкция поставлена: {html.escape(subject)}, {html.escape(span)}.\n{note}"
+
+
+async def cb_sanction_no_reason(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    _, _, draft_id, seasons_s = update.callback_query.data.split(":")
+    try:
+        head = await _finish_sanction(context.bot, update.effective_user.id, draft_id, int(seasons_s), None)
+    except service.InputError as exc:
+        head = f"⚠️ {exc}"
+    text, kb = await asyncio.to_thread(_sanctions_view)
+    await _show(update, head + "\n\n" + text, kb)
+
+
+async def _input_sanction_reason(update: Update, context: ContextTypes.DEFAULT_TYPE, entry: dict, text: str) -> None:
+    head = await _finish_sanction(context.bot, update.effective_user.id, entry["draft_id"],
+                                  entry["seasons"], text)
+    view, kb = await asyncio.to_thread(_sanctions_view)
+    await update.effective_message.reply_text(head + "\n\n" + view, reply_markup=kb, parse_mode="HTML")
+
+
+async def cb_sanction_lift_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    sanction_id = int(update.callback_query.data.rsplit(":", 1)[1])
+    sanction = await asyncio.to_thread(repo.get_sanction, sanction_id)
+    if sanction is None or sanction["lifted_at"]:
+        text, kb = await asyncio.to_thread(_sanctions_view)
+        await _show(update, "Эта санкция уже снята.\n\n" + text, kb)
+        return
+    names = await asyncio.to_thread(
+        repo.season_names, [sanction["from_season_id"], sanction["until_season_id"]])
+    await _show(update, f"🔓 <b>Снять санкцию?</b>\n\n{_sanction_line(sanction, names)}",
+                InlineKeyboardMarkup([[_btn("✅ Снять", f"tw:sly:{sanction_id}"), _btn("✖️ Нет", "tw:sanc")]]))
+
+
+async def cb_sanction_lift_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    actor = update.effective_user.id
+    sanction_id = int(update.callback_query.data.rsplit(":", 1)[1])
+    try:
+        sanction = await asyncio.to_thread(sanctions.lift, sanction_id, actor)
+    except service.InputError as exc:
+        head = f"⚠️ {exc}"
+    else:
+        await admin_journal.record(
+            actor, "transfer_sanction_lifted", "transfer_sanction", sanction_id,
+            old={"club": sanction["club_name"], "user_id": sanction["user_id"],
+                 "until_season": sanction["until_season_id"]})
+        recipients = await asyncio.to_thread(sanctions.coaches_to_notify, sanction)
+        subject = sanctions.subject_label(sanction)
+        delivered = await notify.notify_sanction(context.bot, sanction, recipients, subject=subject,
+                                                 span="", lifted=True)
+        head = f"✅ Санкция снята: {html.escape(subject)}. Уведомлено в ЛС: {delivered} из {len(recipients)}."
+    text, kb = await asyncio.to_thread(_sanctions_view)
+    await _show(update, head + "\n\n" + text, kb)
+
+
 # ─── Ввод значения ───────────────────────────────────────────────────────────
 
 def _cancel_target(entry: dict) -> str:
     """Экран, с которого панель спросила значение."""
     if entry["kind"] == "budget":
         return f"tw:budgets:{entry['page']}"
-    return {"autoclose": "tw:auto", "topic": "tw:topics"}.get(entry["kind"], "tw:hub")
+    return {"autoclose": "tw:auto", "topic": "tw:topics", "sanc_target": "tw:sanc",
+            "sanc_reason": "tw:sanc"}.get(entry["kind"], "tw:hub")
 
 
 async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1266,6 +1454,10 @@ async def on_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             await _input_autoclose(update, entry, text)
         elif entry["kind"] == "topic":
             await _input_topic(update, context, entry, text)
+        elif entry["kind"] == "sanc_target":
+            await _input_sanction_target(update, entry, text)
+        elif entry["kind"] == "sanc_reason":
+            await _input_sanction_reason(update, context, entry, text)
         elif entry["kind"] == "fa_edit":
             old_entry = _get_fa_draft(entry["draft_id"])
             if not old_entry:
@@ -1311,6 +1503,14 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_topics, pattern=r"^tw:topics$"))
     app.add_handler(CallbackQueryHandler(cb_topic, pattern=r"^tw:topic:[a-z]+$"))
     app.add_handler(CallbackQueryHandler(cb_settings, pattern=r"^tw:settings$"))
+
+    # Санкции
+    app.add_handler(CallbackQueryHandler(cb_sanctions, pattern=r"^tw:sanc$"))
+    app.add_handler(CallbackQueryHandler(cb_sanction_add, pattern=r"^tw:sadd:(club|coach)$"))
+    app.add_handler(CallbackQueryHandler(cb_sanction_seasons, pattern=r"^tw:sn:[a-f0-9]+:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_sanction_no_reason, pattern=r"^tw:snr:[a-f0-9]+:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_sanction_lift_ask, pattern=r"^tw:sl:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_sanction_lift_yes, pattern=r"^tw:sly:\d+$"))
 
     # Решение по заявке
     app.add_handler(CallbackQueryHandler(cb_approve, pattern=r"^tw:ap:\d+$"))

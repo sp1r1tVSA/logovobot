@@ -23,7 +23,7 @@ import database
 from club_registry import resolve_team_name
 from time_utils import DT_FORMAT, parse_msk
 from transfers import config as tcfg
-from transfers import repo, service
+from transfers import repo, sanctions, service
 from transfers.engine import (
     ACTIVE_STATUSES,
     PENDING_STATUSES,
@@ -433,7 +433,8 @@ def my_status(user_id: int) -> dict:
     if window is None:
         latest = repo.get_latest_window()
         return {"window": None, "latest": _window_info(latest) if latest else None, "club": club,
-                "ledger": None, "requests": [], "rules": None}
+                "ledger": None, "requests": [], "rules": None,
+                "sanction": sanctions.for_user(user_id, club)}
     settings = WindowSettings.from_row(window)
     ledger = None
     if club:
@@ -448,7 +449,8 @@ def my_status(user_id: int) -> dict:
     own = [t for t in repo.list_transfers(window["id"]) if _involves(t, int(user_id), club)]
     own.sort(key=lambda t: t["id"], reverse=True)
     return {"window": _window_info(window), "club": club, "ledger": ledger,
-            "requests": [serialize(t, user_id, private=True) for t in own], "rules": _rules(settings)}
+            "requests": [serialize(t, user_id, private=True) for t in own], "rules": _rules(settings),
+            "sanction": sanctions.for_user(user_id, club)}
 
 
 def urn_items(user_id: int) -> dict:
@@ -472,14 +474,42 @@ def urn_items(user_id: int) -> dict:
             "can_buy": window["status"] == "open" and bool(club)}
 
 
-def history(limit: int = HISTORY_LIMIT) -> dict:
-    """Одобренные заявки текущего (или последнего) окна, свежие сверху."""
-    window = repo.get_active_window() or repo.get_latest_window()
+def _history_window(window_id: int | None) -> dict | None:
+    """Окно истории: запрошенное, а нет такого или не задано — текущее либо последнее."""
+    if window_id:
+        window = repo.get_window(int(window_id))
+        if window is not None:
+            return window
+    return repo.get_active_window() or repo.get_latest_window()
+
+
+def history(user_id: int | None = None, *, window_id: int | None = None, mine: bool = False,
+            club: str | None = None, limit: int = HISTORY_LIMIT) -> dict:
+    """История окна, свежие сверху.
+
+    По умолчанию — одобренные заявки текущего (или последнего) окна, публично. `window_id` —
+    другое окно из списка `windows`. `mine` — все заявки зрителя и его клуба в любом статусе,
+    с причинами отказа. `club` — только заявки, где клуб продавец или покупатель.
+    """
+    windows = [_window_info(w) for w in repo.list_windows()]
+    window = _history_window(window_id)
     if window is None:
-        return {"window": None, "items": []}
-    approved = repo.list_transfers(window["id"], statuses=("approved",))
-    approved.sort(key=lambda t: (t["decided_at"] or "", t["id"]), reverse=True)
-    return {"window": _window_info(window), "items": [serialize(t) for t in approved[:limit]]}
+        return {"window": None, "windows": windows, "items": [], "clubs": [], "mine": False, "club": None}
+    viewer_club = _coach_club_or_none(user_id)
+    mine = bool(mine) and user_id is not None
+    if mine:
+        pool = [t for t in repo.list_transfers(window["id"]) if _involves(t, int(user_id), viewer_club)]
+    else:
+        pool = repo.list_transfers(window["id"], statuses=("approved",))
+    clubs = sorted({c for t in pool for c in (t["from_club"], t["to_club"])
+                    if c and norm_club(c) != norm_club(URN_CLUB)}, key=str.lower)
+    wanted = (club or "").strip()
+    if wanted:
+        pool = [t for t in pool if _same_club(t["from_club"], wanted) or _same_club(t["to_club"], wanted)]
+    pool.sort(key=lambda t: (t["decided_at"] or t["created_at"] or "", t["id"]), reverse=True)
+    items = [serialize(t, user_id, private=True) if mine else serialize(t) for t in pool[:limit]]
+    return {"window": _window_info(window), "windows": windows, "items": items, "clubs": clubs,
+            "mine": mine, "club": wanted or None}
 
 
 def photo_file_id(user_id: int, transfer_id) -> str | None:

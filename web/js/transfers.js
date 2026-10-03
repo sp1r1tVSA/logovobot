@@ -137,7 +137,7 @@ class TransfersView {
       }
     }
 
-    const { window: win, club, ledger, requests, rules } = this.statusData;
+    const { window: win, club, ledger, requests, rules, sanction } = this.statusData;
 
     let winHtml = '';
     if (!win) {
@@ -169,6 +169,21 @@ class TransfersView {
               <span class="req-ovr-tag">OVR cap: ${rules.ovr_cap}</span>
               <span class="req-ovr-tag">Ядро состава: ${rules.min_core_players}+</span>
             </div>` : ''}
+        </div>`;
+    }
+
+    let sanctionHtml = '';
+    if (sanction) {
+      const who = sanction.scope === 'coach' ? 'Вы лишены трансферного окна' : `Клуб ${escapeHtml(sanction.club || club || '')} лишён трансферного окна`;
+      const left = sanction.seasons_left;
+      const leftWord = left === 1 ? 'сезон' : (left > 1 && left < 5 ? 'сезона' : 'сезонов');
+      sanctionHtml = `
+        <div class="transfers-card sanction-banner">
+          <div class="sanction-banner-title">⛔ ${who}</div>
+          <div class="sanction-banner-text">
+            Заявки и докупка слотов недоступны. Осталось: <b>${left} ${leftWord}</b>, считая текущий.
+            ${sanction.reason ? `<br>Причина: ${escapeHtml(sanction.reason)}` : ''}
+          </div>
         </div>`;
     }
 
@@ -243,7 +258,7 @@ class TransfersView {
         ${ownRequests.length === 0 ? '<div class="transfers-empty"><div class="transfers-empty-icon">📭</div><div>Заявок пока нет</div></div>' : ownRequests.map(r => this.renderRequestItem(r)).join('')}
       </div>`;
 
-    container.innerHTML = winHtml + clubHtml + incomingHtml + ownHtml;
+    container.innerHTML = winHtml + sanctionHtml + clubHtml + incomingHtml + ownHtml;
     this.bindActionButtons(container);
   }
 
@@ -679,6 +694,7 @@ class TransfersView {
   // ─── 4. Вкладка «История» ──────────────────────────────────────────────────
 
   async loadHistory(container, force = false) {
+    const filters = this.historyFilters || (this.historyFilters = { windowId: null, mine: false, club: '' });
     if (!this.historyData || force) {
       container.innerHTML = `
         <div class="transfers-empty">
@@ -686,7 +702,7 @@ class TransfersView {
           <div>Загрузка истории...</div>
         </div>`;
       try {
-        const res = await api.getTransferHistory();
+        const res = await api.getTransferHistory(filters);
         if (res.status === 'ok') {
           this.historyData = res.data;
         } else {
@@ -699,57 +715,119 @@ class TransfersView {
       }
     }
 
-    const items = this.historyData.items || [];
+    const data = this.historyData;
+    const items = data.items || [];
+    const windows = data.windows || [];
+    const clubs = data.clubs || [];
+    const currentId = data.window ? data.window.id : null;
+
+    const windowOptions = windows.map(w => {
+      const label = w.title ? w.title : `Окно #${w.id}`;
+      return `<option value="${w.id}" ${w.id === currentId ? 'selected' : ''}>${escapeHtml(label)}</option>`;
+    }).join('');
+    const clubOptions = ['<option value="">Все клубы</option>'].concat(clubs.map(c =>
+      `<option value="${escapeHtml(c)}" ${c === data.club ? 'selected' : ''}>${escapeHtml(c)}</option>`)).join('');
+
+    const toolbar = `
+      <div class="history-toolbar">
+        <div class="history-scope">
+          <button class="transfers-tab-btn ${data.mine ? '' : 'active'}" data-mine="0" type="button">Все</button>
+          <button class="transfers-tab-btn ${data.mine ? 'active' : ''}" data-mine="1" type="button">Мои</button>
+        </div>
+        ${windows.length > 1 ? `<select class="history-select" id="history-window">${windowOptions}</select>` : ''}
+        ${clubs.length > 0 || data.club ? `<select class="history-select" id="history-club">${clubOptions}</select>` : ''}
+      </div>`;
+
+    let body;
     if (items.length === 0) {
-      container.innerHTML = `
+      body = `
         <div class="transfers-empty">
           <div class="transfers-empty-icon">📜</div>
           <div style="font-weight: 700; color: #fff; margin-bottom: 4px;">История пуста</div>
-          <div style="font-size: 0.8rem;">В этом окне ещё нет завершённых трансферов.</div>
+          <div style="font-size: 0.8rem;">${data.mine
+            ? 'В этом окне у вас и вашего клуба нет заявок.'
+            : 'В этом окне ещё нет завершённых трансферов.'}</div>
         </div>`;
-      return;
+    } else {
+      body = `
+        <div style="font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 12px;">
+          ${data.mine ? 'Заявки вашего клуба и ваши' : 'Одобренные трансферы лиги'} (${items.length}):
+        </div>
+        ${items.map(it => this.renderHistoryItem(it, data.mine)).join('')}`;
     }
 
-    container.innerHTML = `
-      <div style="font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 12px;">
-        Одобренные трансферы лиги в текущем окне (${items.length}):
-      </div>
-      ${items.map(it => {
-        const kindLabel = {
-          deal: '🤝 Сделка',
-          surcharge: '⚡ Доплата',
-          urn_sale: '🗑 Продажа в урну',
-          urn_buy: '🛍 Выкуп из урны',
-          free_agent: '🏃 СА',
-        }[it.kind] || it.kind;
+    container.innerHTML = toolbar + body;
 
-        return `
-          <div class="req-item">
-            <div class="req-item-head">
-              <span class="req-item-title">
-                ${kindLabel}: <b>${escapeHtml(it.player_name)}</b>
-                ${it.ovr ? `<span class="req-ovr-tag">OVR ${it.ovr}</span>` : ''}
-              </span>
-              <span class="window-status-badge badge-open">Одобрен</span>
-            </div>
-            <div class="req-route">
-              ${it.from_club ? `Откуда: <b>${escapeHtml(it.from_club)}</b> ` : ''}
-              ${it.to_club ? `→ Куда: <b>${escapeHtml(it.to_club)}</b>` : ''}
-            </div>
-            <div class="req-footer">
-              <div class="req-price">${it.price}</div>
-              ${it.has_photo ? `<button class="btn-withdraw btn-view-photo" data-id="${it.id}" type="button">📸 Фото</button>` : ''}
-            </div>
-          </div>
-        `;
-      }).join('')}
-    `;
-
+    container.querySelectorAll('.history-scope [data-mine]').forEach(btn => {
+      btn.addEventListener('click', () => {
+        filters.mine = btn.dataset.mine === '1';
+        filters.club = '';
+        this.loadHistory(container, true);
+      });
+    });
+    const windowSel = container.querySelector('#history-window');
+    if (windowSel) {
+      windowSel.addEventListener('change', () => {
+        filters.windowId = Number(windowSel.value) || null;
+        filters.club = '';
+        this.loadHistory(container, true);
+      });
+    }
+    const clubSel = container.querySelector('#history-club');
+    if (clubSel) {
+      clubSel.addEventListener('change', () => {
+        filters.club = clubSel.value;
+        this.loadHistory(container, true);
+      });
+    }
     container.querySelectorAll('.btn-view-photo').forEach(btn => {
       btn.addEventListener('click', () => {
         this.openPhotoModal(btn.dataset.id);
       });
     });
+  }
+
+  renderHistoryItem(it, mine) {
+    const kindLabel = {
+      deal: '🤝 Сделка',
+      surcharge: '⚡ Доплата',
+      urn_sale: '🗑 Продажа в урну',
+      urn_buy: '🛍 Выкуп из урны',
+      free_agent: '🏃 СА',
+    }[it.kind] || it.kind;
+    const statusMap = {
+      pending_counterparty: { label: 'Ждёт стороны', cls: 'badge-draft' },
+      pending_manager: { label: 'На рассмотрении', cls: 'badge-draft' },
+      approved: { label: 'Одобрен', cls: 'badge-open' },
+      rejected: { label: 'Отклонён', cls: 'badge-closed' },
+      withdrawn: { label: 'Отозван', cls: 'badge-closed' },
+      cancelled: { label: 'Отменён', cls: 'badge-closed' },
+    };
+    const st = mine ? (statusMap[it.status] || { label: it.status, cls: 'badge-closed' }) : statusMap.approved;
+
+    return `
+      <div class="req-item">
+        <div class="req-item-head">
+          <span class="req-item-title">
+            ${kindLabel}: <b>${escapeHtml(it.player_name)}</b>
+            ${it.ovr ? `<span class="req-ovr-tag">OVR ${it.ovr}</span>` : ''}
+          </span>
+          <span class="window-status-badge ${st.cls}">${st.label}</span>
+        </div>
+        <div class="req-route">
+          ${it.from_club ? `Откуда: <b>${escapeHtml(it.from_club)}</b> ` : ''}
+          ${it.to_club ? `→ Куда: <b>${escapeHtml(it.to_club)}</b>` : ''}
+        </div>
+        ${mine && it.decided_reason ? `
+          <div style="font-size: 0.74rem; color: var(--color-danger); margin: 4px 0;">
+            Причина: ${escapeHtml(it.decided_reason)}
+          </div>` : ''}
+        <div class="req-footer">
+          <div class="req-price">${it.price}</div>
+          ${it.has_photo ? `<button class="btn-withdraw btn-view-photo" data-id="${it.id}" type="button">📸 Фото</button>` : ''}
+        </div>
+      </div>
+    `;
   }
 }
 

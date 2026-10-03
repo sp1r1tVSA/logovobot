@@ -487,6 +487,48 @@ def is_sanctioned(season_id: int, club_name: str | None = None, user_id: int | N
     return False
 
 
+def get_sanction(sanction_id: int) -> dict | None:
+    with transaction() as conn:
+        return _row(conn.execute("SELECT * FROM transfer_sanctions WHERE id = ?", (int(sanction_id),)).fetchone())
+
+
+def list_sanctions(*, limit: int = 50) -> list[dict]:
+    """Все санкции, свежие сверху — и действующие, и снятые."""
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM transfer_sanctions ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()]
+
+
+def coaches_of_club(club_name: str) -> list[dict]:
+    """Тренеры клуба: `telegram_id`, `username`. Клуб в `users.team_name` один на тренера."""
+    key = norm_club(club_name)
+    if not key:
+        return []
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT telegram_id, username, team_name FROM users WHERE team_name IS NOT NULL AND TRIM(team_name) != ''"
+        ).fetchall()
+    return [{"telegram_id": r["telegram_id"], "username": r["username"]} for r in rows
+            if norm_club(resolve_team_name(r["team_name"]) or r["team_name"]) == key]
+
+
+def season_names(season_ids: Iterable[int]) -> dict[int, str]:
+    """{id сезона: название} для подписей санкций; неизвестный id в словарь не попадает."""
+    wanted = {int(i) for i in season_ids if i}
+    if not wanted:
+        return {}
+    with transaction() as conn:
+        rows = conn.execute("SELECT id, name FROM seasons").fetchall()
+    return {int(r["id"]): (r["name"] or "").strip() for r in rows if int(r["id"]) in wanted}
+
+
+def list_windows(limit: int = 20) -> list[dict]:
+    """Окна, свежие сверху."""
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT * FROM transfer_windows ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()]
+
+
 # ─── Справочник игроков ──────────────────────────────────────────────────────
 
 def get_player(player_name: str) -> dict | None:

@@ -532,3 +532,41 @@
   font-size: 2rem;
   margin-bottom: 6px;
 }
+
+/* ─── История и санкции ─── */
+.history-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.history-scope {
+  display: flex;
+  gap: 6px;
+}
+.history-select {
+  flex: 1 1 140px;
+  min-width: 0;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid rgba(148, 163, 184, 0.25);
+  background: rgba(255, 255, 255, 0.04);
+  color: #fff;
+  font-size: 0.82rem;
+}
+.sanction-banner {
+  border-left: 3px solid var(--color-danger, #ef4444);
+}
+.sanction-banner-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1rem;
+  font-weight: 800;
+  color: #fff;
+  margin-bottom: 4px;
+}
+.sanction-banner-text {
+  font-size: 0.84rem;
+  color: var(--text-secondary);
+  line-height: 1.4;
+}

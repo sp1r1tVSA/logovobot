@@ -137,7 +137,14 @@ async def handle_get_history(request: web.Request) -> web.Response:
     if err is not None:
         return err
     try:
-        data = req_mod.history()
+        query = request.query
+        window_raw = (query.get("window") or "").strip()
+        data = req_mod.history(
+            user_info["id"],
+            window_id=int(window_raw) if window_raw.isdigit() else None,
+            mine=query.get("mine") == "1",
+            club=(query.get("club") or "").strip()[:80] or None,
+        )
         return web.json_response({"status": "ok", "data": data})
     except Exception as exc:
         logger.exception("transfers: handle_get_history failed")

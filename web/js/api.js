@@ -519,8 +519,13 @@ class ApiClient {
     });
   }
 
-  getTransferHistory() {
-    return this.request('/api/transfers/history');
+  getTransferHistory({ windowId = null, mine = false, club = '' } = {}) {
+    const qs = new URLSearchParams();
+    if (windowId) qs.set('window', String(windowId));
+    if (mine) qs.set('mine', '1');
+    if (club) qs.set('club', club);
+    const tail = qs.toString();
+    return this.request('/api/transfers/history' + (tail ? `?${tail}` : ''));
   }
 
   getTransferUrn() {

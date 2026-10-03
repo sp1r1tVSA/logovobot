@@ -473,3 +473,21 @@ async def notify_cancelled(bot, transfer: dict, lines: list[str]) -> bool:
     await _dm_parties(bot, transfer, f"🛑 <b>Заявка #{transfer['id']} отменена</b> ({kind})\n\n{body}{why}\n\n"
                                      "Бюджет и слоты возвращены.")
     return await post_to_topic(bot, "feed", f"🛑 <b>Отменён трансфер #{transfer['id']}</b> ({kind})\n\n{body}{why}")
+
+
+async def notify_sanction(bot, sanction: dict, recipients: list[int], *, subject: str, span: str,
+                          lifted: bool = False) -> int:
+    """Тренеру (или всем тренерам клуба) в ЛС: санкция поставлена или снята. Сколько ЛС дошло."""
+    if lifted:
+        text = (f"✅ <b>Санкция снята</b>\n\n{html.escape(subject)}: ограничения трансферного окна "
+                "больше нет — заявки снова можно подавать.")
+    else:
+        reason = (sanction.get("reason") or "").strip()
+        why = f"\nПричина: {html.escape(reason)}" if reason else ""
+        text = (f"⛔ <b>Санкция трансферного окна</b>\n\n{html.escape(subject)} лишён окна: "
+                f"{html.escape(span)}.{why}\n\nЗаявки и докупка слотов недоступны до конца срока.")
+    sent = 0
+    for user_id in dict.fromkeys(recipients):
+        if await dm_user(bot, user_id, text):
+            sent += 1
+    return sent

@@ -132,6 +132,8 @@ ACTIONS: dict[str, tuple[str, str]] = {
     "transfer_free_agent_recorded": ("transfers", "Записан свободный агент"),
     "transfer_free_agent_reassigned": ("transfers", "Переписан свободный агент"),
     "transfer_free_agent_rejected": ("transfers", "Отклонён свободный агент"),
+    "transfer_sanction_added": ("transfers", "Поставлена санкция ТО"),
+    "transfer_sanction_lifted": ("transfers", "Снята санкция ТО"),
     "transfer_request_created": ("transfers", "Подана заявка на трансфер"),
     "transfer_request_confirmed": ("transfers", "Подтверждена заявка (сторона)"),
     "transfer_request_declined": ("transfers", "Отклонена заявка (сторона)"),
