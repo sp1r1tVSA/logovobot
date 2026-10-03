@@ -993,6 +993,16 @@ export class AdminPanel {
         <div style="background: rgba(239, 68, 68, 0.1); border: 1px solid rgba(239, 68, 68, 0.25); border-radius: 8px; padding: 6px 12px; margin-bottom: 10px; color: var(--color-danger); font-size: 0.85rem;">
           Матч аннулирован (ставки возвращены)${m.void_reason ? `: ${esc(m.void_reason)}` : ''}
         </div>`;
+    } else if (m.status === 'closed' && (m.home_goals != null || m.away_goals != null)) {
+      const scoreStr = `${m.home_goals ?? 0} : ${m.away_goals ?? 0}`;
+      resultBanner = `
+        <div style="background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); border-radius: 8px; padding: 6px 12px; margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center; font-size: 0.85rem;">
+          <span style="display:flex; align-items:center; gap:6px;">
+            <span style="display:inline-block; width:8px; height:8px; border-radius:50%; background:#ef4444; animation:irl-pulse 1.5s infinite;"></span>
+            <b>Текущий счёт (LIVE):</b>
+          </span>
+          <span style="font-weight:800; font-size:1.1rem; color:#ef4444;">${scoreStr}</span>
+        </div>`;
     }
 
     const oddsHome = m.odd_home != null ? Number(m.odd_home).toFixed(2) : '—';
@@ -1010,6 +1020,7 @@ export class AdminPanel {
     } else if (m.status === 'open' || m.status === 'closed') {
       actions = `
         <button class="adm-btn sm primary" data-adm-irl-settle="${m.id}">⚖️ Рассчитать</button>
+        <button class="adm-btn sm secondary" data-adm-irl-score="${m.id}" title="Обновить текущий счёт матча">🔴 Счёт</button>
         ${m.status === 'open' ? `<button class="adm-btn sm secondary" data-adm-irl-ref="${m.id}" title="Обновить кэфы у букмекера">🔄 Кэфы</button>` : ''}
         <button class="adm-btn sm danger" data-adm-irl-can="${m.id}">🗑 Отменить (возврат)</button>
       `;
@@ -1177,6 +1188,66 @@ export class AdminPanel {
       };
       const res = await this.post(`${PANEL}/irl/matches/${m.id}/settle`, payload);
       this.toast(`Матч #${m.id} рассчитан. Выплачено ${coins(res.info?.paid || 0)}`);
+      await this.loadIrl();
+    };
+  }
+
+  async askIrlScore(matchId) {
+    const m = (this.irl?.matches || []).find(x => x.id === matchId);
+    if (!m) return;
+    const body = `
+      <form class="adm-form" data-adm-form>
+        <div class="adm-form-desc">
+          <b>${esc(m.home)} — ${esc(m.away)}</b><br>
+          <small class="adm-muted">Укажите текущий счёт матча (LIVE) вручную или запросите из API-Sports.</small>
+        </div>
+        <div style="display:flex; gap:12px; margin-bottom:12px;">
+          <label class="adm-field" style="flex:1;">
+            <span>Голы ${esc(m.home)}</span>
+            <input class="adm-input" name="home_goals" type="number" min="0" max="99" value="${m.home_goals != null ? m.home_goals : ''}" placeholder="0">
+          </label>
+          <label class="adm-field" style="flex:1;">
+            <span>Голы ${esc(m.away)}</span>
+            <input class="adm-input" name="away_goals" type="number" min="0" max="99" value="${m.away_goals != null ? m.away_goals : ''}" placeholder="0">
+          </label>
+        </div>
+        <div class="adm-form-error"></div>
+        <div style="display:flex; gap:8px;">
+          <button type="submit" class="adm-btn primary" style="flex:2;">💾 Сохранить счёт</button>
+          <button type="button" class="adm-btn secondary" data-adm-fetch-api="${m.id}" style="flex:1;">🔄 Из API</button>
+        </div>
+      </form>
+    `;
+
+    this.showModal(this.modalFrame(`Счёт матча #${m.id}`, body));
+    const modalEl = this.root.querySelector('.adm-modal-frame');
+    if (modalEl) {
+      const fetchBtn = modalEl.querySelector('[data-adm-fetch-api]');
+      if (fetchBtn) {
+        fetchBtn.addEventListener('click', async () => {
+          try {
+            fetchBtn.disabled = true;
+            fetchBtn.textContent = 'Загрузка…';
+            const res = await this.post(`${PANEL}/irl/matches/${m.id}/score`, { from_api: true });
+            this.toast(`Счёт обновлён из API: ${res.home_goals ?? 0} : ${res.away_goals ?? 0}`);
+            this.closeModal();
+            await this.loadIrl();
+          } catch (e) {
+            this.toast(e.message || 'Ошибка обновления из API', true);
+            fetchBtn.disabled = false;
+            fetchBtn.textContent = '🔄 Из API';
+          }
+        });
+      }
+    }
+
+    this._modalSubmit = async (values) => {
+      const payload = {
+        home_goals: values.home_goals !== '' ? Number(values.home_goals) : null,
+        away_goals: values.away_goals !== '' ? Number(values.away_goals) : null,
+      };
+      const res = await this.post(`${PANEL}/irl/matches/${m.id}/score`, payload);
+      this.toast(`Счёт матча #${m.id} обновлён: ${res.home_goals ?? 0} : ${res.away_goals ?? 0}`);
       await this.loadIrl();
     };
   }
@@ -2654,6 +2725,8 @@ export class AdminPanel {
       this.askIrlCancel(Number(el.dataset.admIrlCan));
     } else if ((el = t('[data-adm-irl-settle]'))) {
       this.askIrlSettle(Number(el.dataset.admIrlSettle));
+    } else if ((el = t('[data-adm-irl-score]'))) {
+      this.askIrlScore(Number(el.dataset.admIrlScore));
     } else if ((el = t('[data-adm-irl-ref]'))) {
       this.refreshIrlOdds(Number(el.dataset.admIrlRef));
     } else if ((el = t('[data-adm-irl-bets]'))) {

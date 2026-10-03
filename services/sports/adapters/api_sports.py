@@ -21,7 +21,7 @@ from datetime import datetime, timezone
 from typing import Any, Optional
 
 import config
-from time_utils import parse_msk
+from time_utils import now_msk, parse_msk
 from services.sports.adapters.base import SportsDataProvider
 from services.sports.cache import ProviderCache
 from services.sports.circuit import ProviderCircuitBreaker
@@ -66,6 +66,8 @@ class APISportsProvider(SportsDataProvider):
         self.circuit_breaker = ProviderCircuitBreaker(max_failures=5, cooldown_seconds=60.0)
         self.cache = ProviderCache(default_ttl_seconds=getattr(config, "SPORTS_CACHE_TTL_SECONDS", 30))
         self.health_monitor = get_health_monitor()
+        self._quota_exhausted_until: Optional[datetime] = None
+        self._quota_error_msg: Optional[str] = None
 
     @property
     def provider_name(self) -> str:
@@ -85,6 +87,26 @@ class APISportsProvider(SportsDataProvider):
     def _record_failure(self, err: Optional[Exception] = None) -> None:
         self.circuit_breaker.record_failure(err)
 
+    def _record_quota_exhausted(self, msg: str) -> None:
+        from datetime import timedelta
+        now = now_msk()
+        if now.hour < 3:
+            reset_msk = now.replace(hour=3, minute=0, second=10, microsecond=0)
+        else:
+            reset_msk = (now + timedelta(days=1)).replace(hour=3, minute=0, second=10, microsecond=0)
+        self._quota_exhausted_until = reset_msk
+        self._quota_error_msg = msg
+        logger.warning(f"APISports daily quota exhausted. Pausing until {reset_msk.strftime('%Y-%m-%d %H:%M:%S')} MSK. Reason: {msg}")
+
+    def is_quota_exhausted(self) -> bool:
+        if getattr(self, "_quota_exhausted_until", None) is None:
+            return False
+        if now_msk() < self._quota_exhausted_until:
+            return True
+        self._quota_exhausted_until = None
+        self._quota_error_msg = None
+        return False
+
     async def _fetch_json(
         self,
         endpoint: str,
@@ -94,6 +116,10 @@ class APISportsProvider(SportsDataProvider):
         """Dispatches an authenticated GET request with rate limiting, circuit breaker, and retry logic."""
         if not self.api_key:
             raise ValueError("SPORTS_API_KEY is not configured.")
+
+        if self.is_quota_exhausted():
+            logger.warning("APISports call skipped: daily quota exhausted.")
+            return {"errors": {"requests": self._quota_error_msg or "Daily limit reached"}}
 
         # 1. Check cache first
         clean_ep = endpoint.strip().lstrip("/")
@@ -309,8 +335,13 @@ class APISportsProvider(SportsDataProvider):
             logger.warning(f"APISports {endpoint} failed: {e}")
             return None
         if not isinstance(payload, dict) or payload.get("errors"):
-            # Plan/limit/parameter errors come as HTTP 200; never log the key (it is not in `errors`).
-            logger.warning(f"APISports {endpoint} returned errors: {str(payload.get('errors'))[:200] if isinstance(payload, dict) else 'bad payload'}")
+            errors = payload.get("errors") if isinstance(payload, dict) else None
+            err_str = str(errors or "").lower()
+            if isinstance(errors, dict) and ("requests" in errors or "ratelimit" in err_str):
+                self._record_quota_exhausted(str(errors.get("requests") or errors))
+            elif "request limit" in err_str:
+                self._record_quota_exhausted(str(errors))
+            logger.warning(f"APISports {endpoint} returned errors: {str(errors)[:200] if errors else 'bad payload'}")
             return None
         resp = payload.get("response")
         return resp if isinstance(resp, list) else None
@@ -414,6 +445,18 @@ class APISportsProvider(SportsDataProvider):
 
         # `score.fulltime` is the 90-minute score even when the match went to AET/PEN.
         fulltime = (f.get("score") or {}).get("fulltime") or {}
+        goals = f.get("goals") or {}
+        status_short = str((fixture.get("status") or {}).get("short") or "NS").upper()
+        elapsed = (fixture.get("status") or {}).get("elapsed")
+
+        home_g = _goal(fulltime.get("home"))
+        if home_g is None and status_short in ("1H", "HT", "2H", "ET", "BT", "P", "FT", "AET", "PEN"):
+            home_g = _goal(goals.get("home"))
+
+        away_g = _goal(fulltime.get("away"))
+        if away_g is None and status_short in ("1H", "HT", "2H", "ET", "BT", "P", "FT", "AET", "PEN"):
+            away_g = _goal(goals.get("away"))
+
         return PrematchFixture(
             fixture_id=fixture_id,
             league_id=league_id,
@@ -423,9 +466,10 @@ class APISportsProvider(SportsDataProvider):
             home=str(home),
             away=str(away),
             kickoff=kickoff,
-            status_short=str((fixture.get("status") or {}).get("short") or "NS").upper(),
-            home_goals=_goal(fulltime.get("home")),
-            away_goals=_goal(fulltime.get("away")),
+            status_short=status_short,
+            home_goals=home_g,
+            away_goals=away_g,
+            elapsed=elapsed if isinstance(elapsed, int) and elapsed >= 0 else None,
         )
 
     # ── Legacy & Live Match Lifecycle Support (Phase 6 / 7) ──────────────────

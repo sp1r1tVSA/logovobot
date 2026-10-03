@@ -20395,6 +20395,19 @@ def update_irl_odds(irl_match_id: int, odd_home: float, odd_draw: float, odd_awa
         return cur.rowcount > 0
 
 
+def update_irl_live_score(irl_match_id: int, home_goals: int | None, away_goals: int | None) -> bool:
+    """Обновить текущий live-счёт незавершённого IRL-матча."""
+    if home_goals is None and away_goals is None:
+        return False
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE irl_matches SET home_goals = ?, away_goals = ? "
+            "WHERE id = ? AND status IN ('open', 'closed')",
+            (home_goals, away_goals, irl_match_id),
+        )
+        return cur.rowcount > 0
+
+
 def close_started_irl_matches() -> int:
     """open → closed для матчей, время начала которых наступило. Возвращает число закрытых."""
     with transaction() as conn:

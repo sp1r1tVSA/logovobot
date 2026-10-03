@@ -156,6 +156,8 @@ class IrlView {
     let score = '';
     if (m.status === 'settled' && m.home_goals != null && m.away_goals != null) {
       score = `<div class="irl-score">${Number(m.home_goals)} : ${Number(m.away_goals)}</div>`;
+    } else if (m.status === 'closed' && (m.home_goals != null || m.away_goals != null)) {
+      score = `<div class="irl-score irl-live-score">${Number(m.home_goals || 0)} : ${Number(m.away_goals || 0)}</div>`;
     }
 
     let state = '';
@@ -163,6 +165,8 @@ class IrlView {
       state = `<div class="ob-banner lock">Матч не состоялся — ставки возвращены${m.void_reason ? ` (${escapeHtml(m.void_reason)})` : ''}</div>`;
     } else if (m.status === 'settled') {
       state = '<div class="irl-final">Матч сыгран</div>';
+    } else if (m.status === 'closed' && (m.home_goals != null || m.away_goals != null)) {
+      state = '<div class="irl-live-badge"><span class="irl-live-dot"></span> LIVE</div>';
     } else if (!m.betting_open) {
       state = '<div class="ob-banner lock">⛔ Приём ставок закрыт</div>';
     }

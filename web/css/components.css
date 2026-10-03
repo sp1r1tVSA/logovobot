@@ -5852,6 +5852,10 @@ span.team-logo-fallback {
 .irl-team.right { text-align: right; }
 .irl-vs { font-size: 0.72rem; color: var(--text-muted); font-weight: 700; }
 .irl-score { font-family: 'Outfit', sans-serif; font-size: 1.2rem; font-weight: 800; color: var(--accent-gold); white-space: nowrap; }
+.irl-live-score { color: #ef4444 !important; font-size: 1.25rem; }
+.irl-live-badge { display: inline-flex; align-items: center; gap: 6px; font-size: 0.75rem; font-weight: 800; color: #ef4444; background: rgba(239, 68, 68, 0.12); border: 1px solid rgba(239, 68, 68, 0.3); padding: 3px 8px; border-radius: 6px; margin-bottom: 8px; }
+.irl-live-dot { width: 6px; height: 6px; border-radius: 50%; background: #ef4444; animation: irl-pulse 1.5s infinite; }
+@keyframes irl-pulse { 0% { opacity: 1; transform: scale(1); } 50% { opacity: 0.3; transform: scale(1.25); } 100% { opacity: 1; transform: scale(1); } }
 .irl-final { font-size: 0.78rem; color: var(--text-secondary); margin-bottom: 8px; }
 .irl-odds { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .irl-odd {

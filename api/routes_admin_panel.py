@@ -1020,6 +1020,55 @@ async def handle_panel_irl_refresh_odds(request: web.Request) -> web.Response:
     })
 
 
+async def handle_panel_irl_update_score(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/matches/{id}/score  {home_goals?, away_goals?, from_api?}"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    match_id = path_int(request, "id")
+    m = await asyncio.to_thread(database.get_irl_match, match_id)
+    if not m:
+        return _error(404, "not_found", "Матч не найден.")
+    if m["status"] not in ("open", "closed"):
+        return _error(400, "not_editable", "Счёт можно обновлять только у активных матчей.")
+
+    data = await _json_body(request)
+    if isinstance(data, web.Response):
+        return data
+
+    from_api = bool(data.get("from_api"))
+    if from_api:
+        from services.sports import get_sports_provider
+        provider = get_sports_provider()
+        fx = await provider.get_prematch_fixture(m["provider_fixture_id"])
+        if not fx:
+            return _error(400, "provider_error", "Провайдер не вернул данные по матчу.")
+        home_goals = fx.home_goals
+        away_goals = fx.away_goals
+    else:
+        raw_h = data.get("home_goals")
+        raw_a = data.get("away_goals")
+        try:
+            home_goals = int(raw_h) if raw_h is not None and raw_h != "" else None
+            away_goals = int(raw_a) if raw_a is not None and raw_a != "" else None
+        except (ValueError, TypeError):
+            return _error(400, "invalid_goals", "Количество голов должно быть целым числом.")
+
+    ok = await asyncio.to_thread(database.update_irl_live_score, match_id, home_goals, away_goals)
+    await admin_journal.record(scope.actor_id, "irl_match_score_updated", "irl_match", match_id,
+                               new=f"{home_goals}:{away_goals}")
+    return web.json_response({
+        "status": "ok",
+        "updated": ok,
+        "home_goals": home_goals,
+        "away_goals": away_goals,
+    })
+
+
 async def handle_panel_irl_match_bets(request: web.Request) -> web.Response:
     """GET /api/admin/panel/irl/matches/{id}/bets"""
     scope = _resolve_scope(request)
@@ -1062,6 +1111,7 @@ def register_admin_panel_routes(app: web.Application) -> None:
     r.add_post("/api/admin/panel/irl/matches/{id}/cancel", handle_panel_irl_cancel)
     r.add_post("/api/admin/panel/irl/matches/{id}/settle", handle_panel_irl_settle)
     r.add_post("/api/admin/panel/irl/matches/{id}/refresh-odds", handle_panel_irl_refresh_odds)
+    r.add_post("/api/admin/panel/irl/matches/{id}/score", handle_panel_irl_update_score)
     r.add_get("/api/admin/panel/irl/matches/{id}/bets", handle_panel_irl_match_bets)
     r.add_post("/api/admin/panel/irl/run-pick", handle_panel_irl_run_pick)
     r.add_get("/api/admin/panel/me", handle_panel_me)
