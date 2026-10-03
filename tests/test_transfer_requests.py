@@ -368,3 +368,46 @@ class TestMiniAppViews:
         hist = req_mod.history()["items"]
         assert len(hist) == 1
         assert hist[0]["player_name"] == "Oldie"
+
+
+class TestPhotoProxy:
+    """Фото отдаётся через бота: токена нет ни в ответе, ни в логе, кеш закрытый."""
+
+    SECRET = "123456:SECRET-TOKEN-VALUE"
+
+    def _call(self, monkeypatch, bot, caplog):
+        from aiohttp import web
+        from aiohttp.test_utils import make_mocked_request
+        from transfers import api as tapi
+
+        monkeypatch.setattr(config, "TOKEN", self.SECRET, raising=False)
+        monkeypatch.setattr(tapi, "_auth", lambda request: ({"id": 1}, None))
+        monkeypatch.setattr(tapi.req_mod, "photo_file_id", lambda user_id, tid: "FILE-ID")
+        app = web.Application()
+        app["bot"] = bot
+        request = make_mocked_request("GET", "/api/transfers/5/photo", app=app, match_info={"id": "5"})
+        with caplog.at_level("DEBUG"):
+            return asyncio.run(tapi.handle_get_photo(request))
+
+    def test_serves_photo_through_bot_with_private_cache(self, monkeypatch, caplog):
+        tg_file = MagicMock()
+        tg_file.download_as_bytearray = AsyncMock(return_value=bytearray(b"\xff\xd8jpeg"))
+        bot = MagicMock()
+        bot.get_file = AsyncMock(return_value=tg_file)
+        resp = self._call(monkeypatch, bot, caplog)
+        bot.get_file.assert_awaited_once_with("FILE-ID")
+        assert resp.status == 200 and resp.body == b"\xff\xd8jpeg"
+        assert resp.headers["Cache-Control"].startswith("private")
+        assert self.SECRET not in str(resp.headers)
+
+    def test_failure_does_not_leak_token(self, monkeypatch, caplog):
+        bot = MagicMock()
+        bot.get_file = AsyncMock(side_effect=RuntimeError(f"https://api.telegram.org/bot{self.SECRET}/getFile"))
+        resp = self._call(monkeypatch, bot, caplog)
+        assert resp.status == 502
+        assert self.SECRET not in resp.text and self.SECRET not in caplog.text
+
+    def test_no_bot_is_503(self, monkeypatch, caplog):
+        monkeypatch.setattr(notify, "_global_bot", None)
+        resp = self._call(monkeypatch, None, caplog)
+        assert resp.status == 503

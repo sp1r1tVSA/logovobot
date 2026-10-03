@@ -20,11 +20,9 @@ import json
 import logging
 from typing import Any
 
-import aiohttp
 from aiohttp import web
 from PIL import Image
 
-import config
 from api.auth import check_user_access, extract_init_data, get_authenticated_user
 from transfers import notify, requests as req_mod, service
 
@@ -159,35 +157,22 @@ async def handle_get_photo(request: web.Request) -> web.Response:
     if not file_id:
         return web.json_response({"status": "error", "error": "photo_not_found"}, status=404)
 
-    # Проксирование фото из Telegram getFile
-    bot_token = getattr(config, "TOKEN", None)
-    if not bot_token:
-        return web.json_response({"status": "error", "error": "bot_token_not_configured"}, status=500)
+    # Прокси через бота: токен остаётся внутри python-telegram-bot и не попадает
+    # ни в URL, которые мы собираем, ни в логи. Исключение логируем только по типу.
+    bot = _get_bot(request)
+    if bot is None:
+        return web.json_response({"status": "error", "error": "bot_unavailable"}, status=503)
 
     try:
-        async with aiohttp.ClientSession() as session:
-            get_file_url = f"https://api.telegram.org/bot{bot_token}/getFile?file_id={file_id}"
-            async with session.get(get_file_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                if resp.status != 200:
-                    return web.json_response({"status": "error", "error": "telegram_getfile_failed"}, status=502)
-                meta = await resp.json()
-                file_path = meta.get("result", {}).get("file_path")
-                if not file_path:
-                    return web.json_response({"status": "error", "error": "file_path_missing"}, status=502)
-
-                download_url = f"https://api.telegram.org/file/bot{bot_token}/{file_path}"
-                async with session.get(download_url, timeout=aiohttp.ClientTimeout(total=10)) as dl_resp:
-                    if dl_resp.status != 200:
-                        return web.json_response({"status": "error", "error": "photo_download_failed"}, status=502)
-                    content = await dl_resp.read()
-                    return web.Response(
-                        body=content,
-                        content_type="image/jpeg",
-                        headers={"Cache-Control": "public, max-age=86400"},
-                    )
+        tg_file = await bot.get_file(file_id)
+        content = bytes(await tg_file.download_as_bytearray())
     except Exception as exc:
-        logger.warning("transfers: failed to proxy photo for transfer %s: %s", transfer_id, exc)
+        logger.warning("transfers: failed to proxy photo for transfer %s: %s", transfer_id, type(exc).__name__)
         return web.json_response({"status": "error", "error": "failed_to_load_photo"}, status=502)
+
+    # private: фото видны только авторизованным, общий кеш (туннель, CDN) их держать не должен.
+    return web.Response(body=content, content_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=86400"})
 
 
 # ─── POST Endpoints ───────────────────────────────────────────────────────────
