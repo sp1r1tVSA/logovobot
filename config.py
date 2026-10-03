@@ -151,13 +151,13 @@ def _get_int_env(name: str, default: int) -> int:
 IRL_ENABLED = os.getenv("IRL_ENABLED", "false").strip().lower() in ("true", "1", "yes")
 IRL_BOOKMAKER_ID = _get_int_env("IRL_BOOKMAKER_ID", 0)
 # ЧМ, Евро, Кубок Америки, ЛЧ, Лига наций, АПЛ, Ла Лига, Серия А, Бундеслига, Лига 1,
-# отбор ЧМ (Европа), отбор Евро, товарищеские матчи.
+# Лига Европы, отбор ЧМ (Европа), отбор Евро. Товарищеские (10) не включены.
 IRL_COMPETITION_PRIORITY = _get_int_list(
-    "IRL_COMPETITION_PRIORITY", "1,4,9,2,5,39,140,135,78,61,32,960,10"
+    "IRL_COMPETITION_PRIORITY", "1,4,9,2,5,39,140,135,78,61,3,32,960"
 )
 IRL_TOP_TEAMS = _get_str_list(
     "IRL_TOP_TEAMS",
-    "Real Madrid,Barcelona,Manchester City,Liverpool,Arsenal,Bayern Munich,Paris Saint Germain,"
+    "Real Madrid,Barcelona,Manchester City,Liverpool,Arsenal,Bayern Munich,Bayern München,Paris Saint Germain,"
     "Inter,Juventus,AC Milan,Manchester United,Chelsea,Atletico Madrid,Borussia Dortmund,"
     "Brazil,Argentina,France,England,Germany,Spain,Portugal,Italy,Netherlands",
 )
