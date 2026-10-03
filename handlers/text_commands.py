@@ -10,6 +10,7 @@ import database
 from services import admin_journal
 from handlers.base import (
     is_admin,
+    is_global_admin,
     generate_league_table_image,
     resolve_division_id,
     resolve_division_target,
@@ -369,7 +370,18 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
                 "• <code>/topiki &lt;div_id&gt;</code> — статус топиков дивизиона\n"
                 "• <code>/diviziony</code> — сводка по всем дивизионам"
             )
+        if is_global_admin(user_id):
+            help_text += (
+                "\n\n📢 <b>Централизованная рассылка (супер-админ):</b>\n"
+                "• <code>Темшик рассылка [ставки|новости|тур] &lt;текст&gt;</code> — быстрая рассылка\n"
+                "• <code>/broadcast</code> — пошаговый мастер рассылки в ЛС"
+            )
         await msg.reply_text(help_text, parse_mode="HTML")
+        return True
+
+    if action in ("рассылка", "broadcast", "объявление"):
+        from handlers.admin_broadcast import run_quick_broadcast
+        await run_quick_broadcast(update, context, args_str)
         return True
 
     if action in ("профиль", "profile", "активность", "стата", "кто"):

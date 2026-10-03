@@ -296,6 +296,7 @@ def _build_super_admin_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🏆 Дивизионы", callback_data="admin_divs_hub"),
             InlineKeyboardButton("📡 Обзор лиги", callback_data="ovw_home"),
         ],
+        [InlineKeyboardButton("📢 Рассылка сообщений", callback_data="admin_broadcast_hub")],
         [InlineKeyboardButton("👔 Админы дивизионов", callback_data="admin_div_admins_hub")],
         [InlineKeyboardButton("👥 Управление игроками", callback_data="admin_manage_players")],
         [InlineKeyboardButton("🔗 Привязка клубов", callback_data="admin_bind_hub")],

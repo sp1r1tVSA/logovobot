@@ -20719,3 +20719,48 @@ def void_irl_match(irl_match_id: int, reason: str | None = None,
         """, ((reason or "").strip()[:300] or None, actor_id, irl_match_id))
     logger.info("IRL match #%s voided: refunded=%s", irl_match_id, refunded)
     return True, {"refunded": refunded}
+
+
+def get_broadcast_user_ids(only_with_team: bool = False) -> list[int]:
+    """Retrieve list of distinct telegram_ids for broadcasting."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        if only_with_team:
+            cursor.execute("SELECT DISTINCT telegram_id FROM users WHERE telegram_id > 0 AND team_name IS NOT NULL")
+        else:
+            cursor.execute("SELECT DISTINCT telegram_id FROM users WHERE telegram_id > 0")
+        return [row[0] for row in cursor.fetchall() if row[0] and row[0] > 0]
+
+
+def get_broadcast_chat_targets() -> list[dict]:
+    """Retrieve distinct group chat and topic destinations for broadcasting."""
+    targets = []
+    seen = set()
+    dt_topics = get_all_division_topics()
+    for t in dt_topics:
+        chat_id = t.get("group_chat_id")
+        thread_id = t.get("message_thread_id")
+        if chat_id and thread_id:
+            key = (chat_id, thread_id)
+            if key not in seen:
+                seen.add(key)
+                targets.append({
+                    "chat_id": chat_id,
+                    "thread_id": thread_id,
+                    "label": f"Дивизион {t.get('division_name', '')} ({t.get('topic_type', '')})",
+                })
+    main_group_id = get_config("group_id")
+    if main_group_id:
+        try:
+            mg_id = int(main_group_id)
+            if (mg_id, None) not in seen:
+                seen.add((mg_id, None))
+                targets.append({
+                    "chat_id": mg_id,
+                    "thread_id": None,
+                    "label": "Основная группа лиги",
+                })
+        except (ValueError, TypeError):
+            pass
+    return targets
+
