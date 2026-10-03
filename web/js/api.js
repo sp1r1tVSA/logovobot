@@ -150,6 +150,22 @@ class ApiClient {
     return this.request('/api/outrights/my');
   }
 
+  // Ставки на реальные матчи дня («IRL»): ординары 1X2, не больше max_bet.
+  getIrlToday() {
+    return this.request('/api/irl/today');
+  }
+
+  placeIrlBet({ match_id, outcome, amount, odd }) {
+    return this.request('/api/irl/bets', {
+      method: 'POST',
+      body: JSON.stringify({ match_id, outcome, amount, odd })
+    });
+  }
+
+  getMyIrlBets() {
+    return this.request('/api/irl/bets/mine');
+  }
+
   getCupLine(stageId) {
     return this.request(`/api/cup/stages/${stageId}/line`);
   }

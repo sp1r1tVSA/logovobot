@@ -8,6 +8,7 @@ import asyncio
 import json
 import logging
 from aiohttp import web
+import config
 import database
 from config import INITIAL_WALLET_BALANCE
 from api.auth import get_authenticated_user, check_user_access
@@ -105,7 +106,9 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
             # Кнопка панели Logovo.bet — только для ADMIN_IDS, как и сам /api/admin/panel.
             "is_panel_admin": is_super_admin(user_id),
             "has_access": has_access,
-            "bet_limits": bet_limits
+            "bet_limits": bet_limits,
+            # Чип «IRL» в лобби показываем только при включённых ставках на реальные матчи.
+            "irl_enabled": bool(config.IRL_ENABLED),
         },
         "open_tours_count": len(open_tours),
         "divisions": divisions

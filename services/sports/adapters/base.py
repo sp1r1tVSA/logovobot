@@ -20,6 +20,8 @@ from services.sports.models import (
     ProviderMatch,
     ProviderOdds,
     ProviderStatistics,
+    MatchWinnerOdds,
+    PrematchFixture,
 )
 
 
@@ -130,3 +132,21 @@ class SportsDataProvider(ABC):
     async def get_standings(self, competition_id: int | str, season_id: int | str) -> list[dict[str, Any]]:
         """Fetch league standings table."""
         ...
+
+    # ── IRL betting (optional: providers without pre-match data return None) ─
+
+    async def get_prematch_fixtures(
+        self, date: str, league_ids: Optional[list[int]] = None
+    ) -> Optional[list[PrematchFixture]]:
+        """Fixtures of one MSK day. None = provider unavailable; [] = a genuinely empty day."""
+        return None
+
+    async def get_prematch_fixture(self, fixture_id: int | str) -> Optional[PrematchFixture]:
+        """One fixture with its status and main-time score. None = unavailable or unknown."""
+        return None
+
+    async def get_match_winner_odds(
+        self, fixture_id: int | str, bookmaker_id: int
+    ) -> Optional[MatchWinnerOdds]:
+        """1X2 odds of one bookmaker. None = unavailable or incomplete."""
+        return None

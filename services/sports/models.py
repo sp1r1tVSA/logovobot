@@ -238,3 +238,36 @@ class LiveStatistics:
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
+
+
+# ─── IRL betting (pre-match 1X2) ─────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class PrematchFixture:
+    """A real-world fixture for IRL betting, provider-neutral.
+
+    `kickoff` is naive MSK. `home_goals`/`away_goals` are the main-time (90 min
+    + stoppage) score and stay None until the provider has one — never a fake 0.
+    """
+    fixture_id: int
+    league_id: int
+    league_name: str
+    home: str
+    away: str
+    kickoff: datetime
+    status_short: str = "NS"
+    home_goals: Optional[int] = None
+    away_goals: Optional[int] = None
+    country: str = ""
+    season: Optional[int] = None
+
+
+@dataclass(frozen=True)
+class MatchWinnerOdds:
+    """1X2 prices of one bookmaker for one fixture. Complete or not returned at all."""
+    fixture_id: int
+    bookmaker_id: int
+    home: float
+    draw: float
+    away: float
+    updated_at: Optional[datetime] = None

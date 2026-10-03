@@ -372,6 +372,10 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
         await msg.reply_text(help_text, parse_mode="HTML")
         return True
 
+    if action in ("профиль", "profile", "активность", "стата", "кто"):
+        await cmd_user_profile(update, context, target_ref=args_str)
+        return True
+
     if action in ("дивизионы", "дивизион", "divisions", "divs"):
         divisions = await asyncio.to_thread(database.get_active_divisions)
         if not divisions:
@@ -1308,4 +1312,72 @@ async def cmd_sync_club_titles(update: Update, context: ContextTypes.DEFAULT_TYP
         report_lines.append("\n<b>Ошибки:</b>")
         report_lines.extend(stats["details"][-5:])
     await _safe_edit_status(status_m, "\n".join(report_lines))
+
+
+async def cmd_user_profile(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    target_ref: str | None = None,
+) -> None:
+    """Отображает карточку профиля игрока («Neat Tree») с турнирным рейтингом и активностью."""
+    msg = update.effective_message
+    if not msg:
+        return
+    user = update.effective_user
+    if not user:
+        return
+
+    target_user_id = None
+    target_username = None
+    target_name = None
+
+    # 1. Если это ответ на сообщение другого пользователя (reply)
+    if msg.reply_to_message and msg.reply_to_message.from_user:
+        rep_user = msg.reply_to_message.from_user
+        if not rep_user.is_bot:
+            target_user_id = rep_user.id
+            target_username = rep_user.username
+            target_name = rep_user.first_name
+        else:
+            await msg.reply_text("🤖 Бот не является участником лиги.", parse_mode="HTML")
+            return
+
+    # 2. Если передан явный аргумент (target_ref)
+    clean_ref = (target_ref or "").strip()
+    if not clean_ref and not target_user_id and msg.text:
+        parts = msg.text.strip().split(None, 1)
+        if len(parts) > 1 and parts[0].lower() in ("профиль", "мой профиль"):
+            clean_ref = parts[1].strip()
+
+    if clean_ref and not target_user_id:
+        found = await asyncio.to_thread(database.find_user_by_ref, clean_ref)
+        if found:
+            target_user_id = found["telegram_id"]
+            target_username = found["username"]
+            target_name = found["username"] or str(found["telegram_id"])
+        else:
+            await msg.reply_text(
+                f"❌ Пользователь «{html.escape(clean_ref)}» не найден в турнирной системе.",
+                parse_mode="HTML",
+            )
+            return
+
+    # 3. По умолчанию — вызывающий пользователь
+    if not target_user_id:
+        target_user_id = user.id
+        target_username = user.username
+        target_name = user.first_name
+
+    from services.chat_activity import build_profile_card
+    card_text, reply_markup = await asyncio.to_thread(
+        build_profile_card, target_user_id, target_name, target_username
+    )
+
+    await msg.reply_text(
+        card_text,
+        parse_mode="HTML",
+        reply_markup=reply_markup,
+        disable_web_page_preview=True,
+    )
+
 

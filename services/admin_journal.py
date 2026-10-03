@@ -110,6 +110,11 @@ ACTIONS: dict[str, tuple[str, str]] = {
     "market_close_reason": ("bets", "Причина закрытия рынка"),
     "wallet_admin_credit": ("bets", "Начислены монеты"),
     "wallet_admin_debit": ("bets", "Списаны монеты"),
+    "irl_match_added": ("bets", "IRL: добавлен матч"),
+    "irl_match_replaced": ("bets", "IRL: матч заменён"),
+    "irl_match_published": ("bets", "IRL: матч опубликован"),
+    "irl_match_cancelled": ("bets", "IRL: матч отменён"),
+    "irl_match_settled": ("bets", "IRL: матч рассчитан вручную"),
     # Сезоны
     "create_season": ("seasons", "Создан сезон"),
     "activate_season": ("seasons", "Активирован сезон"),

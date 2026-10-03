@@ -41,6 +41,7 @@ GLOBAL_ADMIN_COMMANDS = ADMIN_COMMANDS + [
     BotCommand("backup", "Бэкап базы"),
     BotCommand("ocr_stats", "Метрики распознавания скриншотов"),
     BotCommand("audit", "Журнал действий админов"),
+    BotCommand("irl", "IRL-ставки: матчи дня"),
 ]
 
 # Панель трансферного окна: ответственному (даже если он не админ) и админам из ADMIN_IDS.

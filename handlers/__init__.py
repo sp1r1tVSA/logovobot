@@ -388,9 +388,32 @@ async def handle_placeholders(update: Update, context: ContextTypes.DEFAULT_TYPE
     await query.answer("Эта функция находится в разработке.", show_alert=True)
 
 async def track_group_id(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Track the ID of the Telegram group the bot is in."""
+    """Track the ID of the Telegram group the bot is in and record user activity."""
     if update.effective_chat and update.effective_chat.type in ("group", "supergroup"):
         await asyncio.to_thread(database.set_config, "group_id", str(update.effective_chat.id))
+
+    # Track user chat activity (СМС, стикеры, ГС, видеокружочки, фото, токс)
+    try:
+        user = update.effective_user
+        msg = update.effective_message
+        if user and not user.is_bot and msg:
+            msg_type = None
+            is_toxic = False
+            if msg.text:
+                msg_type = "text"
+                from services.chat_activity import is_toxic_message
+                is_toxic = is_toxic_message(msg.text)
+            elif msg.sticker:
+                msg_type = "sticker"
+            elif msg.voice or msg.video_note:
+                msg_type = "voice"
+            elif msg.photo:
+                msg_type = "photo"
+
+            if msg_type:
+                await asyncio.to_thread(database.record_user_chat_activity, user.id, msg_type, is_toxic)
+    except Exception as e:
+        logger.debug(f"Failed to track user chat activity: {e}")
 
     # Collect style samples from a persona source user (e.g. @t3miy) for AI learning
     try:
@@ -428,6 +451,9 @@ def _register_user_handlers(app: Application) -> None:
 
     app.add_handler(MessageHandler(filters.Regex("^👤 Мой кабинет$"), show_cabinet))
     app.add_handler(MessageHandler(filters.Regex("^💬 Поддержка$"), show_support))
+
+    from handlers.text_commands import cmd_user_profile
+    app.add_handler(MessageHandler(filters.Regex(r"(?i)^(?:профиль|мой\s+профиль)(?:\s+.*)?$"), cmd_user_profile))
     
     from handlers.drafts import handle_draft_media, cb_draft_confirm, cb_draft_reject, cb_draft_add_player, cb_draft_skip_player
     app.add_handler(MessageHandler((filters.PHOTO | filters.TEXT) & filters.ChatType.GROUPS & ~filters.COMMAND, handle_draft_media), group=2)
@@ -963,6 +989,10 @@ def _register_admin_handlers(app: Application) -> None:
     # 🩺 Эксплуатация: /health, /backup, /ocr_stats, /audit — глобальные админы, только ЛС
     from handlers.admin_ops import register_admin_ops_handlers
     register_admin_ops_handlers(app)
+
+    # ⚽ IRL-ставки: /irl, /irl_settle и кнопки превью — глобальные админы, только ЛС
+    from handlers.admin_irl import register_admin_irl_handlers
+    register_admin_irl_handlers(app)
 
     # 🔁 Трансферное окно: панель /to — только ответственный за ТО, в ЛС
     from transfers.handlers import register_handlers as register_transfer_handlers
