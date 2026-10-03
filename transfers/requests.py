@@ -16,11 +16,14 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import os
 import re
+import urllib.parse
 from dataclasses import dataclass, field, replace
 
 import database
 from club_registry import resolve_team_name
+from services.graphics import player_photos
 from time_utils import DT_FORMAT, parse_msk
 from transfers import config as tcfg
 from transfers import repo, sanctions, service
@@ -376,6 +379,29 @@ def _loads(raw) -> list:
     return value if isinstance(value, list) else []
 
 
+def portrait_url(player_name: str | None, *clubs: str | None) -> str | None:
+    """Ссылка на портрет игрока из кэша `assets/players/`; без сети и без записи.
+
+    Портрет кэшируется под именем и клубом, где игрока опознали, поэтому пробуем клубы сделки
+    по очереди, а `get_photo_path` сам откатывается к файлу без клуба. Нет файла — `None`,
+    и Mini App рисует монограмму.
+    """
+    if not player_name:
+        return None
+    try:
+        # `get_photo_path` с клубом откатывается к файлу без клуба, поэтому сначала проверяем
+        # файлы по клубам напрямую, и только потом общий.
+        candidates = [player_photos.get_cached_photo_path(player_name, club)
+                      for club in clubs if club and norm_club(club) != norm_club(URN_CLUB)]
+        candidates.append(player_photos.get_cached_photo_path(player_name, None))
+        for path in candidates:
+            if os.path.isfile(path) and os.path.getsize(path) > 0:
+                return "/assets/players/" + urllib.parse.quote(os.path.basename(path))
+    except Exception:
+        return None
+    return None
+
+
 def serialize(t: dict, viewer_id: int | None = None, *, private: bool = False) -> dict:
     """Заявка для Mini App. Без Telegram ID и текста комментария.
 
@@ -390,6 +416,7 @@ def serialize(t: dict, viewer_id: int | None = None, *, private: bool = False) -
         "sellable": None if t["sellable"] is None else bool(t["sellable"]),
         "commented_at": t["commented_at"], "created_at": t["created_at"], "decided_at": t["decided_at"],
         "has_photo": bool(t["photo_file_id"]),
+        "portrait_url": portrait_url(t["player_name"], t["from_club"], t["to_club"]),
     }
     if private:
         data["warnings"] = _loads(t["warnings"])

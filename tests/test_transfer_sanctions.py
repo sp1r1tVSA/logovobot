@@ -388,3 +388,39 @@ class TestRoute:
         _window()
         _, body = self._call(monkeypatch, "?mine=1")
         assert body["data"]["mine"] is True and body["data"]["window"]["title"] == "ТО Зима"
+
+
+class TestPortraitUrl:
+    """Портрет игрока в карточке истории: только из кэша, без сети."""
+
+    def test_no_file_gives_none(self, tmp_path, monkeypatch):
+        from services.graphics import player_photos
+        monkeypatch.setattr(player_photos, "PHOTOS_DIR", str(tmp_path))
+        assert req_mod.portrait_url("Oldie", "Челси") is None
+        assert req_mod.portrait_url(None) is None
+
+    def test_club_file_wins_then_clubless_fallback(self, tmp_path, monkeypatch):
+        from services.graphics import player_photos
+        monkeypatch.setattr(player_photos, "PHOTOS_DIR", str(tmp_path))
+        (tmp_path / "oldie.png").write_bytes(b"x" * 10)
+        assert req_mod.portrait_url("Oldie", "Челси", "Арсенал") == "/assets/players/oldie.png"
+        (tmp_path / "oldie_арсенал.png").write_bytes(b"x" * 10)
+        url = req_mod.portrait_url("Oldie", "Челси", "Арсенал")
+        assert url.startswith("/assets/players/oldie_") and url.endswith(".png")
+        assert "%D0" in url  # кириллица в имени файла закодирована
+
+    def test_urn_is_not_a_club_for_the_lookup(self, tmp_path, monkeypatch):
+        from services.graphics import player_photos
+        monkeypatch.setattr(player_photos, "PHOTOS_DIR", str(tmp_path))
+        (tmp_path / "oldie_урна.png").write_bytes(b"x" * 10)
+        assert req_mod.portrait_url("Oldie", req_mod.URN_CLUB) is None
+
+    def test_history_items_carry_portrait_url(self, tmp_path, monkeypatch):
+        from services.graphics import player_photos
+        monkeypatch.setattr(player_photos, "PHOTOS_DIR", str(tmp_path))
+        (tmp_path / "oldie.png").write_bytes(b"x" * 10)
+        _window(season=10)
+        sale = req_mod.create_urn_sale(101, player="Oldie", tm_price="10", special_price="4", sellable=True)
+        repo.set_transfer_status(sale["id"], "approved", expected=("pending_manager",))
+        item = req_mod.history(101)["items"][0]
+        assert item["portrait_url"] == "/assets/players/oldie.png"

@@ -805,26 +805,40 @@ class TransfersView {
     };
     const st = mine ? (statusMap[it.status] || { label: it.status, cls: 'badge-closed' }) : statusMap.approved;
 
+    const initial = escapeHtml(String(it.player_name || '?').trim().charAt(0).toUpperCase() || '?');
+    const fallback = `<span class="hist-portrait-fallback" ${it.portrait_url ? 'hidden' : ''}>${initial}</span>`;
+    const portrait = (it.portrait_url
+      ? `<img class="hist-portrait-img" src="${escapeHtml(it.portrait_url)}" alt="" loading="lazy"
+              onerror="this.hidden=true;this.nextElementSibling.hidden=false" />`
+      : '') + fallback;
+
     return `
-      <div class="req-item">
-        <div class="req-item-head">
-          <span class="req-item-title">
-            ${kindLabel}: <b>${escapeHtml(it.player_name)}</b>
-            ${it.ovr ? `<span class="req-ovr-tag">OVR ${it.ovr}</span>` : ''}
-          </span>
-          <span class="window-status-badge ${st.cls}">${st.label}</span>
+      <div class="req-item req-item-hist">
+        <div class="hist-portrait">
+          ${portrait}
+          ${it.ovr ? `<span class="hist-portrait-ovr">${it.ovr}</span>` : ''}
         </div>
-        <div class="req-route">
-          ${it.from_club ? `Откуда: <b>${escapeHtml(it.from_club)}</b> ` : ''}
-          ${it.to_club ? `→ Куда: <b>${escapeHtml(it.to_club)}</b>` : ''}
-        </div>
-        ${mine && it.decided_reason ? `
-          <div style="font-size: 0.74rem; color: var(--color-danger); margin: 4px 0;">
-            Причина: ${escapeHtml(it.decided_reason)}
-          </div>` : ''}
-        <div class="req-footer">
-          <div class="req-price">${it.price}</div>
-          ${it.has_photo ? `<button class="btn-withdraw btn-view-photo" data-id="${it.id}" type="button">📸 Фото</button>` : ''}
+        <div class="hist-body">
+          <div class="req-item-head">
+            <span class="req-item-title">
+              <span class="hist-kind">${kindLabel}</span>
+              <b>${escapeHtml(it.player_name)}</b>
+            </span>
+            <span class="window-status-badge ${st.cls}">${st.label}</span>
+          </div>
+          <div class="req-route">
+            ${it.from_club ? `<b>${escapeHtml(it.from_club)}</b>` : ''}
+            ${it.from_club && it.to_club ? ' → ' : ''}
+            ${it.to_club ? `<b>${escapeHtml(it.to_club)}</b>` : ''}
+          </div>
+          ${mine && it.decided_reason ? `
+            <div style="font-size: 0.74rem; color: var(--color-danger); margin: 4px 0;">
+              Причина: ${escapeHtml(it.decided_reason)}
+            </div>` : ''}
+          <div class="req-footer">
+            <div class="req-price">${it.price}</div>
+            ${it.has_photo ? `<button class="btn-withdraw btn-view-photo" data-id="${it.id}" type="button">📸 Фото</button>` : ''}
+          </div>
         </div>
       </div>
     `;

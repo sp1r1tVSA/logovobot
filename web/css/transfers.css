@@ -570,3 +570,76 @@
   color: var(--text-secondary);
   line-height: 1.4;
 }
+
+/* Карточка истории: портрет игрока слева, сделка справа */
+.req-item-hist {
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+}
+.hist-portrait {
+  position: relative;
+  flex: 0 0 60px;
+  width: 60px;
+  height: 60px;
+}
+.hist-portrait-img,
+.hist-portrait-fallback {
+  width: 60px;
+  height: 60px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: center top;
+  background: linear-gradient(160deg, rgba(245, 176, 39, 0.22), rgba(255, 255, 255, 0.04));
+  border: 2px solid rgba(245, 176, 39, 0.45);
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.3rem;
+  font-weight: 800;
+  color: var(--accent-gold, #f5b027);
+}
+.hist-portrait-ovr {
+  position: absolute;
+  right: -4px;
+  bottom: -2px;
+  min-width: 26px;
+  padding: 1px 5px;
+  border-radius: 8px;
+  background: #0f172a;
+  border: 1px solid rgba(245, 176, 39, 0.6);
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.7rem;
+  font-weight: 800;
+  line-height: 1.4;
+  text-align: center;
+  color: var(--accent-gold, #f5b027);
+}
+.hist-body {
+  flex: 1;
+  min-width: 0;
+}
+.hist-body .req-item-head {
+  align-items: flex-start;
+  gap: 8px;
+}
+.hist-body .req-item-title {
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+.hist-body .req-item-title b {
+  overflow-wrap: anywhere;
+}
+.hist-kind {
+  font-size: 0.7rem;
+  font-weight: 700;
+  color: var(--text-secondary, #94a3b8);
+}
+.hist-portrait-img[hidden],
+.hist-portrait-fallback[hidden] {
+  display: none;
+}
