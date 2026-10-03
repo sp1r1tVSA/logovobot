@@ -212,6 +212,7 @@ async def handle_mute_command(update: Update, context: ContextTypes.DEFAULT_TYPE
         old=f"@{target.username}" if target.username else str(target.id),
         new=format_duration(duration), division_id=division_id, reason=reason or None,
     )
+    await asyncio.to_thread(database.increment_user_toxic_count, target.id, 1)
     text = (
         f"🔇 {target.mention} заглушен на <b>{format_duration(duration)}</b> "
         f"(до {until:%d.%m %H:%M} МСК)."

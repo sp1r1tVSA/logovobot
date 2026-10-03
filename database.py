@@ -2321,6 +2321,9 @@ def init_db() -> None:
         from transfers.schema import apply_schema as _apply_transfer_schema
         _apply_transfer_schema(cursor)
 
+        # ─── 034: активность участников в чатах лиги ─────────────────────────
+        _ensure_user_chat_activity_schema(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -18408,6 +18411,7 @@ MIGRATION_029_FREEBETS = "029_freebets"
 MIGRATION_030_CLUB_SMM_POSTS = "030_club_smm_posts"
 MIGRATION_031_OCR_RUNS = "031_ocr_runs"
 MIGRATION_032_AUTO_VOID_SYSTEM_ACTOR = "032_auto_void_system_actor"
+MIGRATION_034_USER_CHAT_ACTIVITY = "034_user_chat_activity"
 OUTRIGHT_MARKET_TYPES = ("division_winner", "cup_winner", "division_top_scorer", "league_top_scorer")
 OUTRIGHT_OTHER_KEY = "__other__"
 MAX_OPEN_OUTRIGHT_BETS = 20
@@ -18668,6 +18672,26 @@ def _reattribute_series_auto_voids(cursor: sqlite3.Cursor) -> None:
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
         (MIGRATION_032_AUTO_VOID_SYSTEM_ACTOR,
          "bet_audit_log: series auto-voids attributed to the system, not the reporter"),
+    )
+
+
+def _ensure_user_chat_activity_schema(cursor: sqlite3.Cursor) -> None:
+    """Миграция 034: учёт активности участников в чате (СМС, стикеры, ГС, фото, токс)."""
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_chat_activity (
+            user_id INTEGER PRIMARY KEY,
+            messages_count INTEGER NOT NULL DEFAULT 0,
+            stickers_count INTEGER NOT NULL DEFAULT 0,
+            voice_count INTEGER NOT NULL DEFAULT 0,
+            photos_count INTEGER NOT NULL DEFAULT 0,
+            toxic_count INTEGER NOT NULL DEFAULT 0,
+            last_message_at TEXT,
+            updated_at TEXT
+        )
+    """)
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_034_USER_CHAT_ACTIVITY, "user_chat_activity: tracking group messages, stickers, voice, photos, toxicity"),
     )
 
 
@@ -20052,3 +20076,116 @@ def find_telegram_id_by_username(username: str) -> int | None:
             (name,),
         ).fetchone()
     return int(row["telegram_id"]) if row else None
+
+
+# ─── Chat Activity & Player Profile Data ──────────────────────────────────────
+
+def record_user_chat_activity(user_id: int, msg_type: str, is_toxic: bool = False) -> None:
+    """Increment message/media/toxic counters for user and stamp last_message_at in MSK."""
+    if not user_id:
+        return
+    is_text = 1 if msg_type == "text" else 0
+    is_sticker = 1 if msg_type == "sticker" else 0
+    is_voice = 1 if msg_type == "voice" else 0
+    is_photo = 1 if msg_type == "photo" else 0
+    is_tox = 1 if is_toxic else 0
+
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_chat_activity (
+                user_id, messages_count, stickers_count, voice_count, photos_count, toxic_count, last_message_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'), datetime('now', '+3 hours'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                messages_count = user_chat_activity.messages_count + excluded.messages_count,
+                stickers_count = user_chat_activity.stickers_count + excluded.stickers_count,
+                voice_count = user_chat_activity.voice_count + excluded.voice_count,
+                photos_count = user_chat_activity.photos_count + excluded.photos_count,
+                toxic_count = user_chat_activity.toxic_count + excluded.toxic_count,
+                last_message_at = datetime('now', '+3 hours'),
+                updated_at = datetime('now', '+3 hours')
+        """, (user_id, is_text, is_sticker, is_voice, is_photo, is_tox))
+
+
+def increment_user_toxic_count(user_id: int, amount: int = 1) -> None:
+    """Increment toxic counter for user (e.g. on moderator mute or toxic event)."""
+    if not user_id or amount <= 0:
+        return
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            INSERT INTO user_chat_activity (
+                user_id, messages_count, stickers_count, voice_count, photos_count, toxic_count, last_message_at, updated_at
+            ) VALUES (?, 0, 0, 0, 0, ?, datetime('now', '+3 hours'), datetime('now', '+3 hours'))
+            ON CONFLICT(user_id) DO UPDATE SET
+                toxic_count = user_chat_activity.toxic_count + excluded.toxic_count,
+                updated_at = datetime('now', '+3 hours')
+        """, (user_id, amount))
+
+
+def get_user_chat_activity(user_id: int) -> dict:
+    """Retrieve chat message counters and last activity timestamp for user."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT messages_count, stickers_count, voice_count, photos_count, toxic_count, last_message_at
+            FROM user_chat_activity
+            WHERE user_id = ?
+        """, (user_id,))
+        row = cursor.fetchone()
+        if not row:
+            return {
+                "messages_count": 0,
+                "stickers_count": 0,
+                "voice_count": 0,
+                "photos_count": 0,
+                "toxic_count": 0,
+                "last_message_at": None,
+            }
+        return {
+            "messages_count": int(row["messages_count"] or 0),
+            "stickers_count": int(row["stickers_count"] or 0),
+            "voice_count": int(row["voice_count"] or 0),
+            "photos_count": int(row["photos_count"] or 0),
+            "toxic_count": int(row["toxic_count"] or 0),
+            "last_message_at": row["last_message_at"],
+        }
+
+
+def get_user_chat_profile_data(user_id: int) -> dict:
+    """Retrieve combined user info, tournament summary, ELO rating, medals, and chat activity."""
+    user = get_user(user_id)
+    tourney = get_user_tournament_summary(user_id)
+    activity = get_user_chat_activity(user_id)
+
+    team_name = tourney.get("team_name") if tourney.get("registered") else (user["team_name"] if user else None)
+    div_id = tourney.get("division_id") if tourney.get("registered") else (user["division_id"] if user else None)
+
+    elo = get_team_elo(team_name, division_id=div_id or 1) if team_name else 1500.0
+
+    medals = {"gold": 0, "silver": 0, "bronze": 0}
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT
+                SUM(CASE WHEN final_rank = 1 THEN 1 ELSE 0 END) as gold,
+                SUM(CASE WHEN final_rank = 2 THEN 1 ELSE 0 END) as silver,
+                SUM(CASE WHEN final_rank = 3 THEN 1 ELSE 0 END) as bronze
+            FROM season_snapshots
+            WHERE user_id = ?
+        """, (user_id,))
+        row = cursor.fetchone()
+        if row:
+            medals["gold"] = int(row["gold"] or 0)
+            medals["silver"] = int(row["silver"] or 0)
+            medals["bronze"] = int(row["bronze"] or 0)
+
+    return {
+        "user_id": user_id,
+        "user": dict(user) if user else None,
+        "tournament_summary": tourney,
+        "chat_activity": activity,
+        "elo": elo,
+        "medals": medals,
+    }
+
