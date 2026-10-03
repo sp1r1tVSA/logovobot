@@ -7,8 +7,8 @@ e-sports championships: divisions and rounds, match result intake via AI screens
 standings and Pillow-rendered infographics, a debt/warn discipline system, and a virtual
 prediction market ("Logovo.bet") exposed through a Telegram Mini App.
 
-The project is well past MVP — 399 Python files (174 application modules and scripts +
-225 pytest files), 73 SQLite tables (migrations through `032`), and ten completed development phases documented in the
+The project is well past MVP — 428 Python files (191 application modules and scripts +
+237 pytest files), 82 SQLite tables (migrations through `033`), and ten completed development phases documented in the
 `PHASE_*.md` reports under `reports/`. Post-phase work is logged in the numbered
 `FIX_*.md` notes and the `*_AUDIT.md` reports beside them.
 
@@ -116,10 +116,11 @@ never prevents the bot itself from starting. Preserve that isolation.
 | `services/sports/` + `sports_provider.py` | External live-football provider adapters plus `cache`, `circuit`, `limiter`, `freshness`, `health`, `odds_sync` |
 | `services/` (root, ~62 modules) | Betting/market engines, ELO, Poisson, risk, settlement, gamification, seasons, `topic_cache.py`; operations: `db_backup`, `job_health`, `bot_health`, `ocr_metrics`, `admin_journal` |
 | `api/` (22 modules) | `aiohttp` Mini App API — `server.py`, `auth.py`, `rate_limiter.py`, `params.py`, and 18 `routes_*.py` modules |
-| `web/` | Mini App frontend (static `index.html`, `css/`, `js/` — `api`, `app`, `admin` (the Logovo.bet panel), `charts`, `effects`, `outrights`, `store`, `tg`, `ui`) |
+| `transfers/` (15 modules) | The transfer window («ТО») — own package with its own SQL (`repo.py`), schema (`schema.py`, migration `033`), pure rules (`engine.py`), request lifecycle (`requests.py`, `approval.py`, `squad.py`, `slots.py`, `sanctions.py`), the `/to` panel (`handlers.py`), Mini App routes (`api.py`), notifications and the auto-close job. See *Transfer window* below |
+| `web/` | Mini App frontend (static `index.html`, `css/`, `js/` — `api`, `app`, `admin` (the Logovo.bet panel), `charts`, `effects`, `outrights`, `store`, `tg`, `ui`, `transfers`, `shop`) |
 | `utils/` | `media_utils.py`, a thin re-export wrapper over `services/animation_sender.py` |
 | `scripts/` (28 scripts) | One-off operational scripts (DB audit, backfills, imports, bulk club binding, cup bracket seeding, cache refresh, season reset, previews and checkers) |
-| `tests/` | 225 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
+| `tests/` | 237 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
 | `assets/` | **Not in git** — emptied on 2026-09-18 with the КПЛ season. Runtime recreates `avatars/` and `players/` on demand; `logos/` must be refilled by hand (see below) |
 | `reports/` | Historical `PHASE_*.md` plans/matrices/reports, `FIX_0*.md` notes and `*_AUDIT.md` audits, moved off the repo root |
 | `tasks/`, `docs/` | Working plan/todo notes and `PURGE_SEASON_GUIDE.md` |
@@ -147,7 +148,11 @@ Anything registered after the AI catch-all will never fire. Add new handlers *be
 
 ## Storage rules
 
-- `database.py` owns all SQL. Do not open connections or write queries elsewhere.
+- `database.py` owns all SQL. Do not open connections or write queries elsewhere. **One exception:**
+  the transfer window's SQL lives in `transfers/repo.py`. It still goes through
+  `database.transaction()` / `get_connection()` and is parameterized like everything else, but new
+  transfer queries belong there, not in `database.py`. Coin movements stay in `database.py`
+  (`spend_coins`), and `transfers/schema.py` is applied from `init_db()`.
 - Always go through the `transaction()` context manager. It is **re-entrant**: a nested
   call on the same thread joins the outer transaction and commits only when the outermost
   scope exits. This makes composite operations (e.g. confirm match + advance cup series)
@@ -585,6 +590,96 @@ limit keys, scopes and bounds shared by the route and the analysis (`LIMIT_KEYS_
 
 ---
 
+## Transfer window («ТО»)
+
+A transfer window lets coaches trade players between clubs, sell cards to the «урна», take a free
+agent (СА) and pay a surcharge for a special card, under a manager's approval. It lives in the
+`transfers/` package, not in `database.py` / `handlers/` (see the SQL exception under Storage rules);
+the plan and its decisions are in `tasks/plan-transfer-window.md`. Money is **integer thousands**
+(`price_k`; 12.5M = 12500).
+
+**Window.** One per league, not per division. `transfer_windows.status` is `draft | open | closed`,
+at most one is not closed, and it closes by itself at its date-time (`transfers/jobs.py::job_auto_close`,
+every 60 s through `_run_repeating`; it also rejects the `pending_counterparty` requests). `season_id` is
+the season sanctions count from. The starting values of a new window are in `transfers/config.py`
+(`max_buys` / `max_sells` 3, `max_extra_slots` / `slot_price_coins` 0, `ovr_cap` 114, `min_core_players` 5,
+`fa_ovr_cap` 112, urn divisors 2 and 3, `urn_max_per_club` 1, `surcharge_min_ovr` 100, the surcharge table
+100 → 10 000 and 111 → 160 000); **code reads the window's own settings, never those constants.**
+
+**Storage.** Migration `033_transfer_window` (`transfers/schema.py`, additive, applied from
+`database.init_db()` in the same transaction) creates nine tables: `transfer_windows`,
+`transfer_club_budgets`, `transfers`, `transfer_squad_ops`, `transfer_core_snapshot`, `transfer_players`,
+`transfer_topics`, `transfer_slot_purchases`, `transfer_sanctions`. **Budget and slots are computed on
+read** (`engine.compute_ledger`) from `transfers` (`pending_*` plus `approved`) and
+`transfer_slot_purchases` — nothing stores a balance, so a cancelled or rejected request frees its money
+and slot at once.
+
+**Requests.** `transfers.kind` is `deal | surcharge | urn_sale | urn_buy | free_agent`; `status` is
+`pending_counterparty → pending_manager → approved`, or `rejected | withdrawn | cancelled`. A deal needs
+the other coach's confirmation first; an urn buy does not. A surcharge is its own kind, priced by the OVR
+table, and uses no slot. The urn pays (TM + special) / 2, or / 3 for an unsellable card, buys back at
+TM + special, and works in a `draft` window too. The photo goes multipart → Pillow check and re-encode →
+a Telegram `file_id`, and is served through a `getFile` proxy so the token stays server-side.
+
+**Hard blocks vs warnings.** The bot refuses outright only: OVR ≥ `ovr_cap`; the core rule (at least
+`min_core_players` of the original squad stay, checked against `transfer_core_snapshot` taken when the
+window opened); a second free agent for one coach; an active sanction; the urn rules. Everything else —
+budget, buy/sell limits, banned names — is a **warning the manager decides on**. `approval.py` re-checks
+the request on approval: hard blocks stop it, warnings are refreshed. It does not look at the window's
+status, so a `pending_manager` request is still decided after the window closes.
+
+**Roles.** `config.TRANSFER_MANAGER_ID` (env, digits only, else `None`) is the single manager and the
+only transfer setting read from the environment. **Only the manager approves requests — `ADMIN_IDS` cannot.**
+The `/to` panel (DM only, callback prefix `tw:`, pending text input kept in process memory for 600 s)
+is open to the manager and `ADMIN_IDS`: window, auto-close, budgets, group topics, rules (view only),
+«📋 Одобренные заявки», «⛔ Санкции». In the Mini App the transfers view and its header
+button are shown to `is_panel_admin` (`ADMIN_IDS`) only for now — a rollout gate in `app.js`, not an
+API rule: `/api/transfers/…` accepts any authenticated coach — while the «🔁 Трансферы» shop tab (extra
+slots) is open to everyone.
+
+**Topics.** `transfer_topics` binds three topics in one group — `requests`, `feed`, `alerts` — by a topic
+link pasted into the panel. With no topic bound the message goes to the manager's DM with a note, so
+nothing is lost silently.
+
+**Free agents.** The manager forwards a channel comment to the bot's DM; `parse_fa_comment` →
+`fa_preview` → `record_free_agent`. Priority is by the comment's `commented_at`, one free agent per coach,
+and coaches do not file free agents from the Mini App.
+
+**Squad (`squad.py`).** Approval does not touch `squad_players`. A separate «применить к составу» button
+writes the change and records each step in `transfer_squad_ops`; rollback restores exactly those
+operations and is refused if a later request touched the same player in the same club. Cancelling an
+approved request rolls the squad back in the same transaction; a sale to the urn whose card was already
+bought out cannot be cancelled.
+
+**Slots (`slots.py`).** An extra slot is bought for coins: `database.spend_coins` plus a
+`transfer_slot_purchases` row with `coin_tx_id`, in one transaction (coin type `transfer_slot`). The
+ceiling `max_extra_slots` is per club, buys and sells together. Slot purchases are not journaled.
+`repo.refund_slot_purchase` exists with no UI yet.
+
+**Sanctions (`sanctions.py`).** A club or a coach is barred for 1–5 seasons including the current one
+(the window's `season_id`, else the active season); `until = from + N − 1`, which assumes consecutive season
+ids. A club sanction follows the club, a coach sanction follows the person. The block sits in
+`requests._check` and `slots`. The coach gets a DM on add and lift, and the Mini App shows only the
+viewer's own sanction (a banner, `my_status["sanction"]`). `requests.history` and
+`GET /api/transfers/history` (`window`, `mine`, `club`) feed the history tab.
+
+**Admin journal.** Journaled actions, all labelled in `services/admin_journal.ACTIONS`:
+`transfer_request_approved`, `transfer_request_rejected`, `transfer_request_cancelled`,
+`transfer_squad_applied`, `transfer_squad_reverted`, `transfer_sanction_added`, `transfer_sanction_lifted`.
+Add any new transfer action there too.
+
+**Wiring.** `handlers/__init__.py` registers `transfers.handlers.register_handlers` before the AI
+catch-all; `api/server.py` calls `register_transfer_routes` (`/api/transfers/…`); `main.py` hands the bot
+to `transfers.notify` in `post_init` and schedules `transfer_auto_close`; `web/` has the
+`#view-transfers` section, `web/js/transfers.js`, `web/css/transfers.css` and the shop tab.
+
+Tests — run them per subsystem, no full sweep: `test_transfer_engine`, `test_transfer_window`,
+`test_transfer_service`, `test_transfer_requests`, `test_transfer_approval`, `test_transfer_squad`,
+`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_panel`, plus `test_production_audit`
+for any new button and `test_admin_journal` for new journal actions.
+
+---
+
 ## Operations (global admins)
 
 Four screens for **global admins only** (`is_global_admin`), in **private chat only** — in a
@@ -673,6 +768,8 @@ compare against `config.ADMIN_IDS` inline:
   bootstrap `is_panel_admin` flag that shows its ⚙️ button in the Mini App.
 - The ops commands `/health`, `/backup`, `/ocr_stats` (`/ocr`) and `/audit` (`/admin_log`)
   are `is_global_admin`-only and answer in private chat only (see Operations).
+- The transfer window has its own manager: `config.TRANSFER_MANAGER_ID` alone approves requests,
+  `ADMIN_IDS` run the `/to` panel but cannot approve (see Transfer window).
 
 `config.py` re-reads `config.ADMIN_IDS` dynamically inside these helpers, so admin changes
 take effect without a restart. Keep that behaviour.

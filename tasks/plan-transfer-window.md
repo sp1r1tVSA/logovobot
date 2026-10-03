@@ -222,7 +222,7 @@ transfers/
    (`my_status["sanction"]`), публичного списка нет. История (`requests.history`, `GET /api/transfers/history`
    с `window`, `mine`, `club`): выбор окна, «Все» (одобренные) / «Мои» (все статусы своего клуба с причинами),
    фильтр по клубу.
-8. **Документация.** Раздел в `CLAUDE.md`, обновить список тестов.
+8. **Документация.** Раздел в `CLAUDE.md`, обновить список тестов. ✅ Раздел «Transfer window» в `CLAUDE.md`, строка `transfers/` в таблице архитектуры, исключение «SQL в `transfers/repo.py`» в Storage rules, роль менеджера в Roles and access, пересчитаны счётчики (428 файлов, 237 тестов, 82 таблицы, миграции до `033`), список из 9 тестов ТО.
 
 Тесты по подсистемам, без полного прогона: `test_transfer_engine`, `test_transfer_window`, `test_transfer_service`,
 `test_transfer_requests`, `test_transfer_squad` + `test_production_audit` для новых кнопок.
