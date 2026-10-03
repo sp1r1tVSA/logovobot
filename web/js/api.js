@@ -508,6 +508,17 @@ class ApiClient {
     return this.request('/api/transfers/status');
   }
 
+  getTransferSlots() {
+    return this.request('/api/transfers/slots');
+  }
+
+  buyTransferSlot(slotType) {
+    return this.request('/api/transfers/slots', {
+      method: 'POST',
+      body: JSON.stringify({ slot_type: slotType })
+    });
+  }
+
   getTransferHistory() {
     return this.request('/api/transfers/history');
   }

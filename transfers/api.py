@@ -1,6 +1,8 @@
 """aiohttp HTTP-маршруты Mini App для трансферного окна (/api/transfers/...).
 
 * GET  /api/transfers/status        — статус окна, бюджет и слоты клуба, заявки тренера
+* GET  /api/transfers/slots         — доп. слоты за монеты: цена, потолок, баланс (магазин)
+* POST /api/transfers/slots         — купить доп. слот за монеты (slot_type: buy|sell)
 * GET  /api/transfers/history       — лента одобренных сделок
 * GET  /api/transfers/urn           — доступные карты в урне для выкупа
 * GET  /api/transfers/{id}/photo    — прокси фото заявки из Telegram
@@ -24,7 +26,7 @@ from aiohttp import web
 from PIL import Image
 
 from api.auth import check_user_access, extract_init_data, get_authenticated_user
-from transfers import notify, requests as req_mod, service
+from transfers import notify, requests as req_mod, service, slots
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +118,17 @@ async def handle_get_status(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
     except Exception as exc:
         logger.exception("transfers: handle_get_status failed")
+        return web.json_response({"status": "error", "message": "Внутренняя ошибка сервера"}, status=500)
+
+
+async def handle_get_slots(request: web.Request) -> web.Response:
+    user_info, err = _auth(request)
+    if err is not None:
+        return err
+    try:
+        return web.json_response({"status": "ok", "data": slots.info(user_info["id"])})
+    except Exception:
+        logger.exception("transfers: handle_get_slots failed")
         return web.json_response({"status": "error", "message": "Внутренняя ошибка сервера"}, status=500)
 
 
@@ -339,6 +352,33 @@ async def handle_post_urn_buy(request: web.Request) -> web.Response:
     })
 
 
+async def handle_post_slot(request: web.Request) -> web.Response:
+    user_info, err = _auth(request)
+    if err is not None:
+        return err
+    try:
+        fields, _ = await _read_request_payload(request)
+    except web.HTTPBadRequest:
+        raise
+
+    try:
+        purchase = slots.buy(user_info["id"], str(fields.get("slot_type") or ""))
+    except service.InputError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception:
+        logger.exception("transfers: slots.buy failed")
+        return web.json_response({"status": "error", "message": "Не удалось купить слот"}, status=500)
+
+    bot = _get_bot(request)
+    if bot:
+        try:
+            await notify.announce_slot_bought(bot, purchase)
+        except Exception:
+            logger.exception("transfers: announce_slot_bought error")
+
+    return web.json_response({"status": "ok", "purchase": purchase})
+
+
 async def handle_post_confirm(request: web.Request) -> web.Response:
     user_info, err = _auth(request)
     if err is not None:
@@ -427,11 +467,13 @@ def register_routes(app: web.Application) -> None:
     """Регистрация всех HTTP-маршрутов трансферного окна в aiohttp."""
     app.router.add_get("/api/transfers/status", handle_get_status)
     app.router.add_get("/api/transfers/history", handle_get_history)
+    app.router.add_get("/api/transfers/slots", handle_get_slots)
     app.router.add_get("/api/transfers/urn", handle_get_urn)
     app.router.add_get("/api/transfers/{id}/photo", handle_get_photo)
 
     app.router.add_post("/api/transfers/deal", handle_post_deal)
     app.router.add_post("/api/transfers/surcharge", handle_post_surcharge)
+    app.router.add_post("/api/transfers/slots", handle_post_slot)
     app.router.add_post("/api/transfers/urn/sale", handle_post_urn_sale)
     app.router.add_post("/api/transfers/urn/buy", handle_post_urn_buy)
     app.router.add_post("/api/transfers/{id}/confirm", handle_post_confirm)

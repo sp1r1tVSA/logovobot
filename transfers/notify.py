@@ -313,6 +313,15 @@ async def announce_free_agent(bot, transfer: dict) -> bool:
     return await post_to_topic(bot, "feed", "\n".join(lines))
 
 
+async def announce_slot_bought(bot, purchase: dict) -> bool:
+    """Клуб докупил слот за монеты — строка в ленту `feed`."""
+    what = "покупки" if purchase.get("slot_type") == "buy" else "продажи"
+    state = purchase.get("state") or {}
+    text = (f"🪙 <b>{html.escape(purchase.get('club') or '')}</b> докупил слот {what} за "
+            f"{purchase.get('price')} 🪙 (докупок {state.get('bought', '?')} из {state.get('max_extra', '?')}).")
+    return await post_to_topic(bot, "feed", text)
+
+
 async def notify_free_agent_recorded(bot, transfer: dict) -> bool:
     """Уведомление тренеру, подписавшему свободного агента."""
     user_id = transfer.get("to_user")

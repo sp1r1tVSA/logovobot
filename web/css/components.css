@@ -5798,7 +5798,7 @@ span.team-logo-fallback {
 .adm-check-side { font-size: 0.76rem; color: var(--text-muted); white-space: nowrap; }
 .adm-check:has(input:checked) { background: rgba(245, 176, 39, 0.08); }
 
-/* ─── Shop (вкладка «Магазин»; каталога пока нет) ─── */
+/* ─── Shop (вкладка «Магазин»; пока только слоты трансферного окна) ─── */
 .shop-balance-card {
   display: flex;
   flex-direction: column;
@@ -5823,3 +5823,15 @@ span.team-logo-fallback {
 .shop-empty-icon { font-size: 2.4rem; margin-bottom: 10px; filter: drop-shadow(0 0 16px rgba(245, 176, 39, 0.35)); }
 .shop-empty-title { font-family: 'Outfit', sans-serif; font-size: 1.05rem; font-weight: 800; color: #fff; margin-bottom: 6px; }
 .shop-empty-desc { font-size: 0.84rem; color: var(--text-secondary); line-height: 1.45; max-width: 300px; margin: 0 auto; }
+
+/* Слоты ТО в магазине */
+.shop-slots { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+.shop-slot-head { display: flex; justify-content: space-between; gap: 10px; font-size: 0.78rem; font-weight: 700; color: var(--text-secondary); }
+.shop-slot-card { display: flex; align-items: center; gap: 12px; padding: 12px 14px; background: rgba(14, 18, 27, 0.6); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 14px; }
+.shop-slot-icon { font-size: 1.6rem; }
+.shop-slot-info { flex: 1; min-width: 0; }
+.shop-slot-title { font-family: 'Outfit', sans-serif; font-size: 0.95rem; font-weight: 800; color: #fff; }
+.shop-slot-hint { font-size: 0.76rem; color: var(--text-secondary); line-height: 1.35; }
+.shop-slot-buy { padding: 8px 14px; border: 1px solid rgba(245, 176, 39, 0.45); border-radius: 10px; background: rgba(245, 176, 39, 0.14); color: var(--accent-gold); font-weight: 800; white-space: nowrap; cursor: pointer; }
+.shop-slot-buy:disabled { opacity: 0.4; cursor: default; }
+.shop-slot-note { font-size: 0.8rem; color: var(--text-muted); text-align: center; line-height: 1.4; }
