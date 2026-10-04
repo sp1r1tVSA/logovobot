@@ -20,7 +20,7 @@ from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
 
-TOPIC_LABELS = {"requests": "Заявки", "feed": "Лента", "alerts": "Алерты"}
+TOPIC_LABELS = {"requests": "Заявки", "feed": "Лента", "alerts": "Алерты", "fa": "Свободные агенты"}
 
 KIND_LABELS = {
     "deal": "сделка", "free_agent": "свободный агент", "surcharge": "доплата",
@@ -422,6 +422,9 @@ def _decision_lines(t: dict) -> list[str]:
     elif kind == "urn_buy":
         lines.append(f"Покупатель: {html.escape(t.get('to_club') or '—')}, выкуп из урны "
                      f"<b>{format_k(t.get('price_k'))}</b>")
+    elif kind == "free_agent":
+        lines.append(f"{html.escape(t.get('from_club') or '—')} → {html.escape(t.get('to_club') or '—')}, "
+                     f"<b>{format_k(t.get('price_k'))}</b>")
     return lines
 
 
@@ -437,6 +440,13 @@ async def _dm_parties(bot, transfer: dict, text: str) -> None:
 
 async def notify_approved(bot, transfer: dict) -> bool:
     """Одобрено: ЛС сторонам и публикация в ленту. True — лента получила пост."""
+    if transfer.get("kind") == "free_agent":
+        if transfer.get("to_user") and not await notify_free_agent_recorded(bot, transfer):
+            await post_to_topic(
+                bot, "alerts",
+                f"⚠️ По заявке #{transfer['id']} не дошло в ЛС (бот заблокирован или не запущен): "
+                f"<code>{transfer['to_user']}</code>")
+        return await announce_free_agent(bot, transfer)
     kind = KIND_LABELS.get(transfer.get("kind"), "")
     body = "\n".join(_decision_lines(transfer))
     await _dm_parties(bot, transfer, f"✅ <b>Заявка #{transfer['id']} одобрена</b> ({kind})\n\n{body}")

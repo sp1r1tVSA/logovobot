@@ -62,6 +62,7 @@ TOPIC_PURPOSE = {
     "requests": "заявки, которые ждут вашего решения",
     "feed": "объявления для всей лиги: открытие, закрытие, сделки",
     "alerts": "сводки и проблемы: недоставленные ЛС, автоотклонения",
+    "fa": "тема, где тренеры пишут заявки на свободных агентов — бот разбирает их сам",
 }
 
 # user_id → {"kind": "budget"|"autoclose"|"topic", "expires": monotonic, ...}
@@ -191,7 +192,8 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
     lines.append(f"Бюджеты: {info['budgets']} из {info['clubs']} клубов (без бюджета — 0)")
     if status == "open":
         lines.append(f"Снимок составов: {info['snapshot']} из {info['clubs']} клубов")
-    missing = [notify.TOPIC_LABELS[t] for t in notify.TOPIC_LABELS if t not in info["topics"]]
+    # «Свободные агенты» — необязательная тема: без неё просто нет автоматического разбора
+    missing = [label for t, label in notify.TOPIC_LABELS.items() if t != "fa" and t not in info["topics"]]
     lines.append("Темы группы: все привязаны" if not missing
                  else "Темы группы: не привязаны — " + ", ".join(missing))
     if info["statuses"]:
@@ -518,8 +520,9 @@ def _topics_view() -> tuple[str, InlineKeyboardMarkup]:
         lines.append(f"{mark} <b>{label}</b> — {TOPIC_PURPOSE[key]}")
     lines += ["", "Не привязанная тема не теряет сообщения — они приходят вам в ЛС.",
               "Нажмите тему, чтобы привязать или перепривязать её."]
-    kb = [[_btn(("🔁 " if key in topics else "🔗 ") + label, f"tw:topic:{key}")
-           for key, label in notify.TOPIC_LABELS.items()], _back()]
+    buttons = [_btn(("🔁 " if key in topics else "🔗 ") + label, f"tw:topic:{key}")
+               for key, label in notify.TOPIC_LABELS.items()]
+    kb = [buttons[i:i + 2] for i in range(0, len(buttons), 2)] + [_back()]
     return "\n".join(lines), InlineKeyboardMarkup(kb)
 
 
@@ -559,8 +562,10 @@ async def _input_topic(update: Update, context: ContextTypes.DEFAULT_TYPE, entry
         raise service.InputError("В этой группе нет тем — нужна группа с включёнными темами.")
     try:
         # Пробное сообщение заодно проверяет, что тема есть и бот может в неё писать.
-        await bot.send_message(chat.id, f"✅ Эта тема — «{label}» трансферного окна.",
-                               message_thread_id=thread_id)
+        probe = (f"✅ Эта тема — «{label}» трансферного окна. Пишите заявки по шаблону "
+                 "(1. Имя / 2. Откуда / 3. Куда / 4. Сумма), бот передаст их на одобрение."
+                 if topic_type == "fa" else f"✅ Эта тема — «{label}» трансферного окна.")
+        await bot.send_message(chat.id, probe, message_thread_id=thread_id)
     except TelegramError as exc:
         raise service.InputError(f"Не получилось написать в эту тему: {html.escape(str(exc))}.")
     actor = update.effective_user.id
@@ -741,6 +746,62 @@ async def on_fa_comment(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         except Exception:
             pass
     await msg.reply_text(card_text, reply_markup=kb, parse_mode="HTML")
+
+
+class _FaTopicFilter(filters.MessageFilter):
+    """Новое сообщение в привязанной теме «Свободные агенты», похожее на заявку СА."""
+
+    def filter(self, message) -> bool:
+        chat = message.chat
+        user = message.from_user
+        if not chat or chat.type not in ("group", "supergroup") or not user or user.is_bot:
+            return False
+        if not req_mod.looks_like_fa(message.text or message.caption or ""):
+            return False
+        try:
+            topic = repo.get_topic("fa")
+        except Exception:
+            return False
+        return bool(topic and topic["group_chat_id"] == chat.id
+                    and topic["message_thread_id"] == message.message_thread_id)
+
+
+FA_TOPIC_FILTER = _FaTopicFilter(name="transfers.fa_topic")
+
+
+async def on_fa_topic_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Заявка СА, написанная тренером в теме группы: разбор → карточка ответственному.
+
+    Клуб берётся у автора, а не из пункта «Куда». Отказ по жёсткому правилу
+    пишется ответом в теме; сообщения не по шаблону фильтр не пропускает.
+    """
+    msg = update.effective_message
+    user = update.effective_user
+    if not msg or not user:
+        return
+    text = msg.text or msg.caption or ""
+    photo_file_id = msg.photo[-1].file_id if msg.photo else None
+    commented_at = req_mod.commented_at_msk(msg.date)
+    try:
+        draft = req_mod.parse_fa_comment(text, commented_at=commented_at, photo_file_id=photo_file_id,
+                                         author_id=user.id)
+        transfer = await asyncio.to_thread(req_mod.submit_free_agent, draft, user.id)
+    except service.InputError as exc:
+        await msg.reply_text(f"⚠️ Заявка не принята:\n\n{exc}", parse_mode="HTML")
+        return
+    except Exception:
+        logger.exception("transfers: fa topic message failed")
+        await msg.reply_text("⚠️ Не удалось обработать заявку. Попробуйте ещё раз или напишите ответственному.")
+        return
+
+    await msg.reply_text(
+        f"✅ Заявка #{transfer['id']} принята: <b>{html.escape(transfer['player_name'])}</b> → "
+        f"{html.escape(transfer['to_club'])}, {format_k(transfer['price_k'])}. Ждёт решения ответственного.",
+        parse_mode="HTML")
+    try:
+        await notify.post_request_card(context.bot, transfer)
+    except Exception:
+        logger.exception("transfers: post_request_card failed for free agent #%s", transfer["id"])
 
 
 async def cb_fa_record(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1543,6 +1604,9 @@ def register_handlers(app) -> None:
     app.add_handler(CommandHandler("to", cmd_hub))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & AWAITING_INPUT, on_input))
     app.add_handler(MessageHandler(filters.ChatType.PRIVATE & ~filters.COMMAND & FA_COMMENT_FILTER, on_fa_comment))
+    app.add_handler(MessageHandler(
+        filters.UpdateType.MESSAGE & (filters.TEXT | filters.CAPTION | filters.PHOTO)
+        & ~filters.COMMAND & FA_TOPIC_FILTER, on_fa_topic_message))
 
     app.add_handler(CallbackQueryHandler(cmd_hub, pattern=r"^tw:hub$"))
     app.add_handler(CallbackQueryHandler(cb_create, pattern=r"^tw:create$"))

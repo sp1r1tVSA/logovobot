@@ -67,6 +67,8 @@ def _remember_player(t: dict) -> None:
         repo.upsert_player(t["player_name"], last_club=t["to_club"], ovr=t["ovr"], price_k=t["price_k"])
     elif kind == "surcharge":
         repo.upsert_player(t["player_name"], last_club=t["to_club"], ovr=t["ovr"])
+    elif kind == "free_agent":
+        repo.upsert_player(t["player_name"], last_club=t["to_club"], ovr=t["ovr"], price_k=t["price_k"])
 
 
 def approve(manager_id: int, transfer_id) -> Decision:

@@ -651,11 +651,12 @@ def commented_at_msk(moment: dt.datetime | None) -> str | None:
 
 
 def parse_fa_comment(text: str | None, *, commented_at: str | None = None,
-                     photo_file_id: str | None = None) -> FaDraft:
+                     photo_file_id: str | None = None, author_id: int | None = None) -> FaDraft:
     """«1. Имя Фамилия / 2. Откуда / 3. Куда / 4. Сумма / 5. Остаток / 6. Фото» → черновик.
 
     Разбор детерминированный: номера пунктов, клуб «Куда» — через реестр клубов,
     тренер — по клубу. OVR — необязательное «OVR 105» в любом месте.
+    С `author_id` (заявка из темы группы) клуб и тренер — автора, пункт «Куда» не разбирается.
     """
     raw = str(text or "").strip()
     lines = _numbered_lines(raw)
@@ -670,8 +671,12 @@ def parse_fa_comment(text: str | None, *, commented_at: str | None = None,
 
     from_club = " ".join(_FA_OVR.sub("", lines.get(2, "")).split()) or None
     to_text = " ".join(lines[3].split())
-    to_club = service.resolve_club(to_text)
-    coach = database.find_user_by_team(to_club)
+    if author_id is not None:
+        to_club = coach_club(author_id)
+        coach = {"telegram_id": int(author_id)}
+    else:
+        to_club = service.resolve_club(to_text)
+        coach = database.find_user_by_team(to_club)
     price_k = parse_money_k(lines[4])
     if price_k is None:
         raise InputError(f"Не понял сумму: «{lines[4]}».")
@@ -771,6 +776,28 @@ def record_free_agent(draft: FaDraft, actor_id: int, *, replace_id: int | None =
         return FaRecorded(repo.get_transfer(tid), repo.get_transfer(replaced["id"]) if replaced else None)
 
 
+def submit_free_agent(draft: FaDraft, author_id: int) -> dict:
+    """Заявка СА от тренера из темы группы: `pending_manager`, решает ответственный.
+
+    Бюджет и слот резервируются сразу (заявка активна), отказ их освобождает.
+    Нарушение жёсткого правила — `InputError`, и заявка не создаётся.
+    """
+    with database.transaction():
+        window = _window()
+        records = _fa_records(window["id"], draft)
+        if any(_same_club(t["to_club"], draft.to_club) and t["commented_at"] == draft.commented_at
+               for t in records):
+            raise InputError("Эта заявка уже подана.")
+        ev = _require(_check(window, draft.request(), user_ids=(draft.to_user,)))
+        tid = repo.insert_transfer(
+            window["id"], "free_agent", draft.player_name, "pending_manager", _warnings(ev),
+            from_club=draft.from_club, to_club=draft.to_club, to_user=draft.to_user,
+            price_k=draft.price_k, ovr=draft.ovr, source_text=draft.source_text,
+            commented_at=draft.commented_at, reported_budget_k=draft.reported_budget_k,
+            photo_file_id=draft.photo_file_id, initiator_id=int(author_id))
+        return repo.get_transfer(tid)
+
+
 def edit_fa_draft(draft: FaDraft, text: str) -> FaDraft:
     """Исправленный ответственным текст → новый черновик с тем же временем и фото."""
     fresh = parse_fa_comment(text, commented_at=draft.commented_at, photo_file_id=draft.photo_file_id)
@@ -782,5 +809,5 @@ __all__ = [
     "create_deal", "create_surcharge", "create_urn_sale", "create_urn_buy", "counterparty_id",
     "confirm", "decline", "withdraw", "serialize", "my_status", "urn_items", "history", "photo_file_id",
     "looks_like_fa", "FaDraft", "commented_at_msk", "parse_fa_comment", "FaPreview", "fa_preview",
-    "FaRecorded", "record_free_agent", "edit_fa_draft",
+    "FaRecorded", "record_free_agent", "submit_free_agent", "edit_fa_draft",
 ]

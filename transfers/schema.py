@@ -18,7 +18,10 @@ TRANSFER_KINDS = ("deal", "free_agent", "surcharge", "urn_sale", "urn_buy")
 TRANSFER_STATUSES = (
     "pending_counterparty", "pending_manager", "approved", "rejected", "withdrawn", "cancelled",
 )
-TOPIC_TYPES = ("requests", "feed", "alerts")
+TOPIC_TYPES = ("requests", "feed", "alerts", "fa")
+# `transfer_topics` из миграции 033 принимает только первые три типа (CHECK, который в SQLite
+# без пересоздания таблицы не изменить), поэтому остальные лежат в `transfer_topics_ext`.
+EXT_TOPIC_TYPES = ("fa",)
 
 
 def apply_schema(cursor: sqlite3.Cursor) -> None:
@@ -165,6 +168,16 @@ def apply_schema(cursor: sqlite3.Cursor) -> None:
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transfer_topics (
             topic_type TEXT PRIMARY KEY CHECK(topic_type IN ('requests', 'feed', 'alerts')),
+            group_chat_id INTEGER NOT NULL,
+            message_thread_id INTEGER,
+            bound_by INTEGER,
+            bound_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+        )
+    """)
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transfer_topics_ext (
+            topic_type TEXT PRIMARY KEY CHECK(topic_type IN ('fa')),
             group_chat_id INTEGER NOT NULL,
             message_thread_id INTEGER,
             bound_by INTEGER,

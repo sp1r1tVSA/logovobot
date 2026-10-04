@@ -638,10 +638,10 @@ API rule: `/api/transfers/…` accepts any authenticated coach — while the «�
 slots) is open to everyone.
 
 **Topics.** `transfer_topics` binds three topics in one group — `requests`, `feed`, `alerts` — by a topic
-link pasted into the panel. With no topic bound the message goes to the manager's DM with a note, so
+link pasted into the panel. A fourth, optional one, `fa` («Свободные агенты»), is stored in `transfer_topics_ext` (additive table, no CHECK): the deployed `transfer_topics` only allows the first three types and SQLite cannot change a CHECK without a rebuild. `repo.bind_topic/get_topic/get_topics` route `schema.EXT_TOPIC_TYPES` there; the panel's «все привязаны» line ignores `fa`. With no topic bound the message goes to the manager's DM with a note, so
 nothing is lost silently.
 
-**Free agents.** The manager forwards a channel comment to the bot's DM; `parse_fa_comment` →
+**Free agents.** Automatic flow: with the `fa` topic bound, a coach writes the template (1. имя / 2. откуда / 3. куда / 4. сумма) in it; `handlers.FA_TOPIC_FILTER` lets only `looks_like_fa` messages of that topic through (anything else is silently ignored), `parse_fa_comment(author_id=…)` takes the club from the **author** (the «Куда» line is not checked against it) and the message date as `commented_at`, `requests.submit_free_agent` files a `pending_manager` request, the bot answers in the topic and posts the card to `requests` for the manager. On approval the coach gets a DM and the feed gets an announcement. The unbound `fa` topic means the flow is off; the bot must see all group messages (admin rights or privacy mode off). Manual fallback: the manager forwards a channel comment to the bot's DM; `parse_fa_comment` →
 `fa_preview` → `record_free_agent`. Priority is by the comment's `commented_at`, one free agent per coach,
 and coaches do not file free agents from the Mini App.
 
@@ -677,7 +677,7 @@ to `transfers.notify` in `post_init` and schedules `transfer_auto_close`; `web/`
 
 Tests — run them per subsystem, no full sweep: `test_transfer_engine`, `test_transfer_window`,
 `test_transfer_service`, `test_transfer_requests`, `test_transfer_approval`, `test_transfer_squad`,
-`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_panel`, plus `test_production_audit`
+`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_fa_topic`, `test_transfer_panel`, plus `test_production_audit`
 for any new button and `test_admin_journal` for new journal actions.
 
 ---

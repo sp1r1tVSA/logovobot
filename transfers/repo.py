@@ -27,7 +27,7 @@ from transfers.engine import (
     norm_club,
     norm_player,
 )
-from transfers.schema import TOPIC_TYPES, TRANSFER_KINDS, TRANSFER_STATUSES
+from transfers.schema import EXT_TOPIC_TYPES, TOPIC_TYPES, TRANSFER_KINDS, TRANSFER_STATUSES
 
 
 class WindowConflict(Exception):
@@ -601,19 +601,30 @@ def bind_topic(topic_type: str, group_chat_id: int, message_thread_id: int | Non
                bound_by: int | None) -> None:
     if topic_type not in TOPIC_TYPES:
         raise ValueError(f"unknown topic type: {topic_type}")
+    args = (topic_type, int(group_chat_id), message_thread_id, bound_by, now_msk_str())
     with transaction() as conn:
+        if topic_type in EXT_TOPIC_TYPES:
+            conn.execute(
+                "INSERT INTO transfer_topics_ext (topic_type, group_chat_id, message_thread_id, bound_by, bound_at) "
+                "VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT(topic_type) DO UPDATE SET group_chat_id = excluded.group_chat_id, "
+                "message_thread_id = excluded.message_thread_id, bound_by = excluded.bound_by, "
+                "bound_at = excluded.bound_at", args)
+            return
         conn.execute(
             "INSERT INTO transfer_topics (topic_type, group_chat_id, message_thread_id, bound_by, bound_at) "
             "VALUES (?, ?, ?, ?, ?) "
             "ON CONFLICT(topic_type) DO UPDATE SET group_chat_id = excluded.group_chat_id, "
             "message_thread_id = excluded.message_thread_id, bound_by = excluded.bound_by, "
-            "bound_at = excluded.bound_at",
-            (topic_type, int(group_chat_id), message_thread_id, bound_by, now_msk_str()),
-        )
+            "bound_at = excluded.bound_at", args)
 
 
 def get_topic(topic_type: str) -> dict | None:
     with transaction() as conn:
+        if topic_type in EXT_TOPIC_TYPES:
+            return _row(conn.execute(
+                "SELECT * FROM transfer_topics_ext WHERE topic_type = ?", (topic_type,)
+            ).fetchone())
         return _row(conn.execute(
             "SELECT * FROM transfer_topics WHERE topic_type = ?", (topic_type,)
         ).fetchone())
@@ -621,7 +632,9 @@ def get_topic(topic_type: str) -> dict | None:
 
 def get_topics() -> dict[str, dict]:
     with transaction() as conn:
-        return {r["topic_type"]: dict(r) for r in conn.execute("SELECT * FROM transfer_topics").fetchall()}
+        rows = conn.execute("SELECT * FROM transfer_topics").fetchall()
+        rows += conn.execute("SELECT * FROM transfer_topics_ext").fetchall()
+        return {r["topic_type"]: dict(r) for r in rows}
 
 
 # ─── Исходный состав ─────────────────────────────────────────────────────────
