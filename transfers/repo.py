@@ -512,6 +512,25 @@ def coaches_of_club(club_name: str) -> list[dict]:
             if norm_club(resolve_team_name(r["team_name"]) or r["team_name"]) == key]
 
 
+def list_coaches() -> list[dict]:
+    """Все тренеры с клубом: `telegram_id`, `team_name` как в `users` (резолв — у вызывающего)."""
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT telegram_id, team_name FROM users WHERE team_name IS NOT NULL AND TRIM(team_name) != ''"
+        ).fetchall()
+    return [{"telegram_id": r["telegram_id"], "team_name": r["team_name"]} for r in rows]
+
+
+def claim_reminder(window_id: int, tag: str) -> bool:
+    """Отметить напоминание отправленным. False — оно уже было, повторять не надо."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "INSERT OR IGNORE INTO transfer_reminders (window_id, tag, sent_at) VALUES (?, ?, ?)",
+            (window_id, tag, now_msk_str()),
+        )
+        return cur.rowcount > 0
+
+
 def season_names(season_ids: Iterable[int]) -> dict[int, str]:
     """{id сезона: название} для подписей санкций; неизвестный id в словарь не попадает."""
     wanted = {int(i) for i in season_ids if i}

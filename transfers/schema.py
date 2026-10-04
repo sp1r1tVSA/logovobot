@@ -185,6 +185,16 @@ def apply_schema(cursor: sqlite3.Cursor) -> None:
         )
     """)
 
+    # Какие напоминания уже отправлены: (окно, метка) уникальны, поэтому повтор после рестарта невозможен.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transfer_reminders (
+            window_id INTEGER NOT NULL REFERENCES transfer_windows(id),
+            tag TEXT NOT NULL,
+            sent_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+            PRIMARY KEY (window_id, tag)
+        )
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transfer_slot_purchases (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
