@@ -214,6 +214,24 @@ def _goal_shortfall_line(sides) -> str:
     )
 
 
+def _assist_gap_line(sides) -> str:
+    """Soft hint for the AI confirmation card: a side scored but no assist was read.
+
+    Goals without an assist are normal, so this is only a nudge — the model may
+    also have dropped or misread the assister's row of the stats table, and the
+    card otherwise looks like a perfectly ordinary match. Only meant for readings
+    taken from a stats table; a timeline screenshot carries no assists at all.
+    `sides` is ((team, {player: assists}, score), ...).
+    """
+    teams = [safe_escape(team) for team, assists, score in sides if score > 0 and not assists]
+    if not teams:
+        return ""
+    return (
+        f"ℹ️ <b>Ассисты не распознаны:</b> {', '.join(teams)}.\n"
+        f"<i>Если на скриншоте у этой команды есть ассисты — нажмите «Изменить вручную».</i>\n\n"
+    )
+
+
 def _goal_excess_line(sides) -> str:
     """Error for the AI confirmation card when more goals were read than scored.
 
@@ -3032,6 +3050,10 @@ async def ai_recognize_now(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             score_sides = ((home_team, h_goals, h_score), (away_team, a_goals, a_score))
             excess_line = _goal_excess_line(score_sides)
             shortfall_line = excess_line or _goal_shortfall_line(score_sides)
+            if not excess_line and not is_single_timeline and ocr_stats.get("rows"):
+                shortfall_line += _assist_gap_line(
+                    ((home_team, h_assists, h_score), (away_team, a_assists, a_score))
+                )
             # Счёт в метриках — в порядке хозяева/гости матча (player1/player2).
             await _record_ocr("goals_exceed" if excess_line else "ok", h_score, a_score)
 
