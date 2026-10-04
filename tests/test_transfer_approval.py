@@ -459,3 +459,81 @@ class TestPortraitPrefetch:
         req_mod.record_free_agent(draft, MANAGER)
         _run(handlers.cb_fa_record, _update(data=f"tw:fa:rec:{draft_id}"), _bot())
         assert prefetched == []
+
+
+class TestPortraitBackfillButton:
+    def _press(self, user_id=MANAGER):
+        bot = _bot()
+        update = _update(user_id, data="tw:ports")
+
+        async def go():
+            await handlers.cb_portraits(update, SimpleNamespace(bot=bot))
+            await asyncio.gather(*list(handlers._background))
+
+        asyncio.run(go())
+        return update.callback_query, bot
+
+    def test_route_and_button_registered(self):
+        from telegram.ext import CallbackQueryHandler
+
+        added = []
+        handlers.register_handlers(SimpleNamespace(add_handler=lambda h, *a, **k: added.append(h)))
+        patterns = [h.pattern for h in added if isinstance(h, CallbackQueryHandler)]
+        assert any(p.match("tw:ports") for p in patterns)
+
+    def test_approved_list_offers_button(self):
+        _, deal = _setup()
+        approval.approve(MANAGER, deal["id"])
+        _, markup = handlers._approved_view(0)
+        assert "tw:ports" in [b.callback_data for row in markup.inline_keyboard for b in row]
+
+    def test_runs_in_background_and_reports(self, monkeypatch):
+        _, deal = _setup()
+        approval.approve(MANAGER, deal["id"])
+        seen = []
+
+        def fake(items):
+            seen.extend(t["player_name"] for t in items)
+            return {"total": 1, "cached": 0, "fetched": 1, "missing": []}
+
+        monkeypatch.setattr(handlers.req_mod, "backfill_portraits", fake)
+        query, bot = self._press()
+        assert seen == ["B. Saka"]
+        assert query.answers and not query.answers[0][1]
+        assert any("Скачано: 1" in t for t in _texts(bot, MANAGER))
+        assert handlers._portraits_running is False
+
+    def test_missing_players_are_listed(self, monkeypatch):
+        _, deal = _setup()
+        approval.approve(MANAGER, deal["id"])
+        monkeypatch.setattr(handlers.req_mod, "backfill_portraits",
+                            lambda items: {"total": 1, "cached": 0, "fetched": 0, "missing": ["B. Saka"]})
+        _, bot = self._press()
+        assert any("Без портрета: B. Saka" in t for t in _texts(bot, MANAGER))
+
+    def test_failure_is_reported_and_unlocks(self, monkeypatch):
+        _, deal = _setup()
+        approval.approve(MANAGER, deal["id"])
+
+        def boom(items):
+            raise RuntimeError("network")
+
+        monkeypatch.setattr(handlers.req_mod, "backfill_portraits", boom)
+        _, bot = self._press()
+        assert any("Не удалось" in t for t in _texts(bot, MANAGER))
+        assert handlers._portraits_running is False
+
+    def test_nothing_approved_does_not_start(self, monkeypatch):
+        _setup()
+        monkeypatch.setattr(handlers.req_mod, "backfill_portraits",
+                            lambda items: pytest.fail("must not run"))
+        query, bot = self._press()
+        assert query.answers[0][1] is True and bot.send_message.await_count == 0
+
+    def test_stranger_is_refused(self, monkeypatch):
+        _, deal = _setup()
+        approval.approve(MANAGER, deal["id"])
+        monkeypatch.setattr(handlers.req_mod, "backfill_portraits",
+                            lambda items: pytest.fail("must not run"))
+        _, bot = self._press(user_id=555)
+        assert bot.send_message.await_count == 0

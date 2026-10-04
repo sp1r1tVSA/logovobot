@@ -672,3 +672,46 @@
 .hist-arrow {
   color: var(--text-secondary, #94a3b8);
 }
+
+/* Автоподбор имени клуба/игрока */
+.suggest-host { position: relative; }
+.suggest-list {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 100%;
+  margin-top: 4px;
+  z-index: 30;
+  max-height: 240px;
+  overflow-y: auto;
+  background: #161a22;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+}
+.suggest-list[hidden] { display: none; }
+.suggest-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  color: #fff;
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+}
+.suggest-item:last-child { border-bottom: 0; }
+.suggest-item:active { background: rgba(245, 176, 39, 0.12); }
+.suggest-club {
+  color: var(--text-secondary, #94a3b8);
+  font-size: 0.75rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 45%;
+}

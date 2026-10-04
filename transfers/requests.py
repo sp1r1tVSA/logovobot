@@ -424,6 +424,33 @@ def prefetch_portrait(t: dict) -> str | None:
     return None
 
 
+def backfill_portraits(transfers: list[dict]) -> dict:
+    """Догрузить портреты по одобренным заявкам: `{"total", "cached", "fetched", "missing"}`.
+
+    Блокирует (сеть) — зовите в потоке. Один игрок в нескольких заявках качается один раз,
+    а уже лежащий в кэше файл сети не трогает. `missing` — имена, для которых портрета нет.
+    """
+    seen, stats = set(), {"total": 0, "cached": 0, "fetched": 0, "missing": []}
+    for t in transfers:
+        name = t.get("player_name")
+        key = norm_player(name)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        stats["total"] += 1
+        clubs = [c for c in (t.get("from_club"), t.get("to_club"))
+                 if c and norm_club(c) != norm_club(URN_CLUB)]
+        if not clubs:
+            stats["missing"].append(name)
+        elif portrait_url(name, *clubs):
+            stats["cached"] += 1
+        elif prefetch_portrait(t):
+            stats["fetched"] += 1
+        else:
+            stats["missing"].append(name)
+    return stats
+
+
 def serialize(t: dict, viewer_id: int | None = None, *, private: bool = False) -> dict:
     """Заявка для Mini App. Без Telegram ID и текста комментария.
 

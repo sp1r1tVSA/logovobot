@@ -539,6 +539,13 @@ def get_player(player_name: str) -> dict | None:
         return _row(conn.execute("SELECT * FROM transfer_players WHERE norm_name = ?", (key,)).fetchone())
 
 
+def list_pool_players() -> list[dict]:
+    """Игроки справочника `transfer_players` — для автоподбора имён."""
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT player_name, last_club FROM transfer_players ORDER BY id").fetchall()]
+
+
 def upsert_player(player_name: str, *, last_club: str | None = None, ovr: int | None = None,
                   price_k: int | None = None) -> None:
     """Запомнить последнюю известную карту игрока. None не затирает прежнее."""

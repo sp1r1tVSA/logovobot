@@ -524,6 +524,13 @@ class ApiClient {
     return this.request('/api/transfers/status');
   }
 
+  getTransferSuggest(kind, q, { club = '', own = false } = {}) {
+    const qs = new URLSearchParams({ kind, q });
+    if (club) qs.set('club', club);
+    if (own) qs.set('own', '1');
+    return this.request('/api/transfers/suggest?' + qs.toString());
+  }
+
   getTransferSlots() {
     return this.request('/api/transfers/slots');
   }

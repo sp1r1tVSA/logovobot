@@ -511,6 +511,74 @@ class TransfersView {
         this.renderFormFields();
       });
     });
+
+    this.bindSuggest();
+  }
+
+  // Автоподбор имени клуба/игрока: подсказки с сервера, выбор подставляет каноничное имя.
+  bindSuggest() {
+    const val = (id) => (document.getElementById(id)?.value || '').trim();
+    if (this.requestKind === 'deal') {
+      this.attachSuggest('deal-other-club', (q) => api.getTransferSuggest('club', q), () => {
+        document.getElementById('deal-player')?.focus();
+      });
+      this.attachSuggest('deal-player', (q) => this.dealRole === 'sell'
+        ? api.getTransferSuggest('player', q, { own: true })
+        : api.getTransferSuggest('player', q, { club: val('deal-other-club') }));
+    } else if (this.requestKind === 'surcharge') {
+      this.attachSuggest('surcharge-player', (q) => api.getTransferSuggest('player', q, { own: true }));
+    } else if (this.requestKind === 'urn_sale') {
+      this.attachSuggest('urn-player', (q) => api.getTransferSuggest('player', q, { own: true }));
+    }
+  }
+
+  attachSuggest(inputId, fetcher, onPick) {
+    const input = document.getElementById(inputId);
+    if (!input) return;
+    input.setAttribute('autocomplete', 'off');
+    const box = document.createElement('div');
+    box.className = 'suggest-list';
+    box.hidden = true;
+    input.parentElement.classList.add('suggest-host');
+    input.insertAdjacentElement('afterend', box);
+
+    let timer = null;
+    let seq = 0;
+    const hide = () => { box.hidden = true; box.innerHTML = ''; };
+
+    const show = (items) => {
+      if (!items.length) return hide();
+      box.innerHTML = items.map((it, i) => `
+        <button type="button" class="suggest-item" data-i="${i}">
+          <span class="suggest-name">${escapeHtml(it.name)}</span>
+          ${it.club ? `<span class="suggest-club">${escapeHtml(it.club)}</span>` : ''}
+        </button>`).join('');
+      box.hidden = false;
+      box.querySelectorAll('.suggest-item').forEach(btn => {
+        // pointerdown, а не click: к click поле уже теряет фокус и список прячется
+        btn.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          input.value = items[Number(btn.dataset.i)].name;
+          hide();
+          if (onPick) onPick();
+        });
+      });
+    };
+
+    input.addEventListener('input', () => {
+      clearTimeout(timer);
+      const q = input.value.trim();
+      if (!q) return hide();
+      timer = setTimeout(async () => {
+        const mine = ++seq;
+        try {
+          const res = await fetcher(q);
+          if (mine === seq && res.status === 'ok' && document.activeElement === input) show(res.data || []);
+        } catch (_) { /* подсказки необязательны: ввод работает и без них */ }
+      }, 180);
+    });
+    input.addEventListener('blur', () => { seq++; setTimeout(hide, 120); });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Escape') hide(); });
   }
 
   bindRequestForm(container) {

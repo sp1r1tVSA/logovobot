@@ -116,7 +116,7 @@ never prevents the bot itself from starting. Preserve that isolation.
 | `services/sports/` + `sports_provider.py` | External live-football provider adapters plus `cache`, `circuit`, `limiter`, `freshness`, `health`, `odds_sync` |
 | `services/` (root, ~62 modules) | Betting/market engines, ELO, Poisson, risk, settlement, gamification, seasons, `topic_cache.py`; operations: `db_backup`, `job_health`, `bot_health`, `ocr_metrics`, `admin_journal` |
 | `api/` (22 modules) | `aiohttp` Mini App API — `server.py`, `auth.py`, `rate_limiter.py`, `params.py`, and 18 `routes_*.py` modules |
-| `transfers/` (15 modules) | The transfer window («ТО») — own package with its own SQL (`repo.py`), schema (`schema.py`, migration `033`), pure rules (`engine.py`), request lifecycle (`requests.py`, `approval.py`, `squad.py`, `slots.py`, `sanctions.py`), the `/to` panel (`handlers.py`), Mini App routes (`api.py`), notifications and the auto-close job. See *Transfer window* below |
+| `transfers/` (16 modules) | The transfer window («ТО») — own package with its own SQL (`repo.py`), schema (`schema.py`, migration `033`), pure rules (`engine.py`), request lifecycle (`requests.py`, `approval.py`, `squad.py`, `slots.py`, `sanctions.py`), the `/to` panel (`handlers.py`), Mini App routes (`api.py`), form autocomplete (`suggest.py`), notifications and the auto-close job. See *Transfer window* below |
 | `web/` | Mini App frontend (static `index.html`, `css/`, `js/` — `api`, `app`, `admin` (the Logovo.bet panel), `charts`, `effects`, `outrights`, `store`, `tg`, `ui`, `transfers`, `shop`) |
 | `utils/` | `media_utils.py`, a thin re-export wrapper over `services/animation_sender.py` |
 | `scripts/` (28 scripts) | One-off operational scripts (DB audit, backfills, imports, bulk club binding, cup bracket seeding, cache refresh, season reset, previews and checkers) |
@@ -645,6 +645,8 @@ nothing is lost silently.
 `fa_preview` → `record_free_agent`. Priority is by the comment's `commented_at`, one free agent per coach,
 and coaches do not file free agents from the Mini App.
 
+**Form autocomplete (`suggest.py`).** `GET /api/transfers/suggest?kind=club|player&q=…` (`club=` or `own=1` scope the players) feeds the dropdown under the club and player inputs of the Mini App request forms (`attachSuggest` in `web/js/transfers.js`). Clubs come from `config.CLUB_REGISTRY` plus `TEAM_ALIASES`, never the coach's own club or the urn; players come from `squad_players` and `transfer_players`, the scoped club first. Matching is prefix → word prefix → substring, then a typo fallback. It only suggests: the server still validates the typed name on submit.
+
 **Squad (`squad.py`).** Approval does not touch `squad_players`. A separate «применить к составу» button
 writes the change and records each step in `transfer_squad_ops`; rollback restores exactly those
 operations and is refused if a later request touched the same player in the same club. Cancelling an
@@ -661,7 +663,7 @@ ceiling `max_extra_slots` is per club, buys and sells together. Slot purchases a
 ids. A club sanction follows the club, a coach sanction follows the person. The block sits in
 `requests._check` and `slots`. The coach gets a DM on add and lift, and the Mini App shows only the
 viewer's own sanction (a banner, `my_status["sanction"]`). `requests.history` and
-`GET /api/transfers/history` (`window`, `mine`, `club`) feed the history tab. History cards show the player's portrait: `requests.portrait_url` looks only in the `assets/players/` cache (club files first, then the clubless one) and never touches the network; no file means `null` and the Mini App draws a monogram. When the manager approves a request or records a free agent (`cb_approve`, `cb_fa_record`, `cb_fa_reassign`), `handlers._prefetch_portrait_later` downloads the portrait in the background (`requests.prefetch_portrait` → `player_photos.fetch_and_cache`, source club first, then target; the urn is not a club) — never on the approval path, never raising. History cards also show club crests from `getTeamLogoUrl`.
+`GET /api/transfers/history` (`window`, `mine`, `club`) feed the history tab. History cards show the player's portrait: `requests.portrait_url` looks only in the `assets/players/` cache (club files first, then the clubless one) and never touches the network; no file means `null` and the Mini App draws a monogram. When the manager approves a request or records a free agent (`cb_approve`, `cb_fa_record`, `cb_fa_reassign`), `handlers._prefetch_portrait_later` downloads the portrait in the background (`requests.prefetch_portrait` → `player_photos.fetch_and_cache`, source club first, then target; the urn is not a club) — never on the approval path, never raising. Portraits of requests approved before that existed are backfilled by «🖼 Подгрузить портреты» in «📋 Одобренные заявки» (`tw:ports`, `handlers.cb_portraits` → `requests.backfill_portraits`, one fetch per player, in a background task; it sends the manager a summary and a second press while it runs is refused). History cards also show club crests from `getTeamLogoUrl`.
 
 **Admin journal.** Journaled actions, all labelled in `services/admin_journal.ACTIONS`:
 `transfer_request_approved`, `transfer_request_rejected`, `transfer_request_cancelled`,

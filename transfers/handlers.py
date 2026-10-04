@@ -1182,6 +1182,7 @@ def _approved_view(page: int) -> tuple[str, InlineKeyboardMarkup]:
         rows.append([_btn(label[:60], f"tw:tr:{t['id']}")])
     if pending:
         rows.append([_btn(f"📋 Применить все ({pending})", "tw:sqall")])
+    rows.append([_btn("🖼 Подгрузить портреты", "tw:ports")])
     nav = []
     if page > 0:
         nav.append(_btn("◀️", f"tw:appr:{page - 1}"))
@@ -1238,6 +1239,49 @@ async def cb_squad_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if failed:
         head += "\n⚠️ Не применено:\n" + "\n".join(html.escape(f) for f in failed)
     await _show(update, head + "\n\n" + text, kb)
+
+
+_portraits_running = False
+
+
+async def cb_portraits(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Догрузить портреты одобренных заявок окна. Качаем в фоне, итог — отдельным сообщением."""
+    global _portraits_running
+    if not await _guard(update, context):
+        return
+    query, user = update.callback_query, update.effective_user
+    if _portraits_running:
+        await _alert(query, "Портреты уже качаются — дождитесь итога")
+        return
+    items = _approved_items(_approved_window())
+    if not items:
+        await _alert(query, "Одобренных заявок нет")
+        return
+    _portraits_running = True
+    await query.answer("Качаю портреты в фоне, пришлю итог")
+
+    async def _work() -> None:
+        global _portraits_running
+        try:
+            stats = await asyncio.to_thread(req_mod.backfill_portraits, items)
+            text = (f"🖼 <b>Портреты</b>: игроков {stats['total']}\n"
+                    f"Скачано: {stats['fetched']}, уже были: {stats['cached']}, "
+                    f"не нашлось: {len(stats['missing'])}")
+            if stats["missing"]:
+                text += "\nБез портрета: " + html.escape(", ".join(stats["missing"][:30]))
+        except Exception:
+            logger.exception("transfers: portrait backfill failed")
+            text = "⚠️ Не удалось догрузить портреты — подробности в логе."
+        finally:
+            _portraits_running = False
+        try:
+            await context.bot.send_message(chat_id=user.id, text=text, parse_mode="HTML")
+        except Exception as exc:
+            logger.warning("transfers: portrait backfill report not delivered: %s", exc)
+
+    task = asyncio.ensure_future(_work())
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 # ─── Санкции ─────────────────────────────────────────────────────────────────
@@ -1537,6 +1581,7 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_squad_apply, pattern=r"^tw:sq:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_squad_rollback, pattern=r"^tw:sr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_squad_all, pattern=r"^tw:sqall$"))
+    app.add_handler(CallbackQueryHandler(cb_portraits, pattern=r"^tw:ports$"))
     app.add_handler(CallbackQueryHandler(cb_cancel_ask, pattern=r"^tw:cx:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_cancel_yes, pattern=r"^tw:cxy:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_cancel_back, pattern=r"^tw:cxn:\d+$"))
