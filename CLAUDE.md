@@ -661,6 +661,8 @@ operations and is refused if a later request touched the same player in the same
 approved request rolls the squad back in the same transaction; a sale to the urn whose card was already
 bought out cannot be cancelled.
 
+**Reconciliation («🧮 Сверка составов», `tw:rec`, `reconcile.py`).** Read-only check of the window's approved squad-changing requests against the live `squad_players`, shown on the hub once something is approved. The expected place of a player is set by his LAST approved request (by `decided_at`, then id): `squad._steps` gives the club he ends in, or none for an urn sale. Four kinds, in this order: `not_applied` (approved, not applied — the manager gets «Применить все» → `tw:sqall`, the admins only see the list), `missing` (applied, but the player is not in the club he went to), `extra` (applied, but he still sits in a club that should not hold him) and `duplicate` (not applied yet and already in two clubs). Only players of this window's requests are checked, so equal names elsewhere in the 80 squads are not noise; a cancelled request has left the `approved` set. The bot never repairs a hand edit — it points at it. `RECONCILE_LIMIT` caps the lines per kind. Not journaled (it changes nothing). `tests/test_transfer_reconcile.py` covers it.
+
 **Slots (`slots.py`).** An extra slot is bought for coins: `database.spend_coins` plus a
 `transfer_slot_purchases` row with `coin_tx_id`, in one transaction (coin type `transfer_slot`). The
 ceiling `max_extra_slots` is per club, buys and sells together. Slot purchases are not journaled. The manager refunds one from the hub's «🪙 Слоты за монеты» screen
@@ -697,7 +699,7 @@ to `transfers.notify` in `post_init` and schedules `transfer_auto_close`; `web/`
 
 Tests — run them per subsystem, no full sweep: `test_transfer_engine`, `test_transfer_window`,
 `test_transfer_service`, `test_transfer_requests`, `test_transfer_approval`, `test_transfer_squad`,
-`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_swap`, `test_transfer_preview`, `test_transfer_fa_topic`, `test_transfer_panel`, `test_transfer_card`, plus `test_production_audit`
+`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_swap`, `test_transfer_preview`, `test_transfer_reconcile`, `test_transfer_fa_topic`, `test_transfer_panel`, `test_transfer_card`, plus `test_production_audit`
 for any new button and `test_admin_journal` for new journal actions.
 
 ---

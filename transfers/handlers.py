@@ -25,7 +25,7 @@ from telegram.ext import ContextTypes, filters
 
 from services import admin_journal
 from time_utils import MSK_LABEL, fmt_msk, now_msk
-from transfers import approval, notify, repo, reminders, requests as req_mod, sanctions, service, slots as slots_mod, squad
+from transfers import approval, notify, reconcile, repo, reminders, requests as req_mod, sanctions, service, slots as slots_mod, squad
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -213,6 +213,8 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
         unapplied = sum(1 for t in approved if squad.needs_apply(t))
         rows.append([_btn(f"📋 Одобренные заявки ({unapplied} без состава)" if unapplied
                           else "📋 Одобренные заявки", "tw:appr:0")])
+    if approved:
+        rows.append([_btn("🧮 Сверка составов", "tw:rec")])
     rows.append([_btn("🧵 Темы группы", "tw:topics"), _btn("📋 Правила окна", "tw:settings")])
     rows.append([_btn("⛔ Санкции", "tw:sanc")])
     if slots_mod.active_purchases(window["id"]):
@@ -1510,6 +1512,45 @@ async def cb_squad_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _show(update, head + "\n\n" + text, kb)
 
 
+RECONCILE_LIMIT = 8   # строк на вид расхождения; остальное — «и ещё N»
+
+
+def _reconcile_view(viewer_is_manager: bool) -> tuple[str, InlineKeyboardMarkup]:
+    window = _approved_window()
+    if window is None or not _approved_items(window):
+        return "🧮 Одобренных заявок нет — сверять нечего.", InlineKeyboardMarkup([_back()])
+    issues = reconcile.reconcile(window["id"])
+    lines = [f"🧮 <b>Сверка составов</b> — окно {_window_name(window)}", ""]
+    rows = []
+    if not issues:
+        lines.append("✅ Составы совпадают с одобренными заявками.")
+    else:
+        counts = reconcile.summary(issues)
+        lines.append("Расхождений: <b>%d</b>" % len(issues))
+        for kind in reconcile.KIND_ORDER:
+            group = [i for i in issues if i.kind == kind]
+            if not group:
+                continue
+            lines += ["", f"<b>{reconcile.KIND_LABELS[kind]}</b> ({len(group)}):"]
+            lines += [f"• {html.escape(i.text)}" for i in group[:RECONCILE_LIMIT]]
+            if len(group) > RECONCILE_LIMIT:
+                lines.append(f"…и ещё {len(group) - RECONCILE_LIMIT}")
+        if counts["not_applied"] and viewer_is_manager:
+            rows.append([_btn(f"📋 Применить все ({counts['not_applied']})", "tw:sqall")])
+        if any(counts[k] for k in ("missing", "extra", "duplicate")):
+            lines += ["", "Правки вне ТО бот сам не откатывает: исправьте состав вручную или отмените заявку."]
+    rows.append([_btn("🔄", "tw:rec"), _btn("⬅️ Назад", "tw:hub")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def cb_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    manager = service.is_transfer_manager(update.effective_user.id)
+    text, kb = await asyncio.to_thread(_reconcile_view, manager)
+    await _show(update, text, kb)
+
+
 _portraits_running = False
 
 
@@ -1855,6 +1896,7 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_squad_rollback, pattern=r"^tw:sr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_squad_all, pattern=r"^tw:sqall$"))
     app.add_handler(CallbackQueryHandler(cb_portraits, pattern=r"^tw:ports$"))
+    app.add_handler(CallbackQueryHandler(cb_reconcile, pattern=r"^tw:rec$"))
     app.add_handler(CallbackQueryHandler(cb_slots, pattern=r"^tw:slots:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_slot_refund_ask, pattern=r"^tw:slr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_slot_refund_yes, pattern=r"^tw:slc:\d+$"))
