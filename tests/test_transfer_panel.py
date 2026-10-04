@@ -326,3 +326,89 @@ class TestSlotRefundPanel:
             # PTB берёт первый подошедший обработчик — пересечение паттернов уводит кнопку не туда
             first = next(h for h in cbs if h.pattern.match(data))
             assert first.callback is cb, data
+
+
+# ─── Что висит ───────────────────────────────────────────────────────────────
+
+class TestQueuePanel:
+    def _window(self):
+        wid = service.create_window(10)
+        repo.open_window(wid, 1)
+        return wid
+
+    def _req(self, wid, status, name, hours=0, warnings=(), kind="urn_sale"):
+        from time_utils import now_msk
+        import datetime as dt
+
+        tid = repo.insert_transfer(wid, kind, name, status, warnings=warnings, from_club="Арсенал",
+                                   price_k=12500)
+        stamp = (now_msk() - dt.timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        with database.transaction() as conn:
+            conn.execute("UPDATE transfers SET created_at = ?, updated_at = ? WHERE id = ?", (stamp, stamp, tid))
+        return tid
+
+    def test_empty_queue(self):
+        self._window()
+        upd = _press(handlers.cb_queue, "tw:q:0")
+        assert "Всё решено" in _last(upd)
+
+    def test_hub_button_counts_only_waiting(self):
+        wid = self._window()
+        _, kb = handlers._hub_view()
+        assert "tw:q:0" not in [b.callback_data for r in kb.inline_keyboard for b in r]
+        self._req(wid, "pending_manager", "Салах")
+        self._req(wid, "approved", "Месси")
+        _, kb = handlers._hub_view()
+        labels = {b.callback_data: b.text for r in kb.inline_keyboard for b in r}
+        assert "1 ждут решения" in labels["tw:q:0"]
+
+    def test_oldest_first_with_marks_and_warnings(self):
+        wid = self._window()
+        fresh = self._req(wid, "pending_manager", "Свежий", hours=1)
+        old = self._req(wid, "pending_manager", "Давний", hours=30,
+                        warnings=[{"code": "OVER_BUDGET", "message": "Не хватает бюджета"}])
+        wait = self._req(wid, "pending_counterparty", "Ждущий", hours=5)
+        text, kb = handlers._queue_view(0)
+        assert text.index("Давний") < text.index("Свежий")
+        lines = text.splitlines()
+        assert "🔔" in next(x for x in lines if "Давний" in x)
+        assert "🔔" not in next(x for x in lines if "Свежий" in x)
+        assert "Не хватает бюджета" in text and "1 д 6 ч" in text
+        assert "Ждущий" in text and "будут отклонены" in text
+        data = [b.callback_data for r in kb.inline_keyboard for b in r]
+        assert f"tw:tr:{old}" in data and f"tw:tr:{fresh}" in data and f"tw:tr:{wait}" not in data
+
+    def test_paging(self):
+        wid = self._window()
+        ids = [self._req(wid, "pending_manager", f"Игрок{i}", hours=20 - i) for i in range(7)]
+        text, kb = handlers._queue_view(0)
+        data = [b.callback_data for r in kb.inline_keyboard for b in r]
+        assert "tw:q:1" in data and f"tw:tr:{ids[0]}" in data and f"tw:tr:{ids[6]}" not in data
+        _, kb = handlers._queue_view(1)
+        data = [b.callback_data for r in kb.inline_keyboard for b in r]
+        assert "tw:q:0" in data and f"tw:tr:{ids[6]}" in data
+
+    def test_request_screen_has_decision_buttons_and_back_to_queue(self):
+        wid = self._window()
+        tid = self._req(wid, "pending_manager", "Салах", hours=3,
+                        warnings=[{"code": "X", "message": "Лимит продаж"}])
+        upd = _press(handlers.cb_open_transfer, f"tw:tr:{tid}")
+        text, kb = upd.callback_query.edits[-1]
+        data = [b.callback_data for r in kb.inline_keyboard for b in r]
+        assert f"tw:ap:{tid}" in data and f"tw:rj:{tid}" in data and "tw:q:0" in data
+        assert "Ждёт: 3 ч" in text and "Лимит продаж" in text
+
+    def test_counterparty_request_has_no_decision_buttons(self):
+        wid = self._window()
+        tid = self._req(wid, "pending_counterparty", "Ждущий")
+        upd = _press(handlers.cb_open_transfer, f"tw:tr:{tid}")
+        data = [b.callback_data for r in upd.callback_query.edits[-1][1].inline_keyboard for b in r]
+        assert data == ["tw:q:0"]
+
+    def test_route_registered(self):
+        from telegram.ext import CallbackQueryHandler
+
+        added = []
+        handlers.register_handlers(SimpleNamespace(add_handler=lambda h, *a, **k: added.append(h)))
+        first = next(h for h in added if isinstance(h, CallbackQueryHandler) and h.pattern.match("tw:q:3"))
+        assert first.callback is handlers.cb_queue

@@ -24,8 +24,8 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes, filters
 
 from services import admin_journal
-from time_utils import MSK_LABEL, fmt_msk
-from transfers import approval, notify, repo, requests as req_mod, sanctions, service, slots as slots_mod, squad
+from time_utils import MSK_LABEL, fmt_msk, now_msk
+from transfers import approval, notify, repo, reminders, requests as req_mod, sanctions, service, slots as slots_mod, squad
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -205,6 +205,9 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
     if status == "draft":
         rows.append([_btn("🔓 Открыть окно", "tw:open")])
     rows.append([_btn("💰 Бюджеты", "tw:budgets:0"), _btn("⏰ Автозакрытие", "tw:auto")])
+    waiting, awaiting_coach = _queue_items(window)
+    if waiting or awaiting_coach:
+        rows.append([_btn(f"📬 Что висит ({len(waiting)} ждут решения)" if waiting else "📬 Что висит", "tw:q:0")])
     approved = _approved_items(window)
     if approved:
         unapplied = sum(1 for t in approved if squad.needs_apply(t))
@@ -1073,10 +1076,18 @@ async def cb_reject_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ─── Состав: применить, откатить, отменить одобренную ───────────────────────
 
 APPROVED_PAGE = 8
+QUEUE_PAGE = 5
+QUEUE_STATUSES = ("pending_manager", "pending_counterparty")
 
 
 def _transfer_keyboard(t: dict, *, back: bool) -> InlineKeyboardMarkup | None:
     rows = []
+    if t["status"] in QUEUE_STATUSES:
+        if t["status"] == "pending_manager":
+            rows.append([_btn("✅ Одобрить", f"tw:ap:{t['id']}"), _btn("❌ Отклонить", f"tw:rj:{t['id']}")])
+        if back:
+            rows.append(_back("tw:q:0", "⬅️ К очереди"))
+        return InlineKeyboardMarkup(rows) if rows else None
     if t["status"] == "approved":
         if squad.needs_apply(t):
             rows.append([_btn("📋 Применить к составу", f"tw:sq:{t['id']}")])
@@ -1093,6 +1104,11 @@ def _transfer_view(t: dict, *, back: bool) -> tuple[str, InlineKeyboardMarkup | 
              f"Статус: {TRANSFER_STATUS_LABELS.get(t['status'], t['status'])}"]
     if t.get("price_k"):
         lines.append(f"Сумма: {format_k(t['price_k'])}")
+    if t["status"] in QUEUE_STATUSES:
+        hours = reminders.waiting_hours(t, now_msk())
+        if hours is not None:
+            lines.append(f"Ждёт: {_age(hours)}")
+        lines.extend(f"⚠️ {html.escape(w)}" for w in _warning_texts(t))
     if t["status"] == "approved":
         if not squad.changes_squad(t):
             lines.append("Состав: доплата состав не меняет")
@@ -1273,6 +1289,101 @@ async def cb_open_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         await update.callback_query.answer("Заявка не найдена", show_alert=True)
         return
     text, kb = _transfer_view(t, back=True)
+    await _show(update, text, kb)
+
+
+# ─── Что висит: очередь заявок без решения ───────────────────────────────────
+
+def _age(hours: int) -> str:
+    days, rest = divmod(max(0, hours), 24)
+    return f"{days} д {rest} ч" if days else f"{rest} ч"
+
+
+def _warning_texts(t: dict) -> list[str]:
+    """Предупреждения, сохранённые в заявке (JSON в `transfers.warnings`)."""
+    raw = t.get("warnings")
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return []
+    return [str(w.get("message") if isinstance(w, dict) else w) for w in items or [] if w]
+
+
+def _queue_items(window: dict | None) -> tuple[list[dict], list[dict]]:
+    """(ждут ответственного, ждут вторую сторону): самые давние сверху."""
+    if window is None:
+        return [], []
+    items = repo.list_transfers(window["id"], statuses=QUEUE_STATUSES)
+
+    def oldest_first(t: dict):
+        since = reminders.waiting_since(t)
+        return (since is None, since.isoformat() if since else "", t["id"])
+
+    manager = sorted((t for t in items if t["status"] == "pending_manager"), key=oldest_first)
+    counterparty = sorted((t for t in items if t["status"] == "pending_counterparty"), key=oldest_first)
+    return manager, counterparty
+
+
+def _queue_line(t: dict, now) -> str:
+    hours = reminders.waiting_hours(t, now)
+    stale = hours is not None and hours >= reminders.STALE_HOURS
+    parts = [("🔔 " if stale else "") + notify.describe_transfer(t)]
+    if t.get("price_k"):
+        parts.append(format_k(t["price_k"]))
+    if hours is not None:
+        parts.append(_age(hours))
+    line = " · ".join(parts)
+    warns = _warning_texts(t)
+    if warns:
+        line += "\n   ⚠️ " + html.escape("; ".join(warns))
+    return line
+
+
+def _queue_view(page: int) -> tuple[str, InlineKeyboardMarkup]:
+    window = _approved_window()
+    manager, counterparty = _queue_items(window)
+    if not manager and not counterparty:
+        return "📬 Всё решено — заявок без ответа нет.", InlineKeyboardMarkup([_back()])
+    now = now_msk()
+    stale = len(reminders.stale_pending(manager, now))
+    pages = max(1, (len(manager) + QUEUE_PAGE - 1) // QUEUE_PAGE)
+    page = max(0, min(page, pages - 1))
+    lines = [f"📬 <b>Что висит</b> — окно {_window_name(window)}", "",
+             f"Ждут вашего решения: <b>{len(manager)}</b>"
+             + (f" (🔔 дольше {reminders.STALE_HOURS} ч: {stale})" if stale else ""),
+             f"Ждут вторую сторону: <b>{len(counterparty)}</b>"
+             + (" — при закрытии окна будут отклонены" if counterparty else "")]
+    rows = []
+    chunk = manager[page * QUEUE_PAGE:(page + 1) * QUEUE_PAGE]
+    if chunk:
+        lines.append("")
+    for t in chunk:
+        lines.append(_queue_line(t, now))
+        rows.append([_btn(f"#{t['id']} {t.get('player_name') or ''}"[:60], f"tw:tr:{t['id']}")])
+    if counterparty:
+        lines.extend(["", "<b>Ждут вторую сторону:</b>"])
+        lines.extend(_queue_line(t, now) for t in counterparty[:QUEUE_PAGE])
+        if len(counterparty) > QUEUE_PAGE:
+            lines.append(f"… и ещё {len(counterparty) - QUEUE_PAGE}")
+    nav = []
+    if page > 0:
+        nav.append(_btn("◀️", f"tw:q:{page - 1}"))
+    if page < pages - 1:
+        nav.append(_btn("▶️", f"tw:q:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([_btn("🔄", f"tw:q:{page}")])
+    rows.append(_back())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def cb_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    page = int(update.callback_query.data.rsplit(":", 1)[1])
+    text, kb = await asyncio.to_thread(_queue_view, page)
     await _show(update, text, kb)
 
 
@@ -1715,6 +1826,7 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_reject_cancel, pattern=r"^tw:rjc$"))
 
     # Состав и отмена одобренных
+    app.add_handler(CallbackQueryHandler(cb_queue, pattern=r"^tw:q:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_approved, pattern=r"^tw:appr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_open_transfer, pattern=r"^tw:tr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_squad_apply, pattern=r"^tw:sq:\d+$"))

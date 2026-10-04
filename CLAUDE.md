@@ -673,6 +673,12 @@ viewer's own sanction (a banner, `my_status["sanction"]`). `requests.history` an
 
 **Reminders (`reminders.py`, test `test_transfer_reminders`).** The `transfer_reminders` table (`window_id`, `tag`, additive, in `transfers/schema.py` beside the other transfer tables) remembers what was sent, so a restart never repeats a DM; `repo.claim_reminder` is called *before* sending (at most once). Job `transfer_reminders` (`jobs.job_reminders`, every 5 min through `_run_repeating`): 24 h and 1 h before `auto_close_at` every coach with a free buy/sell slot or an incoming offer gets a DM (slots used/limit, budget left, offers waiting for their answer; sanctioned coaches skipped), and the manager gets the queue of `pending_manager` requests plus the count of unconfirmed ones that the close will reject. The close tag carries the `auto_close_at` value, so moving the time re-arms the reminders. Separately the manager gets one batched DM about `pending_manager` requests older than `STALE_HOURS` = 12 (tag `stale:<id>`, once per request, also after the window closed).
 
+**Queue («📬 Что висит», `tw:q:N`).** The hub button (shown when something waits) opens the manager's queue: `pending_manager` requests,
+oldest first, 5 per page, each with its kind, amount, how long it has waited (`reminders.waiting_hours`, the same clock as
+`stale_pending`), 🔔 past `STALE_HOURS` and the warnings stored in the request. `pending_counterparty` ones are listed below
+as «ждут вторую сторону» (the window close rejects them). A request button opens `tw:tr:ID`, which for `pending_manager`
+carries ✅/❌ (`tw:ap:` / `tw:rj:`, same handlers as the card in the topic) and a back button to the queue. `test_transfer_panel`.
+
 **Admin journal.** Journaled actions, all labelled in `services/admin_journal.ACTIONS`:
 `transfer_request_approved`, `transfer_request_rejected`, `transfer_request_cancelled`,
 `transfer_squad_applied`, `transfer_squad_reverted`, `transfer_sanction_added`, `transfer_sanction_lifted`, `transfer_slot_refunded`.
