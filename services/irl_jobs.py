@@ -35,11 +35,13 @@ PICK_RETRY = timedelta(minutes=30)
 ODDS_HORIZON = timedelta(hours=24)
 
 _next_pick_try: dict[str, datetime] = {}
+_polled_live_windows: dict[int, set[str]] = {}
 
 
 def reset_state() -> None:
     """Сбросить память джоб (для тестов)."""
     _next_pick_try.clear()
+    _polled_live_windows.clear()
 
 
 # ─── Админские сообщения ─────────────────────────────────────────────────────
@@ -294,6 +296,35 @@ async def run_odds_refresh(provider=None, now: Optional[datetime] = None) -> int
 _RESULT_LABEL = {"home": "П1", "draw": "Х", "away": "П2"}
 
 
+def _should_poll_match(m_id: int, kickoff: datetime, now: datetime) -> bool:
+    """Определяет, нужно ли обращаться к провайдеру по матчу прямо сейчас.
+
+    Экономит квоту API-Sports (100 запр/день):
+    - До 45 мин: 0 запросов.
+    - Перерыв (45-65 мин): ровно 1 запрос (сохраняет счёт перерыва).
+    - Конец 2-го тайма (75-95 мин): ровно 1 запрос (сохраняет предфинальный счёт).
+    - После 95 мин: опрашивает каждые 5 минут для финального расчёта.
+    """
+    delta_min = (now - kickoff).total_seconds() / 60.0
+    if delta_min < 0:
+        return False
+    if 45 <= delta_min <= 65:
+        polled = _polled_live_windows.setdefault(m_id, set())
+        if "ht" not in polled:
+            polled.add("ht")
+            return True
+        return False
+    if 75 <= delta_min < 95:
+        polled = _polled_live_windows.setdefault(m_id, set())
+        if "late" not in polled:
+            polled.add("late")
+            return True
+        return False
+    if delta_min >= 95:
+        return True
+    return False
+
+
 def _manual_text(m: dict, reason: str) -> str:
     stats = database.get_irl_match_bet_stats(m["id"])
     return (f"🛠 <b>IRL-матч #{m['id']} требует ручного расчёта</b>\n"
@@ -315,12 +346,35 @@ async def run_settle(bot, provider=None, now: Optional[datetime] = None) -> dict
         from services.sports import get_sports_provider
         provider = get_sports_provider()
 
+    if getattr(provider, "is_quota_exhausted", lambda: False)():
+        today_str = (now or now_msk()).date().isoformat()
+        if await _notify_once(bot, f"quota_exhausted:{today_str}",
+                              "⚠️ <b>Исчерпан суточный лимит запросов к API-Sports (100/100)</b>.\n"
+                              "Провайдер временно заблокирован до 03:00 МСК (сброс квоты).\n"
+                              "Матч дня переведён на ручной расчёт через панель или команду <code>/irl_settle</code>."):
+            report["manual"] += 1
+        return report
+
     for m in database.list_irl_matches(statuses=("open", "closed"), limit=200):
         kickoff = parse_msk(m["kickoff_at"])
         if kickoff is None or kickoff > now:
             continue
+        if not _should_poll_match(m["id"], kickoff, now):
+            continue
         fx = await provider.get_prematch_fixture(m["provider_fixture_id"])
+        if fx is not None:
+            # Обновляем live-счёт во время игры, если провайдер отдал голы
+            if fx.home_goals is not None or fx.away_goals is not None:
+                database.update_irl_live_score(m["id"], fx.home_goals, fx.away_goals)
+
         if fx is None:
+            if getattr(provider, "is_quota_exhausted", lambda: False)():
+                today_str = (now or now_msk()).date().isoformat()
+                await _notify_once(bot, f"quota_exhausted:{today_str}",
+                                  "⚠️ <b>Исчерпан суточный лимит запросов к API-Sports (100/100)</b>.\n"
+                                  "Провайдер временно заблокирован до 03:00 МСК (сброс квоты).\n"
+                                  "Матч дня переведён на ручной расчёт через панель или команду <code>/irl_settle</code>.")
+                return report
             decision = irl_betting.SettleDecision("wait", reason="Провайдер недоступен")
         else:
             decision = irl_betting.settle_decision(

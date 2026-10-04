@@ -260,6 +260,7 @@ class PrematchFixture:
     away_goals: Optional[int] = None
     country: str = ""
     season: Optional[int] = None
+    elapsed: Optional[int] = None
 
 
 @dataclass(frozen=True)

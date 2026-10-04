@@ -858,7 +858,7 @@ def _register_admin_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("set_results_topic", admin_set_results_topic))
     app.add_handler(CommandHandler("set_warns_topic", admin_set_warns_topic))
 
-    app.add_handler(CallbackQueryHandler(show_admin_panel, pattern="^admin_main_menu$"))
+    app.add_handler(CallbackQueryHandler(show_admin_panel, pattern="^(admin_main_menu|super_admin_panel)$"))
 
     # RBAC: панели и изолированные точки входа админа дивизиона
     app.add_handler(CallbackQueryHandler(show_division_admin_panel, pattern=r"^admin_div_panel:\d+$"))
@@ -993,6 +993,30 @@ def _register_admin_handlers(app: Application) -> None:
     # ⚽ IRL-ставки: /irl, /irl_settle и кнопки превью — глобальные админы, только ЛС
     from handlers.admin_irl import register_admin_irl_handlers
     register_admin_irl_handlers(app)
+
+    # 📢 Централизованная рассылка: /broadcast — только глобальные админы, выбор ЛС/топики
+    from handlers.admin_broadcast import (
+        admin_broadcast_hub,
+        admin_broadcast_cat_selected,
+        admin_broadcast_target_selected,
+        admin_broadcast_retarget,
+        admin_broadcast_confirm,
+        admin_broadcast_cancel,
+        handle_broadcast_text_input,
+    )
+
+    async def _admin_broadcast_photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if context.user_data.get("broadcast", {}).get("state") == "WAITING_TEXT":
+            await handle_broadcast_text_input(update, context)
+
+    app.add_handler(CommandHandler(["broadcast", "rassylka"], admin_broadcast_hub))
+    app.add_handler(MessageHandler(filters.PHOTO & filters.ChatType.PRIVATE, _admin_broadcast_photo_handler))
+    app.add_handler(CallbackQueryHandler(admin_broadcast_hub, pattern="^admin_broadcast_hub$"))
+    app.add_handler(CallbackQueryHandler(admin_broadcast_cat_selected, pattern=r"^admin_bcast_cat:[a-z_]+$"))
+    app.add_handler(CallbackQueryHandler(admin_broadcast_target_selected, pattern=r"^admin_bcast_target:(all|pm|topics)$"))
+    app.add_handler(CallbackQueryHandler(admin_broadcast_retarget, pattern="^admin_bcast_retarget$"))
+    app.add_handler(CallbackQueryHandler(admin_broadcast_confirm, pattern="^admin_bcast_confirm$"))
+    app.add_handler(CallbackQueryHandler(admin_broadcast_cancel, pattern="^admin_bcast_cancel$"))
 
     # 🔁 Трансферное окно: панель /to — только ответственный за ТО, в ЛС
     from transfers.handlers import register_handlers as register_transfer_handlers

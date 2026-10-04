@@ -20308,6 +20308,16 @@ def list_irl_matches(bet_day: str | None = None, statuses: tuple[str, ...] | Non
         return [dict(r) for r in conn.execute(sql, params).fetchall()]
 
 
+def get_irl_distinct_days(limit: int = 14) -> list[str]:
+    """Список уникальных дней (YYYY-MM-DD), на которые заведены IRL-матчи."""
+    with transaction() as conn:
+        rows = conn.execute(
+            "SELECT DISTINCT bet_day FROM irl_matches WHERE bet_day IS NOT NULL ORDER BY bet_day DESC LIMIT ?",
+            (int(limit),),
+        ).fetchall()
+        return [r["bet_day"] for r in rows if r["bet_day"]]
+
+
 def create_irl_draft(provider_fixture_id, league_id: int | None, league_name: str | None,
                      home: str, away: str, kickoff_at, odd_home: float, odd_draw: float,
                      odd_away: float, bet_day: str | None = None,
@@ -20385,6 +20395,19 @@ def update_irl_odds(irl_match_id: int, odd_home: float, odd_draw: float, odd_awa
         return cur.rowcount > 0
 
 
+def update_irl_live_score(irl_match_id: int, home_goals: int | None, away_goals: int | None) -> bool:
+    """Обновить текущий live-счёт незавершённого IRL-матча."""
+    if home_goals is None and away_goals is None:
+        return False
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE irl_matches SET home_goals = ?, away_goals = ? "
+            "WHERE id = ? AND status IN ('open', 'closed')",
+            (home_goals, away_goals, irl_match_id),
+        )
+        return cur.rowcount > 0
+
+
 def close_started_irl_matches() -> int:
     """open → closed для матчей, время начала которых наступило. Возвращает число закрытых."""
     with transaction() as conn:
@@ -20431,6 +20454,20 @@ def get_irl_match_bet_stats(irl_match_id: int) -> dict:
             "WHERE irl_match_id = ? AND status = 'pending'", (irl_match_id,)
         ).fetchone()
         return {"count": int(row["n"]), "total": int(row["total"])}
+
+
+def get_irl_match_bets(irl_match_id: int, limit: int = 100) -> list[dict]:
+    """Ставки игроков на конкретный IRL-матч с именами пользователей."""
+    with transaction() as conn:
+        rows = conn.execute("""
+            SELECT b.*, u.username, u.team_name
+            FROM irl_bets b
+            LEFT JOIN users u ON u.telegram_id = b.user_id
+            WHERE b.irl_match_id = ?
+            ORDER BY b.id DESC
+            LIMIT ?
+        """, (int(irl_match_id), int(limit))).fetchall()
+        return [dict(r) for r in rows]
 
 
 def _irl_pick_label(match, outcome: str) -> str:
@@ -20695,3 +20732,48 @@ def void_irl_match(irl_match_id: int, reason: str | None = None,
         """, ((reason or "").strip()[:300] or None, actor_id, irl_match_id))
     logger.info("IRL match #%s voided: refunded=%s", irl_match_id, refunded)
     return True, {"refunded": refunded}
+
+
+def get_broadcast_user_ids(only_with_team: bool = False) -> list[int]:
+    """Retrieve list of distinct telegram_ids for broadcasting."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        if only_with_team:
+            cursor.execute("SELECT DISTINCT telegram_id FROM users WHERE telegram_id > 0 AND team_name IS NOT NULL")
+        else:
+            cursor.execute("SELECT DISTINCT telegram_id FROM users WHERE telegram_id > 0")
+        return [row[0] for row in cursor.fetchall() if row[0] and row[0] > 0]
+
+
+def get_broadcast_chat_targets() -> list[dict]:
+    """Retrieve distinct group chat and topic destinations for broadcasting."""
+    targets = []
+    seen = set()
+    dt_topics = get_all_division_topics()
+    for t in dt_topics:
+        chat_id = t.get("group_chat_id")
+        thread_id = t.get("message_thread_id")
+        if chat_id and thread_id:
+            key = (chat_id, thread_id)
+            if key not in seen:
+                seen.add(key)
+                targets.append({
+                    "chat_id": chat_id,
+                    "thread_id": thread_id,
+                    "label": f"Дивизион {t.get('division_name', '')} ({t.get('topic_type', '')})",
+                })
+    main_group_id = get_config("group_id")
+    if main_group_id:
+        try:
+            mg_id = int(main_group_id)
+            if (mg_id, None) not in seen:
+                seen.add((mg_id, None))
+                targets.append({
+                    "chat_id": mg_id,
+                    "thread_id": None,
+                    "label": "Основная группа лиги",
+                })
+        except (ValueError, TypeError):
+            pass
+    return targets
+

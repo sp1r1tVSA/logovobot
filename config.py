@@ -110,7 +110,23 @@ OPENROUTER_MODEL = os.getenv(
 OPENROUTER_BASE_URL = os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1").strip()
 # ─── Phase 8: Real Sports Provider Configuration ──────────────────────────────
 SPORTS_PROVIDER = os.getenv("SPORTS_PROVIDER", "auto").strip()
-SPORTS_API_KEY = os.getenv("SPORTS_API_KEY", os.getenv("APISPORTS_KEY", "")).strip()
+def _get_sports_api_keys() -> list[str]:
+    raw = os.getenv("SPORTS_API_KEY", os.getenv("APISPORTS_KEY", "")).strip()
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    k1 = os.getenv("SPORTS_API_KEY_1", "").strip()
+    if k1 and k1 not in keys:
+        keys.append(k1)
+    k2 = os.getenv("SPORTS_API_KEY_2", os.getenv("APISPORTS_KEY_2", "")).strip()
+    if k2 and k2 not in keys:
+        keys.append(k2)
+    for i in range(3, 10):
+        ki = os.getenv(f"SPORTS_API_KEY_{i}", "").strip()
+        if ki and ki not in keys:
+            keys.append(ki)
+    return keys
+
+SPORTS_API_KEYS = _get_sports_api_keys()
+SPORTS_API_KEY = SPORTS_API_KEYS[0] if SPORTS_API_KEYS else ""
 APISPORTS_KEY = SPORTS_API_KEY  # Backward compatibility
 SPORTS_API_BASE_URL = os.getenv("SPORTS_API_BASE_URL", "https://v3.football.api-sports.io").strip()
 SPORTS_TIMEOUT_SECONDS = float(os.getenv("SPORTS_TIMEOUT_SECONDS", "10.0"))

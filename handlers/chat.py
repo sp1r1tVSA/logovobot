@@ -43,6 +43,12 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not update.message:
         return
 
+    # Intercept broadcast wizard text in private chat
+    if update.message.chat.type == "private" and context.user_data.get("broadcast", {}).get("state") == "WAITING_TEXT":
+        from handlers.admin_broadcast import handle_broadcast_text_input
+        if await handle_broadcast_text_input(update, context):
+            return
+
     # Check if text is a tournament text command (e.g. "Темшик таблица", "Темшик состав")
     if update.message.text:
         handled = await handle_temshik_command(update, context)

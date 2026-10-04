@@ -7,9 +7,11 @@ import telegram.error
 from telegram.ext import ContextTypes
 
 import database
+from time_utils import now_msk
 from services import admin_journal
 from handlers.base import (
     is_admin,
+    is_global_admin,
     generate_league_table_image,
     resolve_division_id,
     resolve_division_target,
@@ -242,6 +244,98 @@ async def _reply_club_debts(msg, user_id: int, query: str) -> None:
     await msg.reply_text("\n".join(lines), parse_mode="HTML")
 
 
+async def _reply_round_fixtures(update: Update, context: ContextTypes.DEFAULT_TYPE, cmd_text: str) -> None:
+    """Отображает расписание и результаты тура («Темшик матчи [15]», «Темшик кто с кем играет [15]»)."""
+    msg = update.effective_message
+    if not msg:
+        return
+
+    division_id, _, divisions = await resolve_command_division(update, cmd_text)
+    if division_id is None:
+        division_id = await resolve_division_id(update)
+    if division_id is None and divisions:
+        division_id = divisions[0]["id"]
+    if division_id is None:
+        division_id = 1
+
+    # Ищем номер тура (1-99) в строке запроса
+    nums = re.findall(r"\b(\d{1,2})\b", cmd_text)
+    target_round = None
+    if nums:
+        for n in nums:
+            val = int(n)
+            # Если число не совпадает со значением division_id или это единственное число
+            if val != division_id or len(nums) == 1:
+                target_round = val
+                break
+        if target_round is None:
+            target_round = int(nums[0])
+    else:
+        # Если номер не указан — берем активный открытый тур или максимальный
+        active_rounds = await asyncio.to_thread(database.get_active_open_rounds, division_id)
+        if active_rounds:
+            target_round = active_rounds[0].get("round_number")
+        else:
+            all_rounds = await asyncio.to_thread(database.get_division_rounds, division_id)
+            if all_rounds:
+                target_round = max(all_rounds)
+
+    if not target_round:
+        await msg.reply_text(
+            "ℹ️ Укажите номер тура, например:\n"
+            "• <code>Темшик матчи 15</code>\n"
+            "• <code>Темшик кто с кем играет 15 тур</code>\n"
+            "• <code>Темшик расписание 15 Дивизион 2</code>",
+            parse_mode="HTML"
+        )
+        return
+
+    division_name = await _division_name(division_id)
+    matches = await asyncio.to_thread(database.get_matches_by_round, target_round, division_id=division_id)
+    info = await asyncio.to_thread(database.get_round_info, target_round, division_id=division_id)
+
+    if not matches:
+        await msg.reply_text(
+            f"📅 Матчи <b>{target_round}-го тура</b> в дивизионе <b>{html.escape(division_name)}</b> пока не сформированы.",
+            parse_mode="HTML"
+        )
+        return
+
+    lines = [f"📅 <b>РАСПИСАНИЕ: {target_round}-й ТУР — {html.escape(division_name).upper()}</b>"]
+    if info:
+        is_open = info.get("is_open")
+        deadline_text = info.get("deadline")
+        if is_open and deadline_text:
+            dt = database.parse_flexible_datetime(deadline_text)
+            if dt and now_msk() > dt:
+                lines.append("🔴 <i>Статус: дедлайн истёк</i>\n")
+            else:
+                lines.append(f"🟢 <i>Статус: открыт (дедлайн: {html.escape(str(deadline_text))})</i>\n")
+        elif is_open:
+            lines.append("🟢 <i>Статус: открыт</i>\n")
+        else:
+            lines.append("🔴 <i>Статус: закрыт</i>\n")
+    else:
+        lines.append("")
+
+    for m in matches:
+        t1 = html.escape(str(m.get("player1_team") or "Команда 1"))
+        t2 = html.escape(str(m.get("player2_team") or "Команда 2"))
+        u1 = m.get("player1_username")
+        u2 = m.get("player2_username")
+        c1 = f" (@{html.escape(u1)})" if u1 else ""
+        c2 = f" (@{html.escape(u2)})" if u2 else ""
+
+        if m.get("status") in ("confirmed", "completed"):
+            s1 = m.get("player1_score", 0)
+            s2 = m.get("player2_score", 0)
+            lines.append(f"• <b>{t1}</b>{c1} <b>{s1} : {s2}</b> <b>{t2}</b>{c2} — ✅")
+        else:
+            lines.append(f"• <b>{t1}</b>{c1} 🆚 <b>{t2}</b>{c2} — ⏳")
+
+    await msg.reply_text("\n".join(lines), parse_mode="HTML")
+
+
 TOTW_ACTIONS = ("сборная","сборную", "тотв", "totw", "символическая", "символичка")
 _SEASON_WORD_REGEX = re.compile(r"(?<!\w)(?:сезон\w*|season|весь|всё|все)(?!\w)", re.IGNORECASE)
 
@@ -338,6 +432,8 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
             "<code>Темшик долги мои</code>)\n"
             "• <code>Темшик состав [клуб]</code> — фото и состав заявленного клуба\n"
             "• <code>Темшик карточка [клуб]</code> — инфокарточка клуба\n"
+            "• <code>Темшик матчи [тур] [дивизион]</code> — расписание тура (или <code>кто с кем играет 15 тур</code>)\n"
+            "• <code>Темшик профиль [@user]</code> — карточка профиля и активность в чате\n"
             "• <code>Темшик позвать [клуб]</code> — позвать тренера клуба на матч (тегнет тренера)\n"
             "• <code>Темшик дивизионы</code> — список активных дивизионов лиги\n"
         )
@@ -369,10 +465,30 @@ async def handle_temshik_command(update: Update, context: ContextTypes.DEFAULT_T
                 "• <code>/topiki &lt;div_id&gt;</code> — статус топиков дивизиона\n"
                 "• <code>/diviziony</code> — сводка по всем дивизионам"
             )
+        if is_global_admin(user_id):
+            help_text += (
+                "\n\n📢 <b>Централизованная рассылка (супер-админ):</b>\n"
+                "• <code>Темшик рассылка [ставки|новости|тур] &lt;текст&gt;</code> — быстрая рассылка\n"
+                "• <code>/broadcast</code> — пошаговый мастер рассылки в ЛС"
+            )
         await msg.reply_text(help_text, parse_mode="HTML")
         return True
 
-    if action in ("профиль", "profile", "активность", "стата", "кто"):
+    if (
+        action in ("матчи", "игры", "расписание") or
+        (action in ("тур", "туры") and bool(re.search(r"\b\d+\b", cmd_text))) or
+        full_cmd.startswith("кто с кем") or
+        full_cmd.startswith("кто играет")
+    ):
+        await _reply_round_fixtures(update, context, cmd_text)
+        return True
+
+    if action in ("рассылка", "broadcast", "объявление"):
+        from handlers.admin_broadcast import run_quick_broadcast
+        await run_quick_broadcast(update, context, args_str)
+        return True
+
+    if action in ("профиль", "profile", "активность", "стата"):
         await cmd_user_profile(update, context, target_ref=args_str)
         return True
 

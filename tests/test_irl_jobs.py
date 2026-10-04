@@ -356,6 +356,36 @@ class TestSettle:
         run(irl_jobs.run_settle(FakeBot(), p))
         assert p.calls == []
 
+    def test_match_not_polled_in_first_40_minutes(self, clock):
+        # 20 minutes from kickoff: no query should be dispatched
+        mid = _open_and_bet(29, hours_ago=0.33)
+        p = FakeProvider(results={29: result(29, "1H", (1, 0))})
+        run(irl_jobs.run_settle(FakeBot(), p))
+        assert p.calls == []
+
+    def test_live_window_updates_score_without_settling(self, clock):
+        # 50 minutes from kickoff: halftime window polls once and updates score
+        mid = _open_and_bet(30, hours_ago=0.83)
+        p = FakeProvider(results={30: result(30, "1H", (1, 0))})
+        run(irl_jobs.run_settle(FakeBot(), p))
+        assert len(p.calls) == 1
+        m = database.get_irl_match(mid)
+        assert m["status"] == "closed"
+        assert m["home_goals"] == 1 and m["away_goals"] == 0
+
+    def test_quota_exhausted_alerts_admins_once(self, clock):
+        mid = _open_and_bet(31, hours_ago=3)
+        p = FakeProvider(results={31: result(31)})
+        p.is_quota_exhausted = lambda: True
+        bot = FakeBot()
+        run(irl_jobs.run_settle(bot, p))
+        assert any("суточный лимит запросов к API-Sports" in t for t in bot.texts())
+        initial_sent = len(bot.texts())
+        assert initial_sent == len(config.ADMIN_IDS)
+        # Second call does not re-alert (notify_once)
+        run(irl_jobs.run_settle(bot, p))
+        assert len(bot.texts()) == initial_sent
+
 
 # ─── Wiring ──────────────────────────────────────────────────────────────────
 

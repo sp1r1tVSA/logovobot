@@ -152,3 +152,61 @@ class TestUserChatProfile(unittest.TestCase):
         self.assertIn("💬 <b>АКТИВНОСТЬ:</b>", self_text)
         self.assertEqual(kwargs.get("parse_mode"), "HTML")
 
+    def test_kto_does_not_trigger_profile_card(self):
+        """Verify 'кто с кем играет 15 тур' does not trigger profile card."""
+        import asyncio
+        from handlers.text_commands import handle_temshik_command
+
+        update = MagicMock()
+        context = MagicMock()
+
+        msg = AsyncMock()
+        msg.reply_to_message = MagicMock()
+        msg.reply_to_message.from_user = MagicMock()
+        msg.reply_to_message.from_user.is_bot = False
+        msg.reply_to_message.from_user.id = 998801
+        msg.reply_to_message.from_user.first_name = "Ислам"
+        msg.reply_to_message.from_user.username = "islam_dev"
+
+        msg.text = "Темшик кто с кем играет 15 ткр"
+        user = MagicMock()
+        user.id = 998802
+        user.first_name = "Kiwi"
+        user.username = "kiwi"
+
+        update.effective_message = msg
+        update.effective_user = user
+        update.effective_chat = MagicMock()
+        update.effective_chat.id = -10012345
+        update.effective_chat.type = "supergroup"
+
+        with unittest.mock.patch("handlers.text_commands.cmd_user_profile", new_callable=AsyncMock) as mock_profile:
+            handled = asyncio.run(handle_temshik_command(update, context))
+            self.assertTrue(handled)
+            mock_profile.assert_not_called()
+
+        # Reply should be about 15-й тур, not a user profile
+        msg.reply_text.assert_awaited_once()
+        reply = msg.reply_text.call_args[0][0]
+        self.assertIn("15-го", reply)
+
+    def test_kto_general_question_falls_through_to_ai(self):
+        """Verify 'кто чемпион?' returns False so AI Temshik handles it."""
+        import asyncio
+        from handlers.text_commands import handle_temshik_command
+
+        update = MagicMock()
+        context = MagicMock()
+        msg = AsyncMock()
+        msg.reply_to_message = None
+        msg.text = "Темшик кто чемпион?"
+        user = MagicMock()
+        user.id = 998802
+
+        update.effective_message = msg
+        update.effective_user = user
+
+        handled = asyncio.run(handle_temshik_command(update, context))
+        self.assertFalse(handled)
+
+
