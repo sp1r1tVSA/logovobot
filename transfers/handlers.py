@@ -25,7 +25,7 @@ from telegram.ext import ContextTypes, filters
 
 from services import admin_journal
 from time_utils import MSK_LABEL, fmt_msk, now_msk
-from transfers import approval, notify, reconcile, repo, reminders, requests as req_mod, sanctions, service, slots as slots_mod, squad
+from transfers import approval, notify, recap, reconcile, repo, reminders, requests as req_mod, sanctions, service, slots as slots_mod, squad
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -179,6 +179,7 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
         rows = [[_btn("➕ Создать окно", "tw:create")]]
         if _approved_items(latest):
             rows.append([_btn("📋 Одобренные заявки", "tw:appr:0")])
+            rows.append([_btn("🏁 Итоги окна", "tw:recap")])
         rows.append([_btn("🧵 Темы группы", "tw:topics"), _btn("⛔ Санкции", "tw:sanc")])
         return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -214,7 +215,7 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
         rows.append([_btn(f"📋 Одобренные заявки ({unapplied} без состава)" if unapplied
                           else "📋 Одобренные заявки", "tw:appr:0")])
     if approved:
-        rows.append([_btn("🧮 Сверка составов", "tw:rec")])
+        rows.append([_btn("🧮 Сверка составов", "tw:rec"), _btn("🏁 Итоги окна", "tw:recap")])
     rows.append([_btn("🧵 Темы группы", "tw:topics"), _btn("📋 Правила окна", "tw:settings")])
     rows.append([_btn("⛔ Санкции", "tw:sanc")])
     if slots_mod.active_purchases(window["id"]):
@@ -323,6 +324,7 @@ async def cb_close_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await admin_journal.record(actor, "transfer_window_closed", "transfer_window", window["id"],
                                new={"rejected": len(result.rejected)})
     await notify.announce_close(context.bot, window, result.rejected, auto=False)
+    await notify.announce_recap(context.bot, window)
     await _show(update, f"✅ Окно закрыто. Отклонено неподтверждённых заявок: {len(result.rejected)}.",
                 InlineKeyboardMarkup([_back()]))
 
@@ -1551,6 +1553,55 @@ async def cb_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await _show(update, text, kb)
 
 
+def _recap_keyboard(viewer_is_manager: bool) -> InlineKeyboardMarkup:
+    rows = [[_btn("📣 Опубликовать в ленту", "tw:recapp")]] if viewer_is_manager else []
+    rows.append([_btn("⬅️ Назад", "tw:hub")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Итоги окна картинкой в ЛС — посмотреть до публикации или повторить её."""
+    if not await _guard(update, context):
+        return
+    window = _approved_window()
+    data = await asyncio.to_thread(recap.build, window["id"]) if window else None
+    if data is None or data.empty:
+        await _show(update, "🏁 Одобренных заявок нет — подводить итоги нечего.", InlineKeyboardMarkup([_back()]))
+        return
+    query = update.callback_query
+    if query:
+        try:
+            await query.answer()
+        except Exception:
+            pass
+    caption = recap.caption(data, _window_name(window))
+    kb = _recap_keyboard(service.is_transfer_manager(update.effective_user.id))
+    png = await recap.build_image_async(data)
+    if png and len(caption) <= notify.CAPTION_LIMIT:
+        await update.effective_message.reply_photo(png, caption=caption, parse_mode="HTML", reply_markup=kb)
+    else:
+        await update.effective_message.reply_text(caption, parse_mode="HTML", reply_markup=kb)
+
+
+async def cb_recap_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Повторная публикация итогов в ленту — только ответственный."""
+    query, user = update.callback_query, update.effective_user
+    if not query or not user:
+        return
+    if not service.is_transfer_manager(user.id):
+        await _alert(query, "⛔ Публикует итоги только ответственный за трансферы")
+        return
+    window = _approved_window()
+    if window is None:
+        await _alert(query, "Окна нет")
+        return
+    posted = await notify.announce_recap(context.bot, window, force=True)
+    if posted:
+        await admin_journal.record(user.id, "transfer_recap_posted", "transfer_window", window["id"])
+    await _alert(query, "✅ Итоги опубликованы в ленте" if posted
+                 else "⚠️ В ленту не ушло — копия отправлена вам в ЛС")
+
+
 _portraits_running = False
 
 
@@ -1897,6 +1948,8 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_squad_all, pattern=r"^tw:sqall$"))
     app.add_handler(CallbackQueryHandler(cb_portraits, pattern=r"^tw:ports$"))
     app.add_handler(CallbackQueryHandler(cb_reconcile, pattern=r"^tw:rec$"))
+    app.add_handler(CallbackQueryHandler(cb_recap, pattern=r"^tw:recap$"))
+    app.add_handler(CallbackQueryHandler(cb_recap_post, pattern=r"^tw:recapp$"))
     app.add_handler(CallbackQueryHandler(cb_slots, pattern=r"^tw:slots:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_slot_refund_ask, pattern=r"^tw:slr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_slot_refund_yes, pattern=r"^tw:slc:\d+$"))

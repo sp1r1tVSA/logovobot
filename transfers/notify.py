@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import html
 import logging
 
@@ -15,7 +16,7 @@ from telegram.error import TelegramError
 
 import config
 from time_utils import MSK_LABEL, fmt_msk
-from transfers import card, repo
+from transfers import card, recap, repo
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -95,6 +96,44 @@ async def post_card_to_topic(bot, topic_type: str, transfer: dict, caption: str)
             except Exception as exc:
                 logger.warning("transfers: card post to %s failed: %s", topic_type, exc)
     return await post_to_topic(bot, topic_type, caption)
+
+
+async def post_image_to_topic(bot, topic_type: str, png: bytes | None, caption: str) -> bool:
+    """Готовая картинка в тему с подписью; нет темы, картинки или отказ — обычный текст."""
+    try:
+        topic = repo.get_topic(topic_type)
+    except Exception:
+        logger.exception("transfers: topic lookup failed")
+        topic = None
+    if topic and png and len(caption) <= CAPTION_LIMIT:
+        try:
+            await bot.send_photo(chat_id=topic["group_chat_id"], message_thread_id=topic["message_thread_id"],
+                                 photo=png, caption=caption, parse_mode="HTML")
+            return True
+        except Exception as exc:
+            logger.warning("transfers: image post to %s failed: %s", topic_type, exc)
+    return await post_to_topic(bot, topic_type, caption)
+
+
+RECAP_TAG = "recap"
+
+
+async def announce_recap(bot, window: dict, *, force: bool = False) -> bool:
+    """Итоги окна в ленту. Сам по себе — один раз на окно (`claim_reminder`), `force` — повтор вручную.
+
+    Окно без одобренных заявок итогов не получает: пустая карточка в ленте никому не нужна.
+    """
+    try:
+        data = await asyncio.to_thread(recap.build, window["id"])
+    except Exception:
+        logger.exception("transfers: recap build failed for window %s", window.get("id"))
+        return False
+    if data.empty:
+        return False
+    if not force and not await asyncio.to_thread(repo.claim_reminder, window["id"], RECAP_TAG):
+        return False
+    png = await recap.build_image_async(data)
+    return await post_image_to_topic(bot, "feed", png, recap.caption(data, _window_title(window)))
 
 
 def _window_title(window: dict) -> str:
