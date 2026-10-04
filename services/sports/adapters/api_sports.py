@@ -278,8 +278,9 @@ class APISportsProvider(SportsDataProvider):
                                     key_failed_with_quota = True
                                     break
 
-                                if isinstance(errors, dict) and "token" in errors:
-                                    self._record_key_exhausted(active_key, f"Token error: {errors['token']}")
+                                if isinstance(errors, dict) and ("token" in errors or "access" in errors):
+                                    err_reason = str(errors.get("token") or errors.get("access"))
+                                    self._record_key_exhausted(active_key, f"Auth/Access error: {err_reason}")
                                     last_payload = data
                                     key_failed_with_quota = True
                                     break
