@@ -11,7 +11,7 @@
 
 import { api } from './api.js';
 import { tgBridge } from './tg.js';
-import { escapeHtml } from './ui.js';
+import { escapeHtml, getTeamLogoUrl } from './ui.js';
 
 class TransfersView {
   constructor() {
@@ -290,9 +290,10 @@ class TransfersView {
           <span class="window-status-badge ${st.cls}">${st.label}</span>
         </div>
 
-        <div class="req-route">
-          ${r.from_club ? `Откуда: <b>${escapeHtml(r.from_club)}</b> ` : ''}
-          ${r.to_club ? `→ Куда: <b>${escapeHtml(r.to_club)}</b>` : ''}
+        <div class="req-route hist-route">
+          ${r.from_club ? this.renderRouteClub(r.from_club) : ''}
+          ${r.from_club && r.to_club ? '<span class="hist-arrow">→</span>' : ''}
+          ${r.to_club ? this.renderRouteClub(r.to_club) : ''}
         </div>
 
         ${r.warnings && r.warnings.length ? `
@@ -658,7 +659,7 @@ class TransfersView {
         <div class="urn-item-card" data-id="${it.id}">
           <div class="urn-item-info">
             <div class="urn-item-name">${escapeHtml(it.player_name)} ${it.ovr ? `<span class="req-ovr-tag">OVR ${it.ovr}</span>` : ''}</div>
-            <div class="urn-item-club">Из клуба: <b>${escapeHtml(it.from_club || '—')}</b></div>
+            <div class="urn-item-club">Из клуба: ${it.from_club ? this.renderRouteClub(it.from_club) : '<b>—</b>'}</div>
             <div class="urn-item-price">Цена выкупа: <b>${it.buy_price}</b></div>
           </div>
           <div>
@@ -787,6 +788,17 @@ class TransfersView {
     });
   }
 
+  /** Клуб в маршруте сделки: герб (если найден) + название. «Урна» — без герба, с 🗑. */
+  renderRouteClub(name) {
+    if (!name) return '';
+    const isUrn = String(name).trim().toLowerCase() === 'урна';
+    const url = isUrn ? null : getTeamLogoUrl(name);
+    const mark = isUrn
+      ? '<span class="hist-club-urn">🗑</span>'
+      : (url ? `<img class="hist-club-logo" src="${escapeHtml(url)}" alt="" loading="lazy" decoding="async" onerror="this.remove()" />` : '');
+    return `<span class="hist-club">${mark}<b>${escapeHtml(name)}</b></span>`;
+  }
+
   renderHistoryItem(it, mine) {
     const kindLabel = {
       deal: '🤝 Сделка',
@@ -826,10 +838,10 @@ class TransfersView {
             </span>
             <span class="window-status-badge ${st.cls}">${st.label}</span>
           </div>
-          <div class="req-route">
-            ${it.from_club ? `<b>${escapeHtml(it.from_club)}</b>` : ''}
-            ${it.from_club && it.to_club ? ' → ' : ''}
-            ${it.to_club ? `<b>${escapeHtml(it.to_club)}</b>` : ''}
+          <div class="req-route hist-route">
+            ${it.from_club ? this.renderRouteClub(it.from_club) : ''}
+            ${it.from_club && it.to_club ? '<span class="hist-arrow">→</span>' : ''}
+            ${it.to_club ? this.renderRouteClub(it.to_club) : ''}
           </div>
           ${mine && it.decided_reason ? `
             <div style="font-size: 0.74rem; color: var(--color-danger); margin: 4px 0;">

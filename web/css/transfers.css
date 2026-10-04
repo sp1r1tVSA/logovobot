@@ -494,6 +494,9 @@
   color: #fff;
 }
 .urn-item-club {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
   font-size: 0.78rem;
   color: var(--text-secondary, #94a3b8);
 }
@@ -642,4 +645,30 @@
 .hist-portrait-img[hidden],
 .hist-portrait-fallback[hidden] {
   display: none;
+}
+.hist-route {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 8px;
+}
+.hist-club {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  vertical-align: middle;
+}
+.hist-club-logo {
+  width: 18px;
+  height: 18px;
+  object-fit: contain;
+  flex: 0 0 18px;
+}
+.hist-club-urn {
+  font-size: 0.85rem;
+  line-height: 1;
+}
+.hist-arrow {
+  color: var(--text-secondary, #94a3b8);
 }
