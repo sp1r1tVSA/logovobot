@@ -25,7 +25,7 @@ from telegram.ext import ContextTypes, filters
 
 from services import admin_journal
 from time_utils import MSK_LABEL, fmt_msk, now_msk
-from transfers import approval, notify, recap, reconcile, repo, reminders, requests as req_mod, sanctions, service, slots as slots_mod, squad
+from transfers import approval, board, notify, recap, reconcile, repo, reminders, requests as req_mod, sanctions, service, slots as slots_mod, squad
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -216,6 +216,9 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
                           else "📋 Одобренные заявки", "tw:appr:0")])
     if approved:
         rows.append([_btn("🧮 Сверка составов", "tw:rec"), _btn("🏁 Итоги окна", "tw:recap")])
+    lots = board.live_lots(window) if status == "open" else []
+    if lots:
+        rows.append([_btn(f"📌 Доска ({len(lots)})", "tw:bd:0")])
     rows.append([_btn("🧵 Темы группы", "tw:topics"), _btn("📋 Правила окна", "tw:settings")])
     rows.append([_btn("⛔ Санкции", "tw:sanc")])
     if slots_mod.active_purchases(window["id"]):
@@ -1413,6 +1416,77 @@ async def cb_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await _show(update, text, kb)
 
 
+# ─── Доска «ищу / продаю» ────────────────────────────────────────────────────
+
+BOARD_PAGE = 8
+
+
+def _board_view(page: int, viewer_is_manager: bool) -> tuple[str, InlineKeyboardMarkup]:
+    lots = board.live_lots()
+    if not lots:
+        return "📌 На доске пусто — лотов нет (или окно не открыто).", InlineKeyboardMarkup([_back()])
+    pages = max(1, (len(lots) + BOARD_PAGE - 1) // BOARD_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = lots[page * BOARD_PAGE:(page + 1) * BOARD_PAGE]
+    sells = sum(1 for lot in lots if lot["side"] == "sell")
+    lines = [f"📌 <b>Доска ТО</b> — продают: {sells}, ищут: {len(lots) - sells}", ""]
+    for lot in chunk:
+        line = f"#{lot['id']} · <b>{html.escape(lot['club_name'])}</b> — {notify.lot_line(lot)}"
+        if lot.get("responses_pending"):
+            line += f" · откликов: {lot['responses_pending']}"
+        lines.append(line)
+        if lot.get("note"):
+            lines.append(f"    <i>{html.escape(lot['note'])}</i>")
+    if pages > 1:
+        lines.extend(["", f"Страница {page + 1} из {pages}"])
+    rows = []
+    if viewer_is_manager:
+        buttons = [_btn(f"✖ #{lot['id']}", f"tw:bdx:{lot['id']}") for lot in chunk]
+        rows.extend(buttons[i:i + 4] for i in range(0, len(buttons), 4))
+    nav = []
+    if page > 0:
+        nav.append(_btn("◀️", f"tw:bd:{page - 1}"))
+    if page < pages - 1:
+        nav.append(_btn("▶️", f"tw:bd:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([_btn("🔄", f"tw:bd:{page}")])
+    rows.append(_back())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def cb_board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    page = int(update.callback_query.data.rsplit(":", 1)[1])
+    manager = service.is_transfer_manager(update.effective_user.id)
+    text, kb = await asyncio.to_thread(_board_view, page, manager)
+    await _show(update, text, kb)
+
+
+async def cb_board_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Снять лот с доски — только ответственный; автору уходит ЛС."""
+    query, user = update.callback_query, update.effective_user
+    if not query or not user:
+        return
+    if not service.is_transfer_manager(user.id):
+        await _alert(query, "⛔ Снимать лоты может только ответственный за трансферы")
+        return
+    try:
+        lot = await asyncio.to_thread(board.remove_lot, user.id, query.data.rsplit(":", 1)[1])
+    except service.InputError as exc:
+        await _alert(query, str(exc))
+        return
+    await admin_journal.record(
+        user.id, "transfer_board_lot_removed", "transfer_board_lot", lot["id"],
+        old={"status": "open"},
+        new={"status": "closed", "club": lot["club_name"], "side": lot["side"],
+             "player": lot["player_name"], "to_user": lot["user_id"]})
+    await notify.notify_board_lot_removed(context.bot, lot)
+    text, kb = await asyncio.to_thread(_board_view, 0, True)
+    await _show(update, f"✅ Лот #{lot['id']} снят.\n\n{text}", kb)
+
+
 # ─── Возврат доп. слотов ─────────────────────────────────────────────────────
 
 SLOTS_PAGE = 8
@@ -1941,6 +2015,8 @@ def register_handlers(app) -> None:
 
     # Состав и отмена одобренных
     app.add_handler(CallbackQueryHandler(cb_queue, pattern=r"^tw:q:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_board, pattern=r"^tw:bd:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_board_remove, pattern=r"^tw:bdx:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_approved, pattern=r"^tw:appr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_open_transfer, pattern=r"^tw:tr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_squad_apply, pattern=r"^tw:sq:\d+$"))

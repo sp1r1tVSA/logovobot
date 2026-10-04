@@ -9,7 +9,11 @@
 * GET  /api/transfers/suggest       — автоподбор клуба/игрока (kind=club|player, q, club | own=1)
 * GET  /api/transfers/{id}/photo    — прокси фото заявки из Telegram
 * POST /api/transfers/preview       — предпроверка заявки без подачи (kind + поля формы): блокировки и предупреждения
-* POST /api/transfers/deal          — подать сделку с другим тренером (JSON или multipart с фото)
+* POST /api/transfers/deal          — подать сделку с другим тренером (JSON или multipart с фото);
+                                       с `lot_id` — отклик на лот доски
+* GET  /api/transfers/board         — доска «ищу / продаю»: живые лоты открытого окна
+* POST /api/transfers/board         — повесить лот (side: buy|sell, player, ovr, price, note)
+* POST /api/transfers/board/{id}/close — снять лот своего клуба
 * POST /api/transfers/surcharge     — подать заявку на доплату за спешл
 * POST /api/transfers/urn/sale      — продать карту в урну
 * POST /api/transfers/urn/buy       — выкупить карту из урны
@@ -29,7 +33,7 @@ from aiohttp import web
 from PIL import Image
 
 from api.auth import check_user_access, extract_init_data, get_authenticated_user
-from transfers import market, notify, requests as req_mod, service, slots, suggest
+from transfers import board, market, notify, repo, requests as req_mod, service, slots, suggest
 
 logger = logging.getLogger(__name__)
 
@@ -295,15 +299,16 @@ async def handle_post_deal(request: web.Request) -> web.Response:
     except service.InputError as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
 
+    lot_id = str(fields.get("lot_id") or "").strip()
+    lot = None
     try:
-        deal = req_mod.create_deal(
-            user_id,
-            role=fields.get("role", ""),
-            other_club=fields.get("other_club", ""),
-            player=fields.get("player", ""),
-            price=fields.get("price"),
-            ovr=fields.get("ovr"),
-        )
+        deal_fields = dict(role=fields.get("role", ""), other_club=fields.get("other_club", ""),
+                           player=fields.get("player", ""), price=fields.get("price"), ovr=fields.get("ovr"))
+        if lot_id:
+            deal = board.respond(user_id, lot_id, **deal_fields)
+            lot = repo.get_lot(int(lot_id))
+        else:
+            deal = req_mod.create_deal(user_id, **deal_fields)
     except service.InputError as exc:
         return web.json_response({"status": "error", "message": str(exc)}, status=400)
     except Exception as exc:
@@ -314,7 +319,8 @@ async def handle_post_deal(request: web.Request) -> web.Response:
     bot = _get_bot(request)
     if bot:
         try:
-            await notify.notify_deal_proposal(bot, deal, photo_bytes=photo_bytes)
+            await notify.notify_deal_proposal(bot, deal, photo_bytes=photo_bytes,
+                                              note=notify.board_response_note(lot) if lot else None)
         except Exception:
             logger.exception("transfers: notify_deal_proposal error")
 
@@ -576,6 +582,56 @@ async def handle_post_withdraw(request: web.Request) -> web.Response:
     })
 
 
+async def handle_get_board(request: web.Request) -> web.Response:
+    user_info, err = _auth(request)
+    if err is not None:
+        return err
+    try:
+        return web.json_response({"status": "ok", "data": board.list_board(user_info["id"])})
+    except Exception:
+        logger.exception("transfers: handle_get_board failed")
+        return web.json_response({"status": "error", "message": "Внутренняя ошибка сервера"}, status=500)
+
+
+async def handle_post_board(request: web.Request) -> web.Response:
+    user_info, err = _auth(request)
+    if err is not None:
+        return err
+    try:
+        fields, _photo = await _read_request_payload(request)
+        lot = board.create_lot(user_info["id"], side=fields.get("side", ""), player=fields.get("player"),
+                               ovr=fields.get("ovr"), price=fields.get("price"), note=fields.get("note"))
+    except web.HTTPBadRequest:
+        raise
+    except service.InputError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception:
+        logger.exception("transfers: create_lot failed")
+        return web.json_response({"status": "error", "message": "Не удалось повесить лот"}, status=500)
+    bot = _get_bot(request)
+    if bot:
+        try:
+            await notify.announce_board_lot(bot, lot)
+        except Exception:
+            logger.exception("transfers: announce_board_lot error")
+    club = req_mod._coach_club_or_none(user_info["id"])
+    return web.json_response({"status": "ok", "lot": board.serialize(lot, club, can_act=True)})
+
+
+async def handle_post_board_close(request: web.Request) -> web.Response:
+    user_info, err = _auth(request)
+    if err is not None:
+        return err
+    try:
+        board.close_lot(user_info["id"], request.match_info.get("id"))
+    except service.InputError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception:
+        logger.exception("transfers: close_lot failed")
+        return web.json_response({"status": "error", "message": "Внутренняя ошибка сервера"}, status=500)
+    return web.json_response({"status": "ok"})
+
+
 def register_routes(app: web.Application) -> None:
     """Регистрация всех HTTP-маршрутов трансферного окна в aiohttp."""
     app.router.add_get("/api/transfers/status", handle_get_status)
@@ -584,11 +640,14 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/transfers/urn", handle_get_urn)
     app.router.add_get("/api/transfers/market", handle_get_market)
     app.router.add_get("/api/transfers/suggest", handle_get_suggest)
+    app.router.add_get("/api/transfers/board", handle_get_board)
     app.router.add_get("/api/transfers/{id}/photo", handle_get_photo)
 
     app.router.add_post("/api/transfers/preview", handle_post_preview)
     app.router.add_post("/api/transfers/deal", handle_post_deal)
     app.router.add_post("/api/transfers/swap", handle_post_swap)
+    app.router.add_post("/api/transfers/board", handle_post_board)
+    app.router.add_post("/api/transfers/board/{id}/close", handle_post_board_close)
     app.router.add_post("/api/transfers/surcharge", handle_post_surcharge)
     app.router.add_post("/api/transfers/slots", handle_post_slot)
     app.router.add_post("/api/transfers/urn/sale", handle_post_urn_sale)

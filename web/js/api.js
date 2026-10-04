@@ -600,6 +600,21 @@ class ApiClient {
     });
   }
 
+  getTransferBoard() {
+    return this.request('/api/transfers/board');
+  }
+
+  createTransferLot(payload) {
+    return this.request('/api/transfers/board', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  }
+
+  closeTransferLot(lotId) {
+    return this.request(`/api/transfers/board/${lotId}/close`, { method: 'POST' });
+  }
+
   createTransferUrnBuy(urnItemId) {
     return this.request('/api/transfers/urn/buy', {
       method: 'POST',

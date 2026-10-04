@@ -609,7 +609,7 @@ the season sanctions count from. The starting values of a new window are in `tra
 **Storage.** Migration `033_transfer_window` (`transfers/schema.py`, additive, applied from
 `database.init_db()` in the same transaction) creates nine tables: `transfer_windows`,
 `transfer_club_budgets`, `transfers`, `transfer_squad_ops`, `transfer_core_snapshot`, `transfer_players`,
-`transfer_topics`, `transfer_slot_purchases`, `transfer_sanctions` (later additive tables such as `transfer_swap_links`, `transfer_topics_ext` and `transfer_reminders` sit beside them). **Budget and slots are computed on
+`transfer_topics`, `transfer_slot_purchases`, `transfer_sanctions` (later additive tables such as `transfer_swap_links`, `transfer_topics_ext`, `transfer_reminders`, `transfer_board_lots` and `transfer_board_responses` sit beside them). **Budget and slots are computed on
 read** (`engine.compute_ledger`) from `transfers` (`pending_*` plus `approved`) and
 `transfer_slot_purchases` — nothing stores a balance, so a cancelled or rejected request frees its money
 and slot at once.
@@ -689,9 +689,11 @@ oldest first, 5 per page, each with its kind, amount, how long it has waited (`r
 as «ждут вторую сторону» (the window close rejects them). A request button opens `tw:tr:ID`, which for `pending_manager`
 carries ✅/❌ (`tw:ap:` / `tw:rj:`, same handlers as the card in the topic) and a back button to the queue. `test_transfer_panel`.
 
+**Board («📌 Доска», `board.py`, test `test_transfer_board`).** Coaches post lots without a counterparty: «Продаю» (`sell`, a player is required) or «Ищу» (`buy`, a player or a `note` describing the need), with optional OVR, price and a note of up to 200 characters. Two additive tables: `transfer_board_lots` (window, club, author, side, player and its `norm_name`, `status` `open | closed`, `closed_reason` `author | manager`) and `transfer_board_responses` (`transfer_id` PK → `lot_id`). A lot costs nothing — no budget, no slot. Posting needs an **open** window (not `draft`), a club and no active sanction; at most `MAX_OPEN_PER_CLUB` = 3 live lots per club, no duplicate side + player. **Liveness is computed on read** (`board.is_live`): open, in the current open window, and not a sell lot with an approved response — so a sold lot leaves the board by itself and approval needs no hook; a buy lot stays until it is taken down. A response is an ordinary deal: `POST /api/transfers/deal` with `lot_id` goes through `board.respond` (a sell lot is answered by buying that same player, a buy lot by selling to the lot's club; the club is the lot's, not your own) → `requests.create_deal` + `repo.link_board_response` in one transaction, and the proposal DM to the lot's coach is prefixed with «📌 Отклик на ваш лот». API: `GET /api/transfers/board` (`open`, `club`, `my_open`, `max_open`, `can_post`, `lots` with `mine` / `can_respond` / response counts), `POST /api/transfers/board`, `POST /api/transfers/board/{id}/close` (own club only). A new lot is posted quietly (`disable_notification`) to the `feed` topic; with no feed bound nothing is sent — the lot is visible on the board, so no DM fallback. Panel: the hub shows «📌 Доска (N)» (`tw:bd:N`, 8 per page) when lots are live; the manager alone gets «✖ #id» (`tw:bdx:ID`), journaled as `transfer_board_lot_removed`, with a DM to the author. Mini App: the «📌 Доска» tab (`loadBoard`) — post form, lot cards, «Снять» for your own, «Купить» / «Предложить» prefills the deal form and keeps `respondLot`, shown as a banner above the fields and sent as `lot_id` while the role matches.
+
 **Admin journal.** Journaled actions, all labelled in `services/admin_journal.ACTIONS`:
 `transfer_request_approved`, `transfer_request_rejected`, `transfer_request_cancelled`,
-`transfer_squad_applied`, `transfer_squad_reverted`, `transfer_sanction_added`, `transfer_sanction_lifted`, `transfer_slot_refunded`, `transfer_recap_posted`.
+`transfer_squad_applied`, `transfer_squad_reverted`, `transfer_sanction_added`, `transfer_sanction_lifted`, `transfer_slot_refunded`, `transfer_recap_posted`, `transfer_board_lot_removed`.
 Add any new transfer action there too.
 
 **Wiring.** `handlers/__init__.py` registers `transfers.handlers.register_handlers` before the AI
@@ -701,7 +703,7 @@ to `transfers.notify` in `post_init` and schedules `transfer_auto_close`; `web/`
 
 Tests — run them per subsystem, no full sweep: `test_transfer_engine`, `test_transfer_window`,
 `test_transfer_service`, `test_transfer_requests`, `test_transfer_approval`, `test_transfer_squad`,
-`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_swap`, `test_transfer_preview`, `test_transfer_reconcile`, `test_transfer_recap`, `test_transfer_fa_topic`, `test_transfer_panel`, `test_transfer_card`, plus `test_production_audit`
+`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_swap`, `test_transfer_preview`, `test_transfer_reconcile`, `test_transfer_recap`, `test_transfer_board`, `test_transfer_fa_topic`, `test_transfer_panel`, `test_transfer_card`, plus `test_production_audit`
 for any new button and `test_admin_journal` for new journal actions.
 
 ---
