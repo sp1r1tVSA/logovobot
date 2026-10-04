@@ -660,7 +660,7 @@ bought out cannot be cancelled.
 **Slots (`slots.py`).** An extra slot is bought for coins: `database.spend_coins` plus a
 `transfer_slot_purchases` row with `coin_tx_id`, in one transaction (coin type `transfer_slot`). The
 ceiling `max_extra_slots` is per club, buys and sells together. Slot purchases are not journaled. The manager refunds one from the hub's «🪙 Слоты за монеты» screen
-(`tw:slots:N` → `tw:slr:ID` ask → `tw:sly:ID` confirm): `slots.refund` marks the purchase `refunded` and credits the coins back
+(`tw:slots:N` → `tw:slr:ID` ask → `tw:slc:ID` confirm): `slots.refund` marks the purchase `refunded` and credits the coins back
 (`database.refund_coins`, coin type `transfer_slot_refund`) in one transaction, and refuses a slot that a request already
 occupies. The buyer gets a DM; journaled as `transfer_slot_refunded`.
 

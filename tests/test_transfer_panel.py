@@ -303,7 +303,7 @@ class TestSlotRefundPanel:
         assert "Вернуть слот" in _last(upd)
         bot = FakeBot()
         bot.sent.clear()
-        upd = _press(handlers.cb_slot_refund_yes, f"tw:sly:{pid}", bot=bot)
+        upd = _press(handlers.cb_slot_refund_yes, f"tw:slc:{pid}", bot=bot)
         assert "Слот возвращён" in _last(upd) and database.get_wallet_balance(101) == 1000
         assert _clean[-1][0][1] == "transfer_slot_refunded"
         assert repo.get_slot_purchase(pid)["status"] == "refunded"
@@ -311,7 +311,7 @@ class TestSlotRefundPanel:
     def test_only_the_manager_refunds(self, monkeypatch):
         _, pid = self._bought()
         monkeypatch.setattr(config, "ADMIN_IDS", [990001])
-        upd = _press(handlers.cb_slot_refund_yes, f"tw:sly:{pid}", user_id=990001)
+        upd = _press(handlers.cb_slot_refund_yes, f"tw:slc:{pid}", user_id=990001)
         assert upd.callback_query.alerts and repo.get_slot_purchase(pid)["status"] == "active"
 
     def test_routes_registered(self):
@@ -319,6 +319,10 @@ class TestSlotRefundPanel:
 
         added = []
         handlers.register_handlers(SimpleNamespace(add_handler=lambda h, *a, **k: added.append(h)))
-        patterns = [h.pattern for h in added if isinstance(h, CallbackQueryHandler)]
-        for data in ("tw:slots:0", "tw:slr:5", "tw:sly:5"):
-            assert any(p.match(data) for p in patterns)
+        cbs = [h for h in added if isinstance(h, CallbackQueryHandler)]
+        expected = {"tw:slots:0": handlers.cb_slots, "tw:slr:5": handlers.cb_slot_refund_ask,
+                    "tw:slc:5": handlers.cb_slot_refund_yes, "tw:sly:5": handlers.cb_sanction_lift_yes}
+        for data, cb in expected.items():
+            # PTB берёт первый подошедший обработчик — пересечение паттернов уводит кнопку не туда
+            first = next(h for h in cbs if h.pattern.match(data))
+            assert first.callback is cb, data

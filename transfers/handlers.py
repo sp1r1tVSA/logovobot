@@ -1324,7 +1324,7 @@ async def cb_slot_refund_ask(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if purchase is None or purchase["status"] != "active":
         await _alert(update.callback_query, "Эта покупка уже возвращена.")
         return
-    kb = InlineKeyboardMarkup([[_btn("↩️ Да, вернуть", f"tw:sly:{purchase['id']}"), _btn("Назад", "tw:slots:0")]])
+    kb = InlineKeyboardMarkup([[_btn("↩️ Да, вернуть", f"tw:slc:{purchase['id']}"), _btn("Назад", "tw:slots:0")]])
     await _show(update, f"↩️ <b>Вернуть слот?</b>\n{html.escape(_slot_label(purchase))}\n\n"
                         f"Тренеру вернётся {purchase['price_coins']} 🪙, лимит клуба уменьшится на один слот.", kb)
 
@@ -1723,7 +1723,7 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_portraits, pattern=r"^tw:ports$"))
     app.add_handler(CallbackQueryHandler(cb_slots, pattern=r"^tw:slots:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_slot_refund_ask, pattern=r"^tw:slr:\d+$"))
-    app.add_handler(CallbackQueryHandler(cb_slot_refund_yes, pattern=r"^tw:sly:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_slot_refund_yes, pattern=r"^tw:slc:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_cancel_ask, pattern=r"^tw:cx:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_cancel_yes, pattern=r"^tw:cxy:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_cancel_back, pattern=r"^tw:cxn:\d+$"))
