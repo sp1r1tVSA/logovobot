@@ -966,6 +966,11 @@ async def _close_card(bot, chat_id: int, message_id: int, text: str, reply_marku
 
 
 def _decision_summary(t: dict, word: str) -> str:
+    partner = repo.get_swap_partner(t)
+    if partner is not None:
+        lead, second = (t, partner) if t["id"] < partner["id"] else (partner, t)
+        return (f"{word} <b>#{lead['id']}+#{second['id']}</b> — обмен "
+                f"{html.escape(lead.get('player_name') or '')} ⇄ {html.escape(second.get('player_name') or '')}")
     return f"{word} <b>#{t['id']}</b> — {html.escape(t.get('player_name') or '')}"
 
 
@@ -985,19 +990,23 @@ async def cb_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     t = decision.transfer
     await query.answer("✅ Одобрено")
-    await admin_journal.record(
-        user.id, "transfer_request_approved", "transfer", t["id"],
-        old={"status": "pending_manager"},
-        new={"status": "approved", "kind": t["kind"], "player": t["player_name"],
-             "from": t["from_club"], "to": t["to_club"], "price_k": t["price_k"],
-             "warnings": [w["code"] for w in decision.warnings]})
+    legs = [t] + ([decision.partner] if decision.partner else [])
+    for leg in legs:
+        await admin_journal.record(
+            user.id, "transfer_request_approved", "transfer", leg["id"],
+            old={"status": "pending_manager"},
+            new={"status": "approved", "kind": leg["kind"], "player": leg["player_name"],
+                 "from": leg["from_club"], "to": leg["to_club"], "price_k": leg["price_k"],
+                 "swap_partner": leg.get("swap_partner_id"),
+                 "warnings": [w["code"] for w in decision.warnings]})
     warn = f"\n⚠️ Предупреждений: {len(decision.warnings)}" if decision.warnings else ""
     note = "\nСостав клуба пока не менялся — применить его можно кнопкой ниже." if squad.changes_squad(t) else ""
     await _close_card(context.bot, query.message.chat.id, query.message.message_id,
                       _decision_summary(t, "✅ Одобрена заявка") + warn + note,
                       _transfer_keyboard(t, back=False))
     await notify.notify_approved(context.bot, t)
-    _prefetch_portrait_later(t)
+    for leg in legs:
+        _prefetch_portrait_later(leg)
 
 
 _background: set = set()
@@ -1036,11 +1045,12 @@ async def cb_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _finish_reject(bot, user_id: int, entry: dict, reason: str | None) -> str:
     t = await asyncio.to_thread(approval.reject, user_id, entry["transfer_id"], reason)
-    await admin_journal.record(
-        user_id, "transfer_request_rejected", "transfer", t["id"],
-        old={"status": "pending_manager"},
-        new={"status": "rejected", "kind": t["kind"], "player": t["player_name"],
-             "reason": t["decided_reason"]})
+    for leg in [t] + ([p] if (p := repo.get_swap_partner(t)) else []):
+        await admin_journal.record(
+            user_id, "transfer_request_rejected", "transfer", leg["id"],
+            old={"status": "pending_manager"},
+            new={"status": "rejected", "kind": leg["kind"], "player": leg["player_name"],
+                 "swap_partner": leg.get("swap_partner_id"), "reason": leg["decided_reason"]})
     why = f"\nПричина: {html.escape(t['decided_reason'])}" if t["decided_reason"] else ""
     await _close_card(bot, entry["card_chat_id"], entry["card_message_id"],
                       _decision_summary(t, "❌ Отклонена заявка") + why)
@@ -1108,6 +1118,10 @@ def _transfer_view(t: dict, *, back: bool) -> tuple[str, InlineKeyboardMarkup | 
         lines.append(f"Куда: {html.escape(t['to_club'])}")
     if t.get("price_k"):
         lines.append(f"Сумма: {format_k(t['price_k'])}")
+    if (partner := repo.get_swap_partner(t)) is not None:
+        lines.append(f"🔁 Обмен: вторая половина #{partner['id']} — "
+                     f"{html.escape(partner.get('player_name') or '')} "
+                     f"({TRANSFER_STATUS_LABELS.get(partner['status'], partner['status'])})")
     if t["status"] in QUEUE_STATUSES:
         hours = reminders.waiting_hours(t, now_msk())
         if hours is not None:
@@ -1225,11 +1239,14 @@ async def cb_cancel_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _alert(update.callback_query, str(exc))
         return
     lines = rolled.lines if rolled else []
-    await admin_journal.record(
-        user_id, "transfer_request_cancelled", "transfer", t["id"],
-        old={"status": "approved"},
-        new={"status": "cancelled", "kind": t["kind"], "player": t["player_name"],
-             "from": t["from_club"], "to": t["to_club"], "price_k": t["price_k"], "squad_reverted": lines})
+    partner = repo.get_swap_partner(t)
+    for leg in [t] + ([partner] if partner and partner["status"] == "cancelled" else []):
+        await admin_journal.record(
+            user_id, "transfer_request_cancelled", "transfer", leg["id"],
+            old={"status": "approved"},
+            new={"status": "cancelled", "kind": leg["kind"], "player": leg["player_name"],
+                 "from": leg["from_club"], "to": leg["to_club"], "price_k": leg["price_k"],
+                 "swap_partner": leg.get("swap_partner_id"), "squad_reverted": lines})
     summary = _decision_summary(t, "🛑 Отменена заявка") + ("\n" + "\n".join(html.escape(x) for x in lines) if lines else "")
     kb = InlineKeyboardMarkup([_back("tw:appr:0", "⬅️ К одобренным")]) if _is_private(update) else None
     await _show(update, summary, kb)
@@ -1319,7 +1336,8 @@ def _queue_items(window: dict | None) -> tuple[list[dict], list[dict]]:
     """(ждут ответственного, ждут вторую сторону): самые давние сверху."""
     if window is None:
         return [], []
-    items = repo.list_transfers(window["id"], statuses=QUEUE_STATUSES)
+    items = [t for t in repo.list_transfers(window["id"], statuses=QUEUE_STATUSES)
+             if not t.get("swap_partner_id") or t["id"] < t["swap_partner_id"]]
 
     def oldest_first(t: dict):
         since = reminders.waiting_since(t)

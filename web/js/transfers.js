@@ -240,7 +240,8 @@ class TransfersView {
     }
 
     // Входящие подтверждения
-    const incomingDeals = (requests || []).filter(r => r.can_confirm);
+    const reqList = this.collapseSwaps(requests || []);
+    const incomingDeals = reqList.filter(r => r.can_confirm);
     let incomingHtml = '';
     if (incomingDeals.length > 0) {
       incomingHtml = `
@@ -251,7 +252,7 @@ class TransfersView {
     }
 
     // Мои заявки
-    const ownRequests = (requests || []).filter(r => !r.can_confirm);
+    const ownRequests = reqList.filter(r => !r.can_confirm);
     let ownHtml = `
       <div style="margin-top: 14px;">
         <div style="font-family: 'Outfit', sans-serif; font-size: 0.95rem; font-weight: 800; color: #fff; margin-bottom: 8px;">
@@ -262,6 +263,19 @@ class TransfersView {
 
     container.innerHTML = winHtml + sanctionHtml + clubHtml + incomingHtml + ownHtml;
     this.bindActionButtons(container);
+  }
+
+  // Обмен приходит двумя заявками; в списке показываем одну карточку (первую половину),
+  // а вторую цепляем к ней как `_swap`. Кнопки действуют на пару на сервере.
+  collapseSwaps(list) {
+    const byId = new Map(list.map(r => [r.id, r]));
+    const out = [];
+    for (const r of list) {
+      const pid = r.swap_partner_id;
+      if (!pid || !byId.has(pid)) { out.push(r); continue; }
+      if (r.id < pid) out.push({ ...r, _swap: byId.get(pid) });
+    }
+    return out;
   }
 
   renderRequestItem(r) {
@@ -286,7 +300,7 @@ class TransfersView {
       <div class="req-item" data-id="${r.id}">
         <div class="req-item-head">
           <span class="req-item-title">
-            ${kindMap[r.kind] || r.kind} #${r.id}: <b>${escapeHtml(r.player_name)}</b>
+            ${r.swap_partner_id ? '🔁 Обмен' : (kindMap[r.kind] || r.kind)} #${r.id}${r._swap ? `+#${r._swap.id}` : ''}: <b>${escapeHtml(r.player_name)}</b>
             ${r.ovr ? `<span class="req-ovr-tag">OVR ${r.ovr}</span>` : ''}
           </span>
           <span class="window-status-badge ${st.cls}">${st.label}</span>
@@ -297,6 +311,12 @@ class TransfersView {
           ${r.from_club && r.to_club ? '<span class="hist-arrow">→</span>' : ''}
           ${r.to_club ? this.renderRouteClub(r.to_club) : ''}
         </div>
+        ${r._swap ? `
+          <div class="req-item-title" style="margin-top: 4px;">
+            ⇄ <b>${escapeHtml(r._swap.player_name)}</b>
+            ${r._swap.ovr ? `<span class="req-ovr-tag">OVR ${r._swap.ovr}</span>` : ''}
+            <span style="color: var(--text-muted); font-size: 0.78rem;">${r._swap.price}</span>
+          </div>` : ''}
 
         ${r.warnings && r.warnings.length ? `
           <div style="font-size: 0.74rem; color: var(--accent-gold); margin: 4px 0;">
@@ -410,7 +430,7 @@ class TransfersView {
           <div id="transfer-form-fields"></div>
 
           <!-- Фото к заявке -->
-          <div class="form-group" style="margin-top: 14px;">
+          <div class="form-group" id="transfer-photo-group" style="margin-top: 14px;">
             <label class="form-label">Скриншот / фото (необязательно)</label>
             <div class="photo-upload-zone" id="photo-dropzone">
               <span id="photo-upload-prompt">📷 Нажмите, чтобы прикрепить фото</span>
@@ -432,7 +452,32 @@ class TransfersView {
     this.bindRequestForm(container);
   }
 
+  // Обмен «игрок на игрока»: у каждой половины своя цена — разница и есть доплата.
+  swapFieldsHtml() {
+    const half = (prefix, title, hint) => `
+      <div style="font-size: 0.8rem; font-weight: 700; margin: 6px 0 4px;">${title}</div>
+      <div class="form-group">
+        <input type="text" id="${prefix}-player" class="form-input" placeholder="${hint}" required>
+      </div>
+      <div style="display: flex; gap: 10px;">
+        <div class="form-group" style="flex: 1;">
+          <input type="number" id="${prefix}-ovr" class="form-input" placeholder="OVR" min="1" max="199" required>
+        </div>
+        <div class="form-group" style="flex: 1.2;">
+          <input type="text" id="${prefix}-price" class="form-input" placeholder="Цена, млн" required>
+        </div>
+      </div>`;
+    return `
+      <div style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.4;">
+        Две сделки одной заявкой: вторая сторона принимает или отклоняет обмен целиком, ответственный решает обе вместе.
+      </div>
+      ${half('swap-give', '➡️ Отдаю', 'Игрок вашего состава')}
+      ${half('swap-get', '⬅️ Получаю', 'Игрок клуба-партнёра')}`;
+  }
+
   renderFormFields() {
+    const photoGroup = document.getElementById('transfer-photo-group');
+    if (photoGroup) photoGroup.style.display = (this.requestKind === 'deal' && this.dealRole === 'swap') ? 'none' : '';
     const fieldsContainer = document.getElementById('transfer-form-fields');
     if (!fieldsContainer) return;
 
@@ -441,13 +486,15 @@ class TransfersView {
         <div class="role-toggle-row">
           <button class="role-toggle-btn ${this.dealRole === 'buy' ? 'active buy' : ''}" data-role="buy" type="button">🟢 Я покупаю игрока</button>
           <button class="role-toggle-btn ${this.dealRole === 'sell' ? 'active sell' : ''}" data-role="sell" type="button">🔴 Я продаю игрока</button>
+          <button class="role-toggle-btn ${this.dealRole === 'swap' ? 'active swap' : ''}" data-role="swap" type="button">🔁 Обмен</button>
         </div>
 
         <div class="form-group">
-          <label class="form-label" for="deal-other-club">${this.dealRole === 'buy' ? 'У какого клуба покупаете' : 'Какому клубу продаёте'}</label>
+          <label class="form-label" for="deal-other-club">${{ buy: 'У какого клуба покупаете', sell: 'Какому клубу продаёте', swap: 'С каким клубом меняетесь' }[this.dealRole]}</label>
           <input type="text" id="deal-other-club" class="form-input" placeholder="Название клуба соперника" required>
         </div>
 
+        ${this.dealRole === 'swap' ? this.swapFieldsHtml() : `
         <div class="form-group">
           <label class="form-label" for="deal-player">Имя футболиста (карточки)</label>
           <input type="text" id="deal-player" class="form-input" placeholder="Например: K. De Bruyne" required>
@@ -462,7 +509,7 @@ class TransfersView {
             <label class="form-label" for="deal-price">Сумма (в млн)</label>
             <input type="text" id="deal-price" class="form-input" placeholder="12.5" required>
           </div>
-        </div>
+        </div>`}
       `;
     } else if (this.requestKind === 'surcharge') {
       fieldsContainer.innerHTML = `
@@ -540,6 +587,8 @@ class TransfersView {
       this.attachSuggest('deal-player', (q) => this.dealRole === 'sell'
         ? api.getTransferSuggest('player', q, { own: true })
         : api.getTransferSuggest('player', q, { club: val('deal-other-club') }));
+      this.attachSuggest('swap-give-player', (q) => api.getTransferSuggest('player', q, { own: true }));
+      this.attachSuggest('swap-get-player', (q) => api.getTransferSuggest('player', q, { club: val('deal-other-club') }));
     } else if (this.requestKind === 'surcharge') {
       this.attachSuggest('surcharge-player', (q) => api.getTransferSuggest('player', q, { own: true }));
     } else if (this.requestKind === 'urn_sale') {
@@ -664,7 +713,17 @@ class TransfersView {
           formData.append('photo', this.selectedPhotoFile);
         }
 
-        if (this.requestKind === 'deal') {
+        if (this.requestKind === 'deal' && this.dealRole === 'swap') {
+          const fv = (id) => document.getElementById(id).value;
+          formData.append('other_club', fv('deal-other-club'));
+          formData.append('give_player', fv('swap-give-player'));
+          formData.append('give_ovr', fv('swap-give-ovr'));
+          formData.append('give_price', fv('swap-give-price'));
+          formData.append('get_player', fv('swap-get-player'));
+          formData.append('get_ovr', fv('swap-get-ovr'));
+          formData.append('get_price', fv('swap-get-price'));
+          await api.createTransferSwap(formData, true);
+        } else if (this.requestKind === 'deal') {
           formData.append('role', this.dealRole);
           formData.append('other_club', document.getElementById('deal-other-club').value);
           formData.append('player', document.getElementById('deal-player').value);
@@ -979,7 +1038,7 @@ class TransfersView {
         <div class="hist-body">
           <div class="req-item-head">
             <span class="req-item-title">
-              <span class="hist-kind">${kindLabel}</span>
+              <span class="hist-kind">${it.swap_partner_id ? '🔁 Обмен' : kindLabel}</span>
               <b>${escapeHtml(it.player_name)}</b>
             </span>
             <span class="window-status-badge ${st.cls}">${st.label}</span>

@@ -199,4 +199,15 @@ def cancel(manager_id: int, transfer_id, reason: str | None = None) -> tuple[dic
         if not repo.set_transfer_status(t["id"], "cancelled", expected=("approved",),
                                         actor_id=int(manager_id), reason=text):
             raise InputError("Заявку уже решили.")
+        partner = repo.get_swap_partner(t)
+        if partner is not None and partner["status"] == "approved":
+            # Обмен отменяется целиком: вторая половина без первой не имеет смысла.
+            partner_rolled = _rollback_locked(partner, manager_id) if partner["squad_applied_at"] else None
+            if not repo.set_transfer_status(partner["id"], "cancelled", expected=("approved",),
+                                            actor_id=int(manager_id), reason=text):
+                raise InputError("Вторую половину обмена уже решили.")
+            if partner_rolled is not None:
+                rolled = rolled or SquadResult(t)
+                rolled.lines.extend(partner_rolled.lines)
+                rolled.notes.extend(partner_rolled.notes)
         return repo.get_transfer(t["id"]), rolled

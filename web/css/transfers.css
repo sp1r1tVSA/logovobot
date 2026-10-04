@@ -398,6 +398,12 @@
   border-color: rgba(239, 68, 68, 0.35);
 }
 
+.role-toggle-btn.active.swap {
+  background: rgba(245, 176, 39, 0.15);
+  color: var(--accent-gold, #f5b027);
+  border-color: rgba(245, 176, 39, 0.35);
+}
+
 /* Загрузка фото */
 .photo-upload-zone {
   border: 1px dashed rgba(255, 255, 255, 0.18);

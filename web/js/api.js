@@ -572,6 +572,13 @@ class ApiClient {
     });
   }
 
+  createTransferSwap(payload, isMultipart = false) {
+    return this.request('/api/transfers/swap', {
+      method: 'POST',
+      body: isMultipart ? payload : JSON.stringify(payload)
+    });
+  }
+
   createTransferSurcharge(payload, isMultipart = false) {
     return this.request('/api/transfers/surcharge', {
       method: 'POST',

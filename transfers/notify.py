@@ -106,8 +106,36 @@ def describe_transfer(t: dict) -> str:
     """Одна строка о заявке: №, вид, игрок, откуда → куда."""
     route = " → ".join(html.escape(c) for c in (t.get("from_club"), t.get("to_club")) if c)
     kind = KIND_LABELS.get(t.get("kind"), t.get("kind") or "")
-    line = f"#{t['id']} {kind}: <b>{html.escape(t.get('player_name') or '')}</b>"
+    swap = f" 🔁 обмен с #{t['swap_partner_id']}" if t.get("swap_partner_id") else ""
+    line = f"#{t['id']} {kind}{swap}: <b>{html.escape(t.get('player_name') or '')}</b>"
     return f"{line} ({route})" if route else line
+
+
+def swap_pair(t: dict) -> tuple[dict, dict | None]:
+    """(первая половина, вторая) для заявки из обмена, иначе (t, None).
+
+    Первая — с меньшим номером: сообщения об обмене уходят один раз, от неё,
+    с какой бы половины ни пришло событие.
+    """
+    partner = repo.get_swap_partner(t)
+    if partner is None:
+        return t, None
+    return (t, partner) if t["id"] < partner["id"] else (partner, t)
+
+
+def _leg_line(t: dict) -> str:
+    ovr = f" (OVR {t['ovr']})" if t.get("ovr") else ""
+    return (f"• <b>{html.escape(t.get('player_name') or '')}</b>{ovr}: "
+            f"{html.escape(t.get('from_club') or '—')} → {html.escape(t.get('to_club') or '—')}, "
+            f"<b>{format_k(t.get('price_k'))}</b>")
+
+
+def _swap_lines(lead: dict, partner: dict) -> list[str]:
+    return [_leg_line(lead), _leg_line(partner)]
+
+
+def _swap_title(lead: dict, partner: dict) -> str:
+    return f"#{lead['id']}+#{partner['id']}"
 
 
 _global_bot = None
@@ -122,8 +150,31 @@ def get_bot():
     return _global_bot
 
 
+def _warning_lines(*transfers: dict) -> list[str]:
+    out = []
+    for t in transfers:
+        raw = t.get("warnings")
+        if not raw:
+            continue
+        try:
+            import json
+            items = json.loads(raw) if isinstance(raw, str) else raw
+        except ValueError:
+            continue
+        out.extend(f"• {html.escape(w.get('message') if isinstance(w, dict) else str(w))}" for w in items or [])
+    return out
+
+
 def format_request_card(t: dict) -> str:
     """Полная карточка заявки для темы `requests`."""
+    lead, partner = swap_pair(t)
+    if partner is not None:
+        lines = [f"📋 <b>Заявка {_swap_title(lead, partner)} — обмен игроками</b>", ""]
+        lines.extend(_swap_lines(lead, partner))
+        warns = _warning_lines(lead, partner)
+        if warns:
+            lines.extend(["", "⚠️ <b>Предупреждения:</b>", *warns])
+        return "\n".join(lines)
     kind = KIND_LABELS.get(t.get("kind"), t.get("kind") or "")
     lines = [f"📋 <b>Заявка #{t['id']} — {kind}</b>", ""]
     lines.append(f"Игрок: <b>{html.escape(t.get('player_name') or '')}</b>")
@@ -252,6 +303,15 @@ async def notify_deal_proposal(bot, transfer: dict, *, photo_bytes: bytes | None
     initiator_club = transfer.get("from_club") if initiator_id == transfer.get("from_user") else transfer.get("to_club")
     role_desc = "продать вам игрока" if initiator_id == transfer.get("from_user") else "купить у вас игрока"
 
+    lead, partner = swap_pair(transfer)
+    if partner is not None:
+        return await dm_user(bot, int(counterparty), (
+            f"🔁 <b>Предложение обмена {_swap_title(lead, partner)}</b>\n\n"
+            f"Клуб <b>{html.escape(initiator_club or '')}</b> предлагает обмен игроками:\n"
+            + "\n".join(_swap_lines(lead, partner))
+            + "\n\nПодтвердите или отклоните обмен в Mini App (вкладка 🔁 «Трансферы» → «Статус»). "
+              "Обе половины решаются вместе."))
+
     text = (
         f"🤝 <b>Предложение сделки #{transfer['id']}</b>\n\n"
         f"Клуб <b>{html.escape(initiator_club or '')}</b> предлагает {role_desc}:\n"
@@ -283,6 +343,15 @@ async def notify_deal_confirmed(bot, transfer: dict) -> bool:
     """Вторая сторона подтвердила: уведомить инициатора и отправить карточку в тему `requests`."""
     if bot is None:
         bot = get_bot()
+    lead, partner = swap_pair(transfer)
+    if partner is not None:
+        transfer = lead
+        if transfer.get("initiator_id"):
+            await dm_user(bot, int(transfer["initiator_id"]), (
+                f"✅ <b>Обмен {_swap_title(lead, partner)} подтверждён второй стороной!</b>\n\n"
+                + "\n".join(_swap_lines(lead, partner))
+                + "\n\nЗаявка передана на рассмотрение ответственному за трансферы."))
+        return await post_request_card(bot, transfer)
     initiator_id = transfer.get("initiator_id")
     if initiator_id:
         text = (
@@ -299,6 +368,11 @@ async def notify_deal_declined(bot, transfer: dict) -> bool:
     if bot is None:
         bot = get_bot()
     initiator_id = transfer.get("initiator_id")
+    lead, partner = swap_pair(transfer)
+    if partner is not None and initiator_id:
+        return await dm_user(bot, int(initiator_id), (
+            f"❌ <b>Вторая сторона отклонила обмен {_swap_title(lead, partner)}.</b>\n\n"
+            + "\n".join(_swap_lines(lead, partner))))
     if initiator_id:
         text = (
             f"❌ <b>Вторая сторона отклонила предложение сделки #{transfer['id']}.</b>\n\n"
@@ -315,6 +389,11 @@ async def notify_request_withdrawn(bot, transfer: dict) -> bool:
     if transfer.get("kind") == "deal":
         initiator_id = transfer.get("initiator_id")
         other_user = transfer.get("to_user") if initiator_id == transfer.get("from_user") else transfer.get("from_user")
+        lead, partner = swap_pair(transfer)
+        if other_user and partner is not None:
+            return await dm_user(bot, int(other_user), (
+                f"ℹ️ Предложение обмена {_swap_title(lead, partner)} было отозвано инициатором.\n\n"
+                + "\n".join(_swap_lines(lead, partner))))
         if other_user:
             text = (
                 f"ℹ️ Предложение сделки #{transfer['id']} по игроку "
@@ -484,6 +563,18 @@ async def notify_approved(bot, transfer: dict) -> bool:
                 f"⚠️ По заявке #{transfer['id']} не дошло в ЛС (бот заблокирован или не запущен): "
                 f"<code>{transfer['to_user']}</code>")
         return await announce_free_agent(bot, transfer)
+    lead, partner = swap_pair(transfer)
+    if partner is not None:
+        body = "\n".join(_swap_lines(lead, partner))
+        title = _swap_title(lead, partner)
+        await _dm_parties(bot, lead, f"✅ <b>Обмен {title} одобрен</b>\n\n{body}")
+        # В ленту — карточка на каждую половину: у каждой свой игрок и маршрут.
+        posted = True
+        for leg in (lead, partner):
+            posted = await post_card_to_topic(
+                bot, "feed", leg,
+                f"✅ <b>Одобрен обмен {title}</b>\n\n{_leg_line(leg)}") and posted
+        return posted
     kind = KIND_LABELS.get(transfer.get("kind"), "")
     body = "\n".join(_decision_lines(transfer))
     await _dm_parties(bot, transfer, f"✅ <b>Заявка #{transfer['id']} одобрена</b> ({kind})\n\n{body}")
@@ -493,10 +584,16 @@ async def notify_approved(bot, transfer: dict) -> bool:
 
 async def notify_rejected(bot, transfer: dict) -> bool:
     """Отклонено ответственным: ЛС сторонам с причиной и пост в ленту."""
-    kind = KIND_LABELS.get(transfer.get("kind"), "")
-    body = "\n".join(_decision_lines(transfer))
     reason = transfer.get("decided_reason")
     why = f"\n\nПричина: {html.escape(reason)}" if reason else ""
+    lead, partner = swap_pair(transfer)
+    if partner is not None:
+        body = "\n".join(_swap_lines(lead, partner))
+        title = _swap_title(lead, partner)
+        await _dm_parties(bot, lead, f"❌ <b>Обмен {title} отклонён</b>\n\n{body}{why}")
+        return await post_to_topic(bot, "feed", f"❌ <b>Отклонён обмен {title}</b>\n\n{body}{why}")
+    kind = KIND_LABELS.get(transfer.get("kind"), "")
+    body = "\n".join(_decision_lines(transfer))
     await _dm_parties(bot, transfer, f"❌ <b>Заявка #{transfer['id']} отклонена</b> ({kind})\n\n{body}{why}")
     return await post_to_topic(bot, "feed", f"❌ <b>Отклонён трансфер #{transfer['id']}</b> ({kind})\n\n{body}{why}")
 
@@ -513,7 +610,12 @@ async def notify_squad(bot, transfer: dict, lines: list[str], *, reverted: bool 
 async def notify_cancelled(bot, transfer: dict, lines: list[str]) -> bool:
     """Одобренную заявку отменили: ЛС сторонам и пост в ленту."""
     kind = KIND_LABELS.get(transfer.get("kind"), "")
-    body = "\n".join(_decision_lines(transfer))
+    lead, partner = swap_pair(transfer)
+    if partner is not None:
+        transfer, kind = lead, f"обмен {_swap_title(lead, partner)}"
+        body = "\n".join(_swap_lines(lead, partner))
+    else:
+        body = "\n".join(_decision_lines(transfer))
     if lines:
         body += "\n\n" + "\n".join(html.escape(line) for line in lines)
     reason = transfer.get("decided_reason")

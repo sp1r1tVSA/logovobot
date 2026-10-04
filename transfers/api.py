@@ -242,6 +242,45 @@ async def handle_get_photo(request: web.Request) -> web.Response:
 
 # ─── POST Endpoints ───────────────────────────────────────────────────────────
 
+async def handle_post_swap(request: web.Request) -> web.Response:
+    """Обмен «игрок на игрока»: две связанные сделки, вторая сторона подтверждает обе разом."""
+    user_info, err = _auth(request)
+    if err is not None:
+        return err
+    user_id = user_info["id"]
+
+    try:
+        fields, _photo = await _read_request_payload(request)
+    except web.HTTPBadRequest:
+        raise
+    except service.InputError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+
+    try:
+        swap = req_mod.create_swap(
+            user_id,
+            other_club=fields.get("other_club", ""),
+            give_player=fields.get("give_player", ""), give_price=fields.get("give_price"),
+            give_ovr=fields.get("give_ovr"),
+            get_player=fields.get("get_player", ""), get_price=fields.get("get_price"),
+            get_ovr=fields.get("get_ovr"),
+        )
+    except service.InputError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception:
+        logger.exception("transfers: create_swap failed")
+        return web.json_response({"status": "error", "message": "Не удалось создать заявку"}, status=500)
+
+    bot = _get_bot(request)
+    if bot:
+        try:
+            await notify.notify_deal_proposal(bot, swap)
+        except Exception:
+            logger.exception("transfers: notify_deal_proposal (swap) error")
+
+    return web.json_response({"status": "ok", "transfer": req_mod.serialize(swap, user_id, private=True)})
+
+
 async def handle_post_deal(request: web.Request) -> web.Response:
     user_info, err = _auth(request)
     if err is not None:
@@ -526,6 +565,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/transfers/{id}/photo", handle_get_photo)
 
     app.router.add_post("/api/transfers/deal", handle_post_deal)
+    app.router.add_post("/api/transfers/swap", handle_post_swap)
     app.router.add_post("/api/transfers/surcharge", handle_post_surcharge)
     app.router.add_post("/api/transfers/slots", handle_post_slot)
     app.router.add_post("/api/transfers/urn/sale", handle_post_urn_sale)

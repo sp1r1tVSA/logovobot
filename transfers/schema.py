@@ -195,6 +195,16 @@ def apply_schema(cursor: sqlite3.Cursor) -> None:
         )
     """)
 
+    # Обмен «игрок на игрока»: две заявки-сделки, связанные парой строк (в обе стороны).
+    # Решаются вместе — подтверждение, одобрение, отклонение, отзыв и отмена идут по паре.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transfer_swap_links (
+            transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id),
+            partner_id INTEGER NOT NULL REFERENCES transfers(id),
+            CHECK(transfer_id <> partner_id)
+        )
+    """)
+
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS transfer_slot_purchases (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
