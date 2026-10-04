@@ -140,6 +140,22 @@ class TestAdminPanelIrl(AioHTTPTestCase):
         self.assertEqual(m["home_goals"], 2)
         self.assertEqual(m["away_goals"], 1)
 
+    async def test_settle_rejects_result_contradicting_score(self):
+        kickoff = now_msk() + timedelta(hours=2)
+        mid, _ = database.create_irl_draft(
+            "fix_settle_mismatch", 39, "Premier League", "Portugal", "Norway", kickoff, 1.6, 4.5, 4.9,
+            bet_day=today_msk_str()
+        )
+        database.publish_irl_match(mid)
+
+        resp = await self.client.post(
+            f"/api/admin/panel/irl/matches/{mid}/settle",
+            headers=self._headers(),
+            json={"result": "away", "home_goals": 2, "away_goals": 1}
+        )
+        self.assertEqual(resp.status, 400)
+        self.assertEqual(database.get_irl_match(mid)["status"], "open")
+
     async def test_cancel_match_refunds_bets(self):
         kickoff = now_msk() + timedelta(hours=2)
         mid, _ = database.create_irl_draft(

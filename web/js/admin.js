@@ -2611,6 +2611,11 @@ export class AdminPanel {
     if (this.busy || !this._modalSubmit) return;
     const values = {};
     form.querySelectorAll('input').forEach(i => {
+      // Радио-кнопки делят одно имя: значение даёт только выбранная, иначе побеждала бы последняя.
+      if (i.type === 'radio') {
+        if (i.checked) values[i.name] = i.value;
+        return;
+      }
       values[i.name] = i.type === 'checkbox' ? i.checked : i.value.trim();
     });
     const errorEl = form.querySelector('.adm-form-error');

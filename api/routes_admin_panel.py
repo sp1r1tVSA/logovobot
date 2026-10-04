@@ -982,6 +982,12 @@ async def handle_panel_irl_settle(request: web.Request) -> web.Response:
     except (ValueError, TypeError):
         return _error(400, "invalid_goals", "Количество голов должно быть целым числом.")
 
+    if home_goals is not None and away_goals is not None:
+        from services.irl_betting import result_from_score
+        if result_from_score(home_goals, away_goals) != result:
+            return _error(400, "result_score_mismatch",
+                          f"Счёт {home_goals}:{away_goals} не совпадает с выбранным исходом.")
+
     ok, info = await asyncio.to_thread(database.settle_irl_match, match_id, result, home_goals, away_goals, actor_id=scope.actor_id)
     if not ok:
         return _error(400, "settle_failed", str(info))
