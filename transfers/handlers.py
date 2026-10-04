@@ -769,6 +769,7 @@ async def cb_fa_record(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     _fa_drafts.pop(draft_id, None)
     await admin_journal.record(user.id, "transfer_free_agent_recorded", "transfer", rec.transfer["id"],
                                new={"player": draft.player_name, "club": draft.to_club, "price_k": draft.price_k})
+    _prefetch_portrait_later(rec.transfer)
 
     await notify.announce_free_agent(context.bot, rec.transfer)
     await notify.notify_free_agent_recorded(context.bot, rec.transfer)
@@ -807,6 +808,7 @@ async def cb_fa_reassign(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     await admin_journal.record(user.id, "transfer_free_agent_reassigned", "transfer", rec.transfer["id"],
                                old={"replaced_id": replace_id},
                                new={"player": draft.player_name, "club": draft.to_club, "price_k": draft.price_k})
+    _prefetch_portrait_later(rec.transfer)
 
     await notify.announce_free_agent(context.bot, rec.transfer)
     await notify.notify_free_agent_recorded(context.bot, rec.transfer)

@@ -12,6 +12,7 @@ import database
 from transfers import approval, handlers, notify, repo, requests as req_mod, service
 
 MANAGER = 777
+prefetched: list = []   # заявки, для которых планировалась загрузка портрета
 
 
 @pytest.fixture(autouse=True)
@@ -37,6 +38,8 @@ def _clean(monkeypatch):
 
     monkeypatch.setattr(handlers.admin_journal, "record", _record)
     handlers._pending.clear()
+    prefetched.clear()
+    monkeypatch.setattr(handlers, "_prefetch_portrait_later", prefetched.append)
     yield journal
     handlers._pending.clear()
 
@@ -411,3 +414,48 @@ class TestButtons:
         bot.send_message = AsyncMock(side_effect=_fail)
         upd = _group_press(handlers.cb_reject, f"tw:rj:{deal['id']}", bot)
         assert upd.callback_query.answers[0][1] is True and not handlers._pending
+
+
+# ─── Портрет в фоне ──────────────────────────────────────────────────────────
+
+_FA_TEXT = "1. Jude Bellingham\n2. Dortmund\n3. {club}\n4. 10\n5. 40"
+
+
+class TestPortraitPrefetch:
+    def test_approve_schedules_prefetch(self):
+        _, deal = _setup()
+        _group_press(handlers.cb_approve, f"tw:ap:{deal['id']}", _bot())
+        assert [t["id"] for t in prefetched] == [deal["id"]]
+
+    def test_refused_approve_does_not_prefetch(self):
+        _, deal = _setup()
+        _group_press(handlers.cb_approve, f"tw:ap:{deal['id']}", _bot(), user_id=990001)
+        assert prefetched == []
+
+    def test_free_agent_record_schedules_prefetch(self):
+        _setup()
+        draft = req_mod.parse_fa_comment(_FA_TEXT.format(club="Челси"), commented_at="2026-10-02 20:00:00")
+        draft_id = handlers._save_fa_draft(draft, req_mod.fa_preview(draft), MANAGER)
+        _run(handlers.cb_fa_record, _update(data=f"tw:fa:rec:{draft_id}"), _bot())
+        fa = repo.list_transfers(repo.get_active_window()["id"], kinds=("free_agent",))
+        assert [t["id"] for t in prefetched] == [t["id"] for t in fa] and len(fa) == 1
+
+    def test_free_agent_reassign_schedules_prefetch(self):
+        _setup()
+        late = req_mod.parse_fa_comment(_FA_TEXT.format(club="Челси"), commented_at="2026-10-02 20:00:00")
+        late_id = req_mod.record_free_agent(late, MANAGER).transfer["id"]
+        early = req_mod.parse_fa_comment(_FA_TEXT.format(club="Арсенал"), commented_at="2026-10-02 19:00:00")
+        preview = req_mod.fa_preview(early)
+        assert preview.can_reassign
+        draft_id = handlers._save_fa_draft(early, preview, MANAGER)
+        _run(handlers.cb_fa_reassign, _update(data=f"tw:fa:rea:{draft_id}:{late_id}"), _bot())
+        assert repo.get_transfer(late_id)["status"] == "cancelled"
+        assert len(prefetched) == 1 and prefetched[0]["to_club"] == "Арсенал"
+
+    def test_failed_free_agent_record_does_not_prefetch(self):
+        _setup()
+        draft = req_mod.parse_fa_comment(_FA_TEXT.format(club="Челси"), commented_at="2026-10-02 20:00:00")
+        draft_id = handlers._save_fa_draft(draft, req_mod.fa_preview(draft), MANAGER)
+        req_mod.record_free_agent(draft, MANAGER)
+        _run(handlers.cb_fa_record, _update(data=f"tw:fa:rec:{draft_id}"), _bot())
+        assert prefetched == []

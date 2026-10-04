@@ -36,6 +36,7 @@ def _clean(monkeypatch):
 
     monkeypatch.setattr(handlers.admin_journal, "record", _record)
     handlers._pending.clear()
+    monkeypatch.setattr(handlers, "_prefetch_portrait_later", lambda t: None)
     yield journal
     handlers._pending.clear()
 
