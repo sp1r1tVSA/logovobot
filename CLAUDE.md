@@ -647,6 +647,8 @@ and coaches do not file free agents from the Mini App.
 
 **Market (`market.py`).** `GET /api/transfers/market?q=&ovr_min=&ovr_max=&club=&sort=` backs the «🛒 Рынок» tab of the Mini App (it replaced «🗑 Урна»; `loadMarket` in `web/js/transfers.js`). It returns the urn items (buyable now, same cards and buyout button as before) and a catalog of players from the `transfer_players` directory (`repo.list_catalog_players`): `sort` is `ovr | price | price_desc | name` (unknown prices last), the query uses `suggest._rank` / `_typo`, the club filter resolves through `club_registry.resolve_team_name`. The catalog skips the viewer's own club, the urn and players currently in the urn list, caps at `CATALOG_LIMIT = 60` and reports `catalog_total`; a banned player is flagged (`banned`, `ban_reason`) but stays offerable, since bans are only a warning for the manager. «Предложить» on a catalog card prefills the deal form (club, player, OVR, price in millions, role «покупаю»); it files nothing. `tests/test_transfer_market.py` covers it.
 
+**Feed card (`card.py`).** An approved request (and a recorded free agent) is announced in the `feed` topic as a picture, not text: `services/graphics/transfer_card_generator.render_transfer_card` (pure Pillow, 1440×810, takes plain arguments and knows nothing of `transfers/`) draws the portrait, OVR, price, the route (club crests → club crests; the urn is a «УРНА» tile; a surcharge has one side) and a «HERE WE GO» badge. `card.build_card` turns a request into those arguments and never raises; the portrait is `requests.portrait_path` (cache only, no network, same lookup as `portrait_url`), crests come from `get_team_logo_filename` and every missing file degrades to a blank tile or a monogram. `notify.post_card_to_topic` renders off the loop (`asyncio.to_thread`) and sends `send_photo` with the old text as the caption; with no topic, a caption over 1024 characters, a render failure or a Telegram refusal it falls back to `post_to_topic`, so nothing is lost. DMs to the parties, rejections and cancellations stay text. `tests/test_transfer_card.py` covers it.
+
 **Form autocomplete (`suggest.py`).** `GET /api/transfers/suggest?kind=club|player&q=…` (`club=` or `own=1` scope the players) feeds the dropdown under the club and player inputs of the Mini App request forms (`attachSuggest` in `web/js/transfers.js`). Clubs come from `config.CLUB_REGISTRY` plus `TEAM_ALIASES`, never the coach's own club or the urn; players come from `squad_players` and `transfer_players`, the scoped club first. Matching is prefix → word prefix → substring, then a typo fallback. It only suggests: the server still validates the typed name on submit.
 
 **Squad (`squad.py`).** Approval does not touch `squad_players`. A separate «применить к составу» button
@@ -681,7 +683,7 @@ to `transfers.notify` in `post_init` and schedules `transfer_auto_close`; `web/`
 
 Tests — run them per subsystem, no full sweep: `test_transfer_engine`, `test_transfer_window`,
 `test_transfer_service`, `test_transfer_requests`, `test_transfer_approval`, `test_transfer_squad`,
-`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_fa_topic`, `test_transfer_panel`, plus `test_production_audit`
+`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_fa_topic`, `test_transfer_panel`, `test_transfer_card`, plus `test_production_audit`
 for any new button and `test_admin_journal` for new journal actions.
 
 ---

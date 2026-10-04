@@ -379,12 +379,11 @@ def _loads(raw) -> list:
     return value if isinstance(value, list) else []
 
 
-def portrait_url(player_name: str | None, *clubs: str | None) -> str | None:
-    """Ссылка на портрет игрока из кэша `assets/players/`; без сети и без записи.
+def portrait_path(player_name: str | None, *clubs: str | None) -> str | None:
+    """Локальный файл портрета из кэша `assets/players/`; без сети и без записи.
 
     Портрет кэшируется под именем и клубом, где игрока опознали, поэтому пробуем клубы сделки
-    по очереди, а `get_photo_path` сам откатывается к файлу без клуба. Нет файла — `None`,
-    и Mini App рисует монограмму.
+    по очереди, а затем файл без клуба. «Урна» клубом не считается. Нет файла — `None`.
     """
     if not player_name:
         return None
@@ -396,10 +395,19 @@ def portrait_url(player_name: str | None, *clubs: str | None) -> str | None:
         candidates.append(player_photos.get_cached_photo_path(player_name, None))
         for path in candidates:
             if os.path.isfile(path) and os.path.getsize(path) > 0:
-                return "/assets/players/" + urllib.parse.quote(os.path.basename(path))
+                return path
     except Exception:
         return None
     return None
+
+
+def portrait_url(player_name: str | None, *clubs: str | None) -> str | None:
+    """Ссылка на портрет игрока из кэша `assets/players/`; без сети и без записи.
+
+    Нет файла — `None`, и Mini App рисует монограмму.
+    """
+    path = portrait_path(player_name, *clubs)
+    return "/assets/players/" + urllib.parse.quote(os.path.basename(path)) if path else None
 
 
 def prefetch_portrait(t: dict) -> str | None:
