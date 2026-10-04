@@ -13,6 +13,7 @@ import { outrightsView } from './outrights.js';
 import { irlView } from './irl.js';
 import { transfersView } from './transfers.js';
 import { shopTransfers } from './shop.js';
+import { initDesign } from './design.js';
 
 class AppController {
   constructor() {
@@ -1652,8 +1653,10 @@ class AppController {
 // Instantiate on DOM ready
 if (document.readyState === 'loading') {
   window.addEventListener('DOMContentLoaded', () => {
+    initDesign();
     new AppController();
   });
 } else {
+  initDesign();
   new AppController();
 }
