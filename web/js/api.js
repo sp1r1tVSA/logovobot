@@ -572,6 +572,13 @@ class ApiClient {
     });
   }
 
+  previewTransfer(payload) {
+    return this.request('/api/transfers/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  }
+
   createTransferSwap(payload, isMultipart = false) {
     return this.request('/api/transfers/swap', {
       method: 'POST',

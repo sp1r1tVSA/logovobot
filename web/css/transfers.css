@@ -404,6 +404,32 @@
   border-color: rgba(245, 176, 39, 0.35);
 }
 
+.preview-request-btn {
+  width: 100%;
+  margin: 10px 0 0;
+  padding: 10px 14px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: transparent;
+  color: var(--text-primary, #fff);
+  font-size: 0.88rem;
+  cursor: pointer;
+}
+.preview-request-btn:disabled { opacity: 0.6; }
+.preview-box {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 0.82rem;
+  line-height: 1.45;
+  background: rgba(255, 255, 255, 0.05);
+}
+.preview-box.ok { background: rgba(34, 197, 94, 0.1); }
+.preview-box.warn { background: rgba(245, 176, 39, 0.1); }
+.preview-box.block { background: rgba(239, 68, 68, 0.1); }
+.preview-line + .preview-line { margin-top: 4px; }
+.preview-line.block { color: var(--color-danger, #ef4444); }
+
 /* Загрузка фото */
 .photo-upload-zone {
   border: 1px dashed rgba(255, 255, 255, 0.18);

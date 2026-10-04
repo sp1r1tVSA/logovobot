@@ -8,6 +8,7 @@
 * GET  /api/transfers/market        — рынок: урна + каталог игроков (q, ovr_min, ovr_max, club, sort)
 * GET  /api/transfers/suggest       — автоподбор клуба/игрока (kind=club|player, q, club | own=1)
 * GET  /api/transfers/{id}/photo    — прокси фото заявки из Telegram
+* POST /api/transfers/preview       — предпроверка заявки без подачи (kind + поля формы): блокировки и предупреждения
 * POST /api/transfers/deal          — подать сделку с другим тренером (JSON или multipart с фото)
 * POST /api/transfers/surcharge     — подать заявку на доплату за спешл
 * POST /api/transfers/urn/sale      — продать карту в урну
@@ -361,6 +362,27 @@ async def handle_post_surcharge(request: web.Request) -> web.Response:
     })
 
 
+async def handle_post_preview(request: web.Request) -> web.Response:
+    """Сухой прогон подачи: те же проверки, что у настоящей заявки, но ничего не пишется."""
+    user_info, err = _auth(request)
+    if err is not None:
+        return err
+    try:
+        fields, _photo = await _read_request_payload(request)
+    except web.HTTPBadRequest:
+        raise
+    except service.InputError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    try:
+        data = req_mod.preview(user_info["id"], str(fields.get("kind") or ""), fields)
+    except service.InputError as exc:
+        return web.json_response({"status": "error", "message": str(exc)}, status=400)
+    except Exception:
+        logger.exception("transfers: preview failed")
+        return web.json_response({"status": "error", "message": "Внутренняя ошибка сервера"}, status=500)
+    return web.json_response({"status": "ok", "data": data})
+
+
 async def handle_post_urn_sale(request: web.Request) -> web.Response:
     user_info, err = _auth(request)
     if err is not None:
@@ -564,6 +586,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/transfers/suggest", handle_get_suggest)
     app.router.add_get("/api/transfers/{id}/photo", handle_get_photo)
 
+    app.router.add_post("/api/transfers/preview", handle_post_preview)
     app.router.add_post("/api/transfers/deal", handle_post_deal)
     app.router.add_post("/api/transfers/swap", handle_post_swap)
     app.router.add_post("/api/transfers/surcharge", handle_post_surcharge)

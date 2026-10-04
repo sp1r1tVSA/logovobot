@@ -439,6 +439,12 @@ class TransfersView {
             </div>
           </div>
 
+          <div id="form-preview-box" class="preview-box" style="display: none;"></div>
+
+          <button class="preview-request-btn" id="btn-preview-transfer" type="button">
+            🔍 Проверить заявку
+          </button>
+
           <div id="form-error-box" style="display: none; color: var(--color-danger); font-size: 0.82rem; margin: 10px 0; background: rgba(239,68,68,0.1); padding: 8px 12px; border-radius: 8px;"></div>
 
           <button class="submit-request-btn" id="btn-submit-transfer" type="submit">
@@ -577,6 +583,64 @@ class TransfersView {
     this.bindSuggest();
   }
 
+  // Поля формы как для предпроверки: тот же набор, что уходит при подаче.
+  collectRequestFields() {
+    const v = (id) => document.getElementById(id)?.value ?? '';
+    if (this.requestKind === 'deal' && this.dealRole === 'swap') {
+      return {
+        kind: 'swap', other_club: v('deal-other-club'),
+        give_player: v('swap-give-player'), give_ovr: v('swap-give-ovr'), give_price: v('swap-give-price'),
+        get_player: v('swap-get-player'), get_ovr: v('swap-get-ovr'), get_price: v('swap-get-price'),
+      };
+    }
+    if (this.requestKind === 'deal') {
+      return {
+        kind: 'deal', role: this.dealRole, other_club: v('deal-other-club'),
+        player: v('deal-player'), ovr: v('deal-ovr'), price: v('deal-price'),
+      };
+    }
+    if (this.requestKind === 'surcharge') {
+      return { kind: 'surcharge', player: v('surcharge-player'), ovr: v('surcharge-ovr') };
+    }
+    return {
+      kind: 'urn_sale', player: v('urn-player'), tm_price: v('urn-tm'), special_price: v('urn-special'),
+      sellable: document.getElementById('urn-sellable')?.checked ? '1' : '0',
+    };
+  }
+
+  // «Проверить заявку»: сервер прогоняет настоящие правила подачи, ничего не записывая.
+  async runPreview() {
+    const box = document.getElementById('form-preview-box');
+    const btn = document.getElementById('btn-preview-transfer');
+    if (!box || !btn || this.previewing) return;
+    this.previewing = true;
+    btn.disabled = true;
+    box.style.display = 'block';
+    box.className = 'preview-box';
+    box.textContent = 'Проверяем…';
+    try {
+      const res = await api.previewTransfer(this.collectRequestFields());
+      const d = res.data || {};
+      const lines = [];
+      (d.blocks || []).forEach(t => lines.push(`<div class="preview-line block">⛔ ${escapeHtml(t)}</div>`));
+      (d.warnings || []).forEach(t => lines.push(`<div class="preview-line warn">⚠️ ${escapeHtml(t)}</div>`));
+      if (d.ok) {
+        const price = d.price ? ` Сумма по заявке: <b>${escapeHtml(String(d.price))}</b>.` : '';
+        lines.unshift(`<div class="preview-line ok">✅ ${(d.warnings || []).length
+          ? 'Подать можно, ответственный увидит предупреждения.'
+          : 'Всё в порядке, заявку можно подавать.'}${price}</div>`);
+      }
+      box.className = `preview-box ${d.ok ? ((d.warnings || []).length ? 'warn' : 'ok') : 'block'}`;
+      box.innerHTML = lines.join('');
+    } catch (err) {
+      box.className = 'preview-box block';
+      box.textContent = err.message || 'Не удалось проверить заявку';
+    } finally {
+      this.previewing = false;
+      btn.disabled = false;
+    }
+  }
+
   // Автоподбор имени клуба/игрока: подсказки с сервера, выбор подставляет каноничное имя.
   bindSuggest() {
     const val = (id) => (document.getElementById(id)?.value || '').trim();
@@ -692,6 +756,15 @@ class TransfersView {
       };
       reader.readAsDataURL(file);
     });
+
+    document.getElementById('btn-preview-transfer')?.addEventListener('click', () => this.runPreview());
+    // Любая правка полей делает прошлый результат неактуальным.
+    const resetPreview = () => {
+      const box = document.getElementById('form-preview-box');
+      if (box) box.style.display = 'none';
+    };
+    document.getElementById('transfer-form-fields')?.addEventListener('input', resetPreview);
+    container.querySelectorAll('.kind-toggle-btn').forEach(b => b.addEventListener('click', resetPreview));
 
     // Submit
     const form = document.getElementById('transfer-request-form');

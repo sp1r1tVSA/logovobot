@@ -357,6 +357,71 @@ def create_urn_buy(user_id: int, *, urn_item_id) -> dict:
         return repo.get_transfer(tid)
 
 
+# ─── Предпроверка ────────────────────────────────────────────────────────────
+
+def _truthy(value, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "")
+    return bool(value)
+
+
+# Вид заявки → вызов настоящего создателя. Предпроверка идёт тем же кодом, что и подача,
+# поэтому правила не могут разойтись.
+_PREVIEW_RUNNERS = {
+    "deal": lambda uid, f: create_deal(
+        uid, role=f.get("role") or "", other_club=f.get("other_club") or "",
+        player=f.get("player") or "", price=f.get("price"), ovr=f.get("ovr")),
+    "swap": lambda uid, f: create_swap(
+        uid, other_club=f.get("other_club") or "",
+        give_player=f.get("give_player") or "", give_price=f.get("give_price"), give_ovr=f.get("give_ovr"),
+        get_player=f.get("get_player") or "", get_price=f.get("get_price"), get_ovr=f.get("get_ovr")),
+    "surcharge": lambda uid, f: create_surcharge(uid, player=f.get("player") or "", ovr=f.get("ovr")),
+    "urn_sale": lambda uid, f: create_urn_sale(
+        uid, player=f.get("player") or "", tm_price=f.get("tm_price"),
+        special_price=f.get("special_price"), sellable=_truthy(f.get("sellable"))),
+    "urn_buy": lambda uid, f: create_urn_buy(uid, urn_item_id=f.get("urn_item_id")),
+}
+
+
+def preview(user_id: int, kind: str, fields: dict) -> dict:
+    """Что будет с заявкой, если её подать сейчас — ничего не записывая.
+
+    Гоняет настоящий `create_*` внутри SAVEPOINT и откатывает его: блокировки приходят
+    как `InputError`, предупреждения читаются из созданной строки. Ответ:
+    `{ok, blocks: [текст], warnings: [текст], price_k, price}`; `ok` — заявку можно подать
+    (предупреждения её не блокируют, решает ответственный).
+    """
+    run = _PREVIEW_RUNNERS.get(kind)
+    if run is None:
+        raise InputError("Неизвестный вид заявки.")
+    blocks: list[str] = []
+    warnings: list[str] = []
+    price_k = None
+    with database.transaction() as conn:
+        conn.execute("SAVEPOINT transfer_preview")
+        try:
+            created = run(int(user_id), fields or {})
+            legs = [created]
+            partner = repo.get_swap_partner(created)
+            if partner is not None:
+                legs.append(partner)
+            price_k = created["price_k"]
+            for leg in legs:
+                for w in _loads(leg["warnings"]):
+                    text = w.get("message") if isinstance(w, dict) else str(w)
+                    if text and text not in warnings:
+                        warnings.append(text)
+        except InputError as exc:
+            blocks = [line for line in str(exc).split("\n") if line.strip()]
+        finally:
+            conn.execute("ROLLBACK TO transfer_preview")
+            conn.execute("RELEASE transfer_preview")
+    return {"ok": not blocks, "blocks": blocks, "warnings": warnings,
+            "price_k": price_k, "price": format_k(price_k) if price_k is not None else None}
+
+
 # ─── Вторая сторона и отзыв ──────────────────────────────────────────────────
 
 def counterparty_id(t: dict) -> int | None:
