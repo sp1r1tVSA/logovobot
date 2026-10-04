@@ -5,7 +5,7 @@
  * 4 вкладки:
  *  1. Статус   — состояние окна, бюджет и слоты клуба, входящие предложения, мои заявки
  *  2. Заявка   — форма подачи сделки / доплаты за спешл / продажи в урну (с фото)
- *  3. Урна     — список доступных игроков для выкупа
+ *  3. Рынок    — урна (выкуп) и каталог игроков с поиском и фильтрами; из каталога — в форму сделки
  *  4. История  — лента одобренных трансферов лиги (с просмотром фото)
  */
 
@@ -20,7 +20,9 @@ class TransfersView {
     this.requestKind = 'deal';
     this.dealRole = 'buy';
     this.statusData = null;
-    this.urnData = null;
+    this.marketData = null;
+    this.marketFilters = { q: '', ovrMin: '', ovrMax: '', club: '', sort: 'ovr' };
+    this.prefill = null;
     this.historyData = null;
     this.loading = false;
     this.submitting = false;
@@ -46,7 +48,7 @@ class TransfersView {
         <nav class="transfers-tabs" role="tablist">
           <button class="transfers-tab-btn ${this.activeTab === 'status' ? 'active' : ''}" data-tab="status" type="button">📊 Статус</button>
           <button class="transfers-tab-btn ${this.activeTab === 'request' ? 'active' : ''}" data-tab="request" type="button">📝 Заявка</button>
-          <button class="transfers-tab-btn ${this.activeTab === 'urn' ? 'active' : ''}" data-tab="urn" type="button">🗑 Урна</button>
+          <button class="transfers-tab-btn ${this.activeTab === 'market' ? 'active' : ''}" data-tab="market" type="button">🛒 Рынок</button>
           <button class="transfers-tab-btn ${this.activeTab === 'history' ? 'active' : ''}" data-tab="history" type="button">📜 История</button>
         </nav>
 
@@ -107,8 +109,8 @@ class TransfersView {
       await this.loadStatus(container, force);
     } else if (this.activeTab === 'request') {
       this.renderRequestTab(container);
-    } else if (this.activeTab === 'urn') {
-      await this.loadUrn(container, force);
+    } else if (this.activeTab === 'market') {
+      await this.loadMarket(container, force);
     } else if (this.activeTab === 'history') {
       await this.loadHistory(container, force);
     }
@@ -504,6 +506,19 @@ class TransfersView {
       `;
     }
 
+    if (this.requestKind === 'deal' && this.prefill) {
+      const p = this.prefill;
+      this.prefill = null;
+      const set = (id, value) => {
+        const el = document.getElementById(id);
+        if (el && value != null && value !== '') el.value = value;
+      };
+      set('deal-other-club', p.club);
+      set('deal-player', p.player);
+      set('deal-ovr', p.ovr);
+      set('deal-price', p.price);
+    }
+
     // Role toggle bindings
     fieldsContainer.querySelectorAll('.role-toggle-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -685,69 +700,84 @@ class TransfersView {
     });
   }
 
-  // ─── 3. Вкладка «Урна» ─────────────────────────────────────────────────────
+  // ─── 3. Вкладка «Рынок» ────────────────────────────────────────────────────
 
-  async loadUrn(container, force = false) {
-    if (!this.urnData || force) {
+  async loadMarket(container, force = false) {
+    if (!this.marketData || force) {
       container.innerHTML = `
         <div class="transfers-empty">
           <div class="transfers-empty-icon">⏳</div>
-          <div>Загрузка урны...</div>
+          <div>Загрузка рынка...</div>
         </div>`;
       try {
-        const res = await api.getTransferUrn();
-        if (res.status === 'ok') {
-          this.urnData = res.data;
-        } else {
+        const res = await api.getTransferMarket(this.marketFilters);
+        if (res.status !== 'ok') {
           container.innerHTML = `<div class="transfers-empty">⚠️ ${escapeHtml(res.message || 'Ошибка')}</div>`;
           return;
         }
+        this.marketData = res.data;
       } catch (err) {
         container.innerHTML = `<div class="transfers-empty">⚠️ ${escapeHtml(err.message || 'Ошибка сети')}</div>`;
         return;
       }
     }
 
-    const { items, can_buy } = this.urnData;
-    if (!items || items.length === 0) {
-      container.innerHTML = `
-        <div class="transfers-empty">
-          <div class="transfers-empty-icon">🗑</div>
-          <div style="font-weight: 700; color: #fff; margin-bottom: 4px;">Урна пуста</div>
-          <div style="font-size: 0.8rem;">В этом окне пока нет карточек на выкуп.</div>
-        </div>`;
-      return;
-    }
+    const f = this.marketFilters;
+    const { urn, catalog, catalog_total, clubs, can_buy } = this.marketData;
+    const sorts = [['ovr', 'По OVR'], ['price', 'Дешевле'], ['price_desc', 'Дороже'], ['name', 'По имени']];
 
     container.innerHTML = `
-      <div style="font-size: 0.82rem; color: var(--text-secondary); margin-bottom: 12px;">
-        Карточки игроков, проданные в урну. Любой тренер может выкупить игрока по полной цене (TM + Спешл). Тратит 1 слот покупки.
-      </div>
-      ${items.map(it => `
-        <div class="urn-item-card" data-id="${it.id}">
-          <div class="urn-item-info">
-            <div class="urn-item-name">${escapeHtml(it.player_name)} ${it.ovr ? `<span class="req-ovr-tag">OVR ${it.ovr}</span>` : ''}</div>
-            <div class="urn-item-club">Из клуба: ${it.from_club ? this.renderRouteClub(it.from_club) : '<b>—</b>'}</div>
-            <div class="urn-item-price">Цена выкупа: <b>${it.buy_price}</b></div>
-          </div>
-          <div>
-            ${can_buy ? `<button class="btn-buyout" data-id="${it.id}" type="button">Выкупить</button>` : '<span style="font-size: 0.72rem; color: var(--text-muted);">Недоступно</span>'}
-          </div>
+      <form class="market-filters" id="market-filters">
+        <input type="search" id="market-q" class="form-input" placeholder="Поиск игрока" value="${escapeHtml(f.q)}" autocomplete="off">
+        <div class="market-filter-row">
+          <input type="number" id="market-ovr-min" class="form-input" placeholder="OVR от" min="1" max="199" value="${escapeHtml(String(f.ovrMin))}">
+          <input type="number" id="market-ovr-max" class="form-input" placeholder="OVR до" min="1" max="199" value="${escapeHtml(String(f.ovrMax))}">
         </div>
-      `).join('')}
+        <div class="market-filter-row">
+          <select id="market-club" class="form-input">
+            <option value="">Все клубы</option>
+            ${(clubs || []).map(c => `<option value="${escapeHtml(c)}" ${c === f.club ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+          </select>
+          <select id="market-sort" class="form-input">
+            ${sorts.map(([v, t]) => `<option value="${v}" ${v === f.sort ? 'selected' : ''}>${t}</option>`).join('')}
+          </select>
+        </div>
+        <button class="market-apply-btn" type="submit">Применить</button>
+      </form>
+
+      <div class="market-section-title">🗑 В урне <span class="market-count">${urn.length}</span></div>
+      ${urn.length ? urn.map(it => this.renderUrnCard(it, can_buy)).join('') : `
+        <div class="market-empty">Карточек на выкуп нет.</div>`}
+
+      <div class="market-section-title">📇 Каталог игроков <span class="market-count">${catalog_total}</span></div>
+      ${catalog.length ? catalog.map((it, i) => this.renderCatalogCard(it, i)).join('') : `
+        <div class="market-empty">Ничего не найдено. Справочник пополняется по мере одобренных сделок.</div>`}
+      ${catalog_total > catalog.length ? `<div class="market-more">Показано ${catalog.length} из ${catalog_total} — уточните поиск.</div>` : ''}
     `;
+
+    document.getElementById('market-filters').addEventListener('submit', (e) => {
+      e.preventDefault();
+      this.marketFilters = {
+        q: document.getElementById('market-q').value.trim(),
+        ovrMin: document.getElementById('market-ovr-min').value,
+        ovrMax: document.getElementById('market-ovr-max').value,
+        club: document.getElementById('market-club').value,
+        sort: document.getElementById('market-sort').value,
+      };
+      tgBridge.hapticImpact('light');
+      this.loadMarket(container, true);
+    });
 
     container.querySelectorAll('.btn-buyout').forEach(btn => {
       btn.addEventListener('click', async () => {
         if (!confirm('Выкупить этого игрока из урны?')) return;
-        const id = btn.dataset.id;
         btn.disabled = true;
         btn.textContent = '...';
         try {
-          await api.createTransferUrnBuy(id);
+          await api.createTransferUrnBuy(btn.dataset.id);
           tgBridge.hapticImpact('heavy');
           alert('Заявка на выкуп подана!');
-          this.urnData = null;
+          this.marketData = null;
           this.statusData = null;
           this.activeTab = 'status';
           this.init();
@@ -758,6 +788,54 @@ class TransfersView {
         }
       });
     });
+
+    container.querySelectorAll('.btn-offer').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const item = catalog[Number(btn.dataset.idx)];
+        if (!item) return;
+        tgBridge.hapticImpact('light');
+        this.prefill = {
+          club: item.club || '',
+          player: item.player_name,
+          ovr: item.ovr || '',
+          price: item.price_k ? String(item.price_k / 1000) : '',
+        };
+        this.requestKind = 'deal';
+        this.dealRole = 'buy';
+        this.activeTab = 'request';
+        this.renderShell();
+        this.loadActiveTab();
+      });
+    });
+  }
+
+  renderUrnCard(it, canBuy) {
+    return `
+      <div class="urn-item-card" data-id="${it.id}">
+        <div class="urn-item-info">
+          <div class="urn-item-name">${escapeHtml(it.player_name)} ${it.ovr ? `<span class="req-ovr-tag">OVR ${it.ovr}</span>` : ''}</div>
+          <div class="urn-item-club">Из клуба: ${it.from_club ? this.renderRouteClub(it.from_club) : '<b>—</b>'}</div>
+          <div class="urn-item-price">Цена выкупа: <b>${it.buy_price}</b></div>
+        </div>
+        <div>
+          ${canBuy ? `<button class="btn-buyout" data-id="${it.id}" type="button">Выкупить</button>` : '<span style="font-size: 0.72rem; color: var(--text-muted);">Недоступно</span>'}
+        </div>
+      </div>`;
+  }
+
+  renderCatalogCard(it, idx) {
+    return `
+      <div class="urn-item-card ${it.banned ? 'is-banned' : ''}">
+        <div class="urn-item-info">
+          <div class="urn-item-name">${escapeHtml(it.player_name)} ${it.ovr ? `<span class="req-ovr-tag">OVR ${it.ovr}</span>` : ''}</div>
+          <div class="urn-item-club">${it.club ? this.renderRouteClub(it.club) : '<b>—</b>'}</div>
+          <div class="urn-item-price">${it.price ? `Последняя цена: <b>${escapeHtml(String(it.price))}</b>` : 'Цена неизвестна'}</div>
+          ${it.banned ? `<div class="market-ban">⛔ ${escapeHtml(it.ban_reason || 'В списке запрещённых')}</div>` : ''}
+        </div>
+        <div>
+          <button class="btn-offer" data-idx="${idx}" type="button">Предложить</button>
+        </div>
+      </div>`;
   }
 
   // ─── 4. Вкладка «История» ──────────────────────────────────────────────────

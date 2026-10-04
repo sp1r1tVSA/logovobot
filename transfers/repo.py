@@ -565,6 +565,14 @@ def list_pool_players() -> list[dict]:
             "SELECT player_name, last_club FROM transfer_players ORDER BY id").fetchall()]
 
 
+def list_catalog_players() -> list[dict]:
+    """Справочник игроков целиком (с OVR, ценой и баном) — для рынка."""
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(
+            "SELECT norm_name, player_name, last_club, ovr, price_k, banned, ban_reason "
+            "FROM transfer_players ORDER BY id").fetchall()]
+
+
 def upsert_player(player_name: str, *, last_club: str | None = None, ovr: int | None = None,
                   price_k: int | None = None) -> None:
     """Запомнить последнюю известную карту игрока. None не затирает прежнее."""
