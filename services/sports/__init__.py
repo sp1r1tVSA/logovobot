@@ -64,9 +64,10 @@ def get_sports_provider() -> SportsDataProvider:
         _GLOBAL_PROVIDER = NullSportsDataProvider(reason="Configured to NULL provider.")
         return _GLOBAL_PROVIDER
 
+    api_keys = getattr(config, "SPORTS_API_KEYS", None)
     api_key = getattr(config, "SPORTS_API_KEY", "").strip() or getattr(config, "APISPORTS_KEY", "").strip()
-    if api_key:
-        _GLOBAL_PROVIDER = APISportsProvider(api_key=api_key)
+    if api_keys or api_key:
+        _GLOBAL_PROVIDER = APISportsProvider(api_key=api_key, api_keys=api_keys)
     else:
         _GLOBAL_PROVIDER = NullSportsDataProvider(reason="LIVE DATA UNAVAILABLE: No live provider configured.")
 

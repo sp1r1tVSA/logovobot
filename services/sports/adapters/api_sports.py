@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -55,9 +56,30 @@ class APISportsProvider(SportsDataProvider):
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         rate_limit_rpm: Optional[int] = None,
-        timeout_seconds: Optional[float] = None
+        timeout_seconds: Optional[float] = None,
+        api_keys: Optional[list[str]] = None,
     ) -> None:
-        self.api_key = (api_key or getattr(config, "SPORTS_API_KEY", "") or getattr(config, "APISPORTS_KEY", "")).strip()
+        configured_keys: list[str] = []
+        if api_keys is not None:
+            configured_keys = [k.strip() for k in api_keys if k and k.strip()]
+        elif api_key is not None:
+            single = api_key.strip()
+            configured_keys = [k.strip() for k in single.split(",") if k.strip()] if single else []
+        else:
+            cfg_keys = getattr(config, "SPORTS_API_KEYS", None)
+            if cfg_keys:
+                configured_keys = [k.strip() for k in cfg_keys if k and k.strip()]
+            else:
+                single = (getattr(config, "SPORTS_API_KEY", "") or getattr(config, "APISPORTS_KEY", "")).strip()
+                configured_keys = [k.strip() for k in single.split(",") if k.strip()] if single else []
+
+        seen = set()
+        self.api_keys: list[str] = []
+        for k in configured_keys:
+            if k not in seen:
+                seen.add(k)
+                self.api_keys.append(k)
+
         self.base_url = (base_url or getattr(config, "SPORTS_API_BASE_URL", self.BASE_URL)).rstrip("/")
         self.timeout_sec = timeout_seconds or getattr(config, "SPORTS_TIMEOUT_SECONDS", 10.0)
 
@@ -69,6 +91,30 @@ class APISportsProvider(SportsDataProvider):
         self._quota_exhausted_until: Optional[datetime] = None
         self._quota_error_msg: Optional[str] = None
 
+        self._key_index = 0
+        self._key_lock = threading.Lock()
+        self._key_exhausted_until: dict[str, datetime] = {}
+        self._key_error_msg: dict[str, str] = {}
+        self._key_remaining_quota: dict[str, int] = {}
+
+    @property
+    def api_key(self) -> str:
+        k = self.get_active_api_key(advance=False)
+        if k:
+            return k
+        return self.api_keys[0] if self.api_keys else ""
+
+    @api_key.setter
+    def api_key(self, val: str) -> None:
+        val = (val or "").strip()
+        if val:
+            self.api_keys = [k.strip() for k in val.split(",") if k.strip()]
+            for k in self.api_keys:
+                self._key_exhausted_until.pop(k, None)
+                self._key_error_msg.pop(k, None)
+        else:
+            self.api_keys = []
+
     @property
     def provider_name(self) -> str:
         return "api_sports"
@@ -79,13 +125,56 @@ class APISportsProvider(SportsDataProvider):
 
     @property
     def is_connected(self) -> bool:
-        return bool(self.api_key and not self.circuit_open)
+        return bool(self.api_keys and not self.circuit_open)
 
     def _record_success(self) -> None:
         self.circuit_breaker.record_success()
 
     def _record_failure(self, err: Optional[Exception] = None) -> None:
         self.circuit_breaker.record_failure(err)
+
+    def is_key_exhausted(self, key: str) -> bool:
+        until = self._key_exhausted_until.get(key)
+        if until is None:
+            return False
+        if now_msk() < until:
+            return True
+        self._key_exhausted_until.pop(key, None)
+        self._key_error_msg.pop(key, None)
+        return False
+
+    def get_active_api_key(self, advance: bool = True, exclude: Optional[set[str]] = None) -> Optional[str]:
+        if not self.api_keys:
+            return None
+        excluded = exclude or set()
+        available = [k for k in self.api_keys if k not in excluded and not self.is_key_exhausted(k)]
+        if not available:
+            return None
+        with self._key_lock:
+            idx = self._key_index % len(available)
+            if advance:
+                self._key_index += 1
+            return available[idx]
+
+    def _record_key_exhausted(self, key: str, msg: str) -> None:
+        from datetime import timedelta
+        now = now_msk()
+        if now.hour < 3:
+            reset_msk = now.replace(hour=3, minute=0, second=10, microsecond=0)
+        else:
+            reset_msk = (now + timedelta(days=1)).replace(hour=3, minute=0, second=10, microsecond=0)
+        self._key_exhausted_until[key] = reset_msk
+        self._key_error_msg[key] = msg
+        masked = key[:4] + "..." + key[-4:] if len(key) > 8 else "***"
+        logger.warning(
+            f"APISports key {masked} daily quota exhausted. Pausing until {reset_msk.strftime('%Y-%m-%d %H:%M:%S')} MSK. Reason: {msg}"
+        )
+        if self.is_quota_exhausted():
+            self._quota_exhausted_until = reset_msk
+            self._quota_error_msg = f"All {len(self.api_keys)} API-Sports keys exhausted: {msg}"
+            logger.error(
+                f"ALL {len(self.api_keys)} APISports keys are exhausted! Pausing provider until {reset_msk.strftime('%Y-%m-%d %H:%M:%S')} MSK."
+            )
 
     def _record_quota_exhausted(self, msg: str) -> None:
         from datetime import timedelta
@@ -96,16 +185,18 @@ class APISportsProvider(SportsDataProvider):
             reset_msk = (now + timedelta(days=1)).replace(hour=3, minute=0, second=10, microsecond=0)
         self._quota_exhausted_until = reset_msk
         self._quota_error_msg = msg
+        for k in self.api_keys:
+            self._key_exhausted_until[k] = reset_msk
+            self._key_error_msg[k] = msg
         logger.warning(f"APISports daily quota exhausted. Pausing until {reset_msk.strftime('%Y-%m-%d %H:%M:%S')} MSK. Reason: {msg}")
 
     def is_quota_exhausted(self) -> bool:
-        if getattr(self, "_quota_exhausted_until", None) is None:
+        if not self.api_keys:
             return False
-        if now_msk() < self._quota_exhausted_until:
-            return True
-        self._quota_exhausted_until = None
-        self._quota_error_msg = None
-        return False
+        for k in self.api_keys:
+            if not self.is_key_exhausted(k):
+                return False
+        return True
 
     async def _fetch_json(
         self,
@@ -113,13 +204,13 @@ class APISportsProvider(SportsDataProvider):
         params: Optional[dict[str, Any]] = None,
         cache_ttl: Optional[float] = None
     ) -> dict[str, Any]:
-        """Dispatches an authenticated GET request with rate limiting, circuit breaker, and retry logic."""
-        if not self.api_key:
+        """Dispatches an authenticated GET request with rate limiting, circuit breaker, multi-key rotation, and retry logic."""
+        if not self.api_keys and not self.api_key:
             raise ValueError("SPORTS_API_KEY is not configured.")
 
         if self.is_quota_exhausted():
-            logger.warning("APISports call skipped: daily quota exhausted.")
-            return {"errors": {"requests": self._quota_error_msg or "Daily limit reached"}}
+            logger.warning("APISports call skipped: daily quota exhausted for all keys.")
+            return {"errors": {"requests": self._quota_error_msg or "Daily limit reached for all keys"}}
 
         # 1. Check cache first
         clean_ep = endpoint.strip().lstrip("/")
@@ -137,69 +228,124 @@ class APISportsProvider(SportsDataProvider):
 
         import aiohttp
 
-        headers = {
-            "x-apisports-key": self.api_key,
-            "Accept": "application/json",
-            "User-Agent": "Logovobot/8.0 (SportsIntelligence)"
-        }
         url = f"{self.base_url}/{clean_ep}"
-
         start_time = time.monotonic()
         status_code = 0
         error_msg = None
 
-        for attempt in range(1, 4):
-            try:
-                timeout = aiohttp.ClientTimeout(total=self.timeout_sec)
-                async with aiohttp.ClientSession(timeout=timeout) as session:
-                    async with session.get(url, headers=headers, params=params) as resp:
-                        status_code = resp.status
+        tried_keys: set[str] = set()
+        last_payload: dict[str, Any] = {}
+
+        while True:
+            active_key = self.get_active_api_key(advance=True, exclude=tried_keys)
+            if not active_key:
+                break
+            tried_keys.add(active_key)
+
+            headers = {
+                "x-apisports-key": active_key,
+                "Accept": "application/json",
+                "User-Agent": "Logovobot/8.0 (SportsIntelligence)"
+            }
+
+            key_failed_with_quota = False
+
+            for attempt in range(1, 4):
+                try:
+                    timeout = aiohttp.ClientTimeout(total=self.timeout_sec)
+                    async with aiohttp.ClientSession(timeout=timeout) as session:
+                        async with session.get(url, headers=headers, params=params) as resp:
+                            status_code = resp.status
+                            latency_ms = (time.monotonic() - start_time) * 1000.0
+
+                            if resp.status == 200:
+                                data = await resp.json()
+                                errors = data.get("errors") if isinstance(data, dict) else None
+                                err_str = str(errors or "").lower()
+
+                                is_quota_err = False
+                                quota_err_msg = ""
+                                if isinstance(errors, dict) and "requests" in errors:
+                                    is_quota_err = True
+                                    quota_err_msg = str(errors.get("requests") or errors)
+                                elif "request limit" in err_str:
+                                    is_quota_err = True
+                                    quota_err_msg = str(errors)
+
+                                if is_quota_err:
+                                    self._record_key_exhausted(active_key, quota_err_msg)
+                                    last_payload = data
+                                    key_failed_with_quota = True
+                                    break
+
+                                if isinstance(errors, dict) and "token" in errors:
+                                    self._record_key_exhausted(active_key, f"Token error: {errors['token']}")
+                                    last_payload = data
+                                    key_failed_with_quota = True
+                                    break
+
+                                self.circuit_breaker.record_success()
+                                records = len(data.get("response", [])) if isinstance(data.get("response"), list) else 0
+                                self.health_monitor.record_request(
+                                    provider=self.provider_name,
+                                    endpoint=clean_ep,
+                                    latency_ms=latency_ms,
+                                    status_code=status_code,
+                                    records_count=records
+                                )
+
+                                rem_hdr = resp.headers.get("x-ratelimit-requests-remaining")
+                                if rem_hdr and rem_hdr.isdigit():
+                                    rem_count = int(rem_hdr)
+                                    self._key_remaining_quota[active_key] = rem_count
+                                    if rem_count <= 0:
+                                        self._record_key_exhausted(active_key, "Header indicates 0 requests remaining")
+
+                                if not errors:
+                                    self.cache.set(self.provider_name, cache_key, data, ttl_seconds=cache_ttl)
+                                return data
+
+                            elif resp.status == 429:
+                                retry_after_hdr = resp.headers.get("Retry-After")
+                                retry_sec = float(retry_after_hdr) if retry_after_hdr and retry_after_hdr.isdigit() else 5.0
+                                self.rate_limiter.record_response(429, retry_after=retry_sec)
+                                logger.warning(f"APISports 429 Too Many Requests. Backing off for {retry_sec}s.")
+
+                                if any(k not in tried_keys and not self.is_key_exhausted(k) for k in self.api_keys):
+                                    key_failed_with_quota = True
+                                    break
+                                await asyncio.sleep(retry_sec)
+
+                            else:
+                                text = await resp.text()
+                                error_msg = f"HTTP {resp.status}: {text[:100]}"
+                                logger.warning(f"APISports response error on attempt {attempt}: {error_msg}")
+
+                except Exception as e:
+                    error_msg = str(e)
+                    if attempt == 3:
                         latency_ms = (time.monotonic() - start_time) * 1000.0
+                        self.circuit_breaker.record_failure(e)
+                        self.health_monitor.record_request(
+                            provider=self.provider_name,
+                            endpoint=clean_ep,
+                            latency_ms=latency_ms,
+                            status_code=status_code or 500,
+                            error_message=error_msg
+                        )
+                        raise
+                    await asyncio.sleep(attempt * 1.5)
 
-                        if resp.status == 200:
-                            data = await resp.json()
-                            self.circuit_breaker.record_success()
-                            records = len(data.get("response", []))
-                            self.health_monitor.record_request(
-                                provider=self.provider_name,
-                                endpoint=clean_ep,
-                                latency_ms=latency_ms,
-                                status_code=status_code,
-                                records_count=records
-                            )
-                            # Cache response (an `errors` payload is a plan/limit failure, not data)
-                            if not data.get("errors"):
-                                self.cache.set(self.provider_name, cache_key, data, ttl_seconds=cache_ttl)
-                            return data
+            if not key_failed_with_quota:
+                break
+            else:
+                has_next = any(k not in tried_keys and not self.is_key_exhausted(k) for k in self.api_keys)
+                if has_next:
+                    logger.info("Switching to alternative APISports key...")
+                else:
+                    break
 
-                        elif resp.status == 429:
-                            retry_after_hdr = resp.headers.get("Retry-After")
-                            retry_sec = float(retry_after_hdr) if retry_after_hdr and retry_after_hdr.isdigit() else 5.0
-                            self.rate_limiter.record_response(429, retry_after=retry_sec)
-                            logger.warning(f"APISports 429 Too Many Requests. Backing off for {retry_sec}s.")
-                            await asyncio.sleep(retry_sec)
-
-                        else:
-                            text = await resp.text()
-                            error_msg = f"HTTP {resp.status}: {text[:100]}"
-                            logger.warning(f"APISports response error on attempt {attempt}: {error_msg}")
-
-            except Exception as e:
-                error_msg = str(e)
-                if attempt == 3:
-                    latency_ms = (time.monotonic() - start_time) * 1000.0
-                    self.circuit_breaker.record_failure(e)
-                    self.health_monitor.record_request(
-                        provider=self.provider_name,
-                        endpoint=clean_ep,
-                        latency_ms=latency_ms,
-                        status_code=status_code or 500,
-                        error_message=error_msg
-                    )
-                    raise
-                await asyncio.sleep(attempt * 1.5)
-
-        return {}
+        return last_payload if last_payload else {}
 
     # ── Phase 8 Provider-Neutral Contracts ───────────────────────────────────
 
@@ -337,7 +483,7 @@ class APISportsProvider(SportsDataProvider):
         if not isinstance(payload, dict) or payload.get("errors"):
             errors = payload.get("errors") if isinstance(payload, dict) else None
             err_str = str(errors or "").lower()
-            if isinstance(errors, dict) and ("requests" in errors or "ratelimit" in err_str):
+            if isinstance(errors, dict) and "requests" in errors:
                 self._record_quota_exhausted(str(errors.get("requests") or errors))
             elif "request limit" in err_str:
                 self._record_quota_exhausted(str(errors))
@@ -797,12 +943,22 @@ class APISportsProvider(SportsDataProvider):
 
     def get_provider_status(self) -> dict[str, Any]:
         """Telemetry and health status for admin monitoring (zero credentials exposed)."""
-        return self.health_monitor.get_summary(
+        summary = self.health_monitor.get_summary(
             provider_name=self.provider_name,
             is_connected=self.is_connected,
             circuit_state=self.circuit_breaker.get_state(),
             rate_limiter_stats=self.rate_limiter.get_stats(),
             cache_stats=self.cache.get_stats()
         )
+        available = [k for k in self.api_keys if not self.is_key_exhausted(k)]
+        summary["pool_size"] = len(self.api_keys)
+        summary["pool_available"] = len(available)
+        summary["pool_exhausted"] = len(self.api_keys) - len(available)
+        summary["quota_exhausted"] = self.is_quota_exhausted()
+        if self._quota_exhausted_until:
+            summary["quota_exhausted_until"] = self._quota_exhausted_until.strftime("%Y-%m-%d %H:%M:%S")
+        if self.is_quota_exhausted() and summary.get("status") == "HEALTHY":
+            summary["status"] = "QUOTA_EXHAUSTED"
+        return summary
 
 
