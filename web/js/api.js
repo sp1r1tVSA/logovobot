@@ -555,6 +555,16 @@ class ApiClient {
     return this.request('/api/transfers/urn');
   }
 
+  getTransferMarket({ q = '', ovrMin = '', ovrMax = '', club = '', sort = 'ovr' } = {}) {
+    const qs = new URLSearchParams();
+    if (q) qs.set('q', q);
+    if (ovrMin !== '' && ovrMin != null) qs.set('ovr_min', ovrMin);
+    if (ovrMax !== '' && ovrMax != null) qs.set('ovr_max', ovrMax);
+    if (club) qs.set('club', club);
+    if (sort) qs.set('sort', sort);
+    return this.request('/api/transfers/market?' + qs.toString());
+  }
+
   createTransferDeal(payload, isMultipart = false) {
     return this.request('/api/transfers/deal', {
       method: 'POST',

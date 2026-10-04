@@ -28,12 +28,17 @@ class TelegramBridge {
       this._ready = true;
       this.tg.ready();
       this.tg.expand();
-      // Apply header color
-      try {
-        this.tg.setHeaderColor('#080a0e');
-        this.tg.setBackgroundColor('#080a0e');
-      } catch (e) {}
+      this.syncChrome();
     }
+  }
+
+  // Цвет шапки и фона Telegram следует выбранному дизайну (web/js/design.js).
+  syncChrome() {
+    const color = document.documentElement.getAttribute('data-design') === 'frost' ? '#eaf1ee' : '#080a0e';
+    try {
+      this._tg?.setHeaderColor(color);
+      this._tg?.setBackgroundColor(color);
+    } catch (e) {}
   }
 
   getInitData() {

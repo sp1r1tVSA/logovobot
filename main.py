@@ -154,6 +154,13 @@ def register_jobs(application: Application) -> None:
     except Exception as e:
         logger.warning(f"Could not register transfer auto-close job: {e}")
 
+    # Трансферное окно: напоминания тренерам и ответственному (за сутки/час до закрытия, зависшие заявки)
+    try:
+        from transfers.jobs import job_reminders
+        _run_repeating(application, "transfer_reminders", job_reminders, 300, 120)
+    except Exception as e:
+        logger.warning(f"Could not register transfer reminders job: {e}")
+
     # Ставки на реальные матчи: выбор матча дня, кэфы букмекера, расчёт по счёту провайдера.
     try:
         import config

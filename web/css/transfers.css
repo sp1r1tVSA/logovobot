@@ -49,7 +49,7 @@
   background: rgba(255, 255, 255, 0.1);
 }
 
-/* Навигация по вкладкам (Статус / Заявка / Урна / История) */
+/* Навигация по вкладкам (Статус / Заявка / Рынок / История) */
 .transfers-tabs {
   display: grid;
   grid-template-columns: repeat(4, 1fr);
@@ -520,6 +520,78 @@
 }
 .btn-buyout:hover {
   box-shadow: 0 0 10px rgba(245, 176, 39, 0.4);
+}
+
+/* Рынок */
+.market-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.market-filter-row {
+  display: flex;
+  gap: 8px;
+}
+.market-filter-row > * {
+  flex: 1;
+  min-width: 0;
+}
+.market-apply-btn {
+  background: rgba(245, 176, 39, 0.14);
+  color: var(--accent-gold, #f5b027);
+  border: 1px solid rgba(245, 176, 39, 0.35);
+  border-radius: 10px;
+  padding: 9px 14px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.85rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+.market-section-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 16px 0 8px;
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: #fff;
+}
+.market-count {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-secondary, #94a3b8);
+  background: rgba(255, 255, 255, 0.06);
+  border-radius: 8px;
+  padding: 1px 7px;
+}
+.market-empty,
+.market-more {
+  font-size: 0.78rem;
+  color: var(--text-muted, #64748b);
+  padding: 8px 2px;
+}
+.urn-item-card.is-banned {
+  border-color: rgba(239, 68, 68, 0.3);
+}
+.market-ban {
+  font-size: 0.72rem;
+  color: var(--color-danger, #ef4444);
+}
+.btn-offer {
+  background: rgba(255, 255, 255, 0.06);
+  color: #fff;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  padding: 8px 12px;
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.78rem;
+  font-weight: 800;
+  cursor: pointer;
+  transition: 0.15s ease;
+}
+.btn-offer:hover {
+  border-color: rgba(245, 176, 39, 0.5);
 }
 
 /* Пустые состояния */

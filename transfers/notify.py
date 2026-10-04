@@ -15,7 +15,7 @@ from telegram.error import TelegramError
 
 import config
 from time_utils import MSK_LABEL, fmt_msk
-from transfers import repo
+from transfers import card, repo
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,32 @@ async def post_to_topic(bot, topic_type: str, text: str, reply_markup=None) -> b
         await dm_manager(bot, f"⚠️ Не удалось отправить в тему «{label}»: "
                               f"{html.escape(str(exc))}\n\n{text}")
         return False
+
+
+CAPTION_LIMIT = 1024      # предел подписи к фото в Telegram
+
+
+async def post_card_to_topic(bot, topic_type: str, transfer: dict, caption: str) -> bool:
+    """Карточка трансфера в тему с подписью; не вышло (нет темы, картинки, отказ) — обычный текст.
+
+    Текстовая публикация — прежний путь `post_to_topic`, со своим запасным ЛС ответственному,
+    поэтому сбой картинки ничего не теряет.
+    """
+    try:
+        topic = repo.get_topic(topic_type)
+    except Exception:
+        logger.exception("transfers: topic lookup failed")
+        topic = None
+    if topic and len(caption) <= CAPTION_LIMIT:
+        png = await card.build_card_async(transfer)
+        if png:
+            try:
+                await bot.send_photo(chat_id=topic["group_chat_id"], message_thread_id=topic["message_thread_id"],
+                                     photo=png, caption=caption, parse_mode="HTML")
+                return True
+            except Exception as exc:
+                logger.warning("transfers: card post to %s failed: %s", topic_type, exc)
+    return await post_to_topic(bot, topic_type, caption)
 
 
 def _window_title(window: dict) -> str:
@@ -310,7 +336,7 @@ async def announce_free_agent(bot, transfer: dict) -> bool:
     ]
     if transfer.get("commented_at"):
         lines.append(f"Время комментария: {fmt_msk(transfer['commented_at'])} {MSK_LABEL}")
-    return await post_to_topic(bot, "feed", "\n".join(lines))
+    return await post_card_to_topic(bot, "feed", transfer, "\n".join(lines))
 
 
 async def announce_slot_bought(bot, purchase: dict) -> bool:
@@ -450,7 +476,8 @@ async def notify_approved(bot, transfer: dict) -> bool:
     kind = KIND_LABELS.get(transfer.get("kind"), "")
     body = "\n".join(_decision_lines(transfer))
     await _dm_parties(bot, transfer, f"✅ <b>Заявка #{transfer['id']} одобрена</b> ({kind})\n\n{body}")
-    return await post_to_topic(bot, "feed", f"✅ <b>Одобрен трансфер #{transfer['id']}</b> ({kind})\n\n{body}")
+    return await post_card_to_topic(bot, "feed", transfer,
+                                    f"✅ <b>Одобрен трансфер #{transfer['id']}</b> ({kind})\n\n{body}")
 
 
 async def notify_rejected(bot, transfer: dict) -> bool:

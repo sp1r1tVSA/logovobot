@@ -22,7 +22,7 @@
   <link rel="stylesheet" href="/css/main.css?v=3.5.1">
   <link rel="stylesheet" href="/css/components.css?v=3.5.1">
   <link rel="stylesheet" href="/css/coupon.css?v=3.5.1">
-  <link rel="stylesheet" href="/css/transfers.css?v=3.5.1">
+  <link rel="stylesheet" href="/css/transfers.css?v=3.5.2">
 
   <!-- Critical Coupons & Team Logos Styles -->
   <style id="coupons-critical-css">
@@ -119,6 +119,8 @@
       .coupon-summary-label { font-size: 0.64rem; }
     }
   </style>
+  <!-- Светлая тема «Матовое стекло»: после всех стилей, включая inline-блок выше. -->
+  <link rel="stylesheet" href="/css/theme-frost.css?v=3">
 </head>
 <body>
 
@@ -261,6 +263,22 @@
     <section id="view-profile" class="view-section">
       <!-- Esports Gamer Card -->
       <div class="gamer-profile-card" id="profile-card-container"></div>
+
+      <!-- Дизайн приложения: выбор хранится в localStorage (web/js/design.js) -->
+      <div class="design-switch-card">
+        <div class="design-switch-title">🎨 Дизайн</div>
+        <div class="design-switch-hint">Можно вернуться к прежнему в любой момент</div>
+        <div class="design-switch-options">
+          <button type="button" class="design-option" data-design-choice="dark">
+            <span class="design-option-preview dark"></span>
+            <span>Тёмный</span>
+          </button>
+          <button type="button" class="design-option" data-design-choice="frost">
+            <span class="design-option-preview frost"></span>
+            <span>Матовое стекло</span>
+          </button>
+        </div>
+      </div>
 
       <!-- Performance KPI Analytics Grid -->
       <div style="font-size: 1.05rem; font-weight: 800; margin: 20px 0 10px; color: #fff;">

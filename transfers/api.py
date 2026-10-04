@@ -5,6 +5,7 @@
 * POST /api/transfers/slots         — купить доп. слот за монеты (slot_type: buy|sell)
 * GET  /api/transfers/history       — лента одобренных сделок
 * GET  /api/transfers/urn           — доступные карты в урне для выкупа
+* GET  /api/transfers/market        — рынок: урна + каталог игроков (q, ovr_min, ovr_max, club, sort)
 * GET  /api/transfers/suggest       — автоподбор клуба/игрока (kind=club|player, q, club | own=1)
 * GET  /api/transfers/{id}/photo    — прокси фото заявки из Telegram
 * POST /api/transfers/deal          — подать сделку с другим тренером (JSON или multipart с фото)
@@ -27,7 +28,7 @@ from aiohttp import web
 from PIL import Image
 
 from api.auth import check_user_access, extract_init_data, get_authenticated_user
-from transfers import notify, requests as req_mod, service, slots, suggest
+from transfers import market, notify, requests as req_mod, service, slots, suggest
 
 logger = logging.getLogger(__name__)
 
@@ -184,6 +185,26 @@ async def handle_get_urn(request: web.Request) -> web.Response:
         return web.json_response({"status": "ok", "data": data})
     except Exception as exc:
         logger.exception("transfers: handle_get_urn failed")
+        return web.json_response({"status": "error", "message": "Внутренняя ошибка сервера"}, status=500)
+
+
+async def handle_get_market(request: web.Request) -> web.Response:
+    user_info, err = _auth(request)
+    if err is not None:
+        return err
+    try:
+        query = request.query
+        data = market.market(
+            user_info["id"],
+            q=(query.get("q") or "").strip(),
+            ovr_min=query.get("ovr_min"),
+            ovr_max=query.get("ovr_max"),
+            club=(query.get("club") or "").strip()[:80],
+            sort=(query.get("sort") or "").strip(),
+        )
+        return web.json_response({"status": "ok", "data": data})
+    except Exception:
+        logger.exception("transfers: handle_get_market failed")
         return web.json_response({"status": "error", "message": "Внутренняя ошибка сервера"}, status=500)
 
 
@@ -500,6 +521,7 @@ def register_routes(app: web.Application) -> None:
     app.router.add_get("/api/transfers/history", handle_get_history)
     app.router.add_get("/api/transfers/slots", handle_get_slots)
     app.router.add_get("/api/transfers/urn", handle_get_urn)
+    app.router.add_get("/api/transfers/market", handle_get_market)
     app.router.add_get("/api/transfers/suggest", handle_get_suggest)
     app.router.add_get("/api/transfers/{id}/photo", handle_get_photo)
 

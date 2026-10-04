@@ -230,8 +230,8 @@ class TestNotify:
         assert asyncio.run(notify.notify_approved(bot, t)) is True
         assert any("одобрена" in x for x in _texts(bot, 101))
         assert any("одобрена" in x for x in _texts(bot, 102))
-        feed = [c.kwargs for c in bot.send_message.await_args_list if c.kwargs.get("chat_id") == -100500]
-        assert feed and feed[0]["message_thread_id"] == 9 and "B. Saka" in feed[0]["text"]
+        feed = [c.kwargs for c in bot.send_photo.await_args_list if c.kwargs.get("chat_id") == -100500]
+        assert feed and feed[0]["message_thread_id"] == 9 and "B. Saka" in feed[0]["caption"]
 
     def test_rejected_reason_in_dm_and_feed(self):
         _, deal = _setup()
@@ -331,7 +331,8 @@ class TestButtons:
         bot.edit_message_reply_markup.assert_awaited_once()
         assert any("Одобрена заявка" in x for x in _texts(bot, -100500))
         assert any("одобрена" in x for x in _texts(bot, 101))
-        assert any("Одобрен трансфер" in x for x in _texts(bot, -100999))
+        assert any("Одобрен трансфер" in c.kwargs["caption"] for c in bot.send_photo.await_args_list
+                   if c.kwargs.get("chat_id") == -100999)
         assert [a[0][1] for a in _clean] == ["transfer_request_approved"]
         assert _clean[0][0][0] == MANAGER and _clean[0][0][3] == deal["id"]
 
