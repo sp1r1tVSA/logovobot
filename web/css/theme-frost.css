@@ -1,0 +1,549 @@
+/* ==========================================================================
+   LOGOVO.BET — «Матовое стекло»: светлая тема-альтернатива.
+   Включается атрибутом <html data-design="frost"> (web/js/design.js); без него
+   действует прежний тёмный дизайн, ни одно его правило не тронуто.
+   Файл подключается после остальных стилей и только переопределяет их.
+   Нижняя часть («GENERATED») — светлые варианты жёстко заданных тёмных цветов
+   из components/coupon/transfers.css и inline-стилей index.html: при правке
+   тех правил заведите парное правило здесь.
+   ========================================================================== */
+
+html[data-design="frost"] {
+  color-scheme: light;
+
+  --bg-app: #eaf1ee;
+  --bg-card: rgba(255, 255, 255, 0.62);
+  --bg-card-hover: rgba(255, 255, 255, 0.84);
+  --bg-tertiary: #f4f8f6;
+  --bg-glass: rgba(255, 255, 255, 0.94);
+  --bg-drawer: rgba(244, 248, 246, 0.97);
+  --bg-glass-bar: rgba(255, 255, 255, 0.66);
+
+  /* Золото тёмной темы → глубокий бирюзовый: читается и как текст, и как заливка. */
+  --accent-gold: #0b6b5d;
+  --accent-gold-hover: #095a4e;
+  --accent-gold-glow: rgba(11, 107, 93, 0.28);
+  --accent-gold-light: rgba(11, 107, 93, 0.10);
+  --accent-cyan: #0284c7;
+  --accent-cyan-glow: rgba(2, 132, 199, 0.25);
+
+  --color-success: #0a8f6a;
+  --color-success-bg: rgba(10, 143, 106, 0.14);
+  --color-danger: #dc2626;
+  --color-danger-bg: rgba(220, 38, 38, 0.12);
+  --color-warning: #b45309;
+  --color-warning-bg: rgba(180, 83, 9, 0.12);
+
+  --text-primary: #10231f;
+  --text-secondary: #3f5651;
+  --text-muted: #6b7f7a;
+  --text-gold: #0b6b5d;
+
+  --border-subtle: rgba(255, 255, 255, 0.75);
+  --border-active: rgba(11, 107, 93, 0.8);
+  --shadow-card: 0 10px 28px -14px rgba(16, 35, 31, 0.30);
+  --shadow-gold: 0 4px 18px rgba(11, 107, 93, 0.30);
+  --shadow-neon: 0 0 12px rgba(11, 107, 93, 0.35);
+
+  --radius-sm: 12px;
+  --radius-md: 16px;
+  --radius-lg: 22px;
+}
+
+html[data-design="frost"] body {
+  font-family: 'Onest', 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  background-color: var(--bg-app);
+  color: var(--text-primary);
+}
+
+/* Цветные «пятна» за стеклом — один fixed-слой, как и раньше. */
+html[data-design="frost"] body::before {
+  background-image:
+    radial-gradient(circle at 8% 4%, rgba(45, 212, 191, 0.55) 0%, transparent 38%),
+    radial-gradient(circle at 96% 30%, rgba(255, 122, 89, 0.34) 0%, transparent 36%),
+    radial-gradient(circle at 20% 96%, rgba(198, 241, 53, 0.50) 0%, transparent 40%);
+}
+
+html[data-design="frost"] ::-webkit-scrollbar-thumb { background: rgba(16, 35, 31, 0.2); }
+
+/* Шапка и нижнее меню */
+html[data-design="frost"] body { padding-bottom: calc(96px + env(safe-area-inset-bottom, 0px)); }
+html[data-design="frost"] .app-header {
+  background: var(--bg-glass-bar);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: 0 6px 22px -14px rgba(16, 35, 31, 0.35);
+}
+html[data-design="frost"] .brand-title {
+  background: linear-gradient(135deg, #10231f 30%, #0b6b5d 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+html[data-design="frost"] .brand-logo-icon { filter: none; }
+html[data-design="frost"] .balance-pill {
+  background: linear-gradient(135deg, #c6f135, #2dd4bf);
+  border: 1px solid rgba(255, 255, 255, 0.7);
+}
+html[data-design="frost"] .balance-amount { color: #10231f; font-weight: 800; }
+
+html[data-design="frost"] .bottom-nav {
+  left: 14px;
+  right: 14px;
+  bottom: calc(10px + env(safe-area-inset-bottom, 0px));
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  border-radius: 26px;
+  padding: 8px;
+  box-shadow: 0 16px 36px -14px rgba(16, 35, 31, 0.35);
+}
+html[data-design="frost"] .nav-item { color: var(--text-muted); }
+html[data-design="frost"] .nav-item.active { color: #0b6b5d; }
+html[data-design="frost"] .nav-item.active .nav-icon { filter: none; }
+html[data-design="frost"] .nav-club-logo { filter: drop-shadow(0 2px 3px rgba(16, 35, 31, 0.25)); }
+html[data-design="frost"] .nav-badge { background: #10231f; color: #c6f135; box-shadow: none; }
+
+/* Плашки и вкладки (inline-стили index.html дублируют обычные пилюли) */
+html[data-design="frost"] .category-pill,
+html[data-design="frost"] .coupons-filter-chips .category-pill {
+  background: rgba(255, 255, 255, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  color: var(--text-secondary);
+}
+html[data-design="frost"] .category-pill.active,
+html[data-design="frost"] .coupons-filter-chips .category-pill.active,
+html[data-design="frost"] .division-tab-btn.active {
+  background: #10231f;
+  border-color: #10231f;
+  color: #fff;
+  box-shadow: none;
+}
+
+/* Карточки: стекло без blur (blur на длинных списках тормозит прокрутку). */
+html[data-design="frost"] .coupon-card {
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(255, 255, 255, 0.8);
+  box-shadow: var(--shadow-card);
+}
+html[data-design="frost"] .team-logo-wrapper {
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid rgba(16, 35, 31, 0.08);
+}
+html[data-design="frost"] .team-logo-wrapper img { filter: drop-shadow(0 2px 3px rgba(16, 35, 31, 0.25)); }
+
+/* Переключатель дизайна */
+.design-switch-card {
+  margin: 18px 0 4px;
+  padding: 14px;
+  border-radius: var(--radius-md);
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+}
+.design-switch-title {
+  font-size: 1.05rem;
+  font-weight: 800;
+  color: var(--text-primary);
+}
+.design-switch-hint {
+  font-size: 0.78rem;
+  color: var(--text-muted);
+  margin: 2px 0 12px;
+}
+.design-switch-options { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.design-option {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  align-items: stretch;
+  padding: 8px;
+  border-radius: var(--radius-md);
+  border: 2px solid var(--border-subtle);
+  background: transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  text-align: center;
+}
+.design-option.active { border-color: var(--accent-gold); color: var(--text-primary); }
+.design-option-preview {
+  height: 58px;
+  border-radius: 10px;
+  position: relative;
+  overflow: hidden;
+}
+.design-option-preview::after {
+  content: '';
+  position: absolute;
+  left: 8px; right: 8px; bottom: 8px; height: 16px;
+  border-radius: 8px;
+}
+.design-option-preview.dark { background: radial-gradient(circle at 15% 20%, rgba(245,176,39,.25), transparent 50%), #07090e; }
+.design-option-preview.dark::after { background: #131824; border: 1px solid rgba(255,255,255,.1); }
+.design-option-preview.frost {
+  background:
+    radial-gradient(circle at 10% 10%, rgba(45,212,191,.7), transparent 50%),
+    radial-gradient(circle at 95% 30%, rgba(255,122,89,.5), transparent 50%),
+    radial-gradient(circle at 30% 100%, rgba(198,241,53,.7), transparent 50%),
+    #eaf1ee;
+}
+.design-option-preview.frost::after { background: rgba(255,255,255,.7); border: 1px solid rgba(255,255,255,.9); }
+
+/* ===== GENERATED ===== */
+/* GENERATED section: light overrides for hard-coded dark-theme colours (white text, white/dark rgba surfaces). */
+html[data-design="frost"] .lobby-filter-bar { background: var(--bg-app, rgba(255,255,255,0.72)); background: linear-gradient(180deg, var(--bg-app, rgba(255,255,255,0.72)) 82%, rgba(11, 15, 24, 0) 100%); }
+html[data-design="frost"] .scroll-row::-webkit-scrollbar-track { background: rgba(16,35,31,0.08); }
+html[data-design="frost"] .scroll-row::-webkit-scrollbar-thumb { background: rgba(11,107,93, 0.45); }
+html[data-design="frost"] .division-tabs::-webkit-scrollbar-track { background: rgba(16,35,31,0.08); }
+html[data-design="frost"] .division-tabs::-webkit-scrollbar-thumb { background: rgba(11,107,93, 0.45); }
+html[data-design="frost"] .division-tab-btn { background: rgba(16,35,31,0.05); border: 1px solid rgba(16,35,31,0.13); }
+html[data-design="frost"] .division-tab-btn.active { background: linear-gradient(135deg, rgba(11,107,93, 0.25) 0%, rgba(11,107,93, 0.1) 100%); box-shadow: 0 0 12px rgba(11,107,93, 0.2); }
+html[data-design="frost"] .match-card:hover { border-color: rgba(11,107,93, 0.3); }
+html[data-design="frost"] .match-tour-tag { background: rgba(11,107,93, 0.12); border: 1px solid rgba(11,107,93, 0.25); }
+html[data-design="frost"] .team-name { color: var(--text-primary); }
+html[data-design="frost"] .match-vs-divider { background: rgba(11,107,93, 0.1); border: 1px solid rgba(11,107,93, 0.25); }
+html[data-design="frost"] .btn-match-action:hover,
+html[data-design="frost"] .btn-match-action:active { background: rgba(16,35,31,0.08); border-color: rgba(11,107,93, 0.4); color: var(--text-primary); }
+html[data-design="frost"] .btn-match-action.accent { background: rgba(11,107,93, 0.08); border-color: rgba(11,107,93, 0.25); }
+html[data-design="frost"] .podium-card.first { background: linear-gradient(180deg, rgba(11,107,93, 0.2) 0%, var(--bg-card) 100%); box-shadow: 0 0 24px rgba(11,107,93, 0.25); }
+html[data-design="frost"] .podium-name { color: var(--text-primary); }
+html[data-design="frost"] .leader-name { color: var(--text-primary); }
+html[data-design="frost"] .modal-title { color: var(--text-primary); }
+html[data-design="frost"] .btn-modal-close { color: #fff; }
+html[data-design="frost"] .btn-modal-close.btn-modal-x { background: rgba(16,35,31,0.05); }
+html[data-design="frost"] .streak-card { background: linear-gradient(135deg, rgba(11,107,93, 0.18) 0%, rgba(255,255,255,0.684) 100%); }
+html[data-design="frost"] .streak-day-item.active { background: rgba(11,107,93, 0.2); color: var(--text-primary); }
+html[data-design="frost"] .quest-title { color: var(--text-primary); }
+html[data-design="frost"] .quest-rewards-badge { background: rgba(11,107,93, 0.1); }
+html[data-design="frost"] .quest-progress-bar-wrap { background: rgba(16,35,31,0.08); }
+html[data-design="frost"] .btn-claim-quest { color: #fff; box-shadow: 0 0 8px rgba(11,107,93, 0.4); }
+html[data-design="frost"] .btn-claim-quest::after { box-shadow: 0 0 18px rgba(11,107,93, 0.8); }
+html[data-design="frost"] .gamer-profile-card { background: linear-gradient(180deg, rgba(255,255,255,0.648) 0%, var(--bg-card) 100%); }
+html[data-design="frost"] .user-profile-avatar-fallback { background: linear-gradient(135deg, rgba(255,255,255,0.72) 0%, rgba(255,255,255,0.72) 100%); }
+html[data-design="frost"] .gamer-username { color: var(--text-primary); }
+html[data-design="frost"] .gamer-title-badge { background: rgba(11,107,93, 0.12); border: 1px solid rgba(11,107,93, 0.25); }
+html[data-design="frost"] .gamer-xp-bar-wrap { background: rgba(16,35,31,0.1); }
+html[data-design="frost"] .gamer-stat-val { color: var(--text-primary); }
+html[data-design="frost"] .achievement-card.unlocked { border-color: rgba(11,107,93, 0.4); background: linear-gradient(135deg, rgba(11,107,93, 0.1) 0%, var(--bg-card) 100%); }
+html[data-design="frost"] .achievement-card.rarity-legendary.unlocked { box-shadow: 0 0 20px rgba(11,107,93, 0.35); }
+html[data-design="frost"] .ach-name { color: var(--text-primary); }
+html[data-design="frost"] .btn-claim-achievement { color: #fff; }
+html[data-design="frost"] .duels-header-banner { background: linear-gradient(135deg, rgba(239, 68, 68, 0.2) 0%, rgba(255,255,255,0.684) 100%); }
+html[data-design="frost"] .btn-accept-duel { color: #fff; }
+html[data-design="frost"] .category-pill.active { background: rgba(11,107,93, 0.18); }
+html[data-design="frost"] .match-search-input { color: var(--text-primary); }
+html[data-design="frost"] .match-center-header { background: linear-gradient(180deg, rgba(255,255,255,0.648) 0%, rgba(255,255,255,0.684) 100%); }
+html[data-design="frost"] .team-crest-container { background: rgba(16,35,31,0.05); border: 1px solid rgba(16,35,31,0.156); }
+html[data-design="frost"] .team-name-lg { color: var(--text-primary); }
+html[data-design="frost"] .score-center-badge { background: rgba(255,255,255,0.55); }
+html[data-design="frost"] .form-dot { color: var(--text-primary); }
+html[data-design="frost"] .mc-tab-btn.active,
+html[data-design="frost"] .mc-subtab-btn.active { color: #fff; box-shadow: 0 2px 8px rgba(11,107,93, 0.3); }
+html[data-design="frost"] .market-group-title { color: var(--text-primary); }
+html[data-design="frost"] .insight-card { background: rgba(11,107,93, 0.08); border: 1px solid rgba(11,107,93, 0.25); color: var(--text-primary); }
+html[data-design="frost"] .standings-table td { border-bottom: 1px solid rgba(16,35,31,0.052); }
+html[data-design="frost"] .standings-table td:first-child { color: var(--text-primary); }
+html[data-design="frost"] .standings-pos-pill.top { background: rgba(11,107,93, 0.2); }
+html[data-design="frost"] .standings-pos-pill.mid { background: rgba(16,35,31,0.06); }
+html[data-design="frost"] .form-dot { color: var(--text-primary); }
+html[data-design="frost"] .form-dot.form-d { background: rgba(16,35,31,0.18); }
+html[data-design="frost"] .kpi-value { color: var(--text-primary); }
+html[data-design="frost"] .btn-restore-coupon { background: rgba(11,107,93, 0.15); }
+html[data-design="frost"] .coupons-page-title { color: var(--text-primary); }
+html[data-design="frost"] .coupons-filter-chips .category-pill { background: rgba(255,255,255,0.612); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .coupons-filter-chips .category-pill:hover { border-color: rgba(11,107,93, 0.4); color: var(--text-primary); }
+html[data-design="frost"] .coupons-filter-chips .category-pill.active { background: rgba(11,107,93, 0.12); box-shadow: 0 0 12px rgba(11,107,93, 0.2); }
+html[data-design="frost"] .team-logo-wrapper { background: rgba(16,35,31,0.03); border: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .coupon-card { background: rgba(255,255,255,0.662); border: 1px solid rgba(16,35,31,0.091); }
+html[data-design="frost"] .coupon-header { border-bottom: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .coupon-badge-express { background: rgba(11,107,93, 0.12); border: 1px solid rgba(11,107,93, 0.28); }
+html[data-design="frost"] .coupon-id { color: var(--text-primary); }
+html[data-design="frost"] .coupon-status-badge.badge-pending { color: #0284c7; }
+html[data-design="frost"] .coupon-match-row { border-bottom: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .coupon-team-name { color: var(--text-primary); }
+html[data-design="frost"] .coupon-score { color: var(--text-primary); }
+html[data-design="frost"] .coupon-prediction-pill.pending { color: #0284c7; }
+html[data-design="frost"] .coupon-pred-outcome { color: var(--text-primary); }
+html[data-design="frost"] .coupon-summary { background: rgba(16,35,31,0.02); border: 1px solid rgba(16,35,31,0.052); }
+html[data-design="frost"] .coupon-summary-val { color: var(--text-primary); }
+html[data-design="frost"] .coupon-summary-val.val-cashout { color: #0284c7; }
+html[data-design="frost"] .coupon-btn-repeat { background: rgba(16,35,31,0.04); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .coupon-btn-repeat:hover { background: rgba(11,107,93, 0.08); border-color: rgba(11,107,93, 0.3); }
+html[data-design="frost"] .coupon-btn-cashout { color: #0284c7; }
+html[data-design="frost"] .coupons-empty-state { background: rgba(255,255,255,0.55); border: 1px dashed rgba(16,35,31,0.104); }
+html[data-design="frost"] .coupons-empty-state .empty-title { color: var(--text-primary); }
+html[data-design="frost"] .club-hero { background: linear-gradient(160deg, rgba(11,107,93, 0.10) 0%, rgba(255,255,255,0.619) 45%),
+              var(--bg-glass); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .club-hero-crest { border: 1px solid rgba(11,107,93, 0.25) !important; box-shadow: 0 0 18px rgba(11,107,93, 0.12); }
+html[data-design="frost"] .club-hero-name { color: var(--text-primary); }
+html[data-design="frost"] .club-place-badge { background: rgba(11,107,93, 0.12); border: 1px solid rgba(11,107,93, 0.3); }
+html[data-design="frost"] .club-pill { background: rgba(16,35,31,0.05); border: 1px solid rgba(16,35,31,0.13); }
+html[data-design="frost"] .club-pill:hover { background: rgba(16,35,31,0.09); color: var(--text-primary); }
+html[data-design="frost"] .club-pill.active { background: linear-gradient(135deg, rgba(11,107,93, 0.25) 0%, rgba(11,107,93, 0.12) 100%); border-color: rgba(11,107,93, 0.55); box-shadow: 0 0 10px rgba(11,107,93, 0.25); }
+html[data-design="frost"] .club-series-pill { background: rgba(16,35,31,0.04); border: 1px solid rgba(16,35,31,0.117); }
+html[data-design="frost"] .club-kpi { background: rgba(16,35,31,0.03); border: 1px solid rgba(16,35,31,0.078); }
+html[data-design="frost"] .club-kpi-value { color: var(--text-primary); }
+html[data-design="frost"] .club-form-dot { color: var(--text-primary); }
+html[data-design="frost"] .club-discipline { background: rgba(16,35,31,0.03); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .club-discipline-value { color: var(--text-primary); }
+html[data-design="frost"] .club-placeholder { border: 1px dashed rgba(16,35,31,0.13); }
+html[data-design="frost"] .club-filter-chip { background: rgba(16,35,31,0.05); border: 1px solid rgba(16,35,31,0.13); }
+html[data-design="frost"] .club-filter-chip:hover { background: rgba(16,35,31,0.08); color: var(--text-primary); }
+html[data-design="frost"] .club-filter-chip.active { background: linear-gradient(135deg, rgba(11,107,93, 0.22) 0%, rgba(11,107,93, 0.1) 100%); border-color: rgba(11,107,93, 0.5); box-shadow: 0 0 10px rgba(11,107,93, 0.2); }
+html[data-design="frost"] .club-filter-chip.sub { background: rgba(16,35,31,0.03); border-color: rgba(16,35,31,0.091); }
+html[data-design="frost"] .club-filter-chip.sub.active { color: #0284c7; }
+html[data-design="frost"] .club-match-card { border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .club-badge.proposed { background: rgba(11,107,93, 0.12); border-color: rgba(11,107,93, 0.35); }
+html[data-design="frost"] .club-badge.incoming { color: #0284c7; }
+html[data-design="frost"] .club-badge.finished { background: rgba(16,35,31,0.05); border-color: rgba(16,35,31,0.156); }
+html[data-design="frost"] .club-match-team { color: var(--text-primary); }
+html[data-design="frost"] .btn-club-primary { color: #fff; }
+html[data-design="frost"] .btn-club-secondary { background: rgba(16,35,31,0.05); border: 1px solid rgba(16,35,31,0.156); }
+html[data-design="frost"] .club-leader-card { background: linear-gradient(140deg, rgba(11,107,93, 0.12) 0%, rgba(255,255,255,0.612) 60%); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .club-leader-name { color: var(--text-primary); }
+html[data-design="frost"] .club-squad-list { border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .club-player-row { background: rgba(16,35,31,0.02); }
+html[data-design="frost"] .club-player-row.leader { background: rgba(11,107,93, 0.08); border-color: rgba(11,107,93, 0.28); }
+html[data-design="frost"] .club-player-name { color: var(--text-primary); }
+html[data-design="frost"] .club-stat-badge.goals { background: rgba(11,107,93, 0.12); border-color: rgba(11,107,93, 0.3); }
+html[data-design="frost"] .club-stat-badge.assists { color: #0284c7; }
+html[data-design="frost"] .club-stat-badge.mvp { color: #7c3aed; }
+html[data-design="frost"] .club-empty-state { border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .club-empty-title { color: var(--text-primary); }
+html[data-design="frost"] .club-empty-steps { background: rgba(16,35,31,0.03); border: 1px solid rgba(16,35,31,0.091); }
+html[data-design="frost"] .time-modal-input { background: rgba(16,35,31,0.04); border: 1px solid rgba(16,35,31,0.13); color: var(--text-primary); }
+html[data-design="frost"] .time-preset-btn { background: rgba(16,35,31,0.05); border: 1px solid rgba(16,35,31,0.13); }
+html[data-design="frost"] .time-preset-btn.active,
+html[data-design="frost"] .time-preset-btn:active { background: rgba(11,107,93, 0.16); border-color: rgba(11,107,93, 0.5); }
+html[data-design="frost"] .time-modal-error { color: #dc2626; }
+html[data-design="frost"] .cup-tab-btn { border-color: rgba(11,107,93, 0.35); }
+html[data-design="frost"] .coupon-card.bet-history-card { background: rgba(255,255,255,0.662); border: 1px solid rgba(16,35,31,0.091); }
+html[data-design="frost"] .bet-history-card .coupon-header { border-bottom: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .bet-history-card .coupon-badge-express { background: rgba(11,107,93, 0.12); border: 1px solid rgba(11,107,93, 0.28); }
+html[data-design="frost"] .bet-history-card .coupon-id { color: var(--text-primary); }
+html[data-design="frost"] .bet-history-card .coupon-settled-date { color: rgba(16,35,31,0.65); }
+html[data-design="frost"] .bet-history-card .coupon-team-name { color: var(--text-primary); }
+html[data-design="frost"] .bet-history-card .coupon-score { color: var(--text-primary); }
+html[data-design="frost"] .bet-history-card .coupon-pred-outcome { color: var(--text-primary); }
+html[data-design="frost"] .bet-history-card .coupon-summary { background: rgba(16,35,31,0.02); border: 1px solid rgba(16,35,31,0.052); }
+html[data-design="frost"] .bet-history-card .coupon-summary-val { color: var(--text-primary); }
+html[data-design="frost"] .bet-history-card .btn-cashout.coupon-btn-cashout { color: #0284c7; }
+html[data-design="frost"] .bet-history-card .btn-repeat-bet.coupon-btn-repeat { background: rgba(16,35,31,0.04); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .bet-history-card .coupon-match-row { border-bottom: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .bet-history-card .coupon-status-badge.badge-pending { color: #0284c7; }
+html[data-design="frost"] .bet-history-card .coupon-prediction-pill.pending { color: #0284c7; }
+html[data-design="frost"] .bet-history-card .coupon-summary-val.val-cashout { color: #0284c7; }
+html[data-design="frost"] .list-more-btn { border: 1px solid rgba(16,35,31,0.104); background: rgba(16,35,31,0.04); }
+html[data-design="frost"] .list-more-btn:active { background: rgba(11,107,93, 0.08); border-color: rgba(11,107,93, 0.3); }
+html[data-design="frost"] .line-empty-title { color: var(--text-primary); }
+html[data-design="frost"] .match-division-tag.division-tag-gold { background: rgba(11,107,93,0.15); }
+html[data-design="frost"] .mc-empty-title { color: var(--text-primary); }
+html[data-design="frost"] .prob-home { color: #2563eb; }
+html[data-design="frost"] .prob-draw { color: var(--text-secondary); }
+html[data-design="frost"] .prob-away { color: #dc2626; }
+html[data-design="frost"] .insight-card.mc-factor { background: rgba(16,35,31,0.03); }
+html[data-design="frost"] .leaders-row { border-bottom: 1px solid rgba(16,35,31,0.052); }
+html[data-design="frost"] .leaders-name { color: var(--text-primary); }
+html[data-design="frost"] .standings-team-name { color: var(--text-primary); }
+html[data-design="frost"] .result-team-home { color: var(--text-primary); }
+html[data-design="frost"] .result-team-away { color: var(--text-primary); }
+html[data-design="frost"] .coupons-empty-state.history-empty { background: rgba(255,255,255,0.55); border: 1px dashed rgba(16,35,31,0.104); }
+html[data-design="frost"] .empty-title.history-empty-title { color: var(--text-primary); }
+html[data-design="frost"] .saved-title { color: var(--text-primary); }
+html[data-design="frost"] .saved-name { color: var(--text-primary); }
+html[data-design="frost"] .profile-name { color: var(--text-primary); }
+html[data-design="frost"] .ach-title.ach-title-text { color: var(--text-primary); }
+html[data-design="frost"] .mm-group-title { color: var(--text-primary); }
+html[data-design="frost"] .lb-podium-name { color: var(--text-primary); }
+html[data-design="frost"] .lb-row { border-bottom: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .lb-name { color: var(--text-primary); }
+html[data-design="frost"] .feed-title { color: var(--text-primary); }
+html[data-design="frost"] .hot-teams { color: var(--text-primary); }
+html[data-design="frost"] .mover-selection { color: var(--text-primary); }
+html[data-design="frost"] .mover-current { color: var(--text-primary); }
+html[data-design="frost"] .rec-teams { color: var(--text-primary); }
+html[data-design="frost"] .club-error-title { color: var(--text-primary); }
+html[data-design="frost"] .proto-round { background: rgba(11,107,93,0.1); }
+html[data-design="frost"] .proto-team-name { color: var(--text-primary); }
+html[data-design="frost"] .proto-score-box { background: rgba(255,255,255,0.55); border: 1px solid rgba(16,35,31,0.078); }
+html[data-design="frost"] .proto-mvp { background: rgba(11,107,93,0.08); border: 1px solid rgba(11,107,93,0.25); }
+html[data-design="frost"] .proto-mvp-name { color: var(--text-primary); }
+html[data-design="frost"] .proto-section-title { color: var(--text-primary); }
+html[data-design="frost"] .proto-goal-player { color: var(--text-primary); }
+html[data-design="frost"] .proto-assist { border-top: 1px dashed rgba(16,35,31,0.078); }
+html[data-design="frost"] .proto-shot-title { color: var(--text-primary); }
+html[data-design="frost"] .proto-shot-frame { background: rgba(255,255,255,0.72); }
+html[data-design="frost"] .tg-required-title { color: var(--text-primary); }
+html[data-design="frost"] .admin-pill { background: rgba(16,35,31,0.05); }
+html[data-design="frost"] .admin-pill.active { background: rgba(11,107,93, 0.16); }
+html[data-design="frost"] .adm-tabs::-webkit-scrollbar-track { background: rgba(16,35,31,0.08); }
+html[data-design="frost"] .adm-tabs::-webkit-scrollbar-thumb { background: rgba(11,107,93, 0.45); }
+html[data-design="frost"] .adm-div-pills::-webkit-scrollbar-track { background: rgba(16,35,31,0.08); }
+html[data-design="frost"] .adm-div-pills::-webkit-scrollbar-thumb { background: rgba(11,107,93, 0.45); }
+html[data-design="frost"] .adm-bar-fill { background: linear-gradient(180deg, var(--accent-gold), rgba(11,107,93, 0.35)); }
+html[data-design="frost"] .adm-st-cashed_out,
+html[data-design="frost"] .adm-st-settled { background: rgba(11,107,93, 0.12); }
+html[data-design="frost"] .adm-filter-chip { background: rgba(11,107,93, 0.12); }
+html[data-design="frost"] .adm-btn.primary { color: #fff; }
+html[data-design="frost"] .mono-pill { background: rgba(16,35,31,0.06); }
+html[data-design="frost"] .outright-tab-btn { border-color: rgba(11,107,93, 0.35); }
+html[data-design="frost"] .ob-group-btn.active { color: #fff; }
+html[data-design="frost"] .ob-sel-goals { background: rgba(11,107,93, 0.12); border: 1px solid rgba(11,107,93, 0.25); }
+html[data-design="frost"] .ob-confirm { color: #fff; }
+html[data-design="frost"] .adm-check:has(input:checked) { background: rgba(11,107,93, 0.08); }
+html[data-design="frost"] .shop-balance-card { background: linear-gradient(135deg, rgba(11,107,93, 0.14), rgba(11,107,93, 0.03)); border: 1px solid rgba(11,107,93, 0.28); }
+html[data-design="frost"] .shop-empty-state { background: rgba(255,255,255,0.55); border: 1px dashed rgba(16,35,31,0.104); }
+html[data-design="frost"] .shop-empty-title { color: var(--text-primary); }
+html[data-design="frost"] .shop-slot-card { background: rgba(255,255,255,0.55); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .shop-slot-title { color: var(--text-primary); }
+html[data-design="frost"] .shop-slot-buy { border: 1px solid rgba(11,107,93, 0.45); background: rgba(11,107,93, 0.14); }
+html[data-design="frost"] .irl-confirm { color: #fff; }
+html[data-design="frost"] .betbar { border: 1px solid rgba(11,107,93, 0.45); box-shadow: 0 0 0 1px rgba(255, 159, 26, 0.08),
+    0 0 22px rgba(11,107,93, 0.28),
+    0 12px 32px rgba(0, 0, 0, 0.7); }
+html[data-design="frost"] .betbar-mode { color: var(--text-primary); }
+html[data-design="frost"] .coupon-sheet { background: radial-gradient(120% 60% at 50% 0%, rgba(11,107,93, 0.1) 0%, transparent 60%),
+    var(--coupon-sheet-bg); border: 1px solid rgba(11,107,93, 0.28); box-shadow: 0 -16px 48px rgba(0, 0, 0, 0.85), 0 -1px 24px rgba(11,107,93, 0.12); }
+html[data-design="frost"] .coupon-handle { background: rgba(16,35,31,0.22); }
+html[data-design="frost"] .coupon-icon-btn { background: rgba(16,35,31,0.04); }
+html[data-design="frost"] .coupon-seg { background: rgba(16,35,31,0.05); }
+html[data-design="frost"] .slip-card { border: 1px solid rgba(16,35,31,0.091); }
+html[data-design="frost"] .slip-card-teams { color: var(--text-primary); }
+html[data-design="frost"] .slip-card-outcome { color: var(--text-primary); }
+html[data-design="frost"] .slip-card-stake { border-top: 1px dashed rgba(16,35,31,0.104); }
+html[data-design="frost"] .coupon-mini-field input { color: var(--text-primary); }
+html[data-design="frost"] .coupon-chain-link::before { background: repeating-linear-gradient(180deg, rgba(11,107,93, 0.75) 0 4px, transparent 4px 7px); }
+html[data-design="frost"] .coupon-chain-node { background: rgba(255,255,255,0.72); border: 1px solid rgba(11,107,93, 0.55); }
+html[data-design="frost"] .coupon-chain-total { background: rgba(11,107,93, 0.08); border: 1px dashed rgba(11,107,93, 0.4); }
+html[data-design="frost"] .coupon-stake-field { background: rgba(255,255,255,0.55); border: 1.5px solid rgba(11,107,93, 0.35); box-shadow: inset 0 0 18px rgba(11,107,93, 0.06); }
+html[data-design="frost"] .coupon-stake-field:focus-within { box-shadow: inset 0 0 18px rgba(11,107,93, 0.1), 0 0 18px rgba(11,107,93, 0.22); }
+html[data-design="frost"] .coupon-stake-field input { color: var(--text-primary); }
+html[data-design="frost"] .coupon-chips .stake-chip { background: rgba(16,35,31,0.05); color: var(--text-primary); }
+html[data-design="frost"] .coupon-chips .stake-chip.max { border-color: rgba(11,107,93, 0.55); background: rgba(11,107,93, 0.08); }
+html[data-design="frost"] .coupon-totals { background: rgba(16,35,31,0.03); border: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .coupon-totals-row b { color: var(--text-primary); }
+html[data-design="frost"] .coupon-warning { color: #dc2626; }
+html[data-design="frost"] .coupon-warning.is-notice { background: rgba(11,107,93, 0.1); border-color: rgba(11,107,93, 0.35); }
+html[data-design="frost"] .coupon-cta::after { background: linear-gradient(100deg, transparent 0%, rgba(16,35,31,0.35) 50%, transparent 100%); }
+html[data-design="frost"] .bet-accepted-coupon { background: rgba(11,107,93, 0.1); border: 1px solid rgba(11,107,93, 0.35); }
+html[data-design="frost"] .bet-accepted-stat { background: rgba(16,35,31,0.04); border: 1px solid rgba(16,35,31,0.078); }
+html[data-design="frost"] .bet-accepted-stat b { color: var(--text-primary); }
+html[data-design="frost"] .bet-accepted-btn.secondary { background: rgba(16,35,31,0.05); color: var(--text-primary); }
+html[data-design="frost"] .transfers-pill { background: rgba(11,107,93, 0.1); border: 1px solid rgba(11,107,93, 0.25); }
+html[data-design="frost"] .transfers-pill:hover,
+html[data-design="frost"] .transfers-pill.active { background: rgba(11,107,93, 0.25); box-shadow: 0 0 12px rgba(11,107,93, 0.35); }
+html[data-design="frost"] .transfers-page-title { color: var(--text-primary); }
+html[data-design="frost"] .transfers-refresh-btn { background: rgba(16,35,31,0.05); border: 1px solid rgba(16,35,31,0.13); }
+html[data-design="frost"] .transfers-refresh-btn:hover { color: var(--text-primary); background: rgba(16,35,31,0.1); }
+html[data-design="frost"] .transfers-tabs { background: rgba(255,255,255,0.576); border: 1px solid rgba(16,35,31,0.078); }
+html[data-design="frost"] .transfers-tab-btn.active { background: rgba(11,107,93, 0.15); border: 1px solid rgba(11,107,93, 0.3); }
+html[data-design="frost"] .transfers-card { background: rgba(255,255,255,0.662); border: 1px solid rgba(16,35,31,0.091); }
+html[data-design="frost"] .badge-draft { background: rgba(11,107,93, 0.15); border: 1px solid rgba(11,107,93, 0.3); }
+html[data-design="frost"] .ledger-grid { background: rgba(16,35,31,0.02); border: 1px solid rgba(16,35,31,0.052); }
+html[data-design="frost"] .ledger-stat-val { color: var(--text-primary); }
+html[data-design="frost"] .slot-pill { background: rgba(16,35,31,0.03); border: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .slot-pill-val { color: var(--text-primary); }
+html[data-design="frost"] .incoming-deals-box { background: linear-gradient(135deg, rgba(11,107,93, 0.08), rgba(0, 210, 255, 0.05)); border: 1px solid rgba(11,107,93, 0.3); }
+html[data-design="frost"] .req-item { background: rgba(16,35,31,0.02); border: 1px solid rgba(16,35,31,0.078); }
+html[data-design="frost"] .req-item:hover { border-color: rgba(16,35,31,0.156); }
+html[data-design="frost"] .req-item-title { color: var(--text-primary); }
+html[data-design="frost"] .req-ovr-tag { background: rgba(16,35,31,0.08); }
+html[data-design="frost"] .req-route b { color: var(--text-primary); }
+html[data-design="frost"] .req-footer { border-top: 1px solid rgba(16,35,31,0.052); }
+html[data-design="frost"] .btn-withdraw { border: 1px solid rgba(16,35,31,0.13); }
+html[data-design="frost"] .form-input,
+html[data-design="frost"] .form-select { background: rgba(16,35,31,0.03); border: 1px solid rgba(16,35,31,0.13); color: var(--text-primary); }
+html[data-design="frost"] .form-input:focus,
+html[data-design="frost"] .form-select:focus { box-shadow: 0 0 8px rgba(11,107,93, 0.2); }
+html[data-design="frost"] .kind-toggle-btn { background: rgba(16,35,31,0.03); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .kind-toggle-btn.active { background: rgba(11,107,93, 0.12); border-color: rgba(11,107,93, 0.35); }
+html[data-design="frost"] .role-toggle-btn { background: rgba(16,35,31,0.03); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .photo-upload-zone { border: 1px dashed rgba(16,35,31,0.234); background: rgba(16,35,31,0.01); }
+html[data-design="frost"] .photo-upload-zone:hover { background: rgba(11,107,93, 0.02); }
+html[data-design="frost"] .photo-preview-img { border: 1px solid rgba(16,35,31,0.13); }
+html[data-design="frost"] .submit-request-btn { color: #fff; box-shadow: 0 4px 15px rgba(11,107,93, 0.25); }
+html[data-design="frost"] .urn-item-card { background: rgba(16,35,31,0.02); border: 1px solid rgba(16,35,31,0.078); }
+html[data-design="frost"] .urn-item-card:hover { border-color: rgba(11,107,93, 0.3); }
+html[data-design="frost"] .urn-item-name { color: var(--text-primary); }
+html[data-design="frost"] .btn-buyout { color: #fff; }
+html[data-design="frost"] .btn-buyout:hover { box-shadow: 0 0 10px rgba(11,107,93, 0.4); }
+html[data-design="frost"] .market-apply-btn { background: rgba(11,107,93, 0.14); border: 1px solid rgba(11,107,93, 0.35); }
+html[data-design="frost"] .market-section-title { color: var(--text-primary); }
+html[data-design="frost"] .market-count { background: rgba(16,35,31,0.06); }
+html[data-design="frost"] .btn-offer { background: rgba(16,35,31,0.06); color: var(--text-primary); border: 1px solid rgba(16,35,31,0.182); }
+html[data-design="frost"] .btn-offer:hover { border-color: rgba(11,107,93, 0.5); }
+html[data-design="frost"] .transfers-empty { border: 1px dashed rgba(16,35,31,0.078); }
+html[data-design="frost"] .history-select { background: rgba(16,35,31,0.04); color: var(--text-primary); }
+html[data-design="frost"] .sanction-banner-title { color: var(--text-primary); }
+html[data-design="frost"] .hist-portrait-img,
+html[data-design="frost"] .hist-portrait-fallback { background: linear-gradient(160deg, rgba(11,107,93, 0.22), rgba(16,35,31,0.04)); border: 2px solid rgba(11,107,93, 0.45); }
+html[data-design="frost"] .hist-portrait-ovr { background: rgba(255,255,255,0.72); border: 1px solid rgba(11,107,93, 0.6); }
+html[data-design="frost"] .suggest-list { background: rgba(255,255,255,0.72); border: 1px solid rgba(16,35,31,0.156); }
+html[data-design="frost"] .suggest-item { border-bottom: 1px solid rgba(16,35,31,0.065); color: var(--text-primary); }
+html[data-design="frost"] .suggest-item:active { background: rgba(11,107,93, 0.12); }
+html[data-design="frost"] .coupons-page-title { color: var(--text-primary); }
+html[data-design="frost"] .coupons-filter-chips .category-pill { background: rgba(255,255,255,0.612); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .coupons-filter-chips .category-pill.active { background: rgba(11,107,93, 0.12); box-shadow: 0 0 12px rgba(11,107,93, 0.2); }
+html[data-design="frost"] .team-logo-wrapper { background: rgba(16,35,31,0.03); border: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .coupon-card { background: rgba(255,255,255,0.662); border: 1px solid rgba(16,35,31,0.091); }
+html[data-design="frost"] .coupon-header { border-bottom: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .coupon-badge-express { background: rgba(11,107,93, 0.12); border: 1px solid rgba(11,107,93, 0.28); }
+html[data-design="frost"] .coupon-id { color: var(--text-primary); }
+html[data-design="frost"] .coupon-status-badge.badge-pending { color: #0284c7; }
+html[data-design="frost"] .coupon-match-row { border-bottom: 1px solid rgba(16,35,31,0.065); }
+html[data-design="frost"] .coupon-team-name { color: var(--text-primary); }
+html[data-design="frost"] .coupon-score { color: var(--text-primary); }
+html[data-design="frost"] .coupon-prediction-pill.pending { color: #0284c7; }
+html[data-design="frost"] .coupon-pred-outcome { color: var(--text-primary); }
+html[data-design="frost"] .coupon-summary { background: rgba(16,35,31,0.02); border: 1px solid rgba(16,35,31,0.052); }
+html[data-design="frost"] .coupon-summary-val { color: var(--text-primary); }
+html[data-design="frost"] .coupon-summary-val.val-cashout { color: #0284c7; }
+html[data-design="frost"] .coupon-btn-repeat { background: rgba(16,35,31,0.04); border: 1px solid rgba(16,35,31,0.104); }
+html[data-design="frost"] .coupon-btn-repeat:hover { background: rgba(11,107,93, 0.08); border-color: rgba(11,107,93, 0.3); }
+html[data-design="frost"] .coupon-btn-cashout { color: #0284c7; }
+html[data-design="frost"] .coupons-empty-state { background: rgba(255,255,255,0.55); border: 1px dashed rgba(16,35,31,0.104); }
+
+/* ===== MANUAL FIXES: surfaces that keep their own dark variables / inline colors ===== */
+html[data-design="frost"] {
+  --coupon-obsidian: rgba(244, 248, 246, 0.94);
+  --coupon-sheet-bg: #f1f6f3;
+  --coupon-card-bg: linear-gradient(180deg, rgba(255,255,255,0.86) 0%, rgba(255,255,255,0.7) 100%);
+  --coupon-amber: #0b6b5d;
+  --coupon-gold-grad: linear-gradient(135deg, #c6f135 0%, #6fe0b0 55%, #2dd4bf 100%);
+}
+html[data-design="frost"] .betbar {
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+  box-shadow: 0 10px 30px rgba(16,35,31,0.18);
+}
+html[data-design="frost"] .betbar-odd-label { color: #4a625b; }
+html[data-design="frost"] .betbar-odd-val { color: #0b6b5d; text-shadow: none; }
+html[data-design="frost"] .betbar-count,
+html[data-design="frost"] .betbar-cta,
+html[data-design="frost"] .coupon-cta,
+html[data-design="frost"] .bet-accepted-btn.primary { color: #10231f; box-shadow: 0 6px 18px rgba(45,212,191,0.35); }
+html[data-design="frost"] .coupon-cta:disabled { filter: grayscale(0.6) opacity(0.6); }
+html[data-design="frost"] .coupon-stake-balance,
+html[data-design="frost"] .coupon-totals-row span,
+html[data-design="frost"] .bet-accepted-stat span { color: #4a625b; }
+html[data-design="frost"] .coupon-totals-row b,
+html[data-design="frost"] .bet-accepted-stat b { color: #10231f; }
+html[data-design="frost"] .bet-accepted-stat.win b { color: #0b6b5d; }
+html[data-design="frost"] .bet-accepted-btn.secondary { background: rgba(16,35,31,0.06); color: #10231f; border: 1px solid rgba(16,35,31,0.14); }
+
+/* Modals: light glass surface, ink text (inline `color:#fff` titles included) */
+html[data-design="frost"] .modal-overlay { background: rgba(16, 35, 31, 0.38); }
+html[data-design="frost"] .modal-content { background: rgba(244,248,246,0.97); border: 1px solid rgba(255,255,255,0.9); box-shadow: 0 20px 56px rgba(16,35,31,0.28); }
+html[data-design="frost"] .modal-content [style*="color: #fff"],
+html[data-design="frost"] .modal-content [style*="color:#fff"],
+html[data-design="frost"] .modal-title,
+html[data-design="frost"] .btn-modal-x { color: #10231f !important; }
+html[data-design="frost"] .btn-secondary { color: #10231f !important; background: rgba(16,35,31,0.06) !important; border: 1px solid rgba(16,35,31,0.14) !important; }
+html[data-design="frost"] .time-preset-btn { color: #10231f; background: rgba(16,35,31,0.05); border: 1px solid rgba(16,35,31,0.12); }
+html[data-design="frost"] .time-preset-btn.active,
+html[data-design="frost"] .time-preset-btn:active { color: #0b6b5d; background: rgba(11,107,93,0.12); border-color: rgba(11,107,93,0.5); }
+html[data-design="frost"] .btn-match-action.accent,
+html[data-design="frost"] .nav-item.active { color: #0b6b5d; }
+/* Page-level inline white titles (Match Center, hall of fame, etc.) */
+html[data-design="frost"] .view-section [style*="color: #fff"],
+html[data-design="frost"] .view-section [style*="color:#fff"] { color: #10231f !important; }
+html[data-design="frost"] .btn-primary { color: #fff; }
