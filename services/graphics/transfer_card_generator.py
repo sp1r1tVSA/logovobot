@@ -1,14 +1,17 @@
 """Карточка одобренного трансфера для ленты окна: портрет, маршрут клубов, цена и OVR.
 
-Чистый рендерер: получает готовые данные и путь к портрету, ничего не знает о БД и о
-`transfers/`. Синхронный (Pillow) — из асинхронного кода его зовут через `asyncio.to_thread`.
-Нет портрета — монограмма, нет логотипа — пустой значок; сами по себе они не ошибка.
+Светлый «журнальный» макет: огромное имя слева, вырезанный портрет в круге справа, круг
+окрашен в цвет клуба-получателя (берётся из его логотипа). Чистый рендерер: получает готовые
+данные и путь к портрету, ничего не знает о БД и о `transfers/`. Синхронный (Pillow) — из
+асинхронного кода его зовут через `asyncio.to_thread`. Нет портрета — монограмма, нет логотипа —
+пустое место; сами по себе они не ошибка.
 """
 
 from __future__ import annotations
 
-import functools
+import colorsys
 import io
+import functools
 import logging
 import os
 from dataclasses import dataclass
@@ -30,18 +33,17 @@ DISPLAY_FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "Liberation
 
 SCALE = 2
 W1, H1 = 720, 405
-WIDTH, HEIGHT = W1 * SCALE, H1 * SCALE
+WIDTH, HEIGHT = W1 * SCALE, H1 * SCALE          # рисуем сразу в итоговых пикселях
 
-BG_TOP = (11, 13, 20)
-BG_BOT = (22, 26, 38)
-SURFACE = (26, 30, 42)
-BORDER = (52, 60, 82)
-GOLD = (251, 191, 36)
+PAPER = (244, 241, 232)
+INK = (16, 16, 20)
+MUTED = (110, 110, 118)
 WHITE = (255, 255, 255)
-MUTED = (140, 154, 176)
-TEXT = (214, 222, 235)
-GREEN = (34, 197, 94)
-CYAN = (56, 189, 248)
+DEFAULT_ACCENT = (217, 142, 12)                  # когда нет ни одного логотипа
+
+# Круг с портретом.
+CIRCLE_CX, CIRCLE_CY, CIRCLE_R = 1050, 440, 340
+PORTRAIT_H = 800
 
 # Шапка по виду заявки. Здесь только то, что рисуется на картинке.
 HEADLINES = {
@@ -101,14 +103,6 @@ def route_sides(kind: str | None, from_club: str | None, to_club: str | None) ->
     return club(from_club), club(to_club)
 
 
-def _gradient(img: Image.Image) -> None:
-    draw = ImageDraw.Draw(img)
-    for y in range(HEIGHT):
-        t = y / (HEIGHT - 1)
-        draw.line([(0, y), (WIDTH, y)],
-                  fill=tuple(int(BG_TOP[i] + (BG_BOT[i] - BG_TOP[i]) * t) for i in range(3)) + (255,))
-
-
 def _load_logo(club: str, box: int) -> Image.Image | None:
     filename = get_team_logo_filename(club)
     path = os.path.join(LOGOS_DIR, filename) if filename else None
@@ -123,55 +117,91 @@ def _load_logo(club: str, box: int) -> Image.Image | None:
         return None
 
 
-def _draw_logo_tile(img: Image.Image, draw: ImageDraw.ImageDraw, side: Side, x: int, y: int, size: int) -> None:
-    """Плитка `size`×`size` со значком клуба; нет файла — пустая плитка, урна — подпись."""
-    draw.rounded_rectangle((x, y, x + size, y + size), radius=size // 5, fill=SURFACE, outline=BORDER, width=SCALE)
-    if side.kind == "urn":
-        font = _font(size // 3)
-        draw.text((x + size / 2, y + size / 2), "УРНА", fill=MUTED, font=font, anchor="mm")
-        return
-    if side.kind != "club":
-        return
-    pad = size // 7
-    logo = _load_logo(side.name, size - pad * 2)
-    if logo is not None:
-        img.paste(logo, (x + (size - logo.width) // 2, y + (size - logo.height) // 2), logo)
+def _dominant_color(logo: Image.Image) -> tuple[int, int, int] | None:
+    """Самый «цветной» оттенок логотипа; белое, серое и почти чёрное не считаются."""
+    small = logo.convert("RGBA").resize((48, 48), Image.Resampling.BILINEAR)
+    data = small.tobytes()
+    buckets: dict[tuple[int, int, int], list[int]] = {}
+    for i in range(0, len(data), 4):
+        r, g, b, a = data[i:i + 4]
+        if a < 200:
+            continue
+        _, sat, val = colorsys.rgb_to_hsv(r / 255, g / 255, b / 255)
+        if val < 0.18 or sat < 0.25 and val > 0.8:
+            continue
+        cell = buckets.setdefault((r // 32, g // 32, b // 32), [0, 0, 0, 0])
+        cell[0] += 1
+        cell[1] += r
+        cell[2] += g
+        cell[3] += b
+    if not buckets:
+        return None
+
+    def weight(cell):
+        n, r, g, b = cell
+        return n * (0.3 + colorsys.rgb_to_hsv(r / n / 255, g / n / 255, b / n / 255)[1])
+
+    n, r, g, b = max(buckets.values(), key=weight)
+    return r // n, g // n, b // n
 
 
-def _draw_portrait(img: Image.Image, draw: ImageDraw.ImageDraw, path: str | None, name: str,
-                   box: tuple[int, int, int, int]) -> None:
-    x0, y0, x1, y1 = box
-    w, h = x1 - x0, y1 - y0
-    radius = 18 * SCALE
-    mask = Image.new("L", (w, h), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, w - 1, h - 1), radius=radius, fill=255)
-    tile = None
+def _readable(color: tuple[int, int, int]) -> tuple[int, int, int]:
+    """Оттенок не светлее фона-бумаги, иначе круг сливается с ним."""
+    lum = 0.299 * color[0] + 0.587 * color[1] + 0.114 * color[2]
+    if lum <= 190:
+        return color
+    k = 190 / lum
+    return tuple(int(c * k) for c in color)
+
+
+def accent_color(kind: str | None, from_club: str | None, to_club: str | None) -> tuple[int, int, int]:
+    """Цвет круга: клуб-получатель, а нет его (продажа в урну) — клуб-отправитель."""
+    for club in (to_club, from_club):
+        if not club:
+            continue
+        logo = _load_logo(club, 96)
+        color = _dominant_color(logo) if logo is not None else None
+        if color:
+            return _readable(color)
+    return DEFAULT_ACCENT
+
+
+def _paste_logo(img: Image.Image, club: str, box: int, x: int, y: int) -> bool:
+    logo = _load_logo(club, box)
+    if logo is None:
+        return False
+    img.alpha_composite(logo.convert("RGBA"), (x + (box - logo.width) // 2, y + (box - logo.height) // 2))
+    return True
+
+
+def _draw_portrait(img: Image.Image, path: str | None, name: str, accent) -> None:
+    """Вырезанный портрет стоит на низу карточки; фото с фоном — кадрируется в круг; нет фото — монограмма."""
+    photo = None
     if path:
         try:
             with Image.open(path) as raw:
                 photo = raw.convert("RGBA")
-            backdrop = Image.new("RGBA", photo.size, SURFACE + (255,))
-            backdrop.alpha_composite(photo)
-            tile = ImageOps.fit(backdrop.convert("RGB"), (w, h), Image.Resampling.LANCZOS, centering=(0.5, 0.2))
         except Exception:
             logger.debug("transfer card: portrait %s unreadable", path, exc_info=True)
-            tile = None
-    if tile is None:
-        tile = Image.new("RGB", (w, h), SURFACE)
+    if photo is None:
         letters = "".join(part[0] for part in name.split()[:2]).upper() or "?"
-        ImageDraw.Draw(tile).text((w / 2, h / 2), letters, fill=BORDER, font=_font(88 * SCALE), anchor="mm")
-    img.paste(tile, (x0, y0), mask)
-    draw.rounded_rectangle(box, radius=radius, outline=GOLD, width=2 * SCALE)
-
-
-def _chip(draw: ImageDraw.ImageDraw, x: int, y: int, text: str, fill, ink) -> int:
-    font = _font(15 * SCALE)
-    pad = 10 * SCALE
-    w = int(draw.textlength(text, font=font)) + pad * 2
-    h = 26 * SCALE
-    draw.rounded_rectangle((x, y, x + w, y + h), radius=h // 2, fill=fill)
-    draw.text((x + w / 2, y + h / 2), text, fill=ink, font=font, anchor="mm")
-    return x + w + 8 * SCALE
+        ImageDraw.Draw(img).text((CIRCLE_CX, CIRCLE_CY), letters, fill=WHITE, font=_font(260), anchor="mm")
+        return
+    if photo.getchannel("A").getextrema()[0] >= 250:           # без прозрачности — фон не вырезать
+        d = CIRCLE_R * 2 - 56
+        tile = ImageOps.fit(photo, (d, d), Image.Resampling.LANCZOS, centering=(0.5, 0.25))
+        mask = Image.new("L", (d, d), 0)
+        ImageDraw.Draw(mask).ellipse((0, 0, d - 1, d - 1), fill=255)
+        img.paste(tile, (CIRCLE_CX - d // 2, CIRCLE_CY - d // 2), mask)
+        return
+    height = PORTRAIT_H
+    width = max(1, int(photo.width * height / photo.height))
+    photo = photo.resize((width, height), Image.Resampling.LANCZOS)
+    x, y = CIRCLE_CX - width // 2, HEIGHT - height
+    # alpha_composite не принимает выход за край — подрезаем сами.
+    left, right = max(0, -x), min(width, WIDTH - x)
+    if right > left:
+        img.alpha_composite(photo.crop((left, 0, right, height)), (max(x, 0), y))
 
 
 def render_transfer_card(
@@ -186,67 +216,70 @@ def render_transfer_card(
     transfer_id: int | None = None,
 ) -> bytes:
     """PNG-карточка трансфера. Ничего из окружения не требует: без файлов рисует заглушки."""
-    s = SCALE
-    img = Image.new("RGBA", (WIDTH, HEIGHT), BG_TOP)
-    _gradient(img)
+    accent = accent_color(kind, from_club, to_club)
+    img = Image.new("RGBA", (WIDTH, HEIGHT), PAPER + (255,))
     draw = ImageDraw.Draw(img)
 
-    # Золотая полоса слева и мягкое свечение за заголовком.
-    draw.rectangle((0, 0, 6 * s, HEIGHT), fill=GOLD)
-    glow = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-    ImageDraw.Draw(glow).ellipse((-120 * s, -160 * s, 320 * s, 120 * s), fill=GOLD + (34,))
-    img.alpha_composite(glow)
+    # Круг цвета клуба с тонким белым кантом.
+    cx, cy, r = CIRCLE_CX, CIRCLE_CY, CIRCLE_R
+    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=accent)
+    draw.ellipse((cx - r + 26, cy - r + 26, cx + r - 26, cy + r - 26), outline=WHITE + (90,), width=4)
+    _draw_portrait(img, portrait_path, player_name or "", accent)
     draw = ImageDraw.Draw(img)
 
-    # Шапка: бейдж и номер заявки.
+    # Шапка.
     headline = HEADLINES.get(kind or "", "ТРАНСФЕР")
-    font_head = _font(20 * s)
-    head_w = int(draw.textlength(headline, font=font_head)) + 28 * s
-    draw.rounded_rectangle((32 * s, 24 * s, 32 * s + head_w, 56 * s), radius=16 * s, fill=GOLD)
-    draw.text((32 * s + head_w / 2, 40 * s), headline, fill=(20, 16, 4), font=font_head, anchor="mm")
-    if transfer_id:
-        draw.text((688 * s, 40 * s), f"ТО · #{transfer_id}", fill=MUTED, font=_font(16 * s), anchor="rm")
+    draw.text((64, 58), headline, fill=INK, font=_font(30))
+    head_w = int(draw.textlength(headline, font=_font(30)))
+    draw.line([(64, 104), (64 + max(head_w, 226), 104)], fill=INK, width=4)
+    sub = "ТРАНСФЕРНОЕ ОКНО" + (f" · ЗАЯВКА #{transfer_id}" if transfer_id else "")
+    draw.text((64, 122), sub, fill=MUTED, font=_font(24))
 
-    # Портрет.
-    _draw_portrait(img, draw, portrait_path, player_name, (32 * s, 78 * s, 212 * s, 288 * s))
+    # Имя — огромное, по базовой линии, чтобы любая длина стояла ровно.
+    name, font_name = _fit(draw, (player_name or "—").upper(), 650, 230, 72)
+    draw.text((56, 380), name, fill=INK, font=font_name, anchor="ls")
 
-    # Правая колонка: имя, чипы, цена.
-    col_x, col_w = 240 * s, 448 * s
-    name, font_name = _fit(draw, player_name or "—", col_w, 44 * s, 24 * s)
-    draw.text((col_x, 84 * s), name, fill=WHITE, font=font_name)
-    chip_x = col_x
+    # Цена.
+    draw.text((64, 440), PRICE_CAPTIONS.get(kind or "", "СУММА"), fill=MUTED, font=_font(26))
+    price, font_price = _fit(draw, price_text, 620, 130, 60)
+    draw.text((60, 572), price, fill=INK, font=font_price, anchor="ls")
+    price_w = int(draw.textlength(price, font=font_price))
+    draw.rectangle((64, 624, 64 + max(price_w, 200), 634), fill=accent)
+
+    # OVR.
     if ovr:
-        chip_x = _chip(draw, chip_x, 142 * s, f"OVR {ovr}", GREEN, (6, 30, 14))
-    _chip(draw, chip_x, 142 * s, {
-        "deal": "СДЕЛКА", "free_agent": "СВОБОДНЫЙ АГЕНТ", "urn_buy": "ПОКУПКА ИЗ УРНЫ",
-        "surcharge": "ДОПЛАТА", "urn_sale": "ПРОДАЖА В УРНУ",
-    }.get(kind or "", "ТРАНСФЕР"), SURFACE, TEXT)
-    draw.text((col_x, 192 * s), PRICE_CAPTIONS.get(kind or "", "СУММА"), fill=MUTED, font=_font(14 * s))
-    price, font_price = _fit(draw, price_text, col_w, 58 * s, 30 * s)
-    draw.text((col_x, 208 * s), price, fill=GOLD, font=font_price)
+        draw.ellipse((1260, 70, 1380, 190), fill=INK)
+        draw.text((1320, 118), str(ovr), fill=WHITE, font=_font(62), anchor="mm")
+        draw.text((1320, 164), "OVR", fill=(190, 190, 200), font=_font(22), anchor="mm")
 
-    # Маршрут клубов.
-    top, bottom = 306 * s, 380 * s
-    draw.rounded_rectangle((32 * s, top, 688 * s, bottom), radius=16 * s, fill=SURFACE, outline=BORDER, width=s)
+    # Маршрут клубов: значок + название, стрелка между ними.
     left, right = route_sides(kind, from_club, to_club)
-    tile = 52 * s
-    ty = top + (bottom - top - tile) // 2
-    label_w = 200 * s
+    box, gap, label_w, y0 = 96, 16, 170, 676
 
     def label(side: Side) -> str:
-        return {"urn": "Урна", "none": "—"}.get(side.kind, side.name)
+        return {"urn": "", "none": "—"}.get(side.kind, side.name)
 
-    _draw_logo_tile(img, draw, left, 46 * s, ty, tile)
-    text, font = _fit(draw, label(left), label_w, 24 * s, 14 * s)
-    draw.text((46 * s + tile + 12 * s, (top + bottom) / 2), text, fill=WHITE, font=font, anchor="lm")
+    def place(side: Side, x: int) -> int:
+        """Рисует сторону с левого края `x`, возвращает правый край."""
+        drew_logo = False
+        if side.kind == "club":
+            drew_logo = _paste_logo(img, side.name, box, x, y0)
+        elif side.kind == "urn":
+            draw.rounded_rectangle((x, y0, x + box, y0 + box), radius=box // 5, fill=INK)
+            draw.text((x + box / 2, y0 + box / 2), "УРНА", fill=WHITE, font=_font(30), anchor="mm")
+            drew_logo = True
+        tx = x + (box + gap if drew_logo else 0)
+        if not label(side):
+            return x + box
+        text, font = _fit(draw, label(side), label_w, 40, 22)
+        draw.text((tx, y0 + box / 2), text, fill=INK, font=font, anchor="lm")
+        return tx + int(draw.textlength(text, font=font))
+
+    end = place(left, 64)
     if right is not None:
-        draw.text((360 * s, (top + bottom) / 2), "→", fill=GOLD, font=_font(40 * s), anchor="mm")
-        _draw_logo_tile(img, draw, right, 674 * s - tile, ty, tile)
-        text, font = _fit(draw, label(right), label_w, 24 * s, 14 * s)
-        draw.text((674 * s - tile - 12 * s, (top + bottom) / 2), text, fill=WHITE, font=font, anchor="rm")
-
-    # Подпись снизу.
-    draw.text((360 * s, 393 * s), "ЛОГОВО ФИФАРЕЙ · ТРАНСФЕРНОЕ ОКНО", fill=BORDER, font=_font(12 * s), anchor="mm")
+        mid = end + 40
+        draw.text((mid, y0 + box / 2), "→", fill=INK, font=_font(54), anchor="mm")
+        place(right, mid + 40)
 
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="PNG", optimize=True)

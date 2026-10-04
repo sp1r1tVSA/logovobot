@@ -74,12 +74,27 @@ class TestRenderer:
 
     def test_real_portrait_is_used(self, tmp_path):
         photo = tmp_path / "p.png"
-        Image.new("RGBA", (300, 400), (200, 30, 30, 255)).save(photo)
+        Image.new("RGBA", (300, 400), (200, 30, 30, 255)).save(photo)       # без прозрачности: кадр в круг
         with_photo = _png(gen.render_transfer_card(kind="deal", player_name="Rodri", price_text="1 млн",
                                                    portrait_path=str(photo)))
         without = _png(gen.render_transfer_card(kind="deal", player_name="Rodri", price_text="1 млн"))
-        x, y = 100 * gen.SCALE, 180 * gen.SCALE
-        assert with_photo.getpixel((x, y))[0] > 150 > without.getpixel((x, y))[0]
+        spot = (gen.CIRCLE_CX, gen.CIRCLE_CY + 200)
+        assert with_photo.getpixel(spot)[1] < 80 < without.getpixel(spot)[1]     # зелёный: фото красное, круг янтарный
+
+    def test_cutout_portrait_stands_on_the_circle(self, tmp_path):
+        photo = tmp_path / "cut.png"
+        img = Image.new("RGBA", (300, 400), (0, 0, 0, 0))
+        img.paste(Image.new("RGBA", (200, 400), (30, 30, 200, 255)), (50, 0))
+        img.save(photo)
+        out = _png(gen.render_transfer_card(kind="deal", player_name="Rodri", price_text="1 млн",
+                                            portrait_path=str(photo)))
+        assert out.getpixel((gen.CIRCLE_CX, gen.CIRCLE_CY))[2] > 150
+        assert out.getpixel((gen.WIDTH - 20, gen.HEIGHT - 20)) == gen.PAPER      # вне круга и силуэта — бумага
+
+    def test_no_ovr_means_no_badge(self):
+        with_ovr = _png(gen.render_transfer_card(kind="deal", player_name="Rodri", price_text="1 млн", ovr=99))
+        without = _png(gen.render_transfer_card(kind="deal", player_name="Rodri", price_text="1 млн"))
+        assert with_ovr.getpixel((1280, 100)) == gen.INK and without.getpixel((1280, 100)) == gen.PAPER
 
     def test_broken_portrait_falls_back_to_monogram(self, tmp_path):
         bad = tmp_path / "bad.png"
@@ -91,6 +106,32 @@ class TestRenderer:
         monkeypatch.setattr(gen, "LOGOS_DIR", "/nonexistent-dir")
         assert gen.render_transfer_card(kind="deal", player_name="Rodri", price_text="1 млн",
                                         from_club="Челси", to_club="Манчестер Сити")
+
+
+class TestAccent:
+    def test_default_without_logos(self, monkeypatch):
+        monkeypatch.setattr(gen, "LOGOS_DIR", "/nonexistent-dir")
+        assert gen.accent_color("deal", "Челси", "Манчестер Сити") == gen.DEFAULT_ACCENT
+
+    def test_dominant_color_ignores_white_and_black(self):
+        logo = Image.new("RGBA", (60, 60), (255, 255, 255, 255))
+        logo.paste(Image.new("RGBA", (30, 60), (10, 10, 10, 255)), (0, 0))
+        logo.paste(Image.new("RGBA", (20, 20), (0, 160, 60, 255)), (35, 20))
+        r, g, b = gen._dominant_color(logo)
+        assert g > r and g > b
+
+    def test_pale_color_is_darkened(self):
+        assert sum(gen._readable((250, 250, 120))) < sum((250, 250, 120))
+        assert gen._readable((20, 100, 60)) == (20, 100, 60)
+
+    def test_uses_logo_of_destination_club(self, tmp_path, monkeypatch):
+        name = gen.get_team_logo_filename("Манчестер Сити")
+        if not name:
+            pytest.skip("no logo mapping")
+        Image.new("RGBA", (64, 64), (0, 120, 220, 255)).save(tmp_path / name)
+        monkeypatch.setattr(gen, "LOGOS_DIR", str(tmp_path))
+        r, g, b = gen.accent_color("deal", "Челси", "Манчестер Сити")
+        assert b > r
 
 
 class TestRoute:
