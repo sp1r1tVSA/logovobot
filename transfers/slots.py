@@ -17,6 +17,7 @@ from transfers.engine import WindowSettings
 from transfers.service import InputError
 
 COIN_TX_TYPE = "transfer_slot"
+COIN_REFUND_TX_TYPE = "transfer_slot_refund"
 COIN_REF_TYPE = "transfer_slot"
 SLOT_TYPES = ("buy", "sell")
 SLOT_LABELS = {"buy": "покупок", "sell": "продаж"}
@@ -94,3 +95,36 @@ def buy(user_id: int, slot_type: str) -> dict:
         purchase_id = repo.add_slot_purchase(window["id"], club, slot_type, price, int(user_id), tx_id)
     return {"purchase_id": purchase_id, "club": club, "slot_type": slot_type, "price": price,
             "window_id": window["id"], "state": info(user_id)}
+
+
+def active_purchases(window_id: int) -> list[dict]:
+    """Действующие покупки слотов окна, новые сверху (для экрана возврата у ответственного)."""
+    rows = [p for p in repo.list_slot_purchases(window_id) if p["status"] == "active"]
+    return list(reversed(rows))
+
+
+def refund(purchase_id: int) -> dict:
+    """Вернуть монеты за слот и снять его с клуба. Монеты и статус меняются одной транзакцией.
+
+    Слот, под который уже подана заявка, не отдаём: после возврата клуб оказался бы
+    сверх лимита. Тогда сначала нужно отозвать или отклонить заявку.
+    """
+    with database.transaction():
+        purchase = repo.get_slot_purchase(int(purchase_id))
+        if purchase is None:
+            raise InputError("Такой покупки нет.")
+        if purchase["status"] != "active":
+            raise InputError("Эта покупка уже возвращена.")
+        ledger = repo.get_club_ledger(purchase["window_id"], purchase["club_name"])
+        used, limit = ((ledger.buys_used, ledger.buys_limit) if purchase["slot_type"] == "buy"
+                       else (ledger.sells_used, ledger.sells_limit))
+        if used > limit - 1:
+            raise InputError(f"Слот уже занят заявкой ({used} из {limit}): сначала отзовите или отклоните её.")
+        if not repo.refund_slot_purchase(purchase["id"]):
+            raise InputError("Эта покупка уже возвращена.")
+        price = int(purchase["price_coins"])
+        tx_id = None
+        if purchase["user_id"] and price > 0:
+            tx_id = database.refund_coins(int(purchase["user_id"]), price, COIN_REFUND_TX_TYPE,
+                                          COIN_REF_TYPE, purchase["coin_tx_id"])
+    return {**purchase, "status": "refunded", "refund_tx_id": tx_id}

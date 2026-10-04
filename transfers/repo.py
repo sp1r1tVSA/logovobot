@@ -431,6 +431,12 @@ def list_slot_purchases(window_id: int, club_name: str | None = None) -> list[di
     return rows
 
 
+def get_slot_purchase(purchase_id: int) -> dict | None:
+    with transaction() as conn:
+        row = conn.execute("SELECT * FROM transfer_slot_purchases WHERE id = ?", (purchase_id,)).fetchone()
+    return dict(row) if row else None
+
+
 def refund_slot_purchase(purchase_id: int) -> bool:
     with transaction() as conn:
         cur = conn.execute(

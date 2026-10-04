@@ -16,7 +16,7 @@ MANAGER = 777
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     with database.transaction() as conn:
-        for table in ("transfer_club_budgets", "transfer_core_snapshot", "transfer_topics"):
+        for table in ("transfer_slot_purchases", "transfer_club_budgets", "transfer_core_snapshot", "transfer_topics"):
             conn.execute(f"DELETE FROM {table}")
         conn.execute("UPDATE transfers SET urn_item_id = NULL")
         conn.execute("DELETE FROM transfers")
@@ -258,3 +258,67 @@ class TestPanel:
         monkeypatch.setattr(handlers, "INPUT_TTL_SECONDS", -1)
         handlers._set_pending(MANAGER, "topic", topic_type="feed")
         assert handlers._get_pending(MANAGER) is None
+
+
+# ─── Возврат слотов ──────────────────────────────────────────────────────────
+
+class TestSlotRefundPanel:
+    def _open(self):
+        with database.transaction() as conn:
+            for table in ("users", "coin_transactions", "user_wallets"):
+                conn.execute(f"DELETE FROM {table}")
+        wid = service.create_window(10)
+        repo.update_window_settings(wid, {"slot_price_coins": 300, "max_extra_slots": 2})
+        repo.open_window(wid, 1)
+        return wid
+
+    def _bought(self, wid=None):
+        from transfers import slots
+
+        wid = wid or self._open()
+        with database.transaction() as conn:
+            conn.execute("INSERT INTO users (telegram_id, username, team_name) VALUES (101, 'c', 'Челси')")
+        database.get_or_create_wallet(101)
+        with database.transaction() as conn:
+            conn.execute("UPDATE user_wallets SET balance = 1000 WHERE user_id = 101")
+        slots.buy(101, "buy")
+        return wid, repo.list_slot_purchases(wid)[0]["id"]
+
+    def test_hub_button_appears_only_with_purchases(self):
+        wid = self._open()
+        _, kb = handlers._hub_view()
+        assert "tw:slots:0" not in [b.callback_data for r in kb.inline_keyboard for b in r]
+        self._bought(wid)
+        _, kb = handlers._hub_view()
+        assert "tw:slots:0" in [b.callback_data for r in kb.inline_keyboard for b in r]
+
+    def test_refund_flow(self, _clean):
+        _, pid = self._bought()
+        upd = _press(handlers.cb_slots, "tw:slots:0")
+        text, kb = upd.callback_query.edits[-1]
+        labels = [b.text for r in kb.inline_keyboard for b in r]
+        assert any("Челси" in x for x in labels)
+        assert f"tw:slr:{pid}" in [b.callback_data for r in kb.inline_keyboard for b in r]
+        upd = _press(handlers.cb_slot_refund_ask, f"tw:slr:{pid}")
+        assert "Вернуть слот" in _last(upd)
+        bot = FakeBot()
+        bot.sent.clear()
+        upd = _press(handlers.cb_slot_refund_yes, f"tw:sly:{pid}", bot=bot)
+        assert "Слот возвращён" in _last(upd) and database.get_wallet_balance(101) == 1000
+        assert _clean[-1][0][1] == "transfer_slot_refunded"
+        assert repo.get_slot_purchase(pid)["status"] == "refunded"
+
+    def test_only_the_manager_refunds(self, monkeypatch):
+        _, pid = self._bought()
+        monkeypatch.setattr(config, "ADMIN_IDS", [990001])
+        upd = _press(handlers.cb_slot_refund_yes, f"tw:sly:{pid}", user_id=990001)
+        assert upd.callback_query.alerts and repo.get_slot_purchase(pid)["status"] == "active"
+
+    def test_routes_registered(self):
+        from telegram.ext import CallbackQueryHandler
+
+        added = []
+        handlers.register_handlers(SimpleNamespace(add_handler=lambda h, *a, **k: added.append(h)))
+        patterns = [h.pattern for h in added if isinstance(h, CallbackQueryHandler)]
+        for data in ("tw:slots:0", "tw:slr:5", "tw:sly:5"):
+            assert any(p.match(data) for p in patterns)

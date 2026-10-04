@@ -659,8 +659,10 @@ bought out cannot be cancelled.
 
 **Slots (`slots.py`).** An extra slot is bought for coins: `database.spend_coins` plus a
 `transfer_slot_purchases` row with `coin_tx_id`, in one transaction (coin type `transfer_slot`). The
-ceiling `max_extra_slots` is per club, buys and sells together. Slot purchases are not journaled.
-`repo.refund_slot_purchase` exists with no UI yet.
+ceiling `max_extra_slots` is per club, buys and sells together. Slot purchases are not journaled. The manager refunds one from the hub's «🪙 Слоты за монеты» screen
+(`tw:slots:N` → `tw:slr:ID` ask → `tw:sly:ID` confirm): `slots.refund` marks the purchase `refunded` and credits the coins back
+(`database.refund_coins`, coin type `transfer_slot_refund`) in one transaction, and refuses a slot that a request already
+occupies. The buyer gets a DM; journaled as `transfer_slot_refunded`.
 
 **Sanctions (`sanctions.py`).** A club or a coach is barred for 1–5 seasons including the current one
 (the window's `season_id`, else the active season); `until = from + N − 1`, which assumes consecutive season
@@ -673,7 +675,7 @@ viewer's own sanction (a banner, `my_status["sanction"]`). `requests.history` an
 
 **Admin journal.** Journaled actions, all labelled in `services/admin_journal.ACTIONS`:
 `transfer_request_approved`, `transfer_request_rejected`, `transfer_request_cancelled`,
-`transfer_squad_applied`, `transfer_squad_reverted`, `transfer_sanction_added`, `transfer_sanction_lifted`.
+`transfer_squad_applied`, `transfer_squad_reverted`, `transfer_sanction_added`, `transfer_sanction_lifted`, `transfer_slot_refunded`.
 Add any new transfer action there too.
 
 **Wiring.** `handlers/__init__.py` registers `transfers.handlers.register_handlers` before the AI

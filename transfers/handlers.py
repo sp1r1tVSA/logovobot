@@ -25,7 +25,7 @@ from telegram.ext import ContextTypes, filters
 
 from services import admin_journal
 from time_utils import MSK_LABEL, fmt_msk
-from transfers import approval, notify, repo, requests as req_mod, sanctions, service, squad
+from transfers import approval, notify, repo, requests as req_mod, sanctions, service, slots as slots_mod, squad
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -212,6 +212,8 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
                           else "📋 Одобренные заявки", "tw:appr:0")])
     rows.append([_btn("🧵 Темы группы", "tw:topics"), _btn("📋 Правила окна", "tw:settings")])
     rows.append([_btn("⛔ Санкции", "tw:sanc")])
+    if slots_mod.active_purchases(window["id"]):
+        rows.append([_btn("🪙 Слоты за монеты", "tw:slots:0")])
     if status == "open" and info["snapshot"] < info["clubs"]:
         rows.append([_btn("📸 Дописать снимок составов", "tw:snap")])
     rows.append([_btn("🔒 Закрыть окно", "tw:close"), _btn("🔄", "tw:hub")])
@@ -1274,6 +1276,79 @@ async def cb_open_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     await _show(update, text, kb)
 
 
+# ─── Возврат доп. слотов ─────────────────────────────────────────────────────
+
+SLOTS_PAGE = 8
+
+
+def _slot_label(p: dict) -> str:
+    kind = "покупки" if p["slot_type"] == "buy" else "продажи"
+    return f"{p['club_name']} — слот {kind}, {p['price_coins']} 🪙"
+
+
+def _slots_view(page: int) -> tuple[str, InlineKeyboardMarkup]:
+    window = _approved_window()
+    items = slots_mod.active_purchases(window["id"]) if window else []
+    if not items:
+        return "🪙 Купленных за монеты слотов нет.", InlineKeyboardMarkup([_back()])
+    pages = (len(items) + SLOTS_PAGE - 1) // SLOTS_PAGE
+    page = max(0, min(page, pages - 1))
+    lines = [f"🪙 <b>Слоты за монеты</b> — окно {_window_name(window)}", "",
+             f"Куплено: {len(items)}. Выберите покупку, чтобы вернуть монеты тренеру и снять слот с клуба."]
+    rows = [[_btn(f"#{p['id']} {_slot_label(p)}"[:60], f"tw:slr:{p['id']}")]
+            for p in items[page * SLOTS_PAGE:(page + 1) * SLOTS_PAGE]]
+    nav = []
+    if page > 0:
+        nav.append(_btn("◀️", f"tw:slots:{page - 1}"))
+    if page < pages - 1:
+        nav.append(_btn("▶️", f"tw:slots:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append(_back())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def cb_slots(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    page = int(update.callback_query.data.rsplit(":", 1)[1])
+    text, kb = await asyncio.to_thread(_slots_view, page)
+    await _show(update, text, kb)
+
+
+async def cb_slot_refund_ask(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    press = await _manager_press(update)
+    if press is None:
+        return
+    purchase = repo.get_slot_purchase(press[1])
+    if purchase is None or purchase["status"] != "active":
+        await _alert(update.callback_query, "Эта покупка уже возвращена.")
+        return
+    kb = InlineKeyboardMarkup([[_btn("↩️ Да, вернуть", f"tw:sly:{purchase['id']}"), _btn("Назад", "tw:slots:0")]])
+    await _show(update, f"↩️ <b>Вернуть слот?</b>\n{html.escape(_slot_label(purchase))}\n\n"
+                        f"Тренеру вернётся {purchase['price_coins']} 🪙, лимит клуба уменьшится на один слот.", kb)
+
+
+async def cb_slot_refund_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    press = await _manager_press(update)
+    if press is None:
+        return
+    user_id, purchase_id = press
+    try:
+        purchase = await asyncio.to_thread(slots_mod.refund, purchase_id)
+    except service.InputError as exc:
+        await _alert(update.callback_query, str(exc))
+        return
+    await admin_journal.record(
+        user_id, "transfer_slot_refunded", "transfer_slot", purchase["id"],
+        old={"status": "active"},
+        new={"status": "refunded", "club": purchase["club_name"], "slot_type": purchase["slot_type"],
+             "coins": purchase["price_coins"], "to_user": purchase["user_id"]})
+    await notify.notify_slot_refunded(context.bot, purchase)
+    text, kb = await asyncio.to_thread(_slots_view, 0)
+    await _show(update, f"✅ Слот возвращён: {html.escape(_slot_label(purchase))}.\n\n{text}", kb)
+
+
 async def cb_squad_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Применить к составам все одобренные заявки окна. Одна не прошла — остальные идут дальше."""
     query, user = update.callback_query, update.effective_user
@@ -1646,6 +1721,9 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_squad_rollback, pattern=r"^tw:sr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_squad_all, pattern=r"^tw:sqall$"))
     app.add_handler(CallbackQueryHandler(cb_portraits, pattern=r"^tw:ports$"))
+    app.add_handler(CallbackQueryHandler(cb_slots, pattern=r"^tw:slots:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_slot_refund_ask, pattern=r"^tw:slr:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_slot_refund_yes, pattern=r"^tw:sly:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_cancel_ask, pattern=r"^tw:cx:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_cancel_yes, pattern=r"^tw:cxy:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_cancel_back, pattern=r"^tw:cxn:\d+$"))

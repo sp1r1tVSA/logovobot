@@ -348,6 +348,17 @@ async def announce_slot_bought(bot, purchase: dict) -> bool:
     return await post_to_topic(bot, "feed", text)
 
 
+async def notify_slot_refunded(bot, purchase: dict) -> bool:
+    """Ответственный вернул монеты за слот — ЛС тренеру, купившему его."""
+    user_id = purchase.get("user_id")
+    if not user_id:
+        return False
+    what = "покупки" if purchase.get("slot_type") == "buy" else "продажи"
+    text = (f"↩️ <b>Слот {what} возвращён</b>\n\nКлуб: <b>{html.escape(purchase.get('club_name') or '')}</b>\n"
+            f"Вам возвращено {purchase.get('price_coins')} 🪙, лимит клуба уменьшен на один слот.")
+    return await dm_user(bot, int(user_id), text)
+
+
 async def notify_free_agent_recorded(bot, transfer: dict) -> bool:
     """Уведомление тренеру, подписавшему свободного агента."""
     user_id = transfer.get("to_user")

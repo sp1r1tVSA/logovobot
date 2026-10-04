@@ -148,6 +148,7 @@ ACTIONS: dict[str, tuple[str, str]] = {
     "transfer_squad_applied": ("transfers", "Трансфер применён к составу"),
     "transfer_squad_reverted": ("transfers", "Состав по трансферу откачен"),
     "transfer_request_cancelled": ("transfers", "Отменена одобренная заявка на трансфер"),
+    "transfer_slot_refunded": ("transfers", "Возвращён доп. слот ТО"),
 }
 
 

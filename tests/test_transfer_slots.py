@@ -239,6 +239,86 @@ class TestSpendCoins:
         assert database.get_wallet_balance(101) == 0
 
 
+class TestRefund:
+    def test_refund_returns_coins_and_frees_the_slot(self):
+        wid = _window()
+        slots.buy(101, "buy")
+        before = repo.get_club_ledger(wid, "Челси")
+        [p] = slots.active_purchases(wid)
+        result = slots.refund(p["id"])
+        assert result["status"] == "refunded" and result["refund_tx_id"]
+        assert database.get_wallet_balance(101) == 1000
+        assert repo.get_club_ledger(wid, "Челси").buys_limit == before.buys_limit - 1
+        assert slots.active_purchases(wid) == [] and slots.info(101)["left"] == 2
+        [tx] = [t for t in database.get_coin_transactions(101) if t["transaction_type"] == "transfer_slot_refund"]
+        assert tx["amount"] == PRICE and tx["reference_type"] == "transfer_slot" and tx["balance_after"] == 1000
+        assert tx["reference_id"] == p["coin_tx_id"]
+        assert database.get_or_create_wallet(101)["total_wagered"] == 0
+
+    def test_second_refund_is_refused(self):
+        wid = _window()
+        slots.buy(101, "buy")
+        pid = slots.active_purchases(wid)[0]["id"]
+        slots.refund(pid)
+        with pytest.raises(InputError, match="уже возвращена"):
+            slots.refund(pid)
+        assert database.get_wallet_balance(101) == 1000
+
+    def test_unknown_purchase(self):
+        _window()
+        with pytest.raises(InputError, match="нет"):
+            slots.refund(999)
+
+    def test_used_slot_is_not_refunded(self):
+        wid = _window()
+        for _ in range(3):
+            repo.insert_transfer(wid, "urn_buy", "Filler", "pending_manager", [], to_club="Челси",
+                                 to_user=101, price_k=1000, ovr=90, initiator_id=101)
+        slots.buy(101, "buy")
+        assert repo.get_club_ledger(wid, "Челси").buys_used == 3
+        [p] = slots.active_purchases(wid)
+        # слот ещё свободен: три покупки укладываются в базовый лимит 3
+        slots.refund(p["id"])
+        slots.buy(101, "buy")
+        repo.insert_transfer(wid, "urn_buy", "Fourth", "pending_manager", [], to_club="Челси",
+                             to_user=101, price_k=1000, ovr=90, initiator_id=101)
+        [p] = slots.active_purchases(wid)
+        with pytest.raises(InputError, match="занят заявкой"):
+            slots.refund(p["id"])
+        assert database.get_wallet_balance(101) == 1000 - PRICE
+
+    def test_coin_failure_rolls_the_status_back(self, monkeypatch):
+        wid = _window()
+        slots.buy(101, "buy")
+        pid = slots.active_purchases(wid)[0]["id"]
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("db locked")
+
+        monkeypatch.setattr(database, "refund_coins", boom)
+        with pytest.raises(RuntimeError):
+            slots.refund(pid)
+        assert repo.get_slot_purchase(pid)["status"] == "active"
+        assert database.get_wallet_balance(101) == 1000 - PRICE
+
+    def test_refund_coins_rejects_bad_amounts(self):
+        _balance(101, 100)
+        for bad in (0, -5, True, 1.5):
+            with pytest.raises(ValueError):
+                database.refund_coins(101, bad, "x")
+        assert database.get_wallet_balance(101) == 100
+
+    def test_dm_to_the_buyer(self):
+        wid = _window()
+        slots.buy(101, "sell")
+        purchase = slots.refund(slots.active_purchases(wid)[0]["id"])
+        bot = MagicMock()
+        bot.send_message = __import__("unittest.mock").mock.AsyncMock()
+        assert asyncio.run(notify.notify_slot_refunded(bot, purchase))
+        kwargs = bot.send_message.await_args.kwargs
+        assert kwargs["chat_id"] == 101 and "продажи" in kwargs["text"] and str(PRICE) in kwargs["text"]
+
+
 class TestAnnounce:
     def test_feed_line_mentions_club_kind_and_price(self, monkeypatch):
         sent = []

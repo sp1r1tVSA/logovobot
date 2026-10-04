@@ -14270,6 +14270,31 @@ def spend_coins(user_id: int, amount: int, tx_type: str, ref_type: str | None = 
         return int(cursor.lastrowid)
 
 
+def refund_coins(user_id: int, amount: int, tx_type: str, ref_type: str | None = None,
+                 ref_id: int | None = None) -> int:
+    """Вернуть монеты за покупку (зеркало `spend_coins`): id записи в coin_transactions.
+
+    Не трогает `total_wagered`. Сумма — положительное целое, иначе ValueError.
+    """
+    if isinstance(amount, bool) or not isinstance(amount, int) or amount <= 0:
+        raise ValueError("Сумма возврата — положительное целое число.")
+    with transaction() as conn:
+        cursor = conn.cursor()
+        get_or_create_wallet(user_id)
+        cursor.execute(
+            "UPDATE user_wallets SET balance = balance + ?, updated_at = datetime('now', '+3 hours')"
+            " WHERE user_id = ?",
+            (amount, user_id),
+        )
+        cursor.execute(
+            "INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,"
+            " balance_after, created_at) VALUES (?, ?, ?, ?, ?,"
+            " (SELECT balance FROM user_wallets WHERE user_id = ?), datetime('now', '+3 hours'))",
+            (user_id, amount, tx_type, ref_id, ref_type, user_id),
+        )
+        return int(cursor.lastrowid)
+
+
 def admin_adjust_wallet(user_id: int, amount: int, actor_id: int, reason: str) -> dict:
     """Ручное начисление (amount > 0) или списание (amount < 0) монет.
 
