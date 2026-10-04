@@ -707,6 +707,7 @@ def recognize_match_screenshots_bytes(
     if stats is not None:
         stats.setdefault("attempts", [])
         stats["model"] = None
+        stats.pop("rows", None)
     try:
         return _recognize_match_screenshots(
             images_bytes_list, mime_type, api_key, caption, squad_hints, stats,
@@ -727,6 +728,17 @@ def _exception_outcome(exc: Exception) -> str:
 def _note_attempt(stats: dict | None, model: str, outcome: str) -> None:
     if stats is not None:
         stats.setdefault("attempts", []).append({"model": model, "outcome": outcome})
+
+
+def _note_rows(stats: dict | None, m: dict) -> None:
+    """Keep the stats-table rows exactly as the model transcribed them (before any
+    swap or trim), so a lost assist can be traced to the model's reading."""
+    if stats is None:
+        return
+    rows = {side: m.get(f"{side}_rows") for side in ("left", "right")}
+    if any(isinstance(v, list) and v for v in rows.values()):
+        rows["score"] = [m.get("left_score"), m.get("right_score")]
+        stats["rows"] = rows
 
 
 def _recognize_match_screenshots(
@@ -906,6 +918,7 @@ def _recognize_match_screenshots(
                             impossible_result = parsed_data
                             if stats is not None:
                                 stats["model"] = m_name
+                                _note_rows(stats, first_m)
                         logger.warning(
                             f"AI Vision ({m_name}): more goals than the score, trying next model"
                         )
@@ -913,6 +926,7 @@ def _recognize_match_screenshots(
                     _note_attempt(stats, m_name, "ok")
                     if stats is not None:
                         stats["model"] = m_name
+                        _note_rows(stats, first_m)
                     return parsed_data
                 else:
                     logger.warning(f"Gemini model '{m_name}' returned no candidates: {res_json}")

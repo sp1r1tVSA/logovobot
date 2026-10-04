@@ -64,6 +64,7 @@ def record_run(
     stats = stats or {}
     attempts = stats.get("attempts") or []
     try:
+        raw_rows = _dump_rows(stats.get("rows"))
         return database.record_ocr_run(
             source,
             status,
@@ -76,10 +77,116 @@ def record_run(
             duration_ms=stats.get("duration_ms"),
             ocr_score1=score1,
             ocr_score2=score2,
+            raw_rows=raw_rows,
         )
     except Exception as e:
         logger.warning("Could not record OCR run (%s/%s): %s", source, status, e)
         return None
+
+
+# A table has at most ~11 rows a side; the cap only guards against a runaway answer.
+_MAX_RAW_ROWS_CHARS = 6000
+
+
+def _dump_rows(rows) -> str | None:
+    """JSON of the model's transcribed table rows, or None when there were none."""
+    if not rows:
+        return None
+    text = json.dumps(rows, ensure_ascii=False, default=str)
+    return text if len(text) <= _MAX_RAW_ROWS_CHARS else None
+
+
+def format_run_rows(run: dict | None) -> str:
+    """HTML for `/ocr_stats raw <match_id>`: what the model read for one run."""
+    if not run:
+        return "🔍 Для этого матча прогонов OCR нет."
+    esc = html.escape
+    lines = [
+        f"🔍 <b>Прогон OCR #{run.get('id')}</b> · матч {run.get('match_id')} · "
+        f"{esc(str(run.get('created_at') or ''))} МСК",
+        f"Источник: {esc(str(run.get('source')))} · статус: {esc(STATUS_LABELS.get(run.get('status'), str(run.get('status'))))}"
+        f" · модель: {esc(str(run.get('model') or '—'))}",
+    ]
+    if run.get("ocr_score1") is not None and run.get("ocr_score2") is not None:
+        lines.append(f"Счёт, как прочитан: {run['ocr_score1']} : {run['ocr_score2']} (хозяева : гости)")
+    raw = run.get("raw_rows")
+    try:
+        data = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        data = None
+    if not isinstance(data, dict):
+        lines.append("")
+        lines.append("Строк таблицы нет: прогон до сохранения строк, скриншот без таблицы или чтение не удалось.")
+        return "\n".join(lines)
+    titles = {"left": "Левая таблица (экран слева)", "right": "Правая таблица (экран справа)"}
+    for side in ("left", "right"):
+        rows = data.get(side)
+        lines.append("")
+        lines.append(f"<b>{titles[side]}</b> — цифры как на экране, слева направо")
+        if not isinstance(rows, list) or not rows:
+            lines.append("—")
+            continue
+        for row in rows:
+            if isinstance(row, dict):
+                name, digits = row.get("name") or row.get("player"), row.get("digits")
+            elif isinstance(row, (list, tuple)) and len(row) == 3:
+                name, digits = row[0], list(row[1:])
+            else:
+                lines.append(f"<code>{esc(str(row))}</code>")
+                continue
+            shown = " ".join(str(d) for d in digits) if isinstance(digits, (list, tuple)) else str(digits)
+            lines.append(f"• {esc(str(name))}: <code>{esc(shown)}</code>")
+    return "\n".join(lines)
+
+
+def _load_rows(raw) -> dict | None:
+    try:
+        data = json.loads(raw) if raw else None
+    except (TypeError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _compact_rows(rows) -> str:
+    """One line of a table as the model read it: «Openda 1 0 · Nakamura 0 1»."""
+    parts = []
+    for row in rows or []:
+        if isinstance(row, dict):
+            name, digits = row.get("name") or row.get("player"), row.get("digits")
+        elif isinstance(row, (list, tuple)) and len(row) == 3:
+            name, digits = row[0], list(row[1:])
+        else:
+            continue
+        shown = " ".join(str(d) for d in digits) if isinstance(digits, (list, tuple)) else str(digits)
+        parts.append(f"{name} {shown}")
+    return " · ".join(parts)
+
+
+def find_assist_gaps(run: dict) -> list[dict]:
+    """Sides of one run that scored but have no assist in the table as the model read it.
+
+    Goals vs assists is decided exactly as the recognizer does it (`rows_to_events`), so
+    the verdict matches what the coach saw on the confirmation card.
+    """
+    from services.ai.ai_recognizer import rows_to_events
+
+    data = _load_rows(run.get("raw_rows"))
+    score = data.get("score") if data else None
+    if not isinstance(score, (list, tuple)) or len(score) != 2:
+        return []
+    gaps = []
+    for side, value in zip(("left", "right"), score):
+        rows = data.get(side)
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+        if value <= 0 or not isinstance(rows, list) or not rows:
+            continue
+        goals, assists, _ = rows_to_events(rows, side, value)
+        if goals and not assists:
+            gaps.append({"side": side, "score": value, "rows": _compact_rows(rows)})
+    return gaps
 
 
 def mark_outcome(outcome: str, *, run_id: int | None = None, match_id: int | None = None,
@@ -161,8 +268,19 @@ def compute_ocr_stats(rows: list[dict]) -> dict:
     def _share(part: int, whole: int) -> float | None:
         return round(100.0 * part / whole, 1) if whole else None
 
+    with_rows = 0
+    assist_gaps: list[dict] = []
+    for r in ok_rows:
+        if not r.get("raw_rows"):
+            continue
+        with_rows += 1
+        for gap in find_assist_gaps(r):
+            assist_gaps.append({"run_id": r.get("id"), "match_id": r.get("match_id"), **gap})
+
     return {
         "total": total,
+        "with_rows": with_rows,
+        "assist_gaps": assist_gaps,
         "ok": len(ok_rows),
         "success_pct": _share(len(ok_rows), total),
         "by_status": dict(by_status.most_common()),
@@ -257,4 +375,37 @@ def format_report(stats: dict) -> str:
         lines.append("<b>Неудачные попытки</b>")
         for outcome, count in list(stats["errors"].items())[:8]:
             lines.append(f"• <code>{esc(outcome)}</code>: {count}")
+        lines.append("")
+
+    lines.extend(_format_assist_diagnostics(stats))
     return "\n".join(lines).rstrip()
+
+
+_MAX_GAPS_SHOWN = 5
+_MAX_GAP_ROWS_CHARS = 220
+
+
+def _format_assist_diagnostics(stats: dict) -> list[str]:
+    """The «lost assists» block of /ocr_stats: where the model's table reading has none."""
+    esc = html.escape
+    with_rows = stats.get("with_rows") or 0
+    lines = ["<b>Диагностика ассистов</b>"]
+    if not with_rows:
+        lines.append("Строки таблиц сохраняются с последнего обновления — появятся после новых прогонов.")
+        return lines
+    gaps = stats.get("assist_gaps") or []
+    lines.append(
+        f"Строки таблиц сохранены для {with_rows} прогонов; "
+        f"команда забила, а ассистов не прочитано: <b>{len(gaps)}</b>"
+    )
+    for gap in gaps[:_MAX_GAPS_SHOWN]:
+        side = "слева" if gap["side"] == "left" else "справа"
+        rows = gap["rows"]
+        if len(rows) > _MAX_GAP_ROWS_CHARS:
+            rows = rows[:_MAX_GAP_ROWS_CHARS].rstrip() + "…"
+        lines.append(f"• матч {gap['match_id']}, {side}, голов {gap['score']}: <code>{esc(rows)}</code>")
+    if len(gaps) > _MAX_GAPS_SHOWN:
+        lines.append(f"…и ещё {len(gaps) - _MAX_GAPS_SHOWN}")
+    if gaps:
+        lines.append("<i>Полные строки матча: /ocr_stats raw &lt;номер матча&gt;</i>")
+    return lines

@@ -256,6 +256,15 @@ async def _render_ocr(update: Update, days: int) -> None:
 async def cmd_ocr_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     if not await _guard(update, context, "ocr_stats"):
         return
+    args = context.args or []
+    if args and args[0].lower() in ("raw", "rows"):
+        # /ocr_stats raw <id матча> — что модель прочла в таблице последнего прогона
+        if len(args) < 2 or not args[1].isdigit():
+            await update.effective_message.reply_text("Использование: /ocr_stats raw &lt;номер матча&gt;", parse_mode="HTML")
+            return
+        run = await asyncio.to_thread(database.get_last_ocr_run, int(args[1]))
+        await _show(update, ocr_metrics.format_run_rows(run), None)
+        return
     days = 7
     if context.args and context.args[0].isdigit():
         days = max(1, min(365, int(context.args[0])))

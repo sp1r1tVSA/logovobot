@@ -183,3 +183,108 @@ class TestRecognizerStats:
         assert stats["attempts"] == [{"model": "", "outcome": "no_key"}]
         assert stats["model"] is None
         assert "duration_ms" in stats
+
+
+def _table_reply():
+    """A stats-table answer: the right side's assister Openda is `[1, 0]` in screen order."""
+    match = {"team1": "A", "team2": "B", "left_score": 3, "right_score": 1,
+             "left_rows": [{"name": "Le Fee", "digits": [1, 0]}, {"name": "Brobbey", "digits": [1, 1]},
+                           {"name": "Fofana", "digits": [1, 0]}, {"name": "Talbi", "digits": [0, 2]}],
+             "right_rows": [{"name": "Openda", "digits": [1, 0]}, {"name": "Nakamura", "digits": [0, 1]}]}
+    return json.dumps({"candidates": [{"content": {"parts": [{"text": json.dumps({"matches": [match]})}]}}]}
+                      ).encode("utf-8")
+
+
+class TestRawRows:
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    def test_recognizer_keeps_the_rows_as_transcribed(self, mock_get_opener):
+        opener = MagicMock()
+        mock_get_opener.return_value = opener
+        cm = MagicMock()
+        cm.__enter__.return_value.read.return_value = _table_reply()
+        opener.open.return_value = cm
+        stats: dict = {}
+        assert recognize_match_screenshots_bytes([b"img"], api_key="k", stats=stats) is not None
+        assert stats["rows"]["right"][0] == {"name": "Openda", "digits": [1, 0]}
+        assert len(stats["rows"]["left"]) == 4
+
+    @patch("services.ai.ai_recognizer._get_gemini_opener")
+    def test_no_rows_for_a_timeline_reading(self, mock_get_opener):
+        opener = MagicMock()
+        mock_get_opener.return_value = opener
+        cm = MagicMock()
+        cm.__enter__.return_value.read.return_value = _gemini_reply()
+        opener.open.return_value = cm
+        stats: dict = {}
+        assert recognize_match_screenshots_bytes([b"img"], api_key="k", stats=stats) is not None
+        assert "rows" not in stats
+
+    def test_migration_036_column(self):
+        with database.transaction() as conn:
+            row = conn.execute("SELECT 1 FROM schema_migrations WHERE version = ?",
+                               (database.MIGRATION_036_OCR_RAW_ROWS,)).fetchone()
+            cols = {r[1] for r in conn.execute("PRAGMA table_info(ocr_runs)")}
+        assert row is not None and "raw_rows" in cols
+
+    def test_record_and_read_back_by_match(self):
+        rows = {"left": [{"name": "A", "digits": [1, 0]}], "right": [{"name": "Openda", "digits": [1, 0]}]}
+        ocr_metrics.record_run("cabinet", "ok", stats={"model": "m", "rows": rows}, match_id=771100)
+        run = database.get_last_ocr_run(771100)
+        assert json.loads(run["raw_rows"]) == rows
+        report = ocr_metrics.format_run_rows(run)
+        assert "Openda" in report and "1 0" in report and "Правая таблица" in report
+
+    def test_run_without_rows_says_so(self):
+        ocr_metrics.record_run("cabinet", "failed", match_id=771101)
+        assert "Строк таблицы нет" in ocr_metrics.format_run_rows(database.get_last_ocr_run(771101))
+        assert "нет" in ocr_metrics.format_run_rows(None)
+
+    def test_oversized_rows_are_dropped_not_stored_truncated(self):
+        huge = {"left": [{"name": "x" * 50, "digits": [0, 0]}] * 500, "right": []}
+        assert ocr_metrics._dump_rows(huge) is None
+        assert ocr_metrics._dump_rows(None) is None
+
+
+class TestAssistGapLine:
+    def test_flags_a_scoring_side_without_assists(self):
+        from handlers.cabinet import _assist_gap_line
+        line = _assist_gap_line((("Лион", {}, 1), ("Сандерленд", {"TALBI": 2}, 3)))
+        assert "Лион" in line and "Сандерленд" not in line
+        assert "Изменить вручную" in line
+
+    def test_quiet_when_nothing_to_flag(self):
+        from handlers.cabinet import _assist_gap_line
+        assert _assist_gap_line((("A", {"X": 1}, 1), ("B", {}, 0))) == ""
+
+
+class TestAssistDiagnosticsInReport:
+    LOST = {"left": [{"name": "Le Fee", "digits": [1, 0]}, {"name": "Brobbey", "digits": [1, 1]}],
+            "right": [{"name": "Openda", "digits": [0, 0]}, {"name": "Nakamura", "digits": [0, 1]}],
+            "score": [2, 1]}
+
+    def _run(self, rows, **extra):
+        return {"id": 1, "match_id": 42, "status": "ok", "raw_rows": json.dumps(rows), **extra}
+
+    def test_finds_the_side_that_scored_without_assists(self):
+        gaps = ocr_metrics.find_assist_gaps(self._run(self.LOST))
+        assert [g["side"] for g in gaps] == ["right"]
+        assert "Openda 0 0" in gaps[0]["rows"]
+
+    def test_quiet_when_assists_are_read_or_scoreboard_missing(self):
+        ok = {**self.LOST, "right": [{"name": "Openda", "digits": [1, 0]}, {"name": "Nakamura", "digits": [0, 1]}]}
+        assert ocr_metrics.find_assist_gaps(self._run(ok)) == []
+        no_score = {k: v for k, v in self.LOST.items() if k != "score"}
+        assert ocr_metrics.find_assist_gaps(self._run(no_score)) == []
+        assert ocr_metrics.find_assist_gaps({"raw_rows": None}) == []
+
+    def test_report_lists_the_gap_and_points_to_raw(self):
+        stats = ocr_metrics.compute_ocr_stats([self._run(self.LOST, created_at="x")])
+        stats.update(days=7, since="s")
+        text = ocr_metrics.format_report(stats)
+        assert "Диагностика ассистов" in text and "матч 42" in text and "справа" in text
+        assert "/ocr_stats raw" in text
+
+    def test_report_without_stored_rows_says_so(self):
+        stats = ocr_metrics.compute_ocr_stats([{"id": 1, "status": "ok"}])
+        stats.update(days=7, since="s")
+        assert "после новых прогонов" in ocr_metrics.format_report(stats)

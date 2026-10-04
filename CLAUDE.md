@@ -734,6 +734,16 @@ admin's actions.
   or `rejected` (draft rejected). Only a pending run changes. **Accuracy is not stored**: it
   compares the score read with the match's final score on read, so a corrected result
   counts at once, and technical results are excluded. Recording never raises.
+  The model's transcribed stats-table rows (`left_rows` / `right_rows`, screen order, digits as
+  seen) go in `stats["rows"]` and are kept in `ocr_runs.raw_rows` (migration `036`, JSON, dropped
+  when over 6000 chars; absent for timeline readings and for runs before 036), with the
+  scoreboard (`score`). The `/ocr_stats` report ends with «Диагностика ассистов»: runs where a
+  side scored but `rows_to_events` finds no assist (`ocr_metrics.find_assist_gaps`), last 5 with
+  the rows inline. `/ocr_stats raw
+  <match_id>` shows the latest run's rows — the way to tell whether the model misread a table
+  row when an assist went missing. The cabinet confirmation card also adds an «Ассисты не
+  распознаны» hint (`cabinet._assist_gap_line`) for a side that scored with zero assists read
+  from a table; it is a soft nudge toward «Изменить вручную», not a block.
 - **`/audit [@user|id] [категория]`** (alias `/admin_log`) — the admin journal, 10 per page,
   filtered by category (`admin_journal.CATEGORIES`). Handlers write through
   `admin_journal.record(actor_id, action, target_type, target_id, old=, new=,

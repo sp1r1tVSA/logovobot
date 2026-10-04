@@ -2327,6 +2327,9 @@ def init_db() -> None:
         # ─── 035: IRL-ставки на реальные матчи ────────────────────────────────
         _ensure_irl_betting(cursor)
 
+        # ─── 036: сырые строки таблицы статистики в прогоне OCR ──────────────
+        _ensure_ocr_raw_rows_column(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -18644,6 +18647,28 @@ def _ensure_ocr_runs_schema(cursor: sqlite3.Cursor) -> None:
     )
 
 
+MIGRATION_036_OCR_RAW_ROWS = "036_ocr_raw_rows"
+
+
+def _ensure_ocr_raw_rows_column(cursor: sqlite3.Cursor) -> None:
+    """Миграция 036: `ocr_runs.raw_rows` — строки таблицы статистики как их прочла модель.
+
+    Нужна, чтобы по /ocr_stats было видно, что именно вернул Gemini, когда в
+    результате пропал ассист: нули, пропущенная строка или перепутанные колонки.
+    Аддитивно: у прогонов до миграции колонка пустая.
+    """
+    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (MIGRATION_036_OCR_RAW_ROWS,))
+    if cursor.fetchone():
+        return
+    cols = {r[1] for r in cursor.execute("PRAGMA table_info(ocr_runs)").fetchall()}
+    if "raw_rows" not in cols:
+        cursor.execute("ALTER TABLE ocr_runs ADD COLUMN raw_rows TEXT")
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_036_OCR_RAW_ROWS, "ocr_runs.raw_rows: model-transcribed stats table rows"),
+    )
+
+
 def _reattribute_series_auto_voids(cursor: sqlite3.Cursor) -> None:
     """Миграция 032: аннулирование рынков несыгранной игры серии — действие системы.
 
@@ -19962,6 +19987,7 @@ def record_ocr_run(
     duration_ms: int | None = None,
     ocr_score1: int | None = None,
     ocr_score2: int | None = None,
+    raw_rows: str | None = None,
 ) -> int:
     """Store one screenshot-OCR run; returns its id."""
     with transaction() as conn:
@@ -19970,13 +19996,22 @@ def record_ocr_run(
             """
             INSERT INTO ocr_runs (
                 source, user_id, match_id, images, status, model, attempts, attempt_log,
-                duration_ms, ocr_score1, ocr_score2, outcome, created_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now', '+3 hours'))
+                duration_ms, ocr_score1, ocr_score2, raw_rows, outcome, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', datetime('now', '+3 hours'))
             """,
             (source, user_id, match_id, images, status, model, attempts, attempt_log,
-             duration_ms, ocr_score1, ocr_score2),
+             duration_ms, ocr_score1, ocr_score2, raw_rows),
         )
         return cursor.lastrowid
+
+
+def get_last_ocr_run(match_id: int) -> dict | None:
+    """The newest OCR run of a match (any source), or None."""
+    with transaction() as conn:
+        row = conn.execute(
+            "SELECT * FROM ocr_runs WHERE match_id = ? ORDER BY id DESC LIMIT 1", (match_id,),
+        ).fetchone()
+    return dict(row) if row else None
 
 
 OCR_OUTCOMES = ("accepted", "manual", "rejected")
