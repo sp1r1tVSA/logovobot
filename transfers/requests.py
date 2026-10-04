@@ -402,6 +402,28 @@ def portrait_url(player_name: str | None, *clubs: str | None) -> str | None:
     return None
 
 
+def prefetch_portrait(t: dict) -> str | None:
+    """Скачать портрет игроку одобренной заявки в кэш `assets/players/`. Блокирует — зовите в потоке.
+
+    Игрока опознают по ростеру реального клуба, а тот, откуда он ушёл, и есть его клуб, поэтому
+    пробуем `from_club`, затем `to_club`; «Урна» клубом не считается. Уже есть файл — сети нет.
+    Никогда не бросает: нет портрета — Mini App рисует монограмму.
+    """
+    name = t.get("player_name")
+    clubs = [c for c in (t.get("from_club"), t.get("to_club"))
+             if c and norm_club(c) != norm_club(URN_CLUB)]
+    if not name or not clubs or portrait_url(name, *clubs):
+        return None
+    for club in clubs:
+        try:
+            path = player_photos.fetch_and_cache(name, club)
+        except Exception:
+            continue
+        if path:
+            return path
+    return None
+
+
 def serialize(t: dict, viewer_id: int | None = None, *, private: bool = False) -> dict:
     """Заявка для Mini App. Без Telegram ID и текста комментария.
 

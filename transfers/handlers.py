@@ -929,6 +929,17 @@ async def cb_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
                       _decision_summary(t, "✅ Одобрена заявка") + warn + note,
                       _transfer_keyboard(t, back=False))
     await notify.notify_approved(context.bot, t)
+    _prefetch_portrait_later(t)
+
+
+_background: set = set()
+
+
+def _prefetch_portrait_later(t: dict) -> None:
+    """Портрет для истории качаем в фоне: сеть не должна держать ответ менеджеру."""
+    task = asyncio.ensure_future(asyncio.to_thread(req_mod.prefetch_portrait, t))
+    _background.add(task)
+    task.add_done_callback(_background.discard)
 
 
 async def cb_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -415,6 +415,40 @@ class TestPortraitUrl:
         (tmp_path / "oldie_урна.png").write_bytes(b"x" * 10)
         assert req_mod.portrait_url("Oldie", req_mod.URN_CLUB) is None
 
+    def test_prefetch_tries_source_club_then_target_and_skips_urn(self, monkeypatch):
+        from services.graphics import player_photos
+        calls = []
+
+        def fake_fetch(name, team=None, **kw):
+            calls.append(team)
+            return "/x.png" if team == "Арсенал" else None
+
+        monkeypatch.setattr(player_photos, "fetch_and_cache", fake_fetch)
+        monkeypatch.setattr(req_mod, "portrait_url", lambda *a: None)
+        t = {"player_name": "Oldie", "from_club": "Челси", "to_club": "Арсенал"}
+        assert req_mod.prefetch_portrait(t) == "/x.png"
+        assert calls == ["Челси", "Арсенал"]
+        calls.clear()
+        assert req_mod.prefetch_portrait({"player_name": "Oldie", "from_club": "Челси",
+                                          "to_club": req_mod.URN_CLUB}) is None
+        assert calls == ["Челси"]
+        calls.clear()
+        assert req_mod.prefetch_portrait({"player_name": "Oldie", "from_club": req_mod.URN_CLUB,
+                                          "to_club": None}) is None
+        assert calls == []
+
+    def test_prefetch_skips_network_when_portrait_cached_and_never_raises(self, monkeypatch):
+        from services.graphics import player_photos
+
+        def boom(*a, **kw):
+            raise RuntimeError("network down")
+
+        monkeypatch.setattr(player_photos, "fetch_and_cache", boom)
+        monkeypatch.setattr(req_mod, "portrait_url", lambda *a: "/assets/players/o.png")
+        assert req_mod.prefetch_portrait({"player_name": "Oldie", "to_club": "Арсенал"}) is None
+        monkeypatch.setattr(req_mod, "portrait_url", lambda *a: None)
+        assert req_mod.prefetch_portrait({"player_name": "Oldie", "to_club": "Арсенал"}) is None
+
     def test_history_items_carry_portrait_url(self, tmp_path, monkeypatch):
         from services.graphics import player_photos
         monkeypatch.setattr(player_photos, "PHOTOS_DIR", str(tmp_path))
