@@ -1102,6 +1102,10 @@ def _transfer_keyboard(t: dict, *, back: bool) -> InlineKeyboardMarkup | None:
 def _transfer_view(t: dict, *, back: bool) -> tuple[str, InlineKeyboardMarkup | None]:
     lines = [f"📋 {notify.describe_transfer(t)}",
              f"Статус: {TRANSFER_STATUS_LABELS.get(t['status'], t['status'])}"]
+    if t.get("from_club"):
+        lines.append(f"Откуда: {html.escape(t['from_club'])}")
+    if t.get("to_club"):
+        lines.append(f"Куда: {html.escape(t['to_club'])}")
     if t.get("price_k"):
         lines.append(f"Сумма: {format_k(t['price_k'])}")
     if t["status"] in QUEUE_STATUSES:

@@ -412,3 +412,10 @@ class TestQueuePanel:
         handlers.register_handlers(SimpleNamespace(add_handler=lambda h, *a, **k: added.append(h)))
         first = next(h for h in added if isinstance(h, CallbackQueryHandler) and h.pattern.match("tw:q:3"))
         assert first.callback is handlers.cb_queue
+
+    def test_request_screen_has_from_and_to_labels(self):
+        wid = self._window()
+        tid = repo.insert_transfer(wid, "deal", "Салах", "pending_manager", from_club="Арсенал", to_club="Челси")
+        text, _ = handlers._transfer_view(repo.get_transfer(tid), back=True)
+        lines = text.splitlines()
+        assert "Откуда: Арсенал" in lines and "Куда: Челси" in lines
