@@ -37,6 +37,7 @@ STATUS_WORDS = {
 class Decision:
     transfer: dict
     warnings: list[dict]
+    partner: dict | None = None     # вторая половина обмена, решённая вместе с заявкой
 
 
 def _manager_only(manager_id: int | None) -> None:
@@ -51,6 +52,16 @@ def _pending(transfer_id) -> dict:
     if t["status"] != "pending_manager":
         raise InputError(f"Заявка #{t['id']} {STATUS_WORDS.get(t['status'], t['status'])}.")
     return t
+
+
+def _legs(t: dict) -> list[dict]:
+    """Заявка и вторая половина обмена (если есть); обе обязаны ждать решения."""
+    partner = repo.get_swap_partner(t)
+    if partner is None:
+        return [t]
+    if partner["status"] != "pending_manager":
+        raise InputError(f"Вторая половина обмена #{partner['id']} {STATUS_WORDS.get(partner['status'], partner['status'])}.")
+    return [t, partner]
 
 
 def _recheck(t: dict, window: dict) -> tuple[list[Issue], list[dict]]:
@@ -79,15 +90,21 @@ def approve(manager_id: int, transfer_id) -> Decision:
         window = repo.get_window(t["window_id"])
         if window is None:
             raise InputError("Окно заявки не найдено.")
-        blocks, warnings = _recheck(t, window)
-        if blocks:
-            raise InputError("Одобрить нельзя:\n" + "\n".join(f"• {b.message}" for b in blocks))
-        if not repo.set_transfer_status(t["id"], "approved", expected=("pending_manager",),
-                                        actor_id=int(manager_id)):
-            raise InputError("Заявку уже решили.")
-        repo.set_transfer_warnings(t["id"], warnings)
-        _remember_player(t)
-        return Decision(repo.get_transfer(t["id"]), warnings)
+        legs = _legs(t)
+        results = []
+        for leg in legs:
+            blocks, warnings = _recheck(leg, window)
+            if blocks:
+                raise InputError("Одобрить нельзя:\n" + "\n".join(f"• {b.message}" for b in blocks))
+            results.append((leg, warnings))
+        for leg, warnings in results:
+            if not repo.set_transfer_status(leg["id"], "approved", expected=("pending_manager",),
+                                            actor_id=int(manager_id)):
+                raise InputError("Заявку уже решили.")
+            repo.set_transfer_warnings(leg["id"], warnings)
+            _remember_player(leg)
+        partner = repo.get_transfer(legs[1]["id"]) if len(legs) > 1 else None
+        return Decision(repo.get_transfer(t["id"]), [w for _, ws in results for w in ws], partner)
 
 
 def reject(manager_id: int, transfer_id, reason: str | None = None) -> dict:
@@ -96,7 +113,8 @@ def reject(manager_id: int, transfer_id, reason: str | None = None) -> dict:
     text = " ".join((reason or "").split())[:REJECT_REASON_MAX] or None
     with database.transaction():
         t = _pending(transfer_id)
-        if not repo.set_transfer_status(t["id"], "rejected", expected=("pending_manager",),
-                                        actor_id=int(manager_id), reason=text):
-            raise InputError("Заявку уже решили.")
+        for leg in _legs(t):
+            if not repo.set_transfer_status(leg["id"], "rejected", expected=("pending_manager",),
+                                            actor_id=int(manager_id), reason=text):
+                raise InputError("Заявку уже решили.")
         return repo.get_transfer(t["id"])

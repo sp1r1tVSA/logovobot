@@ -298,9 +298,96 @@ def insert_transfer(window_id: int, kind: str, player_name: str, status: str,
         return int(cur.lastrowid)
 
 
+# Заявка вместе с парой по обмену: `swap_partner_id` — вторая половина обмена или NULL.
+_TRANSFER_SELECT = ("SELECT t.*, l.partner_id AS swap_partner_id FROM transfers t "
+                    "LEFT JOIN transfer_swap_links l ON l.transfer_id = t.id")
+
+
 def get_transfer(transfer_id: int) -> dict | None:
     with transaction() as conn:
-        return _row(conn.execute("SELECT * FROM transfers WHERE id = ?", (transfer_id,)).fetchone())
+        return _row(conn.execute(_TRANSFER_SELECT + " WHERE t.id = ?", (transfer_id,)).fetchone())
+
+
+def link_swap(first_id: int, second_id: int) -> None:
+    """Связать две заявки в обмен (в обе стороны)."""
+    if first_id == second_id:
+        raise ValueError("a swap needs two different transfers")
+    with transaction() as conn:
+        conn.execute("INSERT INTO transfer_swap_links (transfer_id, partner_id) VALUES (?, ?)",
+                     (first_id, second_id))
+        conn.execute("INSERT INTO transfer_swap_links (transfer_id, partner_id) VALUES (?, ?)",
+                     (second_id, first_id))
+
+
+# ─── Доска «ищу / продаю» ────────────────────────────────────────────────────
+
+# Отклики считаются по статусу их сделки: висящие и одобренные — отдельно.
+_LOT_SELECT = (
+    "SELECT b.*, "
+    "(SELECT COUNT(*) FROM transfer_board_responses r JOIN transfers t ON t.id = r.transfer_id "
+    " WHERE r.lot_id = b.id AND t.status IN ('pending_counterparty', 'pending_manager')) AS responses_pending, "
+    "(SELECT COUNT(*) FROM transfer_board_responses r JOIN transfers t ON t.id = r.transfer_id "
+    " WHERE r.lot_id = b.id AND t.status = 'approved') AS responses_approved "
+    "FROM transfer_board_lots b"
+)
+
+
+def insert_lot(window_id: int, club_name: str, user_id: int, side: str, *, player_name: str | None,
+               ovr: int | None, price_k: int | None, note: str | None) -> int:
+    with transaction() as conn:
+        cur = conn.execute(
+            "INSERT INTO transfer_board_lots (window_id, club_name, user_id, side, player_name, norm_name, "
+            "ovr, price_k, note, status, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?)",
+            (window_id, club_name, int(user_id), side, player_name,
+             norm_player(player_name) if player_name else None, ovr, price_k, note, now_msk_str()),
+        )
+        return int(cur.lastrowid)
+
+
+def get_lot(lot_id: int) -> dict | None:
+    with transaction() as conn:
+        return _row(conn.execute(_LOT_SELECT + " WHERE b.id = ?", (lot_id,)).fetchone())
+
+
+def list_lots(window_id: int, *, status: str | None = "open") -> list[dict]:
+    """Лоты окна, новые сверху. `status=None` — все."""
+    sql, args = _LOT_SELECT + " WHERE b.window_id = ?", [window_id]
+    if status is not None:
+        sql += " AND b.status = ?"
+        args.append(status)
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(sql + " ORDER BY b.id DESC", args).fetchall()]
+
+
+def close_lot(lot_id: int, reason: str, closed_by: int | None) -> bool:
+    """Снять открытый лот. False — он уже снят."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE transfer_board_lots SET status = 'closed', closed_reason = ?, closed_by = ?, closed_at = ? "
+            "WHERE id = ? AND status = 'open'",
+            (reason, closed_by, now_msk_str(), lot_id),
+        )
+        return cur.rowcount > 0
+
+
+def link_board_response(transfer_id: int, lot_id: int) -> None:
+    with transaction() as conn:
+        conn.execute("INSERT INTO transfer_board_responses (transfer_id, lot_id) VALUES (?, ?)",
+                     (transfer_id, lot_id))
+
+
+def board_lot_of(transfer_id: int) -> int | None:
+    """Лот, на который откликается заявка, или None."""
+    with transaction() as conn:
+        row = conn.execute("SELECT lot_id FROM transfer_board_responses WHERE transfer_id = ?",
+                           (transfer_id,)).fetchone()
+        return int(row["lot_id"]) if row else None
+
+
+def get_swap_partner(transfer: dict | None) -> dict | None:
+    """Вторая половина обмена или None, если заявка не из обмена."""
+    pid = (transfer or {}).get("swap_partner_id")
+    return get_transfer(int(pid)) if pid else None
 
 
 def list_transfers(window_id: int, *, club: str | None = None,
@@ -310,7 +397,7 @@ def list_transfers(window_id: int, *, club: str | None = None,
     """Заявки окна по порядку подачи. Фильтры — в Python: окно невелико."""
     with transaction() as conn:
         rows = [dict(r) for r in conn.execute(
-            "SELECT * FROM transfers WHERE window_id = ? ORDER BY id", (window_id,)
+            _TRANSFER_SELECT + " WHERE t.window_id = ? ORDER BY t.id", (window_id,)
         ).fetchall()]
     if statuses is not None:
         allowed = set(statuses)

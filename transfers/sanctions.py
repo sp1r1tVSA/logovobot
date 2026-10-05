@@ -17,6 +17,8 @@
 
 from __future__ import annotations
 
+import difflib
+
 import database
 from club_registry import resolve_team_name
 from transfers import repo, service
@@ -46,6 +48,24 @@ def _season_for_viewer() -> int | None:
     return int(season) if season else None
 
 
+_CLOSE_CUTOFF = 0.7
+_CLOSE_LIMIT = 3
+
+
+def close_clubs(text: str, clubs: list[str], limit: int = _CLOSE_LIMIT) -> list[str]:
+    """Клубы, похожие на запрос (опечатка, часть названия): подсказка, когда точного совпадения нет."""
+    wanted = norm_club(text)
+    if len(wanted) < 3:
+        return []
+    scored = []
+    for club in clubs:
+        key = norm_club(club)
+        ratio = max(difflib.SequenceMatcher(None, wanted, part).ratio() for part in [key, *key.split()])
+        if ratio >= _CLOSE_CUTOFF:
+            scored.append((-ratio, key, club))
+    return [club for _, _, club in sorted(scored)[:limit]]
+
+
 def find_club(text: str) -> str:
     """Клуб лиги по тексту ответственного: точное имя, алиас реестра или единственное вхождение."""
     raw = (text or "").strip()
@@ -62,7 +82,9 @@ def find_club(text: str) -> str:
         return partial[0]
     if len(partial) > 1:
         raise InputError("Под запрос подходит несколько клубов: " + ", ".join(partial[:6]) + ". Уточните.")
-    raise InputError("Такого клуба нет в лиге. Пришлите название точнее.")
+    near = close_clubs(raw, clubs)
+    hint = " Похоже на: " + ", ".join(near) + "." if near else ""
+    raise InputError("Такого клуба нет в лиге." + hint + " Пришлите название точнее.")
 
 
 def find_coach(text: str) -> dict:

@@ -92,6 +92,17 @@ def manager_text(window: dict, pending: list[dict], waiting_counterparty: int, n
     return "\n".join(lines)
 
 
+def waiting_since(t: dict) -> dt.datetime | None:
+    """С какого момента заявка ждёт: последнее изменение статуса, иначе подача."""
+    return parse_msk(t.get("updated_at") or t.get("created_at"))
+
+
+def waiting_hours(t: dict, now: dt.datetime) -> int | None:
+    """Сколько полных часов заявка ждёт; None, если время не читается."""
+    since = waiting_since(t)
+    return None if since is None else max(0, int((now - since).total_seconds() // 3600))
+
+
 def stale_pending(transfers: list[dict], now: dt.datetime) -> list[dict]:
     """Заявки у ответственного, которые лежат дольше `STALE_HOURS`."""
     border = now - dt.timedelta(hours=STALE_HOURS)
@@ -99,7 +110,7 @@ def stale_pending(transfers: list[dict], now: dt.datetime) -> list[dict]:
     for t in transfers:
         if t["status"] != "pending_manager":
             continue
-        since = parse_msk(t.get("updated_at") or t.get("created_at"))
+        since = waiting_since(t)
         if since is not None and since <= border:
             out.append(t)
     return out

@@ -21,6 +21,7 @@ async def job_auto_close(context) -> None:
     logger.info("transfers: window %s auto-closed, %d requests rejected", window["id"], len(result.rejected))
     bot = context.bot
     await notify.announce_close(bot, window, result.rejected, auto=True)
+    await notify.announce_recap(bot, window)
     await notify.dm_manager(
         bot,
         f"🔒 Окно закрыто автоматически ({fmt_msk(window['auto_close_at'])} {MSK_LABEL}). "

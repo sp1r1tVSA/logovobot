@@ -24,8 +24,8 @@ from telegram.error import TelegramError
 from telegram.ext import ContextTypes, filters
 
 from services import admin_journal
-from time_utils import MSK_LABEL, fmt_msk
-from transfers import approval, notify, repo, requests as req_mod, sanctions, service, slots as slots_mod, squad
+from time_utils import MSK_LABEL, fmt_msk, now_msk
+from transfers import approval, board, notify, recap, reconcile, repo, reminders, requests as req_mod, sanctions, service, slots as slots_mod, squad
 from transfers.engine import format_k
 
 logger = logging.getLogger(__name__)
@@ -179,6 +179,7 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
         rows = [[_btn("➕ Создать окно", "tw:create")]]
         if _approved_items(latest):
             rows.append([_btn("📋 Одобренные заявки", "tw:appr:0")])
+            rows.append([_btn("🏁 Итоги окна", "tw:recap")])
         rows.append([_btn("🧵 Темы группы", "tw:topics"), _btn("⛔ Санкции", "tw:sanc")])
         return "\n".join(lines), InlineKeyboardMarkup(rows)
 
@@ -205,11 +206,19 @@ def _hub_view() -> tuple[str, InlineKeyboardMarkup]:
     if status == "draft":
         rows.append([_btn("🔓 Открыть окно", "tw:open")])
     rows.append([_btn("💰 Бюджеты", "tw:budgets:0"), _btn("⏰ Автозакрытие", "tw:auto")])
+    waiting, awaiting_coach = _queue_items(window)
+    if waiting or awaiting_coach:
+        rows.append([_btn(f"📬 Что висит ({len(waiting)} ждут решения)" if waiting else "📬 Что висит", "tw:q:0")])
     approved = _approved_items(window)
     if approved:
         unapplied = sum(1 for t in approved if squad.needs_apply(t))
         rows.append([_btn(f"📋 Одобренные заявки ({unapplied} без состава)" if unapplied
                           else "📋 Одобренные заявки", "tw:appr:0")])
+    if approved:
+        rows.append([_btn("🧮 Сверка составов", "tw:rec"), _btn("🏁 Итоги окна", "tw:recap")])
+    lots = board.live_lots(window) if status == "open" else []
+    if lots:
+        rows.append([_btn(f"📌 Доска ({len(lots)})", "tw:bd:0")])
     rows.append([_btn("🧵 Темы группы", "tw:topics"), _btn("📋 Правила окна", "tw:settings")])
     rows.append([_btn("⛔ Санкции", "tw:sanc")])
     if slots_mod.active_purchases(window["id"]):
@@ -318,6 +327,7 @@ async def cb_close_ok(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     await admin_journal.record(actor, "transfer_window_closed", "transfer_window", window["id"],
                                new={"rejected": len(result.rejected)})
     await notify.announce_close(context.bot, window, result.rejected, auto=False)
+    await notify.announce_recap(context.bot, window)
     await _show(update, f"✅ Окно закрыто. Отклонено неподтверждённых заявок: {len(result.rejected)}.",
                 InlineKeyboardMarkup([_back()]))
 
@@ -963,6 +973,11 @@ async def _close_card(bot, chat_id: int, message_id: int, text: str, reply_marku
 
 
 def _decision_summary(t: dict, word: str) -> str:
+    partner = repo.get_swap_partner(t)
+    if partner is not None:
+        lead, second = (t, partner) if t["id"] < partner["id"] else (partner, t)
+        return (f"{word} <b>#{lead['id']}+#{second['id']}</b> — обмен "
+                f"{html.escape(lead.get('player_name') or '')} ⇄ {html.escape(second.get('player_name') or '')}")
     return f"{word} <b>#{t['id']}</b> — {html.escape(t.get('player_name') or '')}"
 
 
@@ -982,19 +997,23 @@ async def cb_approve(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
         return
     t = decision.transfer
     await query.answer("✅ Одобрено")
-    await admin_journal.record(
-        user.id, "transfer_request_approved", "transfer", t["id"],
-        old={"status": "pending_manager"},
-        new={"status": "approved", "kind": t["kind"], "player": t["player_name"],
-             "from": t["from_club"], "to": t["to_club"], "price_k": t["price_k"],
-             "warnings": [w["code"] for w in decision.warnings]})
+    legs = [t] + ([decision.partner] if decision.partner else [])
+    for leg in legs:
+        await admin_journal.record(
+            user.id, "transfer_request_approved", "transfer", leg["id"],
+            old={"status": "pending_manager"},
+            new={"status": "approved", "kind": leg["kind"], "player": leg["player_name"],
+                 "from": leg["from_club"], "to": leg["to_club"], "price_k": leg["price_k"],
+                 "swap_partner": leg.get("swap_partner_id"),
+                 "warnings": [w["code"] for w in decision.warnings]})
     warn = f"\n⚠️ Предупреждений: {len(decision.warnings)}" if decision.warnings else ""
     note = "\nСостав клуба пока не менялся — применить его можно кнопкой ниже." if squad.changes_squad(t) else ""
     await _close_card(context.bot, query.message.chat.id, query.message.message_id,
                       _decision_summary(t, "✅ Одобрена заявка") + warn + note,
                       _transfer_keyboard(t, back=False))
     await notify.notify_approved(context.bot, t)
-    _prefetch_portrait_later(t)
+    for leg in legs:
+        _prefetch_portrait_later(leg)
 
 
 _background: set = set()
@@ -1033,11 +1052,12 @@ async def cb_reject(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
 async def _finish_reject(bot, user_id: int, entry: dict, reason: str | None) -> str:
     t = await asyncio.to_thread(approval.reject, user_id, entry["transfer_id"], reason)
-    await admin_journal.record(
-        user_id, "transfer_request_rejected", "transfer", t["id"],
-        old={"status": "pending_manager"},
-        new={"status": "rejected", "kind": t["kind"], "player": t["player_name"],
-             "reason": t["decided_reason"]})
+    for leg in [t] + ([p] if (p := repo.get_swap_partner(t)) else []):
+        await admin_journal.record(
+            user_id, "transfer_request_rejected", "transfer", leg["id"],
+            old={"status": "pending_manager"},
+            new={"status": "rejected", "kind": leg["kind"], "player": leg["player_name"],
+                 "swap_partner": leg.get("swap_partner_id"), "reason": leg["decided_reason"]})
     why = f"\nПричина: {html.escape(t['decided_reason'])}" if t["decided_reason"] else ""
     await _close_card(bot, entry["card_chat_id"], entry["card_message_id"],
                       _decision_summary(t, "❌ Отклонена заявка") + why)
@@ -1073,10 +1093,18 @@ async def cb_reject_cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 # ─── Состав: применить, откатить, отменить одобренную ───────────────────────
 
 APPROVED_PAGE = 8
+QUEUE_PAGE = 5
+QUEUE_STATUSES = ("pending_manager", "pending_counterparty")
 
 
 def _transfer_keyboard(t: dict, *, back: bool) -> InlineKeyboardMarkup | None:
     rows = []
+    if t["status"] in QUEUE_STATUSES:
+        if t["status"] == "pending_manager":
+            rows.append([_btn("✅ Одобрить", f"tw:ap:{t['id']}"), _btn("❌ Отклонить", f"tw:rj:{t['id']}")])
+        if back:
+            rows.append(_back("tw:q:0", "⬅️ К очереди"))
+        return InlineKeyboardMarkup(rows) if rows else None
     if t["status"] == "approved":
         if squad.needs_apply(t):
             rows.append([_btn("📋 Применить к составу", f"tw:sq:{t['id']}")])
@@ -1091,8 +1119,21 @@ def _transfer_keyboard(t: dict, *, back: bool) -> InlineKeyboardMarkup | None:
 def _transfer_view(t: dict, *, back: bool) -> tuple[str, InlineKeyboardMarkup | None]:
     lines = [f"📋 {notify.describe_transfer(t)}",
              f"Статус: {TRANSFER_STATUS_LABELS.get(t['status'], t['status'])}"]
+    if t.get("from_club"):
+        lines.append(f"Откуда: {html.escape(t['from_club'])}")
+    if t.get("to_club"):
+        lines.append(f"Куда: {html.escape(t['to_club'])}")
     if t.get("price_k"):
         lines.append(f"Сумма: {format_k(t['price_k'])}")
+    if (partner := repo.get_swap_partner(t)) is not None:
+        lines.append(f"🔁 Обмен: вторая половина #{partner['id']} — "
+                     f"{html.escape(partner.get('player_name') or '')} "
+                     f"({TRANSFER_STATUS_LABELS.get(partner['status'], partner['status'])})")
+    if t["status"] in QUEUE_STATUSES:
+        hours = reminders.waiting_hours(t, now_msk())
+        if hours is not None:
+            lines.append(f"Ждёт: {_age(hours)}")
+        lines.extend(f"⚠️ {html.escape(w)}" for w in _warning_texts(t))
     if t["status"] == "approved":
         if not squad.changes_squad(t):
             lines.append("Состав: доплата состав не меняет")
@@ -1205,11 +1246,14 @@ async def cb_cancel_yes(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         await _alert(update.callback_query, str(exc))
         return
     lines = rolled.lines if rolled else []
-    await admin_journal.record(
-        user_id, "transfer_request_cancelled", "transfer", t["id"],
-        old={"status": "approved"},
-        new={"status": "cancelled", "kind": t["kind"], "player": t["player_name"],
-             "from": t["from_club"], "to": t["to_club"], "price_k": t["price_k"], "squad_reverted": lines})
+    partner = repo.get_swap_partner(t)
+    for leg in [t] + ([partner] if partner and partner["status"] == "cancelled" else []):
+        await admin_journal.record(
+            user_id, "transfer_request_cancelled", "transfer", leg["id"],
+            old={"status": "approved"},
+            new={"status": "cancelled", "kind": leg["kind"], "player": leg["player_name"],
+                 "from": leg["from_club"], "to": leg["to_club"], "price_k": leg["price_k"],
+                 "swap_partner": leg.get("swap_partner_id"), "squad_reverted": lines})
     summary = _decision_summary(t, "🛑 Отменена заявка") + ("\n" + "\n".join(html.escape(x) for x in lines) if lines else "")
     kb = InlineKeyboardMarkup([_back("tw:appr:0", "⬅️ К одобренным")]) if _is_private(update) else None
     await _show(update, summary, kb)
@@ -1274,6 +1318,173 @@ async def cb_open_transfer(update: Update, context: ContextTypes.DEFAULT_TYPE) -
         return
     text, kb = _transfer_view(t, back=True)
     await _show(update, text, kb)
+
+
+# ─── Что висит: очередь заявок без решения ───────────────────────────────────
+
+def _age(hours: int) -> str:
+    days, rest = divmod(max(0, hours), 24)
+    return f"{days} д {rest} ч" if days else f"{rest} ч"
+
+
+def _warning_texts(t: dict) -> list[str]:
+    """Предупреждения, сохранённые в заявке (JSON в `transfers.warnings`)."""
+    raw = t.get("warnings")
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw) if isinstance(raw, str) else raw
+    except ValueError:
+        return []
+    return [str(w.get("message") if isinstance(w, dict) else w) for w in items or [] if w]
+
+
+def _queue_items(window: dict | None) -> tuple[list[dict], list[dict]]:
+    """(ждут ответственного, ждут вторую сторону): самые давние сверху."""
+    if window is None:
+        return [], []
+    items = [t for t in repo.list_transfers(window["id"], statuses=QUEUE_STATUSES)
+             if not t.get("swap_partner_id") or t["id"] < t["swap_partner_id"]]
+
+    def oldest_first(t: dict):
+        since = reminders.waiting_since(t)
+        return (since is None, since.isoformat() if since else "", t["id"])
+
+    manager = sorted((t for t in items if t["status"] == "pending_manager"), key=oldest_first)
+    counterparty = sorted((t for t in items if t["status"] == "pending_counterparty"), key=oldest_first)
+    return manager, counterparty
+
+
+def _queue_line(t: dict, now) -> str:
+    hours = reminders.waiting_hours(t, now)
+    stale = hours is not None and hours >= reminders.STALE_HOURS
+    parts = [("🔔 " if stale else "") + notify.describe_transfer(t)]
+    if t.get("price_k"):
+        parts.append(format_k(t["price_k"]))
+    if hours is not None:
+        parts.append(_age(hours))
+    line = " · ".join(parts)
+    warns = _warning_texts(t)
+    if warns:
+        line += "\n   ⚠️ " + html.escape("; ".join(warns))
+    return line
+
+
+def _queue_view(page: int) -> tuple[str, InlineKeyboardMarkup]:
+    window = _approved_window()
+    manager, counterparty = _queue_items(window)
+    if not manager and not counterparty:
+        return "📬 Всё решено — заявок без ответа нет.", InlineKeyboardMarkup([_back()])
+    now = now_msk()
+    stale = len(reminders.stale_pending(manager, now))
+    pages = max(1, (len(manager) + QUEUE_PAGE - 1) // QUEUE_PAGE)
+    page = max(0, min(page, pages - 1))
+    lines = [f"📬 <b>Что висит</b> — окно {_window_name(window)}", "",
+             f"Ждут вашего решения: <b>{len(manager)}</b>"
+             + (f" (🔔 дольше {reminders.STALE_HOURS} ч: {stale})" if stale else ""),
+             f"Ждут вторую сторону: <b>{len(counterparty)}</b>"
+             + (" — при закрытии окна будут отклонены" if counterparty else "")]
+    rows = []
+    chunk = manager[page * QUEUE_PAGE:(page + 1) * QUEUE_PAGE]
+    if chunk:
+        lines.append("")
+    for t in chunk:
+        lines.append(_queue_line(t, now))
+        rows.append([_btn(f"#{t['id']} {t.get('player_name') or ''}"[:60], f"tw:tr:{t['id']}")])
+    if counterparty:
+        lines.extend(["", "<b>Ждут вторую сторону:</b>"])
+        lines.extend(_queue_line(t, now) for t in counterparty[:QUEUE_PAGE])
+        if len(counterparty) > QUEUE_PAGE:
+            lines.append(f"… и ещё {len(counterparty) - QUEUE_PAGE}")
+    nav = []
+    if page > 0:
+        nav.append(_btn("◀️", f"tw:q:{page - 1}"))
+    if page < pages - 1:
+        nav.append(_btn("▶️", f"tw:q:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([_btn("🔄", f"tw:q:{page}")])
+    rows.append(_back())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def cb_queue(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    page = int(update.callback_query.data.rsplit(":", 1)[1])
+    text, kb = await asyncio.to_thread(_queue_view, page)
+    await _show(update, text, kb)
+
+
+# ─── Доска «ищу / продаю» ────────────────────────────────────────────────────
+
+BOARD_PAGE = 8
+
+
+def _board_view(page: int, viewer_is_manager: bool) -> tuple[str, InlineKeyboardMarkup]:
+    lots = board.live_lots()
+    if not lots:
+        return "📌 На доске пусто — лотов нет (или окно не открыто).", InlineKeyboardMarkup([_back()])
+    pages = max(1, (len(lots) + BOARD_PAGE - 1) // BOARD_PAGE)
+    page = max(0, min(page, pages - 1))
+    chunk = lots[page * BOARD_PAGE:(page + 1) * BOARD_PAGE]
+    sells = sum(1 for lot in lots if lot["side"] == "sell")
+    lines = [f"📌 <b>Доска ТО</b> — продают: {sells}, ищут: {len(lots) - sells}", ""]
+    for lot in chunk:
+        line = f"#{lot['id']} · <b>{html.escape(lot['club_name'])}</b> — {notify.lot_line(lot)}"
+        if lot.get("responses_pending"):
+            line += f" · откликов: {lot['responses_pending']}"
+        lines.append(line)
+        if lot.get("note"):
+            lines.append(f"    <i>{html.escape(lot['note'])}</i>")
+    if pages > 1:
+        lines.extend(["", f"Страница {page + 1} из {pages}"])
+    rows = []
+    if viewer_is_manager:
+        buttons = [_btn(f"✖ #{lot['id']}", f"tw:bdx:{lot['id']}") for lot in chunk]
+        rows.extend(buttons[i:i + 4] for i in range(0, len(buttons), 4))
+    nav = []
+    if page > 0:
+        nav.append(_btn("◀️", f"tw:bd:{page - 1}"))
+    if page < pages - 1:
+        nav.append(_btn("▶️", f"tw:bd:{page + 1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([_btn("🔄", f"tw:bd:{page}")])
+    rows.append(_back())
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def cb_board(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    page = int(update.callback_query.data.rsplit(":", 1)[1])
+    manager = service.is_transfer_manager(update.effective_user.id)
+    text, kb = await asyncio.to_thread(_board_view, page, manager)
+    await _show(update, text, kb)
+
+
+async def cb_board_remove(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Снять лот с доски — только ответственный; автору уходит ЛС."""
+    query, user = update.callback_query, update.effective_user
+    if not query or not user:
+        return
+    if not service.is_transfer_manager(user.id):
+        await _alert(query, "⛔ Снимать лоты может только ответственный за трансферы")
+        return
+    try:
+        lot = await asyncio.to_thread(board.remove_lot, user.id, query.data.rsplit(":", 1)[1])
+    except service.InputError as exc:
+        await _alert(query, str(exc))
+        return
+    await admin_journal.record(
+        user.id, "transfer_board_lot_removed", "transfer_board_lot", lot["id"],
+        old={"status": "open"},
+        new={"status": "closed", "club": lot["club_name"], "side": lot["side"],
+             "player": lot["player_name"], "to_user": lot["user_id"]})
+    await notify.notify_board_lot_removed(context.bot, lot)
+    text, kb = await asyncio.to_thread(_board_view, 0, True)
+    await _show(update, f"✅ Лот #{lot['id']} снят.\n\n{text}", kb)
 
 
 # ─── Возврат доп. слотов ─────────────────────────────────────────────────────
@@ -1375,6 +1586,94 @@ async def cb_squad_all(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     if failed:
         head += "\n⚠️ Не применено:\n" + "\n".join(html.escape(f) for f in failed)
     await _show(update, head + "\n\n" + text, kb)
+
+
+RECONCILE_LIMIT = 8   # строк на вид расхождения; остальное — «и ещё N»
+
+
+def _reconcile_view(viewer_is_manager: bool) -> tuple[str, InlineKeyboardMarkup]:
+    window = _approved_window()
+    if window is None or not _approved_items(window):
+        return "🧮 Одобренных заявок нет — сверять нечего.", InlineKeyboardMarkup([_back()])
+    issues = reconcile.reconcile(window["id"])
+    lines = [f"🧮 <b>Сверка составов</b> — окно {_window_name(window)}", ""]
+    rows = []
+    if not issues:
+        lines.append("✅ Составы совпадают с одобренными заявками.")
+    else:
+        counts = reconcile.summary(issues)
+        lines.append("Расхождений: <b>%d</b>" % len(issues))
+        for kind in reconcile.KIND_ORDER:
+            group = [i for i in issues if i.kind == kind]
+            if not group:
+                continue
+            lines += ["", f"<b>{reconcile.KIND_LABELS[kind]}</b> ({len(group)}):"]
+            lines += [f"• {html.escape(i.text)}" for i in group[:RECONCILE_LIMIT]]
+            if len(group) > RECONCILE_LIMIT:
+                lines.append(f"…и ещё {len(group) - RECONCILE_LIMIT}")
+        if counts["not_applied"] and viewer_is_manager:
+            rows.append([_btn(f"📋 Применить все ({counts['not_applied']})", "tw:sqall")])
+        if any(counts[k] for k in ("missing", "extra", "duplicate")):
+            lines += ["", "Правки вне ТО бот сам не откатывает: исправьте состав вручную или отмените заявку."]
+    rows.append([_btn("🔄", "tw:rec"), _btn("⬅️ Назад", "tw:hub")])
+    return "\n".join(lines), InlineKeyboardMarkup(rows)
+
+
+async def cb_reconcile(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    if not await _guard(update, context):
+        return
+    manager = service.is_transfer_manager(update.effective_user.id)
+    text, kb = await asyncio.to_thread(_reconcile_view, manager)
+    await _show(update, text, kb)
+
+
+def _recap_keyboard(viewer_is_manager: bool) -> InlineKeyboardMarkup:
+    rows = [[_btn("📣 Опубликовать в ленту", "tw:recapp")]] if viewer_is_manager else []
+    rows.append([_btn("⬅️ Назад", "tw:hub")])
+    return InlineKeyboardMarkup(rows)
+
+
+async def cb_recap(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Итоги окна картинкой в ЛС — посмотреть до публикации или повторить её."""
+    if not await _guard(update, context):
+        return
+    window = _approved_window()
+    data = await asyncio.to_thread(recap.build, window["id"]) if window else None
+    if data is None or data.empty:
+        await _show(update, "🏁 Одобренных заявок нет — подводить итоги нечего.", InlineKeyboardMarkup([_back()]))
+        return
+    query = update.callback_query
+    if query:
+        try:
+            await query.answer()
+        except Exception:
+            pass
+    caption = recap.caption(data, _window_name(window))
+    kb = _recap_keyboard(service.is_transfer_manager(update.effective_user.id))
+    png = await recap.build_image_async(data)
+    if png and len(caption) <= notify.CAPTION_LIMIT:
+        await update.effective_message.reply_photo(png, caption=caption, parse_mode="HTML", reply_markup=kb)
+    else:
+        await update.effective_message.reply_text(caption, parse_mode="HTML", reply_markup=kb)
+
+
+async def cb_recap_post(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Повторная публикация итогов в ленту — только ответственный."""
+    query, user = update.callback_query, update.effective_user
+    if not query or not user:
+        return
+    if not service.is_transfer_manager(user.id):
+        await _alert(query, "⛔ Публикует итоги только ответственный за трансферы")
+        return
+    window = _approved_window()
+    if window is None:
+        await _alert(query, "Окна нет")
+        return
+    posted = await notify.announce_recap(context.bot, window, force=True)
+    if posted:
+        await admin_journal.record(user.id, "transfer_recap_posted", "transfer_window", window["id"])
+    await _alert(query, "✅ Итоги опубликованы в ленте" if posted
+                 else "⚠️ В ленту не ушло — копия отправлена вам в ЛС")
 
 
 _portraits_running = False
@@ -1715,12 +2014,18 @@ def register_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(cb_reject_cancel, pattern=r"^tw:rjc$"))
 
     # Состав и отмена одобренных
+    app.add_handler(CallbackQueryHandler(cb_queue, pattern=r"^tw:q:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_board, pattern=r"^tw:bd:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_board_remove, pattern=r"^tw:bdx:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_approved, pattern=r"^tw:appr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_open_transfer, pattern=r"^tw:tr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_squad_apply, pattern=r"^tw:sq:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_squad_rollback, pattern=r"^tw:sr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_squad_all, pattern=r"^tw:sqall$"))
     app.add_handler(CallbackQueryHandler(cb_portraits, pattern=r"^tw:ports$"))
+    app.add_handler(CallbackQueryHandler(cb_reconcile, pattern=r"^tw:rec$"))
+    app.add_handler(CallbackQueryHandler(cb_recap, pattern=r"^tw:recap$"))
+    app.add_handler(CallbackQueryHandler(cb_recap_post, pattern=r"^tw:recapp$"))
     app.add_handler(CallbackQueryHandler(cb_slots, pattern=r"^tw:slots:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_slot_refund_ask, pattern=r"^tw:slr:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_slot_refund_yes, pattern=r"^tw:slc:\d+$"))

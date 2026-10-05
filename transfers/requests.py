@@ -260,6 +260,49 @@ def create_deal(user_id: int, *, role: str, other_club: str, player: str, price,
         return repo.get_transfer(tid)
 
 
+def create_swap(user_id: int, *, other_club: str, give_player: str, give_price, give_ovr,
+                get_player: str, get_price, get_ovr) -> dict:
+    """Обмен «игрок на игрока»: две связанные сделки, решаются вместе.
+
+    Тренер отдаёт `give_player` клубу `other_club` и получает от него `get_player`.
+    У каждой половины своя цена (разница — это доплата); бюджет и слоты считаются
+    по каждой половине как у обычной сделки. Возвращает половину «отдаю».
+    """
+    own = coach_club(user_id)
+    other = service.resolve_club(other_club or "")
+    if _same_club(own, other):
+        raise InputError("Нельзя обменяться со своим же клубом.")
+    counterparty = database.find_user_by_team(other)
+    if not counterparty or not counterparty.get("telegram_id"):
+        raise InputError(f"У клуба {other} нет тренера в боте — обмен некому подтвердить.")
+    other_id = int(counterparty["telegram_id"])
+    give, take = _clean_player(give_player), _clean_player(get_player)
+    if norm_player(give) == norm_player(take):
+        raise InputError("Игроки обмена должны различаться.")
+    give_k, take_k = _parse_price(give_price, "цену отдаваемого игрока"), _parse_price(get_price, "цену получаемого игрока")
+    give_ovr_v, take_ovr_v = _parse_ovr(give_ovr, required=True), _parse_ovr(get_ovr, required=True)
+
+    first = TransferRequest("deal", give, from_club=own, to_club=other, price_k=give_k, ovr=give_ovr_v)
+    second = TransferRequest("deal", take, from_club=other, to_club=own, price_k=take_k, ovr=take_ovr_v)
+    with database.transaction():
+        window = _window()
+        _no_duplicate(window["id"], first)
+        _no_duplicate(window["id"], second)
+        ev1 = _require(_check(window, first, user_ids=(other_id, int(user_id))))
+        id1 = repo.insert_transfer(
+            window["id"], "deal", give, "pending_counterparty", _warnings(ev1),
+            from_club=own, to_club=other, from_user=int(user_id), to_user=other_id,
+            price_k=give_k, ovr=give_ovr_v, initiator_id=int(user_id))
+        # Вторая половина видит первую среди активных: бюджет и слоты сходятся как у настоящего обмена.
+        ev2 = _require(_check(window, second, user_ids=(int(user_id), other_id)))
+        id2 = repo.insert_transfer(
+            window["id"], "deal", take, "pending_counterparty", _warnings(ev2),
+            from_club=other, to_club=own, from_user=other_id, to_user=int(user_id),
+            price_k=take_k, ovr=take_ovr_v, initiator_id=int(user_id))
+        repo.link_swap(id1, id2)
+        return repo.get_transfer(id1)
+
+
 def create_surcharge(user_id: int, *, player: str, ovr) -> dict:
     """Доплата за спешл своего игрока: цена — по таблице окна, слот не тратит."""
     own = coach_club(user_id)
@@ -314,6 +357,71 @@ def create_urn_buy(user_id: int, *, urn_item_id) -> dict:
         return repo.get_transfer(tid)
 
 
+# ─── Предпроверка ────────────────────────────────────────────────────────────
+
+def _truthy(value, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        return value.strip().lower() not in ("false", "0", "no", "")
+    return bool(value)
+
+
+# Вид заявки → вызов настоящего создателя. Предпроверка идёт тем же кодом, что и подача,
+# поэтому правила не могут разойтись.
+_PREVIEW_RUNNERS = {
+    "deal": lambda uid, f: create_deal(
+        uid, role=f.get("role") or "", other_club=f.get("other_club") or "",
+        player=f.get("player") or "", price=f.get("price"), ovr=f.get("ovr")),
+    "swap": lambda uid, f: create_swap(
+        uid, other_club=f.get("other_club") or "",
+        give_player=f.get("give_player") or "", give_price=f.get("give_price"), give_ovr=f.get("give_ovr"),
+        get_player=f.get("get_player") or "", get_price=f.get("get_price"), get_ovr=f.get("get_ovr")),
+    "surcharge": lambda uid, f: create_surcharge(uid, player=f.get("player") or "", ovr=f.get("ovr")),
+    "urn_sale": lambda uid, f: create_urn_sale(
+        uid, player=f.get("player") or "", tm_price=f.get("tm_price"),
+        special_price=f.get("special_price"), sellable=_truthy(f.get("sellable"))),
+    "urn_buy": lambda uid, f: create_urn_buy(uid, urn_item_id=f.get("urn_item_id")),
+}
+
+
+def preview(user_id: int, kind: str, fields: dict) -> dict:
+    """Что будет с заявкой, если её подать сейчас — ничего не записывая.
+
+    Гоняет настоящий `create_*` внутри SAVEPOINT и откатывает его: блокировки приходят
+    как `InputError`, предупреждения читаются из созданной строки. Ответ:
+    `{ok, blocks: [текст], warnings: [текст], price_k, price}`; `ok` — заявку можно подать
+    (предупреждения её не блокируют, решает ответственный).
+    """
+    run = _PREVIEW_RUNNERS.get(kind)
+    if run is None:
+        raise InputError("Неизвестный вид заявки.")
+    blocks: list[str] = []
+    warnings: list[str] = []
+    price_k = None
+    with database.transaction() as conn:
+        conn.execute("SAVEPOINT transfer_preview")
+        try:
+            created = run(int(user_id), fields or {})
+            legs = [created]
+            partner = repo.get_swap_partner(created)
+            if partner is not None:
+                legs.append(partner)
+            price_k = created["price_k"]
+            for leg in legs:
+                for w in _loads(leg["warnings"]):
+                    text = w.get("message") if isinstance(w, dict) else str(w)
+                    if text and text not in warnings:
+                        warnings.append(text)
+        except InputError as exc:
+            blocks = [line for line in str(exc).split("\n") if line.strip()]
+        finally:
+            conn.execute("ROLLBACK TO transfer_preview")
+            conn.execute("RELEASE transfer_preview")
+    return {"ok": not blocks, "blocks": blocks, "warnings": warnings,
+            "price_k": price_k, "price": format_k(price_k) if price_k is not None else None}
+
+
 # ─── Вторая сторона и отзыв ──────────────────────────────────────────────────
 
 def counterparty_id(t: dict) -> int | None:
@@ -321,6 +429,12 @@ def counterparty_id(t: dict) -> int | None:
     if t["kind"] != "deal":
         return None
     return t["to_user"] if t["initiator_id"] == t["from_user"] else t["from_user"]
+
+
+def _legs(t: dict) -> list[dict]:
+    """Заявка и, если это обмен, его вторая половина — решаются всегда вместе."""
+    partner = repo.get_swap_partner(t)
+    return [t, partner] if partner is not None else [t]
 
 
 def _pending_for_counterparty(user_id: int, transfer_id) -> dict:
@@ -339,20 +453,22 @@ def confirm(user_id: int, transfer_id) -> dict:
         window = repo.get_window(t["window_id"])
         if window is None or window["status"] != "open":
             raise InputError("Трансферное окно закрыто.")
-        ev = _require(_check(window, _request_from_row(t), exclude_id=t["id"],
-                             user_ids=(t["to_user"], t["from_user"])))
-        if not repo.set_transfer_status(t["id"], "pending_manager", expected=("pending_counterparty",)):
-            raise InputError("Заявка уже не ждёт вашего подтверждения.")
-        repo.set_transfer_warnings(t["id"], _warnings(ev))
+        for leg in _legs(t):
+            ev = _require(_check(window, _request_from_row(leg), exclude_id=leg["id"],
+                                 user_ids=(leg["to_user"], leg["from_user"])))
+            if not repo.set_transfer_status(leg["id"], "pending_manager", expected=("pending_counterparty",)):
+                raise InputError("Заявка уже не ждёт вашего подтверждения.")
+            repo.set_transfer_warnings(leg["id"], _warnings(ev))
         return repo.get_transfer(t["id"])
 
 
 def decline(user_id: int, transfer_id) -> dict:
     with database.transaction():
         t = _pending_for_counterparty(user_id, transfer_id)
-        if not repo.set_transfer_status(t["id"], "rejected", expected=("pending_counterparty",),
-                                        actor_id=int(user_id), reason=COUNTERPARTY_DECLINED):
-            raise InputError("Заявка уже не ждёт вашего подтверждения.")
+        for leg in _legs(t):
+            if not repo.set_transfer_status(leg["id"], "rejected", expected=("pending_counterparty",),
+                                            actor_id=int(user_id), reason=COUNTERPARTY_DECLINED):
+                raise InputError("Заявка уже не ждёт вашего подтверждения.")
         return repo.get_transfer(t["id"])
 
 
@@ -364,8 +480,9 @@ def withdraw(user_id: int, transfer_id) -> dict:
             raise InputError("Заявка не найдена.")
         if t["status"] not in PENDING_STATUSES:
             raise InputError("По заявке уже решили — отозвать её нельзя.")
-        if not repo.set_transfer_status(t["id"], "withdrawn", expected=PENDING_STATUSES):
-            raise InputError("По заявке уже решили — отозвать её нельзя.")
+        for leg in _legs(t):
+            if not repo.set_transfer_status(leg["id"], "withdrawn", expected=PENDING_STATUSES):
+                raise InputError("По заявке уже решили — отозвать её нельзя.")
         return repo.get_transfer(t["id"])
 
 
@@ -474,6 +591,7 @@ def serialize(t: dict, viewer_id: int | None = None, *, private: bool = False) -
         "commented_at": t["commented_at"], "created_at": t["created_at"], "decided_at": t["decided_at"],
         "has_photo": bool(t["photo_file_id"]),
         "portrait_url": portrait_url(t["player_name"], t["from_club"], t["to_club"]),
+        "swap_partner_id": t.get("swap_partner_id"),
     }
     if private:
         data["warnings"] = _loads(t["warnings"])

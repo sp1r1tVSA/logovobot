@@ -2,11 +2,12 @@
  * web/js/transfers.js
  * Интерфейс трансферного окна («ТО») в Telegram Mini App.
  *
- * 4 вкладки:
+ * 5 вкладок:
  *  1. Статус   — состояние окна, бюджет и слоты клуба, входящие предложения, мои заявки
  *  2. Заявка   — форма подачи сделки / доплаты за спешл / продажи в урну (с фото)
  *  3. Рынок    — урна (выкуп) и каталог игроков с поиском и фильтрами; из каталога — в форму сделки
- *  4. История  — лента одобренных трансферов лиги (с просмотром фото)
+ *  4. Доска    — лоты «ищу / продаю»; отклик открывает форму сделки, привязанную к лоту
+ *  5. История  — лента одобренных трансферов лиги (с просмотром фото)
  */
 
 import { api } from './api.js';
@@ -23,6 +24,9 @@ class TransfersView {
     this.marketData = null;
     this.marketFilters = { q: '', ovrMin: '', ovrMax: '', club: '', sort: 'ovr' };
     this.prefill = null;
+    this.boardData = null;
+    this.boardSide = 'sell';
+    this.respondLot = null; // { id, role, label } — заявка уйдёт откликом на этот лот
     this.historyData = null;
     this.loading = false;
     this.submitting = false;
@@ -49,6 +53,7 @@ class TransfersView {
           <button class="transfers-tab-btn ${this.activeTab === 'status' ? 'active' : ''}" data-tab="status" type="button">📊 Статус</button>
           <button class="transfers-tab-btn ${this.activeTab === 'request' ? 'active' : ''}" data-tab="request" type="button">📝 Заявка</button>
           <button class="transfers-tab-btn ${this.activeTab === 'market' ? 'active' : ''}" data-tab="market" type="button">🛒 Рынок</button>
+          <button class="transfers-tab-btn ${this.activeTab === 'board' ? 'active' : ''}" data-tab="board" type="button">📌 Доска</button>
           <button class="transfers-tab-btn ${this.activeTab === 'history' ? 'active' : ''}" data-tab="history" type="button">📜 История</button>
         </nav>
 
@@ -111,6 +116,8 @@ class TransfersView {
       this.renderRequestTab(container);
     } else if (this.activeTab === 'market') {
       await this.loadMarket(container, force);
+    } else if (this.activeTab === 'board') {
+      await this.loadBoard(container, force);
     } else if (this.activeTab === 'history') {
       await this.loadHistory(container, force);
     }
@@ -240,7 +247,8 @@ class TransfersView {
     }
 
     // Входящие подтверждения
-    const incomingDeals = (requests || []).filter(r => r.can_confirm);
+    const reqList = this.collapseSwaps(requests || []);
+    const incomingDeals = reqList.filter(r => r.can_confirm);
     let incomingHtml = '';
     if (incomingDeals.length > 0) {
       incomingHtml = `
@@ -251,7 +259,7 @@ class TransfersView {
     }
 
     // Мои заявки
-    const ownRequests = (requests || []).filter(r => !r.can_confirm);
+    const ownRequests = reqList.filter(r => !r.can_confirm);
     let ownHtml = `
       <div style="margin-top: 14px;">
         <div style="font-family: 'Outfit', sans-serif; font-size: 0.95rem; font-weight: 800; color: #fff; margin-bottom: 8px;">
@@ -262,6 +270,19 @@ class TransfersView {
 
     container.innerHTML = winHtml + sanctionHtml + clubHtml + incomingHtml + ownHtml;
     this.bindActionButtons(container);
+  }
+
+  // Обмен приходит двумя заявками; в списке показываем одну карточку (первую половину),
+  // а вторую цепляем к ней как `_swap`. Кнопки действуют на пару на сервере.
+  collapseSwaps(list) {
+    const byId = new Map(list.map(r => [r.id, r]));
+    const out = [];
+    for (const r of list) {
+      const pid = r.swap_partner_id;
+      if (!pid || !byId.has(pid)) { out.push(r); continue; }
+      if (r.id < pid) out.push({ ...r, _swap: byId.get(pid) });
+    }
+    return out;
   }
 
   renderRequestItem(r) {
@@ -286,7 +307,7 @@ class TransfersView {
       <div class="req-item" data-id="${r.id}">
         <div class="req-item-head">
           <span class="req-item-title">
-            ${kindMap[r.kind] || r.kind} #${r.id}: <b>${escapeHtml(r.player_name)}</b>
+            ${r.swap_partner_id ? '🔁 Обмен' : (kindMap[r.kind] || r.kind)} #${r.id}${r._swap ? `+#${r._swap.id}` : ''}: <b>${escapeHtml(r.player_name)}</b>
             ${r.ovr ? `<span class="req-ovr-tag">OVR ${r.ovr}</span>` : ''}
           </span>
           <span class="window-status-badge ${st.cls}">${st.label}</span>
@@ -297,6 +318,12 @@ class TransfersView {
           ${r.from_club && r.to_club ? '<span class="hist-arrow">→</span>' : ''}
           ${r.to_club ? this.renderRouteClub(r.to_club) : ''}
         </div>
+        ${r._swap ? `
+          <div class="req-item-title" style="margin-top: 4px;">
+            ⇄ <b>${escapeHtml(r._swap.player_name)}</b>
+            ${r._swap.ovr ? `<span class="req-ovr-tag">OVR ${r._swap.ovr}</span>` : ''}
+            <span style="color: var(--text-muted); font-size: 0.78rem;">${r._swap.price}</span>
+          </div>` : ''}
 
         ${r.warnings && r.warnings.length ? `
           <div style="font-size: 0.74rem; color: var(--accent-gold); margin: 4px 0;">
@@ -410,7 +437,7 @@ class TransfersView {
           <div id="transfer-form-fields"></div>
 
           <!-- Фото к заявке -->
-          <div class="form-group" style="margin-top: 14px;">
+          <div class="form-group" id="transfer-photo-group" style="margin-top: 14px;">
             <label class="form-label">Скриншот / фото (необязательно)</label>
             <div class="photo-upload-zone" id="photo-dropzone">
               <span id="photo-upload-prompt">📷 Нажмите, чтобы прикрепить фото</span>
@@ -418,6 +445,12 @@ class TransfersView {
               <div id="photo-preview-container" style="display: none;"></div>
             </div>
           </div>
+
+          <div id="form-preview-box" class="preview-box" style="display: none;"></div>
+
+          <button class="preview-request-btn" id="btn-preview-transfer" type="button">
+            🔍 Проверить заявку
+          </button>
 
           <div id="form-error-box" style="display: none; color: var(--color-danger); font-size: 0.82rem; margin: 10px 0; background: rgba(239,68,68,0.1); padding: 8px 12px; border-radius: 8px;"></div>
 
@@ -432,22 +465,55 @@ class TransfersView {
     this.bindRequestForm(container);
   }
 
+  // Обмен «игрок на игрока»: у каждой половины своя цена — разница и есть доплата.
+  swapFieldsHtml() {
+    const half = (prefix, title, hint) => `
+      <div style="font-size: 0.8rem; font-weight: 700; margin: 6px 0 4px;">${title}</div>
+      <div class="form-group">
+        <input type="text" id="${prefix}-player" class="form-input" placeholder="${hint}" required>
+      </div>
+      <div style="display: flex; gap: 10px;">
+        <div class="form-group" style="flex: 1;">
+          <input type="number" id="${prefix}-ovr" class="form-input" placeholder="OVR" min="1" max="199" required>
+        </div>
+        <div class="form-group" style="flex: 1.2;">
+          <input type="text" id="${prefix}-price" class="form-input" placeholder="Цена, млн" required>
+        </div>
+      </div>`;
+    return `
+      <div style="font-size: 0.8rem; color: var(--text-secondary); margin-bottom: 8px; line-height: 1.4;">
+        Две сделки одной заявкой: вторая сторона принимает или отклоняет обмен целиком, ответственный решает обе вместе.
+      </div>
+      ${half('swap-give', '➡️ Отдаю', 'Игрок вашего состава')}
+      ${half('swap-get', '⬅️ Получаю', 'Игрок клуба-партнёра')}`;
+  }
+
   renderFormFields() {
+    const photoGroup = document.getElementById('transfer-photo-group');
+    if (photoGroup) photoGroup.style.display = (this.requestKind === 'deal' && this.dealRole === 'swap') ? 'none' : '';
     const fieldsContainer = document.getElementById('transfer-form-fields');
     if (!fieldsContainer) return;
 
     if (this.requestKind === 'deal') {
+      const lot = this.respondLot && this.respondLot.role === this.dealRole ? this.respondLot : null;
       fieldsContainer.innerHTML = `
+        ${lot ? `
+        <div class="board-respond-banner">
+          <span>📌 Отклик на лот #${lot.id}: ${escapeHtml(lot.label)}</span>
+          <button type="button" class="board-respond-clear" id="board-respond-clear" title="Без привязки к лоту">✕</button>
+        </div>` : ''}
         <div class="role-toggle-row">
           <button class="role-toggle-btn ${this.dealRole === 'buy' ? 'active buy' : ''}" data-role="buy" type="button">🟢 Я покупаю игрока</button>
           <button class="role-toggle-btn ${this.dealRole === 'sell' ? 'active sell' : ''}" data-role="sell" type="button">🔴 Я продаю игрока</button>
+          <button class="role-toggle-btn ${this.dealRole === 'swap' ? 'active swap' : ''}" data-role="swap" type="button">🔁 Обмен</button>
         </div>
 
         <div class="form-group">
-          <label class="form-label" for="deal-other-club">${this.dealRole === 'buy' ? 'У какого клуба покупаете' : 'Какому клубу продаёте'}</label>
+          <label class="form-label" for="deal-other-club">${{ buy: 'У какого клуба покупаете', sell: 'Какому клубу продаёте', swap: 'С каким клубом меняетесь' }[this.dealRole]}</label>
           <input type="text" id="deal-other-club" class="form-input" placeholder="Название клуба соперника" required>
         </div>
 
+        ${this.dealRole === 'swap' ? this.swapFieldsHtml() : `
         <div class="form-group">
           <label class="form-label" for="deal-player">Имя футболиста (карточки)</label>
           <input type="text" id="deal-player" class="form-input" placeholder="Например: K. De Bruyne" required>
@@ -462,7 +528,7 @@ class TransfersView {
             <label class="form-label" for="deal-price">Сумма (в млн)</label>
             <input type="text" id="deal-price" class="form-input" placeholder="12.5" required>
           </div>
-        </div>
+        </div>`}
       `;
     } else if (this.requestKind === 'surcharge') {
       fieldsContainer.innerHTML = `
@@ -519,6 +585,11 @@ class TransfersView {
       set('deal-price', p.price);
     }
 
+    document.getElementById('board-respond-clear')?.addEventListener('click', () => {
+      this.respondLot = null;
+      this.renderFormFields();
+    });
+
     // Role toggle bindings
     fieldsContainer.querySelectorAll('.role-toggle-btn').forEach(btn => {
       btn.addEventListener('click', () => {
@@ -528,6 +599,64 @@ class TransfersView {
     });
 
     this.bindSuggest();
+  }
+
+  // Поля формы как для предпроверки: тот же набор, что уходит при подаче.
+  collectRequestFields() {
+    const v = (id) => document.getElementById(id)?.value ?? '';
+    if (this.requestKind === 'deal' && this.dealRole === 'swap') {
+      return {
+        kind: 'swap', other_club: v('deal-other-club'),
+        give_player: v('swap-give-player'), give_ovr: v('swap-give-ovr'), give_price: v('swap-give-price'),
+        get_player: v('swap-get-player'), get_ovr: v('swap-get-ovr'), get_price: v('swap-get-price'),
+      };
+    }
+    if (this.requestKind === 'deal') {
+      return {
+        kind: 'deal', role: this.dealRole, other_club: v('deal-other-club'),
+        player: v('deal-player'), ovr: v('deal-ovr'), price: v('deal-price'),
+      };
+    }
+    if (this.requestKind === 'surcharge') {
+      return { kind: 'surcharge', player: v('surcharge-player'), ovr: v('surcharge-ovr') };
+    }
+    return {
+      kind: 'urn_sale', player: v('urn-player'), tm_price: v('urn-tm'), special_price: v('urn-special'),
+      sellable: document.getElementById('urn-sellable')?.checked ? '1' : '0',
+    };
+  }
+
+  // «Проверить заявку»: сервер прогоняет настоящие правила подачи, ничего не записывая.
+  async runPreview() {
+    const box = document.getElementById('form-preview-box');
+    const btn = document.getElementById('btn-preview-transfer');
+    if (!box || !btn || this.previewing) return;
+    this.previewing = true;
+    btn.disabled = true;
+    box.style.display = 'block';
+    box.className = 'preview-box';
+    box.textContent = 'Проверяем…';
+    try {
+      const res = await api.previewTransfer(this.collectRequestFields());
+      const d = res.data || {};
+      const lines = [];
+      (d.blocks || []).forEach(t => lines.push(`<div class="preview-line block">⛔ ${escapeHtml(t)}</div>`));
+      (d.warnings || []).forEach(t => lines.push(`<div class="preview-line warn">⚠️ ${escapeHtml(t)}</div>`));
+      if (d.ok) {
+        const price = d.price ? ` Сумма по заявке: <b>${escapeHtml(String(d.price))}</b>.` : '';
+        lines.unshift(`<div class="preview-line ok">✅ ${(d.warnings || []).length
+          ? 'Подать можно, ответственный увидит предупреждения.'
+          : 'Всё в порядке, заявку можно подавать.'}${price}</div>`);
+      }
+      box.className = `preview-box ${d.ok ? ((d.warnings || []).length ? 'warn' : 'ok') : 'block'}`;
+      box.innerHTML = lines.join('');
+    } catch (err) {
+      box.className = 'preview-box block';
+      box.textContent = err.message || 'Не удалось проверить заявку';
+    } finally {
+      this.previewing = false;
+      btn.disabled = false;
+    }
   }
 
   // Автоподбор имени клуба/игрока: подсказки с сервера, выбор подставляет каноничное имя.
@@ -540,6 +669,8 @@ class TransfersView {
       this.attachSuggest('deal-player', (q) => this.dealRole === 'sell'
         ? api.getTransferSuggest('player', q, { own: true })
         : api.getTransferSuggest('player', q, { club: val('deal-other-club') }));
+      this.attachSuggest('swap-give-player', (q) => api.getTransferSuggest('player', q, { own: true }));
+      this.attachSuggest('swap-get-player', (q) => api.getTransferSuggest('player', q, { club: val('deal-other-club') }));
     } else if (this.requestKind === 'surcharge') {
       this.attachSuggest('surcharge-player', (q) => api.getTransferSuggest('player', q, { own: true }));
     } else if (this.requestKind === 'urn_sale') {
@@ -644,6 +775,15 @@ class TransfersView {
       reader.readAsDataURL(file);
     });
 
+    document.getElementById('btn-preview-transfer')?.addEventListener('click', () => this.runPreview());
+    // Любая правка полей делает прошлый результат неактуальным.
+    const resetPreview = () => {
+      const box = document.getElementById('form-preview-box');
+      if (box) box.style.display = 'none';
+    };
+    document.getElementById('transfer-form-fields')?.addEventListener('input', resetPreview);
+    container.querySelectorAll('.kind-toggle-btn').forEach(b => b.addEventListener('click', resetPreview));
+
     // Submit
     const form = document.getElementById('transfer-request-form');
     const errorBox = document.getElementById('form-error-box');
@@ -664,12 +804,25 @@ class TransfersView {
           formData.append('photo', this.selectedPhotoFile);
         }
 
-        if (this.requestKind === 'deal') {
+        if (this.requestKind === 'deal' && this.dealRole === 'swap') {
+          const fv = (id) => document.getElementById(id).value;
+          formData.append('other_club', fv('deal-other-club'));
+          formData.append('give_player', fv('swap-give-player'));
+          formData.append('give_ovr', fv('swap-give-ovr'));
+          formData.append('give_price', fv('swap-give-price'));
+          formData.append('get_player', fv('swap-get-player'));
+          formData.append('get_ovr', fv('swap-get-ovr'));
+          formData.append('get_price', fv('swap-get-price'));
+          await api.createTransferSwap(formData, true);
+        } else if (this.requestKind === 'deal') {
           formData.append('role', this.dealRole);
           formData.append('other_club', document.getElementById('deal-other-club').value);
           formData.append('player', document.getElementById('deal-player').value);
           formData.append('ovr', document.getElementById('deal-ovr').value);
           formData.append('price', document.getElementById('deal-price').value);
+          if (this.respondLot && this.respondLot.role === this.dealRole) {
+            formData.append('lot_id', String(this.respondLot.id));
+          }
           await api.createTransferDeal(formData, true);
         } else if (this.requestKind === 'surcharge') {
           formData.append('player', document.getElementById('surcharge-player').value);
@@ -686,6 +839,8 @@ class TransfersView {
         tgBridge.hapticImpact('heavy');
         alert('Заявка успешно подана!');
         this.selectedPhotoFile = null;
+        this.respondLot = null;
+        this.boardData = null;
         this.statusData = null; // force reload status
         this.activeTab = 'status';
         this.init();
@@ -838,7 +993,162 @@ class TransfersView {
       </div>`;
   }
 
-  // ─── 4. Вкладка «История» ──────────────────────────────────────────────────
+  // ─── 4. Вкладка «Доска» ────────────────────────────────────────────────────
+
+  async loadBoard(container, force = false) {
+    if (!this.boardData || force) {
+      container.innerHTML = `
+        <div class="transfers-empty">
+          <div class="transfers-empty-icon">⏳</div>
+          <div>Загрузка доски...</div>
+        </div>`;
+      try {
+        const res = await api.getTransferBoard();
+        if (res.status !== 'ok') {
+          container.innerHTML = `<div class="transfers-empty">⚠️ ${escapeHtml(res.message || 'Ошибка')}</div>`;
+          return;
+        }
+        this.boardData = res.data;
+      } catch (err) {
+        container.innerHTML = `<div class="transfers-empty">⚠️ ${escapeHtml(err.message || 'Ошибка сети')}</div>`;
+        return;
+      }
+    }
+
+    const d = this.boardData;
+    if (!d.open) {
+      container.innerHTML = `
+        <div class="transfers-empty">
+          <div class="transfers-empty-icon">📌</div>
+          <div>Доска работает, пока трансферное окно открыто.</div>
+        </div>`;
+      return;
+    }
+    const lots = d.lots || [];
+    const sell = this.boardSide === 'sell';
+    container.innerHTML = `
+      ${d.can_post ? `
+      <form class="transfers-card board-form" id="board-form">
+        <div class="role-toggle-row">
+          <button class="role-toggle-btn ${sell ? 'active sell' : ''}" data-side="sell" type="button">🔴 Продаю</button>
+          <button class="role-toggle-btn ${!sell ? 'active buy' : ''}" data-side="buy" type="button">🟢 Ищу</button>
+        </div>
+        <div class="form-group">
+          <input type="text" id="board-player" class="form-input" placeholder="${sell ? 'Игрок вашего состава' : 'Игрок (необязательно)'}" ${sell ? 'required' : ''}>
+        </div>
+        <div class="market-filter-row">
+          <input type="number" id="board-ovr" class="form-input" placeholder="OVR" min="1" max="199">
+          <input type="text" id="board-price" class="form-input" placeholder="${sell ? 'Цена, млн' : 'Бюджет, млн'}">
+        </div>
+        <div class="form-group" style="margin-top: 8px;">
+          <input type="text" id="board-note" class="form-input" maxlength="200" placeholder="${sell ? 'Комментарий (необязательно)' : 'Кого ищете: позиция, OVR, бюджет'}">
+        </div>
+        <div id="board-error" class="board-error" style="display: none;"></div>
+        <button class="submit-request-btn" id="board-submit" type="submit">Повесить лот</button>
+        <div class="board-hint">Лотов клуба: ${d.my_open} из ${d.max_open}. Лот — объявление: деньги и слоты не занимает.</div>
+      </form>` : `
+      <div class="board-hint">${d.club
+        ? (d.my_open >= d.max_open ? `У клуба уже ${d.max_open} лота — снимите один, чтобы повесить новый.` : 'Вешать лоты сейчас нельзя.')
+        : 'Лоты вешают тренеры клубов.'}</div>`}
+
+      <div class="market-section-title">📌 На доске <span class="market-count">${lots.length}</span></div>
+      ${lots.length ? lots.map((lot, i) => this.renderLotCard(lot, i)).join('') : `
+        <div class="market-empty">Лотов пока нет — повесьте первый.</div>`}
+    `;
+
+    container.querySelectorAll('#board-form .role-toggle-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        this.boardSide = btn.dataset.side;
+        this.loadBoard(container);
+      });
+    });
+    if (d.can_post && sell) {
+      this.attachSuggest('board-player', (q) => api.getTransferSuggest('player', q, { own: true }));
+    }
+
+    document.getElementById('board-form')?.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = document.getElementById('board-submit');
+      const errorBox = document.getElementById('board-error');
+      const v = (id) => document.getElementById(id).value;
+      btn.disabled = true;
+      errorBox.style.display = 'none';
+      try {
+        await api.createTransferLot({
+          side: this.boardSide, player: v('board-player'), ovr: v('board-ovr'),
+          price: v('board-price'), note: v('board-note'),
+        });
+        tgBridge.hapticImpact('heavy');
+        this.loadBoard(container, true);
+      } catch (err) {
+        errorBox.textContent = err.message || 'Не удалось повесить лот';
+        errorBox.style.display = 'block';
+        btn.disabled = false;
+      }
+    });
+
+    container.querySelectorAll('.btn-lot-close').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!confirm('Снять лот с доски?')) return;
+        btn.disabled = true;
+        try {
+          await api.closeTransferLot(btn.dataset.id);
+          tgBridge.hapticImpact('light');
+          this.loadBoard(container, true);
+        } catch (err) {
+          alert(err.message || 'Не удалось снять лот');
+          btn.disabled = false;
+        }
+      });
+    });
+
+    container.querySelectorAll('.btn-lot-respond').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const lot = lots[Number(btn.dataset.idx)];
+        if (!lot) return;
+        tgBridge.hapticImpact('light');
+        // Продают — отвечаем покупкой этого игрока; ищут — продажей своего игрока клубу лота.
+        const role = lot.side === 'sell' ? 'buy' : 'sell';
+        const what = lot.player ? `${lot.player}${lot.ovr ? ` (OVR ${lot.ovr})` : ''}` : (lot.note || '');
+        this.respondLot = { id: lot.id, role, label: `${lot.club} — ${lot.side_label.toLowerCase()} ${what}`.trim() };
+        this.prefill = role === 'buy'
+          ? { club: lot.club, player: lot.player, ovr: lot.ovr || '', price: lot.price_k ? String(lot.price_k / 1000) : '' }
+          : { club: lot.club, player: '', ovr: '', price: lot.price_k ? String(lot.price_k / 1000) : '' };
+        this.requestKind = 'deal';
+        this.dealRole = role;
+        this.activeTab = 'request';
+        this.renderShell();
+        this.loadActiveTab();
+      });
+    });
+  }
+
+  renderLotCard(lot, idx) {
+    const sell = lot.side === 'sell';
+    const pending = lot.responses?.pending || 0;
+    let action = '';
+    if (lot.mine) {
+      action = `<button class="btn-offer btn-lot-close" data-id="${lot.id}" type="button">Снять</button>`;
+    } else if (lot.can_respond) {
+      action = `<button class="btn-offer btn-lot-respond" data-idx="${idx}" type="button">${sell ? 'Купить' : 'Предложить'}</button>`;
+    }
+    return `
+      <div class="urn-item-card board-lot ${sell ? 'is-sell' : 'is-buy'} ${lot.mine ? 'is-mine' : ''}">
+        <div class="urn-item-info">
+          <div class="urn-item-name">
+            <span class="board-side ${sell ? 'sell' : 'buy'}">${escapeHtml(lot.side_label)}</span>
+            ${lot.player ? escapeHtml(lot.player) : ''} ${lot.ovr ? `<span class="req-ovr-tag">OVR ${lot.ovr}</span>` : ''}
+          </div>
+          <div class="urn-item-club">${this.renderRouteClub(lot.club)}</div>
+          ${lot.price ? `<div class="urn-item-price">${sell ? 'Цена' : 'Бюджет'}: <b>${escapeHtml(String(lot.price))}</b></div>` : ''}
+          ${lot.note ? `<div class="board-note">${escapeHtml(lot.note)}</div>` : ''}
+          ${pending ? `<div class="board-note">Откликов в работе: ${pending}</div>` : ''}
+        </div>
+        <div>${action}</div>
+      </div>`;
+  }
+
+  // ─── 5. Вкладка «История» ──────────────────────────────────────────────────
 
   async loadHistory(container, force = false) {
     const filters = this.historyFilters || (this.historyFilters = { windowId: null, mine: false, club: '' });
@@ -979,7 +1289,7 @@ class TransfersView {
         <div class="hist-body">
           <div class="req-item-head">
             <span class="req-item-title">
-              <span class="hist-kind">${kindLabel}</span>
+              <span class="hist-kind">${it.swap_partner_id ? '🔁 Обмен' : kindLabel}</span>
               <b>${escapeHtml(it.player_name)}</b>
             </span>
             <span class="window-status-badge ${st.cls}">${st.label}</span>

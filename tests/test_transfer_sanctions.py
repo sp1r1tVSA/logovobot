@@ -69,6 +69,19 @@ class TestParseAndFind:
         with pytest.raises(InputError):
             sanctions.find_club("  ")
 
+    def test_find_club_typo_gets_hint(self):
+        with pytest.raises(InputError) as exc:
+            sanctions.find_club("Челас")
+        assert "Похоже на:" in str(exc.value) and "Челси" in str(exc.value)
+
+    def test_find_club_no_hint_for_nonsense(self):
+        with pytest.raises(InputError) as exc:
+            sanctions.find_club("Zzzz Qqqq")
+        assert "Похоже" not in str(exc.value)
+
+    def test_close_clubs_short_query_gives_nothing(self):
+        assert sanctions.close_clubs("че", ["Челси"]) == []
+
     def test_find_coach_by_username_and_id(self):
         _user(101, "chelsea", "Челси")
         by_name = sanctions.find_coach("@chelsea")

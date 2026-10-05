@@ -576,6 +576,20 @@ class ApiClient {
     });
   }
 
+  previewTransfer(payload) {
+    return this.request('/api/transfers/preview', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  }
+
+  createTransferSwap(payload, isMultipart = false) {
+    return this.request('/api/transfers/swap', {
+      method: 'POST',
+      body: isMultipart ? payload : JSON.stringify(payload)
+    });
+  }
+
   createTransferSurcharge(payload, isMultipart = false) {
     return this.request('/api/transfers/surcharge', {
       method: 'POST',
@@ -588,6 +602,21 @@ class ApiClient {
       method: 'POST',
       body: isMultipart ? payload : JSON.stringify(payload)
     });
+  }
+
+  getTransferBoard() {
+    return this.request('/api/transfers/board');
+  }
+
+  createTransferLot(payload) {
+    return this.request('/api/transfers/board', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  }
+
+  closeTransferLot(lotId) {
+    return this.request(`/api/transfers/board/${lotId}/close`, { method: 'POST' });
   }
 
   createTransferUrnBuy(urnItemId) {
