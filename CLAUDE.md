@@ -245,7 +245,13 @@ through `stage_id` (`get_match_cup_scope`), never through `matches.division_id`.
 and the API, `0` means the general cup, and `database.cup_scope()` normalizes it. A division
 admin manages only their own cup; the general cup is global-admin only.
 `scripts/seed_cup_bracket.py --division N --pairs-file … | --from-winners` seeds a stage, and it
-is a dry run without `--apply`.
+is a dry run without `--apply`. A division admin does the same from the bot: «🏆 Кубок дивизиона» in
+the division admin panel (or `/cup`, listed in the admin command menu) → «🎲 Завести сетку». The
+logic lives in `services/cup_seeding.py` (shared with the script): the next stage is 1/8 from 8
+pasted pairs, later stages from the winners; pairs are validated against the division roster, shown
+as a preview, and written only on «✅ Записать» (journal action `cup_bracket_seeded`; pending text
+input kept in process memory for 600 s). Seeding from the bot is division cups only — the general
+cup stays on the script. `tests/test_cup_seeding.py` covers it.
 
 Every cup can have its own **«Кубок» forum topic**, bound from inside the topic with
 `/set_div_topic <дивизион|общий> cup` and stored in `cup_topics` (`topic_type` is `cup` or

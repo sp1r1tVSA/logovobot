@@ -385,6 +385,7 @@ async def show_division_admin_panel(update: Update, context: ContextTypes.DEFAUL
         [InlineKeyboardButton("🔗 Привязка клубов", callback_data=bind_cb)],
         [InlineKeyboardButton("📢 Рассылка задолженностей", callback_data=f"admin_div_debts_menu:{div_id}")],
         [InlineKeyboardButton("👥 Выдача варнов", callback_data=f"admin_div_manage_players:{div_id}")],
+        [InlineKeyboardButton("🏆 Кубок дивизиона", callback_data=f"cup_scope_{div_id}")],
     ]
     if is_div1_admin:
         keyboard.append([InlineKeyboardButton("👥 Управление участниками лиги", callback_data="admin_manage_players")])

@@ -33,6 +33,7 @@ DEFAULT_COMMANDS = [
 
 ADMIN_COMMANDS = DEFAULT_COMMANDS + [
     BotCommand("overview", "Сводка по всем дивизионам"),
+    BotCommand("cup", "Управление кубком"),
 ]
 
 # Глобальным админам — ещё эксплуатация (handlers/admin_ops.py, только в ЛС).

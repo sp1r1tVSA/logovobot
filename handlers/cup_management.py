@@ -13,7 +13,10 @@ handlers/cup_management.py
 не по выбранному в переключателе.
 
 Порядок действий админа совпадает с порядком кнопок: сетку заводит скрипт
-(`scripts/seed_cup_bracket.py [--division N]`), панель заводит игры и заголовки
+(`scripts/seed_cup_bracket.py [--division N]`) или, у кубка дивизиона, сама
+панель (`services.cup_seeding`): «🎲 Завести сетку 1/8» ждёт 8 пар текстом в ЛС,
+«➡️ Сетка … из победителей» собирает следующую стадию из решённой предыдущей;
+обе показывают сетку и пишут её только по «✅ Записать». Панель заводит игры и заголовки
 серий (`provision`), открывает приём прогнозов (линия видна в Mini App), и только
 затем стартует этап. Старт этапа закрывает линию тем же переходом, что и тур
 лиги, и вернуть её нельзя.
@@ -30,13 +33,14 @@ handlers/cup_management.py
 import asyncio
 import html
 import logging
+import time
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
-from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 import database
 from handlers.base import is_global_admin
-from services import admin_journal
+from services import admin_journal, cup_seeding
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +54,39 @@ _ACTIONS = {
 }
 
 _DENIED = "⛔ Недостаточно прав."
+
+# Сид сетки из бота: пары ждут текстом в ЛС, черновик — до «✅ Записать».
+# Состояние в памяти процесса: после рестарта админ просто нажимает кнопку снова.
+SEED_TTL_SECONDS = 600
+_seed_state: dict[int, dict] = {}
+
+
+def _get_seed(user_id: int | None) -> dict | None:
+    if user_id is None:
+        return None
+    entry = _seed_state.get(user_id)
+    if entry and entry["expires"] < time.monotonic():
+        _seed_state.pop(user_id, None)
+        return None
+    return entry
+
+
+def _set_seed(user_id: int, **data) -> None:
+    _seed_state[user_id] = {"expires": time.monotonic() + SEED_TTL_SECONDS, **data}
+
+
+class _AwaitingCupPairs(filters.MessageFilter):
+    """Сообщение в ЛС от админа, у которого панель ждёт пары сетки."""
+
+    def filter(self, message) -> bool:
+        user = message.from_user
+        if message.chat is None or message.chat.type != "private" or user is None:
+            return False
+        entry = _get_seed(user.id)
+        return bool(entry and entry.get("awaiting"))
+
+
+AWAITING_PAIRS = _AwaitingCupPairs(name="cup_management.awaiting_pairs")
 
 
 def _manageable_scopes(user_id: int | None) -> list[int | None]:
@@ -161,7 +198,7 @@ async def _render_series_list(target, stage: dict) -> None:
     if bracket:
         text = title + "⚪ не начата · 🟢 идёт · ⚠️ спор · ✅ решена\n\nВыберите серию:"
     else:
-        text = title + "Серий нет — сетку заводит скрипт."
+        text = title + "Серий нет — сетку заводит админ кубка (кнопка «🎲 Завести сетку» в панели) или скрипт."
     await _edit_or_reply(target, text, InlineKeyboardMarkup(keyboard))
 
 
@@ -198,6 +235,24 @@ async def _edit_or_reply(target, text: str, markup) -> None:
         await target.reply_text(text, parse_mode="HTML", reply_markup=markup)
 
 
+def _seed_button_label(stage: str, mode: str) -> str:
+    if mode == cup_seeding.MODE_PAIRS:
+        return f"🎲 Завести сетку {stage}"
+    return f"➡️ Сетка {stage} из победителей"
+
+
+def _seed_preview(scope, stage: str, pairs: list[tuple[str, str]]) -> tuple[str, InlineKeyboardMarkup]:
+    code = _scope_code(scope)
+    lines = [f"🎲 <b>{html.escape(database.cup_scope_label(scope))} · {html.escape(stage)}</b>", ""]
+    lines += [f"{n}. {html.escape(t1)} — {html.escape(t2)}" for n, (t1, t2) in enumerate(pairs, start=1)]
+    lines += ["", "Записать сетку? Номер строки — номер серии; переиграть жеребьёвку потом нельзя."]
+    markup = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Записать", callback_data=f"cup_seedok_{code}"),
+        InlineKeyboardButton("✖ Отмена", callback_data=f"cup_seedno_{code}"),
+    ]])
+    return "\n".join(lines), markup
+
+
 def _seed_hint(scope) -> str:
     flag = "" if scope is None else f" --division {scope}"
     return f"<code>python scripts/seed_cup_bracket.py{flag} --apply</code>"
@@ -209,8 +264,12 @@ async def _render_panel(target, context, stage_id: int | None = None, note: str 
     scope = _current_scope(context, scopes)
     stages = await asyncio.to_thread(database.list_cup_stages, division_id=scope)
     lines = [f"🏆 <b>{html.escape(database.cup_scope_label(scope))}</b>", ""]
+    seed = (await asyncio.to_thread(cup_seeding.next_seed, scope)) if scope is not None else None
     if not stages:
-        lines.append(f"Этапов ещё нет — заведи сетку: {_seed_hint(scope)}")
+        if scope is None:
+            lines.append(f"Этапов ещё нет — заведи сетку: {_seed_hint(scope)}")
+        else:
+            lines.append("Этапов ещё нет — нажми «🎲 Завести сетку 1/8» и пришли 8 пар.")
     for stage in stages:
         sid = stage["id"]
         bracket = await asyncio.to_thread(
@@ -244,9 +303,13 @@ async def _render_panel(target, context, stage_id: int | None = None, note: str 
             keyboard[0:0] = _stage_keyboard(stage_id, decided=decided)
     else:
         keyboard.append([InlineKeyboardButton(_ACTIONS["refresh"], callback_data="cup_refresh")])
+    if seed:
+        keyboard.append([InlineKeyboardButton(_seed_button_label(*seed), callback_data=f"cup_seed_{_scope_code(scope)}")])
     if topic:
         keyboard.append([InlineKeyboardButton(_ACTIONS["bracket"], callback_data=f"cup_bracket_{_scope_code(scope)}")])
     keyboard += _scope_switcher(scopes, scope)
+    if scope is not None:
+        keyboard.append([InlineKeyboardButton("« Панель дивизиона", callback_data=f"admin_div_panel:{scope}")])
     markup = InlineKeyboardMarkup(keyboard) if keyboard else None
     await _edit_or_reply(target, "\n".join(lines), markup)
 
@@ -308,6 +371,26 @@ async def cb_cup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
                 else "Сетку выложить не удалось — проверь привязку темы и права бота.")
         await _render_panel(query.message, context, stage_id=context.user_data.get("cup_stage_id"),
                             note=note, scopes=scopes)
+        return
+
+    if data.startswith(("cup_seedok_", "cup_seedno_", "cup_seed_")):
+        prefix = data[:data.rindex("_") + 1]
+        code = _parse_tail(data, prefix)
+        scope = database.cup_scope(code) if code is not None else None
+        # Сетку из бота заводят только кубку дивизиона: общий — скриптом.
+        if scope is None or scope not in scopes:
+            await query.answer(_DENIED, show_alert=True)
+            return
+        await query.answer()
+        context.user_data["cup_scope"] = scope
+        context.user_data.pop("cup_stage_id", None)
+        if prefix == "cup_seed_":
+            await _seed_start(query, context, user_id, scope, scopes)
+        elif prefix == "cup_seedok_":
+            await _seed_commit(query, context, user_id, scope, scopes)
+        else:
+            _seed_state.pop(user_id, None)
+            await _render_panel(query.message, context, note="Сетка не записана.", scopes=scopes)
         return
 
     # Карточка серии ключуется номером серии, а не этапа.
@@ -391,6 +474,101 @@ async def cb_cup(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await announce_stage(context.bot, fresh or stage, announce)
 
 
+async def _seed_start(query, context, user_id: int, scope: int, scopes) -> None:
+    """«🎲 Завести сетку» / «➡️ Сетка из победителей»: просьба прислать пары или черновик."""
+    seed = await asyncio.to_thread(cup_seeding.next_seed, scope)
+    if not seed:
+        _seed_state.pop(user_id, None)
+        await _render_panel(query.message, context, note="Сейчас заводить нечего: текущая стадия ещё не решена.",
+                            scopes=scopes)
+        return
+    stage, mode = seed
+    code = _scope_code(scope)
+    cancel = InlineKeyboardMarkup([[InlineKeyboardButton("✖ Отмена", callback_data=f"cup_seedno_{code}")]])
+    if mode == cup_seeding.MODE_PAIRS:
+        _set_seed(user_id, division_id=scope, stage=stage, awaiting=True, pairs=None)
+        clubs = await asyncio.to_thread(database.get_division_teams, scope)
+        count = cup_seeding.DIVISION_CUP_SERIES[stage]
+        text = (
+            f"🎲 <b>{html.escape(database.cup_scope_label(scope))} · {html.escape(stage)}</b>\n\n"
+            f"Пришлите сюда, в личку, {count} пар — по одной на строку, в порядке серий:\n"
+            "<code>Клуб — Клуб</code>\n\n"
+            f"Клубы дивизиона: {html.escape(', '.join(sorted(clubs)))}"
+        )
+        await _edit_or_reply(query.message, text, cancel)
+        return
+    try:
+        pairs = await asyncio.to_thread(cup_seeding.winners_pairs, stage, scope)
+        pairs = await asyncio.to_thread(cup_seeding.validate_pairs, stage, pairs, scope)
+    except ValueError as e:
+        _seed_state.pop(user_id, None)
+        await _render_panel(query.message, context, note=f"Сетка {stage} не собрана: {e}", scopes=scopes)
+        return
+    _set_seed(user_id, division_id=scope, stage=stage, awaiting=False, pairs=pairs)
+    text, markup = _seed_preview(scope, stage, pairs)
+    await _edit_or_reply(query.message, text, markup)
+
+
+async def _seed_commit(query, context, user_id: int, scope: int, scopes) -> None:
+    """«✅ Записать»: черновик → `cup_series`, только если стадия всё ещё та же."""
+    entry = _get_seed(user_id)
+    if not entry or entry.get("division_id") != scope or not entry.get("pairs"):
+        _seed_state.pop(user_id, None)
+        await _render_panel(query.message, context, note="Черновик сетки устарел — начни заново.", scopes=scopes)
+        return
+    stage, pairs = entry["stage"], entry["pairs"]
+    _seed_state.pop(user_id, None)
+    seed = await asyncio.to_thread(cup_seeding.next_seed, scope)
+    if not seed or seed[0] != stage:
+        await _render_panel(query.message, context, note=f"Сетка {stage} уже заведена или ещё недоступна.",
+                            scopes=scopes)
+        return
+    try:
+        ids = await asyncio.to_thread(cup_seeding.seed, stage, pairs, scope)
+    except ValueError as e:
+        await _render_panel(query.message, context, note=f"Сетка не записана: {e}", scopes=scopes)
+        return
+    await admin_journal.record(
+        user_id, "cup_bracket_seeded", "cup_stage", None,
+        new=f"{stage}, серий {len(ids)}: " + "; ".join(f"{t1} — {t2}" for t1, t2 in pairs),
+        division_id=scope,
+    )
+    from services.cup_broadcast import refresh_cup_bracket
+    await refresh_cup_bracket(context.bot, scope)
+    await _render_panel(query.message, context,
+                        note=f"Сетка {stage} заведена: {len(ids)} сер. Дальше — этап → «🧩 завести игры».",
+                        scopes=scopes)
+
+
+async def on_seed_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Пары сетки текстом: разбор, проверка и черновик с «✅ Записать»."""
+    message = update.effective_message
+    user = update.effective_user
+    entry = _get_seed(user.id if user else None)
+    if message is None or not entry or not entry.get("awaiting"):
+        return
+    scope, stage = entry["division_id"], entry["stage"]
+    scopes = await asyncio.to_thread(_manageable_scopes, user.id)
+    if scope not in scopes:
+        _seed_state.pop(user.id, None)
+        await message.reply_text(_DENIED)
+        return
+    cancel = InlineKeyboardMarkup([[InlineKeyboardButton("✖ Отмена", callback_data=f"cup_seedno_{_scope_code(scope)}")]])
+    try:
+        pairs = cup_seeding.parse_pairs_text(message.text or "")
+        pairs = await asyncio.to_thread(cup_seeding.validate_pairs, stage, pairs, scope)
+    except ValueError as e:
+        _set_seed(user.id, division_id=scope, stage=stage, awaiting=True, pairs=None)
+        await message.reply_text(
+            f"❌ Сетка не прошла проверку:\n{html.escape(str(e))}\n\nИсправьте и пришлите все пары заново.",
+            parse_mode="HTML", reply_markup=cancel,
+        )
+        return
+    _set_seed(user.id, division_id=scope, stage=stage, awaiting=False, pairs=pairs)
+    text, markup = _seed_preview(scope, stage, pairs)
+    await message.reply_text(text, parse_mode="HTML", reply_markup=markup)
+
+
 async def _generate_stage_markets(stage: str, season_id, division_id=None) -> int:
     from services.betting_engine import generate_stage_markets
 
@@ -409,5 +587,7 @@ def register_cup_handlers(app) -> None:
     app.add_handler(CallbackQueryHandler(
         cb_cup,
         pattern=("^cup_(refresh|stage_\\d+|provision_\\d+|open_\\d+|start_\\d+|series_\\d+|ser_\\d+"
-                 "|scope_\\d+|bracket_\\d+)$"),
+                 "|scope_\\d+|bracket_\\d+|seed_\\d+|seedok_\\d+|seedno_\\d+)$"),
     ))
+    # После CallbackQueryHandler: тесты и аудит ищут его первым среди не-командных.
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND & AWAITING_PAIRS, on_seed_input))

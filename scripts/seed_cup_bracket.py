@@ -47,6 +47,7 @@ import config  # noqa: E402
 import database  # noqa: E402
 from club_registry import resolve_team_name  # noqa: E402
 from constants import CUP_STAGES  # noqa: E402
+from services import cup_seeding  # noqa: E402
 
 
 @dataclass(frozen=True)
@@ -190,13 +191,10 @@ DIVISION_PAIRS: dict[str, dict[str, list[tuple[str, str]]]] = {
     },
 }
 
-# Кубок дивизиона: 16 клубов, 1/8 → 1/4 → 1/2 → финал; стадия → число серий.
-DIVISION_CUP_SERIES: dict[str, int] = {"1/8": 8, "1/4": 4, "1/2": 2, "final": 1}
-DIVISION_CUP_STAGES: tuple[str, ...] = tuple(DIVISION_CUP_SERIES)
-
-# «Клуб — Клуб», «Клуб - Клуб», «Клуб; Клуб», «Клуб vs Клуб». Дефис без пробелов
-# вокруг не разделитель: «Аль-Наср» — одно имя.
-_PAIR_SPLIT = re.compile(r"\s+[—–-]\s+|\s*;\s*|\s+vs\.?\s+", re.IGNORECASE)
+# Стадии кубка дивизиона и разбор строки пары — общие с сидом из бота (/cup).
+DIVISION_CUP_SERIES = cup_seeding.DIVISION_CUP_SERIES
+DIVISION_CUP_STAGES = cup_seeding.DIVISION_CUP_STAGES
+_PAIR_SPLIT = cup_seeding.PAIR_SPLIT
 
 # Стадия, где играют только низшие дивизионы (регланамент кубка).
 _STAGE_DIVISION_RESTRICTION: dict[str, set[str]] = {

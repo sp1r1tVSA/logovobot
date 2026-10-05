@@ -74,6 +74,7 @@ ACTIONS: dict[str, tuple[str, str]] = {
     "cup_stage_bets_opened": ("cups", "Открыт приём ставок на стадию"),
     "cup_stage_started": ("cups", "Стадия кубка запущена"),
     "cup_game_winner_set": ("cups", "Назначен проход в серии"),
+    "cup_bracket_seeded": ("cups", "Заведена сетка стадии кубка"),
     # Дивизионы и админы
     "division_created": ("admins", "Создан дивизион"),
     "division_renamed": ("admins", "Переименован дивизион"),
