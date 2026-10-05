@@ -7,8 +7,8 @@ e-sports championships: divisions and rounds, match result intake via AI screens
 standings and Pillow-rendered infographics, a debt/warn discipline system, and a virtual
 prediction market ("Logovo.bet") exposed through a Telegram Mini App.
 
-The project is well past MVP — 428 Python files (191 application modules and scripts +
-237 pytest files), 82 SQLite tables (migrations through `033`), and ten completed development phases documented in the
+The project is well past MVP — 469 Python files (210 application modules and scripts +
+259 pytest files), 93 SQLite tables (migrations through `036`), and ten completed development phases documented in the
 `PHASE_*.md` reports under `reports/`. Post-phase work is logged in the numbered
 `FIX_*.md` notes and the `*_AUDIT.md` reports beside them.
 
@@ -106,21 +106,21 @@ never prevents the bot itself from starting. Preserve that isolation.
 |---|---|
 | `main.py` | Entrypoint, `post_init`, background job registration |
 | `config.py` | All env parsing. Every setting must be read here, never via `os.getenv` at a call site |
-| `database.py` | ~19.8k lines: schema, migrations, and every repository function |
+| `database.py` | ~20.9k lines: schema, migrations, and every repository function |
 | `constants.py` | Shared enums and literals |
 | `club_registry.py` | Canonical club names, aliases, and the tiered name resolver. Imports `config` only |
 | `conftest.py` | Test bootstrap: per-module temp SQLite DB and the autouse fixtures (see Commands) |
-| `handlers/` (16 modules + `__init__`) | Telegram entrypoints — `admin`, `admin_bets`, `admin_ops`, `cabinet`, `drafts`, `betting`, `chat`, `club_smm`, `cup_management`, `league_overview`, `topic_management`, `text_commands`, `squad_ai`, `tracker`, `bot_menu`, `base` |
+| `handlers/` (19 modules + `__init__`) | Telegram entrypoints — `admin`, `admin_bets`, `admin_broadcast` (global admin broadcasts), `admin_irl` (IRL-bets panel), `admin_ops`, `chat_moderation`, `cabinet`, `drafts`, `betting`, `chat`, `club_smm`, `cup_management`, `league_overview`, `topic_management`, `text_commands`, `squad_ai`, `tracker`, `bot_menu`, `base` |
 | `services/ai/` | `ai_recognizer.py` (match-result Gemini Vision OCR), `squad_recognizer.py` (lineup OCR), `ai_chat.py` («Темшик» persona), `persona_base.py`, `bet_picks.py` (panel «ИИ-прогноз» via OpenRouter), `pick_review.py` («Сверка с матчами»), `market_analysis.py` («Анализ рынка») |
-| `services/graphics/` (12 modules) | Pillow renderers: standings tables, club/player/FC cards, club schedules, round digests, top-stats, cup bracket, team of the week (`totw_generator.py`), plus `division_theme.py`, `player_photos.py`, `player_identity.py` |
+| `services/graphics/` (14 modules) | Pillow renderers: standings tables, club/player/FC cards, club schedules, round digests, top-stats, cup bracket, team of the week (`totw_generator.py`), the transfer feed card and window recap (`transfer_card_generator.py`, `transfer_recap_generator.py`), plus `division_theme.py`, `player_photos.py`, `player_identity.py` |
 | `services/sports/` + `sports_provider.py` | External live-football provider adapters plus `cache`, `circuit`, `limiter`, `freshness`, `health`, `odds_sync` |
-| `services/` (root, ~62 modules) | Betting/market engines, ELO, Poisson, risk, settlement, gamification, seasons, `topic_cache.py`; operations: `db_backup`, `job_health`, `bot_health`, `ocr_metrics`, `admin_journal` |
-| `api/` (22 modules) | `aiohttp` Mini App API — `server.py`, `auth.py`, `rate_limiter.py`, `params.py`, and 18 `routes_*.py` modules |
-| `transfers/` (16 modules) | The transfer window («ТО») — own package with its own SQL (`repo.py`), schema (`schema.py`, migration `033`), pure rules (`engine.py`), request lifecycle (`requests.py`, `approval.py`, `squad.py`, `slots.py`, `sanctions.py`), the `/to` panel (`handlers.py`), Mini App routes (`api.py`), form autocomplete (`suggest.py`), notifications and the auto-close job. See *Transfer window* below |
-| `web/` | Mini App frontend (static `index.html`, `css/`, `js/` — `api`, `app`, `admin` (the Logovo.bet panel), `charts`, `effects`, `outrights`, `store`, `tg`, `ui`, `transfers`, `shop`) |
+| `services/` (root, ~66 modules) | Betting/market engines, ELO, Poisson, risk, settlement, gamification, seasons, `topic_cache.py`; operations: `db_backup`, `job_health`, `bot_health`, `ocr_metrics`, `admin_journal` |
+| `api/` (23 modules) | `aiohttp` Mini App API — `server.py`, `auth.py`, `rate_limiter.py`, `params.py`, and 19 `routes_*.py` modules |
+| `transfers/` (21 modules) | The transfer window («ТО») — own package with its own SQL (`repo.py`), schema (`schema.py`, migration `033` + additive tables), settings (`config.py`), pure rules (`engine.py`), window lifecycle and budgets (`service.py`), request lifecycle (`requests.py`, `approval.py`, `squad.py`, `slots.py`, `sanctions.py`), the `/to` panel (`handlers.py`), Mini App routes (`api.py`), form autocomplete (`suggest.py`), market (`market.py`), board (`board.py`), reconciliation (`reconcile.py`), window recap (`recap.py`), feed card (`card.py`), notifications (`notify.py`), reminders (`reminders.py`) and the jobs (`jobs.py`). See *Transfer window* below |
+| `web/` | Mini App frontend (static `index.html`, `css/`, `js/` — `api`, `app`, `admin` (the Logovo.bet panel), `charts`, `design` (dark / frost theme switch), `effects`, `irl` (the «🌍 IRL» lobby), `outrights`, `store`, `tg`, `ui`, `transfers` (tabs «📊 Статус», «📝 Заявка», «🛒 Рынок», «📌 Доска», «📜 История»), `shop`) |
 | `utils/` | `media_utils.py`, a thin re-export wrapper over `services/animation_sender.py` |
-| `scripts/` (28 scripts) | One-off operational scripts (DB audit, backfills, imports, bulk club binding, cup bracket seeding, cache refresh, season reset, previews and checkers) |
-| `tests/` | 237 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
+| `scripts/` (31 scripts) | One-off operational scripts (DB audit, backfills, imports, bulk club binding, cup bracket seeding, cache refresh, season reset, previews and checkers) |
+| `tests/` | 259 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
 | `assets/` | **Not in git** — emptied on 2026-09-18 with the КПЛ season. Runtime recreates `avatars/` and `players/` on demand; `logos/` must be refilled by hand (see below) |
 | `reports/` | Historical `PHASE_*.md` plans/matrices/reports, `FIX_0*.md` notes and `*_AUDIT.md` audits, moved off the repo root |
 | `tasks/`, `docs/` | Working plan/todo notes and `PURGE_SEASON_GUIDE.md` |
