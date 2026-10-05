@@ -225,6 +225,11 @@ ROUND_DEADLINE_REMINDER_HOURS: tuple[int, ...] = (72, 66, 60, 54, 48, 42, 36, 30
 # coin_transactions('welcome_bonus') берут сумму отсюда.
 INITIAL_WALLET_BALANCE = 677
 
+# Пособие при нулевом балансе: игрок с 0 🪙 и без открытых купонов может раз в
+# BAILOUT_COOLDOWN_DAYS забрать BAILOUT_AMOUNT 🪙 (coin_transactions 'bailout').
+BAILOUT_AMOUNT = 200
+BAILOUT_COOLDOWN_DAYS = 7
+
 # Долгосрочные ставки (outright): момент по Москве, с которого приём закрыт, —
 # для дивизионов, кубков дивизионов и бомбардиров. Общий кубок закрывается
 # по-своему, с началом 1/4 финала. Пустое значение — без срока. Расчёт и

@@ -154,6 +154,7 @@ SENSITIVE_PATH_MARKERS = (
     "/api/bets",
     "/api/outrights/bet",
     "/api/achievements/claim",
+    "/api/wallet/bailout",
     "/api/saved-coupons",
     "/api/favorites",
     "/api/cabinet/match-time",

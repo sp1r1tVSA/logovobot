@@ -86,3 +86,32 @@ class ShopTransfers {
 }
 
 export const shopTransfers = new ShopTransfers();
+
+/**
+ * Пособие при нулевом балансе: кнопку рисует UIRenderer.renderBailout, условия
+ * проверяет сервер (database.claim_bailout) — здесь только клик и обновление баланса.
+ */
+let bailoutBusy = false;
+
+async function claimBailout(btn) {
+  if (bailoutBusy) return;
+  bailoutBusy = true;
+  btn.disabled = true;
+  try {
+    const res = await api.claimBailout();
+    store.setUser({ ...store.state.user, balance: res.bailout.balance, bailout: res.bailout });
+    tgBridge.hapticImpact('medium');
+  } catch (e) {
+    const fresh = e.data?.bailout;
+    if (fresh) store.setUser({ ...store.state.user, bailout: fresh });
+    else btn.disabled = false;
+    alert(e.message || 'Не удалось получить пособие');
+  } finally {
+    bailoutBusy = false;
+  }
+}
+
+document.addEventListener('click', (ev) => {
+  const btn = ev.target.closest?.('#shop-bailout-claim');
+  if (btn) claimBailout(btn);
+});

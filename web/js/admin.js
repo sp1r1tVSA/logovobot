@@ -181,6 +181,7 @@ const TX_LABELS = {
   daily_bonus: 'Ежедневный бонус',
   welcome_bonus: 'Стартовый баланс',
   level_up_reward: 'Новый уровень',
+  bailout: 'Пособие при нулевом балансе',
   outright_bet: 'Долгосрочная ставка',
   outright_win: 'Выигрыш: долгосрочная',
   outright_refund: 'Возврат: долгосрочная',

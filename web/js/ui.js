@@ -479,6 +479,7 @@ export class UIRenderer {
     }
     const shopBalEl = document.getElementById('shop-balance-val');
     if (shopBalEl && user) shopBalEl.textContent = this.formatNumber(user.balance);
+    this.renderBailout(user);
     const lvlEl = document.getElementById('user-level-val');
     if (lvlEl && progression) {
       lvlEl.textContent = `Lvl ${progression.level || 1}`;
@@ -488,6 +489,38 @@ export class UIRenderer {
     // ещё не забрана.
     const aBadge = document.getElementById('achievements-badge');
     if (aBadge) aBadge.style.display = unclaimedAchievements > 0 ? '' : 'none';
+  }
+
+  /**
+   * Пособие при нулевом балансе (карточка баланса в магазине). `user.bailout`
+   * приходит из bootstrap только у игрока на нуле; кнопку обрабатывает shop.js.
+   */
+  static renderBailout(user) {
+    const el = document.getElementById('shop-bailout');
+    if (!el) return;
+    const b = user?.bailout;
+    if (!b || Number(user.balance) > 0) {
+      el.hidden = true;
+      el.innerHTML = '';
+      return;
+    }
+    const amount = this.formatNumber(b.amount);
+    let body;
+    if (b.eligible) {
+      body = `<span class="shop-bailout-text">Монеты закончились — можно забрать пособие.</span>`
+        + `<button class="shop-bailout-btn" id="shop-bailout-claim">Забрать ${amount} 🪙</button>`;
+    } else if (b.reason === 'open_bets') {
+      body = `<span class="shop-bailout-text">Пособие ${amount} 🪙 станет доступно, когда разыграются все купоны.</span>`;
+    } else if (b.reason === 'cooldown') {
+      const when = b.next_available_at ? ` Следующее — с ${escapeHtml(String(b.next_available_at).slice(0, 16))} МСК.` : '';
+      body = `<span class="shop-bailout-text">Пособие уже получено.${when}</span>`;
+    } else {
+      el.hidden = true;
+      el.innerHTML = '';
+      return;
+    }
+    el.hidden = false;
+    el.innerHTML = body;
   }
 
   static updateNavClubIcon(overview) {

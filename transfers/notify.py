@@ -327,7 +327,8 @@ async def post_request_card(bot, transfer: dict, *, photo_bytes: bytes | None = 
         return False
 
 
-async def notify_deal_proposal(bot, transfer: dict, *, photo_bytes: bytes | None = None) -> bool:
+async def notify_deal_proposal(bot, transfer: dict, *, photo_bytes: bytes | None = None,
+                               note: str | None = None) -> bool:
     """Уведомить вторую сторону о предложении сделки."""
     if bot is None:
         bot = get_bot()
@@ -359,6 +360,8 @@ async def notify_deal_proposal(bot, transfer: dict, *, photo_bytes: bytes | None
         f"• Сумма сделки: <b>{format_k(transfer.get('price_k'))}</b>\n\n"
         f"Подтвердите или отклоните сделку в Mini App (вкладка 🔁 «Трансферы» → «Статус»)."
     )
+    if note:
+        text = f"{note}\n\n{text}"
 
     if photo_bytes:
         try:
@@ -376,6 +379,50 @@ async def notify_deal_proposal(bot, transfer: dict, *, photo_bytes: bytes | None
             logger.info("transfers: photo DM to %s failed: %s, falling back to text", counterparty, exc)
 
     return await dm_user(bot, int(counterparty), text)
+
+
+def lot_line(lot: dict) -> str:
+    """«Продаю: Rodri (OVR 106) · 20 млн» — одна строка лота."""
+    side = "Продаю" if lot["side"] == "sell" else "Ищу"
+    what = html.escape(lot.get("player_name") or "")
+    if lot.get("ovr"):
+        what += f" (OVR {lot['ovr']})"
+    parts = [f"{side}: <b>{what}</b>" if what else f"<b>{side}</b>"]
+    if lot.get("price_k") is not None:
+        parts.append(format_k(lot["price_k"]))
+    return " · ".join(parts)
+
+
+def board_response_note(lot: dict) -> str:
+    return f"📌 Отклик на ваш лот на доске — {lot_line(lot)}"
+
+
+async def announce_board_lot(bot, lot: dict) -> bool:
+    """Новый лот — тихо в ленту. Лента не привязана — молчим: лот виден на доске Mini App."""
+    try:
+        topic = repo.get_topic("feed")
+    except Exception:
+        logger.exception("transfers: topic lookup failed")
+        topic = None
+    if not topic or bot is None:
+        return False
+    text = f"📌 <b>Доска ТО</b> · {html.escape(lot['club_name'])}\n{lot_line(lot)}"
+    if lot.get("note"):
+        text += f"\n<i>{html.escape(lot['note'])}</i>"
+    text += "\n\nОткликнуться — в Mini App: 🔁 «Трансферы» → «📌 Доска»."
+    try:
+        await bot.send_message(chat_id=topic["group_chat_id"], message_thread_id=topic["message_thread_id"],
+                               text=text, parse_mode="HTML", disable_notification=True,
+                               disable_web_page_preview=True)
+        return True
+    except Exception as exc:
+        logger.warning("transfers: board lot post failed: %s", exc)
+        return False
+
+
+async def notify_board_lot_removed(bot, lot: dict) -> bool:
+    return await dm_user(bot, lot.get("user_id"),
+                         f"📌 Ответственный снял ваш лот с доски ТО — {lot_line(lot)}")
 
 
 async def notify_deal_confirmed(bot, transfer: dict) -> bool:

@@ -112,6 +112,10 @@ class ApiClient {
     return this.request('/api/wallet');
   }
 
+  claimBailout() {
+    return this.request('/api/wallet/bailout', { method: 'POST' });
+  }
+
   getLeaderboard() {
     return this.request('/api/leaderboard');
   }
@@ -598,6 +602,21 @@ class ApiClient {
       method: 'POST',
       body: isMultipart ? payload : JSON.stringify(payload)
     });
+  }
+
+  getTransferBoard() {
+    return this.request('/api/transfers/board');
+  }
+
+  createTransferLot(payload) {
+    return this.request('/api/transfers/board', {
+      method: 'POST',
+      body: JSON.stringify(payload)
+    });
+  }
+
+  closeTransferLot(lotId) {
+    return this.request(`/api/transfers/board/${lotId}/close`, { method: 'POST' });
   }
 
   createTransferUrnBuy(urnItemId) {

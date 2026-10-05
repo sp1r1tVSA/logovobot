@@ -241,6 +241,38 @@ def apply_schema(cursor: sqlite3.Cursor) -> None:
         )
     """)
 
+    # Доска «ищу / продаю»: лот тренера без конкретного покупателя. Отклик — обычная сделка,
+    # связанная с лотом строкой в `transfer_board_responses` (в `transfers` новых колонок нет).
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transfer_board_lots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            window_id INTEGER NOT NULL REFERENCES transfer_windows(id),
+            club_name TEXT NOT NULL,
+            user_id INTEGER NOT NULL,
+            side TEXT NOT NULL CHECK(side IN ('buy', 'sell')),
+            player_name TEXT,
+            norm_name TEXT,
+            ovr INTEGER,
+            price_k INTEGER,
+            note TEXT,
+            status TEXT NOT NULL DEFAULT 'open' CHECK(status IN ('open', 'closed')),
+            closed_reason TEXT,
+            closed_by INTEGER,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+            closed_at TIMESTAMP
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transfer_board_lots_window "
+        "ON transfer_board_lots(window_id, status)"
+    )
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transfer_board_responses (
+            transfer_id INTEGER PRIMARY KEY REFERENCES transfers(id),
+            lot_id INTEGER NOT NULL REFERENCES transfer_board_lots(id)
+        )
+    """)
+
     cursor.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
         (MIGRATION_033_TRANSFER_WINDOW,

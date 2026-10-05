@@ -9,7 +9,10 @@ import asyncio
 import json
 from typing import Generator
 from contextlib import contextmanager
-from config import DB_PATH, INITIAL_WALLET_BALANCE, MAX_OPEN_ROUNDS_PER_DIVISION, ROUND_DEADLINE_REMINDER_HOURS
+from config import (
+    BAILOUT_AMOUNT, BAILOUT_COOLDOWN_DAYS, DB_PATH, INITIAL_WALLET_BALANCE,
+    MAX_OPEN_ROUNDS_PER_DIVISION, ROUND_DEADLINE_REMINDER_HOURS,
+)
 from constants import CUP_DIVISION_SENTINEL, CUP_SERIES_GAMES, CUP_STAGES, CUP_STAGE_ORDER
 from time_utils import SQL_NOW, now_msk, now_msk_str, parse_msk, today_msk
 from club_registry import normalize_team_name, resolve_team_name
@@ -14347,6 +14350,93 @@ def admin_adjust_wallet(user_id: int, amount: int, actor_id: int, reason: str) -
 
     return {"user_id": user_id, "amount": amount, "old_balance": old_balance,
             "new_balance": new_balance, "transaction_id": tx_id, "transaction_type": tx_type}
+
+
+# Купон «открыт», пока ждёт расчёта: обычный или IRL. Пока такой есть, игрок не в
+# тупике — выигрыш вернёт ему монеты, и пособие ему не положено. Долгосрочные ставки
+# (outright_bets) не считаются: они разыгрываются в конце сезона, ждать их незачем.
+_BAILOUT_NO_OPEN_BETS_SQL = """
+    NOT EXISTS (SELECT 1 FROM user_bets WHERE user_id = :uid AND status = 'pending')
+    AND NOT EXISTS (SELECT 1 FROM irl_bets WHERE user_id = :uid AND status = 'pending')
+"""
+
+
+def get_bailout_status(user_id: int) -> dict:
+    """Может ли игрок забрать пособие сейчас и если нет — почему.
+
+    `reason`: None (можно), 'balance' (на счету есть монеты), 'open_bets' (есть
+    неразыгранные купоны) или 'cooldown' (пособие уже брали в последние
+    BAILOUT_COOLDOWN_DAYS дней). `next_available_at` — по Москве, только при 'cooldown'.
+    """
+    wallet = get_or_create_wallet(user_id)
+    balance = int(wallet.get("balance", 0))
+    with transaction() as conn:
+        open_bets = conn.execute(
+            f"SELECT NOT ({_BAILOUT_NO_OPEN_BETS_SQL}) AS has_open", {"uid": user_id}
+        ).fetchone()["has_open"]
+        last = conn.execute(
+            "SELECT MAX(created_at) AS last_at FROM coin_transactions"
+            " WHERE user_id = ? AND transaction_type = 'bailout'",
+            (user_id,),
+        ).fetchone()["last_at"]
+        next_at = None
+        on_cooldown = False
+        if last:
+            row = conn.execute(
+                "SELECT datetime(?, ?) AS next_at, datetime(?, ?) <= datetime('now', '+3 hours') AS ready",
+                (last, f"+{BAILOUT_COOLDOWN_DAYS} days", last, f"+{BAILOUT_COOLDOWN_DAYS} days"),
+            ).fetchone()
+            next_at = row["next_at"]
+            on_cooldown = not row["ready"]
+
+    reason = None
+    if balance > 0:
+        reason = "balance"
+    elif open_bets:
+        reason = "open_bets"
+    elif on_cooldown:
+        reason = "cooldown"
+    return {
+        "eligible": reason is None,
+        "reason": reason,
+        "amount": BAILOUT_AMOUNT,
+        "cooldown_days": BAILOUT_COOLDOWN_DAYS,
+        "balance": balance,
+        "next_available_at": next_at if reason == "cooldown" else None,
+    }
+
+
+def claim_bailout(user_id: int) -> dict:
+    """Начислить пособие, если игрок на нуле, без открытых купонов и вне кулдауна.
+
+    Условия проверяет сам UPDATE: он берёт блокировку записи и применяет их
+    одним оператором, поэтому два одновременных запроса не выдадут пособие дважды.
+    Возвращает `{"granted": bool, **get_bailout_status()}`; при отказе `reason` говорит почему.
+    """
+    get_or_create_wallet(user_id)
+    with transaction() as conn:
+        cursor = conn.execute(
+            f"""
+            UPDATE user_wallets
+            SET balance = balance + :amount, updated_at = datetime('now', '+3 hours')
+            WHERE user_id = :uid AND balance = 0
+              AND {_BAILOUT_NO_OPEN_BETS_SQL}
+              AND NOT EXISTS (
+                  SELECT 1 FROM coin_transactions
+                  WHERE user_id = :uid AND transaction_type = 'bailout'
+                    AND created_at > datetime('now', '+3 hours', :cooldown)
+              )
+            """,
+            {"amount": BAILOUT_AMOUNT, "uid": user_id, "cooldown": f"-{BAILOUT_COOLDOWN_DAYS} days"},
+        )
+        granted = cursor.rowcount == 1
+        if granted:
+            conn.execute(
+                "INSERT INTO coin_transactions (user_id, amount, transaction_type, balance_after, created_at)"
+                " VALUES (?, ?, 'bailout', ?, datetime('now', '+3 hours'))",
+                (user_id, BAILOUT_AMOUNT, BAILOUT_AMOUNT),
+            )
+    return {"granted": granted, **get_bailout_status(user_id)}
 
 
 def get_coin_transactions(user_id: int, limit: int = 30, offset: int = 0) -> list[dict]:
