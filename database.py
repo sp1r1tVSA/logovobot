@@ -6838,6 +6838,132 @@ def apply_player_spelling_merges(plan: dict) -> dict:
     return updated
 
 
+def plan_player_merge(source_names: list[str], target_name: str, team_name: str | None = None,
+                      include_squad: bool = False) -> dict:
+    """Plan folding the stats of several names that stand for ONE footballer into `target_name`.
+
+    Unlike `plan_player_spelling_merges` (one player, several OCR spellings) this is for names
+    that no resolver ties together — a player the coaches call by his first name in one place
+    and by his surname in another. Names are compared case-insensitively and trimmed, nothing fuzzy.
+
+    Returns {"events": [...], "mvp": [...], "squad": [...]}:
+      - events: per (team_name, old_name) with `rows`, `goals`, `assists`;
+      - mvp: per match whose `mvp_player` is a source name (`team_name` limits it to matches of that club);
+      - squad: only with `include_squad`; per (team_name, old_name) — `rename` when the club has
+        no `target_name` yet, `drop` when it already does (the row goes, a missing position is
+        carried over). Stats are what the merge is about, so the squad is left alone by default.
+    Read-only: `apply_player_merge` writes the plan.
+    """
+    target = (target_name or "").strip()
+    sources = [s.strip() for s in source_names if s and s.strip()]
+    if not target or not sources:
+        raise ValueError("target_name and at least one source name are required")
+    src_keys = {s.casefold() for s in sources}
+    if target.casefold() in src_keys:
+        raise ValueError("source name equals the target; use merge_player_spellings for spellings")
+    team_key = team_name.strip().casefold() if team_name else None
+
+    def in_scope(team: str | None) -> bool:
+        return team_key is None or (team or "").strip().casefold() == team_key
+
+    events: list[dict] = []
+    mvp: list[dict] = []
+    squad: list[dict] = []
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT team_name, player_name, COUNT(*) AS rows_n,
+                   COALESCE(SUM(CASE WHEN event_type = 'goal' THEN count END), 0) AS goals,
+                   COALESCE(SUM(CASE WHEN event_type = 'assist' THEN count END), 0) AS assists
+            FROM match_events
+            GROUP BY team_name, player_name
+            ORDER BY team_name, player_name
+        """)
+        for r in cursor.fetchall():
+            if (r["player_name"] or "").strip().casefold() in src_keys and in_scope(r["team_name"]):
+                events.append({"team_name": r["team_name"], "old_name": r["player_name"],
+                               "rows": r["rows_n"], "goals": r["goals"], "assists": r["assists"]})
+
+        cursor.execute("""
+            SELECT id, mvp_player, player1_team, player2_team FROM matches
+            WHERE mvp_player IS NOT NULL AND TRIM(mvp_player) != '' ORDER BY id
+        """)
+        for r in cursor.fetchall():
+            if (r["mvp_player"] or "").strip().casefold() not in src_keys:
+                continue
+            if team_key is not None and not (in_scope(r["player1_team"]) or in_scope(r["player2_team"])):
+                continue
+            mvp.append({"match_id": r["id"], "old_name": r["mvp_player"]})
+
+        cursor.execute("SELECT team_name, player_name FROM squad_players ORDER BY team_name, player_name")
+        by_team: dict[str, list[str]] = {}
+        if not include_squad:
+            return {"events": events, "mvp": mvp, "squad": squad, "target": target}
+        for r in cursor.fetchall():
+            by_team.setdefault(r["team_name"], []).append(r["player_name"])
+        for team, names in by_team.items():
+            if not in_scope(team):
+                continue
+            has_target = any(n.strip().casefold() == target.casefold() for n in names)
+            for n in names:
+                if n.strip().casefold() in src_keys:
+                    squad.append({"team_name": team, "old_name": n,
+                                  "action": "drop" if has_target else "rename"})
+                    has_target = True  # a second source in the same club folds into the first
+    return {"events": events, "mvp": mvp, "squad": squad, "target": target}
+
+
+def apply_player_merge(plan: dict) -> dict:
+    """Write a `plan_player_merge` plan in one transaction.
+
+    Every UPDATE is guarded by the old value, so a row that changed since the plan was made is
+    left alone. Returns {"events": n, "mvp": n, "squad": n} rows touched.
+    """
+    target = plan["target"]
+    target_norm = normalize_player_name_key(target)
+    done = {"events": 0, "mvp": 0, "squad": 0}
+    with transaction() as conn:
+        cursor = conn.cursor()
+        for item in plan.get("events", []):
+            cursor.execute(
+                "UPDATE match_events SET player_name = ? WHERE team_name = ? AND player_name = ?",
+                (target, item["team_name"], item["old_name"])
+            )
+            done["events"] += cursor.rowcount
+        for item in plan.get("mvp", []):
+            cursor.execute(
+                "UPDATE matches SET mvp_player = ? WHERE id = ? AND mvp_player = ?",
+                (target, item["match_id"], item["old_name"])
+            )
+            done["mvp"] += cursor.rowcount
+        for item in plan.get("squad", []):
+            team, old = item["team_name"], item["old_name"]
+            cursor.execute(
+                "SELECT id, position FROM squad_players WHERE team_name = ? AND player_name = ?",
+                (team, old)
+            )
+            row = cursor.fetchone()
+            if not row:
+                continue
+            cursor.execute(
+                "SELECT id, position FROM squad_players WHERE team_name = ? AND player_name = ?",
+                (team, target)
+            )
+            kept = cursor.fetchone()
+            if kept:
+                if not kept["position"] and row["position"]:
+                    cursor.execute("UPDATE squad_players SET position = ? WHERE id = ?",
+                                   (row["position"], kept["id"]))
+                cursor.execute("DELETE FROM squad_players WHERE id = ?", (row["id"],))
+            else:
+                cursor.execute(
+                    "UPDATE squad_players SET player_name = ?, norm_name = ? WHERE id = ?",
+                    (target, target_norm, row["id"])
+                )
+            done["squad"] += 1
+    return done
+
+
 def get_club_top_scorers(team_name: str) -> list[dict]:
     """Get top goal scorers for a club across confirmed matches."""
     with transaction() as conn:
