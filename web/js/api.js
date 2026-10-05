@@ -112,6 +112,10 @@ class ApiClient {
     return this.request('/api/wallet');
   }
 
+  claimBailout() {
+    return this.request('/api/wallet/bailout', { method: 'POST' });
+  }
+
   getLeaderboard() {
     return this.request('/api/leaderboard');
   }

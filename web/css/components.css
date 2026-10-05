@@ -5813,6 +5813,19 @@ span.team-logo-fallback {
 .shop-balance-label { font-size: 0.78rem; font-weight: 700; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.04em; }
 .shop-balance-val { font-family: 'Outfit', sans-serif; font-size: 1.45rem; font-weight: 900; color: var(--accent-gold); white-space: nowrap; }
 .shop-balance-hint { font-size: 0.74rem; color: var(--text-muted); line-height: 1.35; }
+.shop-bailout {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  margin-top: 6px; padding-top: 10px;
+  border-top: 1px dashed rgba(245, 176, 39, 0.28);
+}
+.shop-bailout[hidden] { display: none; }
+.shop-bailout-text { font-size: 0.8rem; color: var(--text-secondary); line-height: 1.35; }
+.shop-bailout-btn {
+  flex-shrink: 0; padding: 9px 14px; border: none; border-radius: 12px; cursor: pointer;
+  font-family: 'Outfit', sans-serif; font-size: 0.85rem; font-weight: 800;
+  color: #1a1204; background: var(--accent-gold);
+}
+.shop-bailout-btn:disabled { opacity: 0.55; cursor: default; }
 .shop-empty-state {
   text-align: center;
   padding: 44px 20px;

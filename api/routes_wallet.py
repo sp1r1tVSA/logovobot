@@ -16,6 +16,12 @@ from handlers.base import is_admin, is_super_admin
 
 logger = logging.getLogger(__name__)
 
+_BAILOUT_REFUSALS = {
+    "balance": "Пособие положено только при нулевом балансе.",
+    "open_bets": "Пока есть неразыгранные купоны, пособие недоступно.",
+    "cooldown": "Пособие уже получено, следующее — позже.",
+}
+
 
 def _resolve_user_bet_limits(user_id: int) -> dict:
     """
@@ -86,6 +92,14 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
 
     bet_limits = await asyncio.to_thread(_resolve_user_bet_limits, user_id)
 
+    # Пособие считаем только для игрока на нуле — остальным запрос не нужен.
+    bailout = None
+    if has_access and not wallet.get("balance", INITIAL_WALLET_BALANCE):
+        try:
+            bailout = await asyncio.to_thread(database.get_bailout_status, user_id)
+        except Exception as e:
+            logger.warning(f"Could not resolve bailout for user #{user_id}: {e}")
+
     # Дивизионы отдаём здесь же: клиенту они нужны до запроса линии, и отдельный
     # /api/divisions стоил лишнего сетевого круга на старте Mini App.
     divisions = await asyncio.to_thread(database.get_divisions, only_active=True) if has_access else []
@@ -107,6 +121,7 @@ async def handle_bootstrap(request: web.Request) -> web.Response:
             "is_panel_admin": is_super_admin(user_id),
             "has_access": has_access,
             "bet_limits": bet_limits,
+            "bailout": bailout,
             # Чип «IRL» в лобби показываем только при включённых ставках на реальные матчи.
             "irl_enabled": bool(config.IRL_ENABLED),
         },
@@ -234,3 +249,50 @@ async def handle_get_wallet(request: web.Request) -> web.Response:
             "bets_won": wallet.get("bets_won", 0)
         }
     })
+
+
+async def handle_get_bailout(request: web.Request) -> web.Response:
+    """
+    GET /api/wallet/bailout
+    Может ли игрок забрать пособие при нулевом балансе, а если нет — почему.
+    """
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    user_info = get_authenticated_user(init_data)
+    if not user_info or "id" not in user_info:
+        return web.json_response({"status": "error", "error": "unauthorized"}, status=401)
+    if not check_user_access(user_info["id"]):
+        return web.json_response(
+            {"status": "error", "error": "access_restricted", "message": "Logovo.bet временно недоступен."},
+            status=403
+        )
+
+    bailout = await asyncio.to_thread(database.get_bailout_status, user_info["id"])
+    return web.json_response({"status": "ok", "bailout": bailout})
+
+
+async def handle_claim_bailout(request: web.Request) -> web.Response:
+    """
+    POST /api/wallet/bailout
+    Начисляет пособие. Условия проверяет `database.claim_bailout`; при отказе — 409
+    с причиной в `bailout.reason`.
+    """
+    init_data = request.headers.get("X-Telegram-Init-Data", "")
+    user_info = get_authenticated_user(init_data)
+    if not user_info or "id" not in user_info:
+        return web.json_response({"status": "error", "error": "unauthorized"}, status=401)
+    if not check_user_access(user_info["id"]):
+        return web.json_response(
+            {"status": "error", "error": "access_restricted", "message": "Logovo.bet временно недоступен."},
+            status=403
+        )
+
+    result = await asyncio.to_thread(database.claim_bailout, user_info["id"])
+    granted = result.pop("granted")
+    if not granted:
+        return web.json_response(
+            {"status": "error", "error": "bailout_unavailable",
+             "message": _BAILOUT_REFUSALS.get(result["reason"], "Пособие сейчас недоступно."),
+             "bailout": result},
+            status=409
+        )
+    return web.json_response({"status": "ok", "bailout": result, "amount": result["amount"]})

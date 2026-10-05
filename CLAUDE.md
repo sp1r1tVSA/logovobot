@@ -490,7 +490,13 @@ fail-open, since the engine rejects anyway. `tests/test_bet_bans.py` covers it.
 
 **Gamification** pays out of the same closed economy, so rewards are calibrated against it
 rather than against round numbers: the starting wallet is `INITIAL_WALLET_BALANCE` (677 🪙),
-the payout ceiling 10 000 🪙 — there is no daily bonus. `seed_gamification_catalog` therefore
+the payout ceiling 10 000 🪙 — there is no daily bonus. The only top-up is the **bailout** («пособие»):
+a player at exactly 0 🪙 with no pending coupon (`user_bets` or `irl_bets`; long-term outright bets don't count) may take
+`BAILOUT_AMOUNT = 200` 🪙 once per `BAILOUT_COOLDOWN_DAYS = 7`. `database.claim_bailout` does it in one guarded
+`UPDATE user_wallets … WHERE balance = 0 AND NOT EXISTS …`, so concurrent requests pay once; the cooldown is read from
+`coin_transactions` (`'bailout'`), no table of its own. `GET/POST /api/wallet/bailout` (409 + `reason` = `balance` /
+`open_bets` / `cooldown`), bootstrap carries `user.bailout` only at balance 0, and the shop's balance card draws the
+button (`UIRenderer.renderBailout`, click in `shop.js`). `tests/test_bailout.py` covers it. `seed_gamification_catalog` therefore
 bands `reward_coins` by rarity — common ≈150–300, rare ≈500–1 000, epic ≈1 000–1 500,
 legendary ≈2 500–5 000, with `reward_xp` at roughly half, because each level gained already
 pays 500 🪙 via `add_user_xp`. `tests/test_gamification.py::TestAchievementsCatalog` enforces

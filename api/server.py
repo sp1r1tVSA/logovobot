@@ -17,6 +17,8 @@ from api.routes_wallet import (
     handle_leaderboard,
     handle_get_division_leaderboard,
     handle_get_wallet,
+    handle_get_bailout,
+    handle_claim_bailout,
 )
 from api.routes_markets import handle_get_tours, handle_get_match_markets, handle_get_odds_history
 from api.routes_cup import handle_get_cup, handle_get_cup_bracket, handle_get_cup_line
@@ -428,6 +430,8 @@ def create_app(bot=None) -> web.Application:
     # 1. Wallet & Bootstrap
     app.router.add_get("/api/bootstrap", handle_bootstrap)
     app.router.add_get("/api/wallet", handle_get_wallet)
+    app.router.add_get("/api/wallet/bailout", handle_get_bailout)
+    app.router.add_post("/api/wallet/bailout", handle_claim_bailout)
     app.router.add_get("/api/leaderboard/division/{division_id}", handle_get_division_leaderboard)
 
     # 2. Markets & Odds
