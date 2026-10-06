@@ -234,17 +234,21 @@ async def handle_get_top_scorers(request: web.Request) -> web.Response:
             div_id = int(div_param)
 
     limit = min(100, query_int(request, "limit", 30, minimum=5))
+    tournament_type = request.query.get("tournament_type") or None
 
-    raw_scorers = await asyncio.to_thread(database.get_top_scorers, limit=limit, division_id=div_id)
-    raw_assists = await asyncio.to_thread(database.get_top_assists, limit=limit, division_id=div_id)
-    raw_mvps = await asyncio.to_thread(database.get_top_mvps, division_id=div_id, limit=limit)
-    raw_combined = await asyncio.to_thread(database.get_top_combined_leaders, limit=limit, division_id=div_id)
+    raw_scorers = await asyncio.to_thread(database.get_top_scorers, limit=limit, division_id=div_id, tournament_type=tournament_type)
+    raw_assists = await asyncio.to_thread(database.get_top_assists, limit=limit, division_id=div_id, tournament_type=tournament_type)
+    raw_mvps = await asyncio.to_thread(database.get_top_mvps, division_id=div_id, limit=limit, tournament_type=tournament_type)
+    raw_combined = await asyncio.to_thread(database.get_top_combined_leaders, limit=limit, division_id=div_id, tournament_type=tournament_type)
 
     top_scorers = [
         {
             **sc,
             "goals": sc.get("total_goals", sc.get("goals", 0)),
             "total_goals": sc.get("total_goals", sc.get("goals", 0)),
+            "assists": sc.get("total_assists", sc.get("assists", 0)),
+            "total_assists": sc.get("total_assists", sc.get("assists", 0)),
+            "points": sc.get("points", ((sc.get("total_goals", sc.get("goals", 0)) or 0) + (sc.get("total_assists", sc.get("assists", 0)) or 0))),
         }
         for sc in raw_scorers
     ]
@@ -253,6 +257,9 @@ async def handle_get_top_scorers(request: web.Request) -> web.Response:
             **a,
             "assists": a.get("total_assists", a.get("assists", 0)),
             "total_assists": a.get("total_assists", a.get("assists", 0)),
+            "goals": a.get("total_goals", a.get("goals", 0)),
+            "total_goals": a.get("total_goals", a.get("goals", 0)),
+            "points": a.get("points", ((a.get("total_goals", a.get("goals", 0)) or 0) + (a.get("total_assists", a.get("assists", 0)) or 0))),
         }
         for a in raw_assists
     ]
@@ -271,9 +278,11 @@ async def handle_get_top_scorers(request: web.Request) -> web.Response:
     top_combined = [
         {
             **cb,
-            "goals": cb.get("goals", 0),
-            "assists": cb.get("assists", 0),
-            "points": cb.get("points", 0),
+            "goals": cb.get("goals", cb.get("total_goals", 0)),
+            "total_goals": cb.get("total_goals", cb.get("goals", 0)),
+            "assists": cb.get("assists", cb.get("total_assists", 0)),
+            "total_assists": cb.get("total_assists", cb.get("assists", 0)),
+            "points": cb.get("points", ((cb.get("goals", 0) or 0) + (cb.get("assists", 0) or 0))),
         }
         for cb in raw_combined
     ]

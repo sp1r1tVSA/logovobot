@@ -162,6 +162,35 @@ class TestDivisionStatisticsAndApi(AioHTTPTestCase):
         self.assertIn("PasserA", passers_a)
         self.assertNotIn("PasserB", passers_a)
 
+        # Add cup match (tournament_type='cup', round_number=-1) for StrikerA
+        with database.transaction() as conn:
+            cursor = conn.cursor()
+            cursor.execute("""
+                INSERT INTO matches (round_number, player1_id, player2_id, status, division_id, tournament_type)
+                VALUES (-1, ?, ?, 'confirmed', ?, 'cup')
+            """, (self.p1_id, self.p2_id, self.div_a_id))
+            m_cup = cursor.lastrowid
+            cursor.execute("""
+                INSERT INTO match_events (match_id, team_name, player_name, event_type, count)
+                VALUES (?, 'TeamA', 'StrikerA', 'goal', 3)
+            """, (m_cup,))
+            cursor.execute("""
+                INSERT INTO match_events (match_id, team_name, player_name, event_type, count)
+                VALUES (?, 'TeamA', 'StrikerA', 'assist', 1)
+            """, (m_cup,))
+
+        # Verify all-tournament goals are summed (4 league + 3 cup = 7 goals)
+        scorers_a_all = database.get_top_scorers(division_id=self.div_a_id)
+        striker_a_entry = next(s for s in scorers_a_all if s["player_name"] == "StrikerA")
+        self.assertEqual(striker_a_entry["goals"], 7)
+        self.assertEqual(striker_a_entry["assists"], 1)
+        self.assertEqual(striker_a_entry["points"], 8)
+
+        # League-only filter
+        scorers_a_league = database.get_top_scorers(division_id=self.div_a_id, tournament_type="league")
+        striker_a_league = next(s for s in scorers_a_league if s["player_name"] == "StrikerA")
+        self.assertEqual(striker_a_league["goals"], 4)
+
     def test_graphic_generation_with_division(self):
         """Test that graphics generators render with division_name without errors."""
         standings = database.get_standings(division_id=self.div_a_id)

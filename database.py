@@ -8028,8 +8028,13 @@ def get_unplayed_matches_in_round(round_number: int) -> list[dict]:
         """, (round_number,))
         return [dict(row) for row in cursor.fetchall()]
 
-def get_top_scorers(limit: int = 20, division_id: int | None = None, season_id: int | None = None) -> list[dict]:
-    """Get top goalscorers in the league aggregated from match_events (strictly confirmed league matches, round_number > 0)."""
+def get_top_scorers(
+    limit: int = 20,
+    division_id: int | None = None,
+    season_id: int | None = None,
+    tournament_type: str | None = None,
+) -> list[dict]:
+    """Get top goalscorers aggregated from match_events across confirmed matches (all tournaments or scoped)."""
     with transaction() as conn:
         cursor = conn.cursor()
         target_season_id = season_id
@@ -8037,26 +8042,47 @@ def get_top_scorers(limit: int = 20, division_id: int | None = None, season_id: 
             act = get_active_season()
             target_season_id = act["id"] if act else 1
 
-        query = """
-            SELECT me.player_name, me.team_name, SUM(me.count) AS total_goals,
+        where_clauses = [
+            "me.event_type IN ('goal', 'assist')",
+            "m.status = 'confirmed'",
+            "(m.season_id = ? OR m.season_id IS NULL)",
+            "COALESCE(m.is_series_header, 0) = 0",
+        ]
+        params = [target_season_id]
+
+        if tournament_type == "league":
+            where_clauses.append("((m.tournament_type IS NULL OR m.tournament_type = 'league' OR m.tournament_type = '') AND m.round_number > 0)")
+        elif tournament_type == "cup":
+            where_clauses.append("(m.tournament_type = 'cup' OR m.cup_series_id IS NOT NULL OR m.round_number = -1)")
+        elif tournament_type:
+            where_clauses.append("m.tournament_type = ?")
+            params.append(tournament_type)
+
+        if division_id is not None:
+            where_clauses.append("""(
+                m.division_id = ?
+                OR (
+                    (m.division_id IS NULL OR m.division_id = 0)
+                    AND LOWER(me.team_name) IN (
+                        SELECT LOWER(team_name) FROM users WHERE division_id = ?
+                    )
+                )
+            )""")
+            params.extend([division_id, division_id])
+
+        query = f"""
+            SELECT me.player_name, me.team_name,
+                   SUM(CASE WHEN me.event_type = 'goal' THEN me.count ELSE 0 END) AS total_goals,
+                   SUM(CASE WHEN me.event_type = 'assist' THEN me.count ELSE 0 END) AS total_assists,
+                   SUM(me.count) AS points,
                    MAX(m.division_id) AS division_id
             FROM match_events me
             JOIN matches m ON me.match_id = m.id
-            WHERE me.event_type = 'goal'
-              AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
-              AND m.round_number > 0
-              AND m.status = 'confirmed'
-              AND (m.season_id = ? OR m.season_id IS NULL)
-        """
-        params = [target_season_id]
-        if division_id is not None:
-            query += " AND m.division_id = ?"
-            params.append(division_id)
-        query += """
+            WHERE {" AND ".join(where_clauses)}
             GROUP BY me.player_name, me.team_name
         """
         cursor.execute(query, tuple(params))
-        rows = _fold_player_rows(cursor, cursor.fetchall(), ("total_goals",))
+        rows = _fold_player_rows(cursor, cursor.fetchall(), ("total_goals", "total_assists", "points"))
 
         div_map = {}
         try:
@@ -8079,12 +8105,20 @@ def get_top_scorers(limit: int = 20, division_id: int | None = None, season_id: 
                     pass
             r["division_name"] = div_map.get(d_id, f"Дивизион {d_id}" if d_id else "")
             r["goals"] = r.get("total_goals", 0)
+            r["assists"] = r.get("total_assists", 0)
+            r["points"] = r.get("points", 0)
 
-        rows.sort(key=lambda r: (-(r["total_goals"] or 0), r["player_name"]))
+        rows = [r for r in rows if (r.get("total_goals") or 0) > 0]
+        rows.sort(key=lambda r: (-(r["total_goals"] or 0), -(r.get("total_assists") or 0), r["player_name"]))
         return rows[:limit]
 
-def get_top_assists(limit: int = 20, division_id: int | None = None, season_id: int | None = None) -> list[dict]:
-    """Get top assist providers in the league aggregated from match_events (strictly confirmed league matches, round_number > 0)."""
+def get_top_assists(
+    limit: int = 20,
+    division_id: int | None = None,
+    season_id: int | None = None,
+    tournament_type: str | None = None,
+) -> list[dict]:
+    """Get top assist providers aggregated from match_events across confirmed matches (all tournaments or scoped)."""
     with transaction() as conn:
         cursor = conn.cursor()
         target_season_id = season_id
@@ -8092,26 +8126,47 @@ def get_top_assists(limit: int = 20, division_id: int | None = None, season_id: 
             act = get_active_season()
             target_season_id = act["id"] if act else 1
 
-        query = """
-            SELECT me.player_name, me.team_name, SUM(me.count) AS total_assists,
+        where_clauses = [
+            "me.event_type IN ('goal', 'assist')",
+            "m.status = 'confirmed'",
+            "(m.season_id = ? OR m.season_id IS NULL)",
+            "COALESCE(m.is_series_header, 0) = 0",
+        ]
+        params = [target_season_id]
+
+        if tournament_type == "league":
+            where_clauses.append("((m.tournament_type IS NULL OR m.tournament_type = 'league' OR m.tournament_type = '') AND m.round_number > 0)")
+        elif tournament_type == "cup":
+            where_clauses.append("(m.tournament_type = 'cup' OR m.cup_series_id IS NOT NULL OR m.round_number = -1)")
+        elif tournament_type:
+            where_clauses.append("m.tournament_type = ?")
+            params.append(tournament_type)
+
+        if division_id is not None:
+            where_clauses.append("""(
+                m.division_id = ?
+                OR (
+                    (m.division_id IS NULL OR m.division_id = 0)
+                    AND LOWER(me.team_name) IN (
+                        SELECT LOWER(team_name) FROM users WHERE division_id = ?
+                    )
+                )
+            )""")
+            params.extend([division_id, division_id])
+
+        query = f"""
+            SELECT me.player_name, me.team_name,
+                   SUM(CASE WHEN me.event_type = 'goal' THEN me.count ELSE 0 END) AS total_goals,
+                   SUM(CASE WHEN me.event_type = 'assist' THEN me.count ELSE 0 END) AS total_assists,
+                   SUM(me.count) AS points,
                    MAX(m.division_id) AS division_id
             FROM match_events me
             JOIN matches m ON me.match_id = m.id
-            WHERE me.event_type = 'assist'
-              AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
-              AND m.round_number > 0
-              AND m.status = 'confirmed'
-              AND (m.season_id = ? OR m.season_id IS NULL)
-        """
-        params = [target_season_id]
-        if division_id is not None:
-            query += " AND m.division_id = ?"
-            params.append(division_id)
-        query += """
+            WHERE {" AND ".join(where_clauses)}
             GROUP BY me.player_name, me.team_name
         """
         cursor.execute(query, tuple(params))
-        rows = _fold_player_rows(cursor, cursor.fetchall(), ("total_assists",))
+        rows = _fold_player_rows(cursor, cursor.fetchall(), ("total_goals", "total_assists", "points"))
 
         div_map = {}
         try:
@@ -8133,14 +8188,22 @@ def get_top_assists(limit: int = 20, division_id: int | None = None, season_id: 
                 except Exception:
                     pass
             r["division_name"] = div_map.get(d_id, f"Дивизион {d_id}" if d_id else "")
+            r["goals"] = r.get("total_goals", 0)
             r["assists"] = r.get("total_assists", 0)
+            r["points"] = r.get("points", 0)
 
-        rows.sort(key=lambda r: (-(r["total_assists"] or 0), r["player_name"]))
+        rows = [r for r in rows if (r.get("total_assists") or 0) > 0]
+        rows.sort(key=lambda r: (-(r["total_assists"] or 0), -(r.get("total_goals") or 0), r["player_name"]))
         return rows[:limit]
 
 
-def get_top_combined_leaders(limit: int = 50, division_id: int | None = None, season_id: int | None = None) -> list[dict]:
-    """Get overall leaders table combining goals and assists (Гол + Пас) across league matches."""
+def get_top_combined_leaders(
+    limit: int = 50,
+    division_id: int | None = None,
+    season_id: int | None = None,
+    tournament_type: str | None = None,
+) -> list[dict]:
+    """Get overall leaders table combining goals and assists (Гол + Пас) across confirmed matches."""
     with transaction() as conn:
         cursor = conn.cursor()
         target_season_id = season_id
@@ -8148,7 +8211,35 @@ def get_top_combined_leaders(limit: int = 50, division_id: int | None = None, se
             act = get_active_season()
             target_season_id = act["id"] if act else 1
 
-        query = """
+        where_clauses = [
+            "me.event_type IN ('goal', 'assist')",
+            "m.status = 'confirmed'",
+            "(m.season_id = ? OR m.season_id IS NULL)",
+            "COALESCE(m.is_series_header, 0) = 0",
+        ]
+        params = [target_season_id]
+
+        if tournament_type == "league":
+            where_clauses.append("((m.tournament_type IS NULL OR m.tournament_type = 'league' OR m.tournament_type = '') AND m.round_number > 0)")
+        elif tournament_type == "cup":
+            where_clauses.append("(m.tournament_type = 'cup' OR m.cup_series_id IS NOT NULL OR m.round_number = -1)")
+        elif tournament_type:
+            where_clauses.append("m.tournament_type = ?")
+            params.append(tournament_type)
+
+        if division_id is not None:
+            where_clauses.append("""(
+                m.division_id = ?
+                OR (
+                    (m.division_id IS NULL OR m.division_id = 0)
+                    AND LOWER(me.team_name) IN (
+                        SELECT LOWER(team_name) FROM users WHERE division_id = ?
+                    )
+                )
+            )""")
+            params.extend([division_id, division_id])
+
+        query = f"""
             SELECT me.player_name, me.team_name,
                    SUM(CASE WHEN me.event_type = 'goal' THEN me.count ELSE 0 END) AS goals,
                    SUM(CASE WHEN me.event_type = 'assist' THEN me.count ELSE 0 END) AS assists,
@@ -8156,17 +8247,7 @@ def get_top_combined_leaders(limit: int = 50, division_id: int | None = None, se
                    MAX(m.division_id) AS division_id
             FROM match_events me
             JOIN matches m ON me.match_id = m.id
-            WHERE me.event_type IN ('goal', 'assist')
-              AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
-              AND m.round_number > 0
-              AND m.status = 'confirmed'
-              AND (m.season_id = ? OR m.season_id IS NULL)
-        """
-        params = [target_season_id]
-        if division_id is not None:
-            query += " AND m.division_id = ?"
-            params.append(division_id)
-        query += """
+            WHERE {" AND ".join(where_clauses)}
             GROUP BY me.player_name, me.team_name
         """
         cursor.execute(query, tuple(params))
@@ -8193,14 +8274,22 @@ def get_top_combined_leaders(limit: int = 50, division_id: int | None = None, se
                     pass
             r["division_name"] = div_map.get(d_id, f"Дивизион {d_id}" if d_id else "")
             r["goals"] = r.get("goals") or 0
+            r["total_goals"] = r["goals"]
             r["assists"] = r.get("assists") or 0
+            r["total_assists"] = r["assists"]
             r["points"] = r.get("points") or 0
 
+        rows = [r for r in rows if (r.get("points") or 0) > 0]
         rows.sort(key=lambda r: (-(r["points"] or 0), -(r["goals"] or 0), -(r["assists"] or 0), r["player_name"]))
         return rows[:limit]
 
 
-def get_top_mvps(division_id: int | None = None, season_id: int | None = None, limit: int = 15) -> list[dict]:
+def get_top_mvps(
+    division_id: int | None = None,
+    season_id: int | None = None,
+    limit: int = 15,
+    tournament_type: str | None = None,
+) -> list[dict]:
     """Игроки с наибольшим числом наград «Игрок матча» (золотая корона на скриншоте).
 
     Возвращает [{"player_name": str, "team_name": str, "mvp_count": int}, ...].
@@ -8228,7 +8317,37 @@ def get_top_mvps(division_id: int | None = None, season_id: int | None = None, l
             act = get_active_season()
             target_season_id = act["id"] if act else 1
 
-        query = """
+        where_clauses = [
+            "m.status = 'confirmed'",
+            "m.mvp_player IS NOT NULL",
+            "TRIM(m.mvp_player) <> ''",
+            "(m.season_id = ? OR m.season_id IS NULL)",
+            "COALESCE(m.is_series_header, 0) = 0",
+        ]
+        params = [target_season_id]
+
+        if tournament_type == "league":
+            where_clauses.append("((m.tournament_type IS NULL OR m.tournament_type = 'league' OR m.tournament_type = '') AND m.round_number > 0)")
+        elif tournament_type == "cup":
+            where_clauses.append("(m.tournament_type = 'cup' OR m.cup_series_id IS NOT NULL OR m.round_number = -1)")
+        elif tournament_type:
+            where_clauses.append("m.tournament_type = ?")
+            params.append(tournament_type)
+
+        if division_id is not None:
+            where_clauses.append("""(
+                m.division_id = ?
+                OR (
+                    (m.division_id IS NULL OR m.division_id = 0)
+                    AND (
+                        LOWER(m.player1_team) IN (SELECT LOWER(team_name) FROM users WHERE division_id = ?)
+                        OR LOWER(m.player2_team) IN (SELECT LOWER(team_name) FROM users WHERE division_id = ?)
+                    )
+                )
+            )""")
+            params.extend([division_id, division_id, division_id])
+
+        query = f"""
             SELECT player_name, team_name, player1_team, player2_team
             FROM (
                 SELECT
@@ -8245,16 +8364,7 @@ def get_top_mvps(division_id: int | None = None, season_id: int | None = None, l
                         ''
                     ) AS team_name
                 FROM matches m
-                WHERE m.status = 'confirmed'
-                  AND m.mvp_player IS NOT NULL
-                  AND TRIM(m.mvp_player) <> ''
-                  AND (m.season_id = ? OR m.season_id IS NULL)
-        """
-        params = [target_season_id]
-        if division_id is not None:
-            query += " AND m.division_id = ?"
-            params.append(division_id)
-        query += """
+                WHERE {" AND ".join(where_clauses)}
             )
         """
         cursor.execute(query, tuple(params))
