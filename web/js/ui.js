@@ -1634,13 +1634,33 @@ export class UIRenderer {
             ? `<span class="division-badge-pill div-${p.division_id || 1}">${escapeHtml(p.division_name)}</span>`
             : '';
 
+          const photoUrl = p.photo_url || null;
+          const portraitHtml = `
+            <div class="podium-portrait-wrap">
+              ${photoUrl ? `
+                <img class="podium-portrait-img" 
+                     src="${escapeHtml(photoUrl)}" 
+                     alt="${escapeHtml(p.player_name)}" 
+                     loading="lazy" 
+                     onerror="this.style.display='none'; const fb = this.parentElement.querySelector('.podium-portrait-fallback'); if (fb) fb.style.display='flex';" />
+              ` : ''}
+              <div class="podium-portrait-fallback" style="${photoUrl ? 'display: none;' : 'display: flex;'}">
+                <svg class="podium-avatar-svg" viewBox="0 0 24 24" width="32" height="32" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M12 2a5 5 0 0 0-5 5v1a5 5 0 0 0 10 0V7a5 5 0 0 0-5-5z"></path>
+                  <path d="M4 21c0-4.4 3.6-7 8-7s8 2.6 8 7"></path>
+                </svg>
+              </div>
+              <div class="podium-crest-badge" title="${escapeHtml(p.team_name)}">
+                ${renderTeamLogoHtml(p.team_name, 16)}
+              </div>
+            </div>
+          `;
+
           return `
             <div class="podium-col ${rankClass}">
               <div class="podium-card">
                 <div class="podium-rank-tag">${medal} #${rankNum}</div>
-                <div class="podium-logo-wrap">
-                  ${renderTeamLogoHtml(p.team_name, 38)}
-                </div>
+                ${portraitHtml}
                 <div class="podium-player-name" title="${escapeHtml(p.player_name)}">${escapeHtml(p.player_name)}</div>
                 <div class="podium-team-line">
                   <span class="podium-team-name">${escapeHtml(p.team_name)}</span>
@@ -1662,41 +1682,6 @@ export class UIRenderer {
           </div>
         `;
       }
-
-      // 5. Шапка вкладок и дивизионов
-      const categoryTabsHtml = `
-        <div class="mc-tabs leaders-subtabs">
-          ${Object.values(leaderViews).map(v => `
-            <button class="mc-subtab-btn${v.id === activeLeader ? ' active' : ''}" data-leader-tab="${v.id}">
-              ${v.label}
-            </button>
-          `).join('')}
-        </div>
-      `;
-
-      // Дивизионы в шапке лидеров (динамически из store)
-      const divsList = (store.state.divisions && store.state.divisions.length > 0)
-        ? store.state.divisions
-        : [
-            { id: 1, name: 'Дивизион 1' },
-            { id: 2, name: 'Дивизион 2' },
-            { id: 3, name: 'Дивизион 3' },
-            { id: 4, name: 'Дивизион 4' },
-            { id: 5, name: 'Дивизион 5' }
-          ];
-
-      const divFilterChips = `
-        <div class="leaders-scope-bar scroll-row">
-          <button class="scope-chip${isOverall ? ' active' : ''}" data-leader-div="all">
-            🌐 Общая (Все)
-          </button>
-          ${divsList.map(d => `
-            <button class="scope-chip${!isOverall && String(selectedDivisionId) === String(d.id) ? ' active' : ''}" data-leader-div="${d.id}">
-              🛡️ ${escapeHtml(d.name || `Дивизион ${d.id}`)}
-            </button>
-          `).join('')}
-        </div>
-      `;
 
       // Строка поиска
       const searchHtml = `
@@ -1732,34 +1717,24 @@ export class UIRenderer {
           theadCols = `
             ${renderSortTh('position', '#', 'Место')}
             ${renderSortTh('player_name', 'Игрок', 'Имя игрока')}
-            ${renderSortTh('team_name', 'Клуб', 'Клуб')}
-            ${renderSortTh('goals', '⚽ Г', 'Забитые голы')}
-            ${renderSortTh('assists', '🎯 П', 'Голевые передачи')}
             ${renderSortTh('points', '⚡ Г+П', 'Всего очков (Гол + Пас)')}
           `;
         } else if (activeLeader === 'scorers') {
           theadCols = `
             ${renderSortTh('position', '#', 'Место')}
             ${renderSortTh('player_name', 'Игрок', 'Имя игрока')}
-            ${renderSortTh('team_name', 'Клуб', 'Клуб')}
             ${renderSortTh('goals', '⚽ Голы', 'Забитые голы')}
-            ${renderSortTh('assists', '🎯 Пасы', 'Голевые передачи')}
-            ${renderSortTh('points', '⚡ Г+П', 'Сумма очков')}
           `;
         } else if (activeLeader === 'assists') {
           theadCols = `
             ${renderSortTh('position', '#', 'Место')}
             ${renderSortTh('player_name', 'Игрок', 'Имя игрока')}
-            ${renderSortTh('team_name', 'Клуб', 'Клуб')}
             ${renderSortTh('assists', '🎯 Пасы', 'Голевые передачи')}
-            ${renderSortTh('goals', '⚽ Голы', 'Забитые голы')}
-            ${renderSortTh('points', '⚡ Г+П', 'Сумма очков')}
           `;
         } else {
           theadCols = `
             ${renderSortTh('position', '#', 'Место')}
             ${renderSortTh('player_name', 'Игрок', 'Имя игрока')}
-            ${renderSortTh('team_name', 'Клуб', 'Клуб')}
             ${renderSortTh('mvp_count', '👑 MVP', 'Награды «Игрок матча»')}
           `;
         }
@@ -1777,27 +1752,40 @@ export class UIRenderer {
           let statCells = '';
           if (activeLeader === 'combined') {
             statCells = `
-              <td class="col-num col-goals">${r.goals}</td>
-              <td class="col-num col-assists">${r.assists}</td>
-              <td class="col-num col-points"><b>${r.points}</b></td>
+              <td class="col-num col-points">
+                <div class="col-points-main">${r.points}</div>
+                <div class="col-points-sub">${r.goals}⚽ ${r.assists}🎯</div>
+              </td>
             `;
           } else if (activeLeader === 'scorers') {
             statCells = `
-              <td class="col-num col-goals font-bold"><b>${r.goals}</b></td>
-              <td class="col-num col-assists col-dim">${r.assists}</td>
-              <td class="col-num col-points">${r.points}</td>
+              <td class="col-num col-goals">
+                <div class="col-points-main">${r.goals}</div>
+                <div class="col-points-sub">голов</div>
+              </td>
             `;
           } else if (activeLeader === 'assists') {
             statCells = `
-              <td class="col-num col-assists font-bold"><b>${r.assists}</b></td>
-              <td class="col-num col-goals col-dim">${r.goals}</td>
-              <td class="col-num col-points">${r.points}</td>
+              <td class="col-num col-assists">
+                <div class="col-points-main">${r.assists}</div>
+                <div class="col-points-sub">пасов</div>
+              </td>
             `;
           } else {
             statCells = `
-              <td class="col-num col-mvp font-bold"><b>${r.mvp_count}</b></td>
+              <td class="col-num col-mvp">
+                <div class="col-points-main">${r.mvp_count}</div>
+                <div class="col-points-sub">MVP</div>
+              </td>
             `;
           }
+
+          const photoHtml = r.photo_url
+            ? `<div class="leaders-player-photo-wrap">
+                 <img class="leaders-player-row-photo" src="${escapeHtml(r.photo_url)}" alt="" loading="lazy" onerror="this.style.display='none'; const fb = this.parentElement.querySelector('.leaders-player-row-crest'); if (fb) fb.style.display='inline-block';" />
+                 <span class="leaders-player-row-crest" style="display:none;">${renderTeamLogoHtml(r.team_name, 22)}</span>
+               </div>`
+            : renderTeamLogoHtml(r.team_name, 22);
 
           return `
             <tr>
@@ -1806,15 +1794,12 @@ export class UIRenderer {
               </td>
               <td class="col-player-name">
                 <div class="leaders-player-wrap">
-                  ${renderTeamLogoHtml(r.team_name, 22)}
+                  ${photoHtml}
                   <div class="leaders-player-info">
                     <span class="player-name-txt">${escapeHtml(r.player_name)}</span>
                     <span class="player-team-sub">${escapeHtml(r.team_name)} ${divBadge}</span>
                   </div>
                 </div>
-              </td>
-              <td class="col-team">
-                <span class="leaders-team-name">${escapeHtml(r.team_name)}</span>
               </td>
               ${statCells}
             </tr>
@@ -1839,20 +1824,12 @@ export class UIRenderer {
 
       container.innerHTML = `
         <div class="leaders-hub">
-          <div class="leaders-hub-header">
-            <div class="leaders-title-wrap">
-              <span class="leaders-hub-title">${view.icon} ${view.label}</span>
-              <span class="leaders-hub-badge">${isOverall ? '🌐 Общая таблица лиги' : `🛡️ Дивизион ${selectedDivisionId}`}</span>
-            </div>
-            <div class="leaders-hub-desc">${isOverall ? `${view.desc} по всем дивизионам лиги` : view.desc}</div>
-          </div>
-          ${categoryTabsHtml}
-          ${divFilterChips}
           ${podiumHtml}
           ${searchHtml}
           ${contentHtml}
         </div>
       `;
+
     }
   }
 

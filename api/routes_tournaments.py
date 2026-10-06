@@ -15,8 +15,21 @@ import config
 import database
 from api.auth import get_authenticated_user
 from api.params import query_int
+from transfers.requests import portrait_url
 
 logger = logging.getLogger(__name__)
+
+
+def _prefetch_missing_top_photos(players_to_fetch: list[tuple[str, str | None]]) -> None:
+    try:
+        from services.graphics import player_photos
+        for p_name, p_team in players_to_fetch:
+            try:
+                player_photos.get_player_photo(p_name, p_team)
+            except Exception as e:
+                logger.debug(f"[TopPhotos] Prefetch failed for {p_name} ({p_team}): {e}")
+    except Exception as e:
+        logger.debug(f"[TopPhotos] Prefetch error: {e}")
 
 
 async def handle_get_tournaments(request: web.Request) -> web.Response:
@@ -241,51 +254,68 @@ async def handle_get_top_scorers(request: web.Request) -> web.Response:
     raw_mvps = await asyncio.to_thread(database.get_top_mvps, division_id=div_id, limit=limit, tournament_type=tournament_type)
     raw_combined = await asyncio.to_thread(database.get_top_combined_leaders, limit=limit, division_id=div_id, tournament_type=tournament_type)
 
+    missing_photos: list[tuple[str, str | None]] = []
+
+    def _enrich_player_dict(row: dict) -> dict:
+        p_name = row.get("player_name")
+        p_team = row.get("team_name")
+        url = portrait_url(p_name, p_team) if p_name else None
+        if not url and p_name:
+            missing_photos.append((p_name, p_team))
+        return {
+            **row,
+            "photo_url": url,
+        }
+
     top_scorers = [
-        {
+        _enrich_player_dict({
             **sc,
             "goals": sc.get("total_goals", sc.get("goals", 0)),
             "total_goals": sc.get("total_goals", sc.get("goals", 0)),
             "assists": sc.get("total_assists", sc.get("assists", 0)),
             "total_assists": sc.get("total_assists", sc.get("assists", 0)),
             "points": sc.get("points", ((sc.get("total_goals", sc.get("goals", 0)) or 0) + (sc.get("total_assists", sc.get("assists", 0)) or 0))),
-        }
+        })
         for sc in raw_scorers
     ]
     top_assists = [
-        {
+        _enrich_player_dict({
             **a,
             "assists": a.get("total_assists", a.get("assists", 0)),
             "total_assists": a.get("total_assists", a.get("assists", 0)),
             "goals": a.get("total_goals", a.get("goals", 0)),
             "total_goals": a.get("total_goals", a.get("goals", 0)),
             "points": a.get("points", ((a.get("total_goals", a.get("goals", 0)) or 0) + (a.get("total_assists", a.get("assists", 0)) or 0))),
-        }
+        })
         for a in raw_assists
     ]
 
     # 👑 Лидеры по наградам «Игрок матча». Ключ mvp_count оставлен как есть —
     # фронт читает его напрямую, алиасов вида goals/total_goals здесь не нужно.
     top_mvps = [
-        {
+        _enrich_player_dict({
             **mv,
             "mvp_count": mv.get("mvp_count", 0),
-        }
+        })
         for mv in raw_mvps
     ]
 
     # ⚡ Общая таблица: Гол + Пас (очки результативности)
     top_combined = [
-        {
+        _enrich_player_dict({
             **cb,
             "goals": cb.get("goals", cb.get("total_goals", 0)),
             "total_goals": cb.get("total_goals", cb.get("goals", 0)),
             "assists": cb.get("assists", cb.get("total_assists", 0)),
             "total_assists": cb.get("total_assists", cb.get("assists", 0)),
             "points": cb.get("points", ((cb.get("goals", 0) or 0) + (cb.get("assists", 0) or 0))),
-        }
+        })
         for cb in raw_combined
     ]
+
+    if missing_photos:
+        unique_missing = list(dict.fromkeys(missing_photos))[:10]
+        asyncio.create_task(asyncio.to_thread(_prefetch_missing_top_photos, unique_missing))
 
     return web.json_response({
         "status": "ok",
