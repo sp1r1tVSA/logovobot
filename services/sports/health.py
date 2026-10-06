@@ -63,6 +63,8 @@ class ProviderHealthMonitor:
         except Exception as e:
             logger.debug(f"Could not write provider sync log: {e}")
 
+    record_call = record_request
+
     def get_summary(
         self,
         provider_name: str,

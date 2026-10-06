@@ -51,7 +51,6 @@ DEFAULT_API_SPORTS_TO_ODDS_SPORT: dict[int, str] = {
     4: "soccer_uefa_european_championship",
     5: "soccer_uefa_nations_league",
     9: "soccer_conmebol_copa_america",
-    32: "soccer_fifa_world_cup_qual_europe",
     39: "soccer_epl",
     61: "soccer_france_ligue_one",
     78: "soccer_germany_bundesliga",
@@ -205,6 +204,11 @@ class TheOddsApiProvider(SportsDataProvider):
                         logger.warning("TheOddsApi 429 quota exhausted.")
                         return None
 
+                    if status_code == 404:
+                        text = await resp.text()
+                        logger.info("TheOddsApi sport %s currently unavailable (HTTP 404): %s", clean_ep, text[:200])
+                        return None
+
                     if status_code != 200:
                         self.circuit_breaker.record_failure()
                         text = await resp.text()
@@ -213,25 +217,25 @@ class TheOddsApiProvider(SportsDataProvider):
 
                     data = await resp.json()
                     self.circuit_breaker.record_success()
-                    self.health_monitor.record_call(
+                    records = len(data) if isinstance(data, list) else 1
+                    self.health_monitor.record_request(
                         provider=self.provider_name,
                         endpoint=clean_ep,
-                        success=True,
-                        status_code=status_code,
                         latency_ms=latency_ms,
+                        status_code=status_code,
+                        records_count=records,
                     )
                     self.cache.set(self.provider_name, cache_key, data, ttl_seconds=cache_ttl)
                     return data
         except Exception as e:
             self.circuit_breaker.record_failure(e)
             latency_ms = (time.monotonic() - start_time) * 1000.0
-            self.health_monitor.record_call(
+            self.health_monitor.record_request(
                 provider=self.provider_name,
                 endpoint=clean_ep,
-                success=False,
-                status_code=status_code or 500,
                 latency_ms=latency_ms,
-                error_msg=str(e),
+                status_code=status_code or 500,
+                error_message=str(e),
             )
             logger.warning("TheOddsApi request %s failed: %s", clean_ep, e)
             return None
