@@ -664,13 +664,29 @@ class TransfersView {
     const val = (id) => (document.getElementById(id)?.value || '').trim();
     if (this.requestKind === 'deal') {
       this.attachSuggest('deal-other-club', (q) => api.getTransferSuggest('club', q), () => {
-        document.getElementById('deal-player')?.focus();
+        const next = this.dealRole === 'swap'
+          ? (document.getElementById('swap-give-player') || document.getElementById('swap-get-player'))
+          : document.getElementById('deal-player');
+        next?.focus();
       });
-      this.attachSuggest('deal-player', (q) => this.dealRole === 'sell'
-        ? api.getTransferSuggest('player', q, { own: true })
-        : api.getTransferSuggest('player', q, { club: val('deal-other-club') }), null, 'deal-ovr');
+      this.attachSuggest('deal-player', (q) => {
+        if (this.dealRole === 'sell') {
+          return api.getTransferSuggest('player', q, { own: true });
+        }
+        const otherClub = val('deal-other-club');
+        if (!otherClub) {
+          return Promise.resolve({ status: 'ok', data: [] });
+        }
+        return api.getTransferSuggest('player', q, { club: otherClub });
+      }, null, 'deal-ovr');
       this.attachSuggest('swap-give-player', (q) => api.getTransferSuggest('player', q, { own: true }), null, 'swap-give-ovr');
-      this.attachSuggest('swap-get-player', (q) => api.getTransferSuggest('player', q, { club: val('deal-other-club') }), null, 'swap-get-ovr');
+      this.attachSuggest('swap-get-player', (q) => {
+        const otherClub = val('deal-other-club');
+        if (!otherClub) {
+          return Promise.resolve({ status: 'ok', data: [] });
+        }
+        return api.getTransferSuggest('player', q, { club: otherClub });
+      }, null, 'swap-get-ovr');
     } else if (this.requestKind === 'surcharge') {
       this.attachSuggest('surcharge-player', (q) => api.getTransferSuggest('player', q, { own: true }), null, 'surcharge-ovr');
     } else if (this.requestKind === 'urn_sale') {

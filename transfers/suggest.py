@@ -66,11 +66,29 @@ def clubs(user_id: int, query: str, limit: int = LIMIT) -> list[dict]:
 
 def players(user_id: int, query: str, *, club: str | None = None, own: bool = False,
             limit: int = LIMIT) -> list[dict]:
-    """Игроки под запрос. Сначала состав нужного клуба (`club` или свой при `own`), затем вся лига."""
+    """Игроки под запрос.
+
+    Если `own=True`, возвращаются строго игроки клуба тренера.
+    Если передан `club`, возвращаются строго игроки указанного клуба.
+    В обоих случаях игроки других клубов и свободного пула в выдачу НЕ попадают.
+    Если `own=False` и `club=None`, поиск идёт по всей лиге и пулу свободных.
+    """
     q = norm_player(query[:MAX_QUERY])
     if not q:
         return []
-    scope = norm_club(_coach_club_or_none(user_id) if own else club)
+
+    target_scope: str | None = None
+    if own:
+        coach_club = _coach_club_or_none(user_id)
+        if not coach_club:
+            return []
+        target_scope = norm_club(coach_club)
+    elif club and club.strip():
+        cq = club_registry.resolve_club_query(club.strip())
+        resolved = cq.canonical or club_registry.resolve_team_name(club.strip()) or club.strip()
+        target_scope = norm_club(resolved)
+        if not target_scope:
+            return []
 
     rows: dict[str, dict] = {}   # ключ имени игрока → лучшая запись
     known: dict[str, str] = {}   # имя команды из squad_players → ключ клуба (резолв один раз)
@@ -78,23 +96,28 @@ def players(user_id: int, query: str, *, club: str | None = None, own: bool = Fa
         team = r["team_name"]
         if team not in known:
             known[team] = norm_club(club_registry.resolve_team_name(team) or team)
-        key = norm_player(r["player_name"])
-        in_scope = bool(scope) and known[team] == scope
-        prev = rows.get(key)
-        if prev is None or (in_scope and not prev["in_scope"]):
-            rows[key] = {"name": r["player_name"], "club": team, "in_scope": in_scope}
-    for r in repo.list_pool_players():
-        rows.setdefault(norm_player(r["player_name"]),
-                        {"name": r["player_name"], "club": r.get("last_club"), "in_scope": False})
+        if target_scope is not None:
+            if known[team] != target_scope:
+                continue
+            key = norm_player(r["player_name"])
+            rows[key] = {"name": r["player_name"], "club": team, "in_scope": True}
+        else:
+            key = norm_player(r["player_name"])
+            rows.setdefault(key, {"name": r["player_name"], "club": team, "in_scope": False})
+
+    if target_scope is None:
+        for r in repo.list_pool_players():
+            rows.setdefault(norm_player(r["player_name"]),
+                            {"name": r["player_name"], "club": r.get("last_club"), "in_scope": False})
 
     found = []
     for key, rec in rows.items():
         rank = _rank(key, q)
         if rank is not None:
-            found.append((not rec["in_scope"], rank, key, rec))
+            found.append((rank, key, rec))
     if not found:
-        found = [(not rec["in_scope"], 4, key, rec) for key, rec in rows.items() if _typo(key, q)]
-    found.sort(key=lambda x: x[:3])
+        found = [(4, key, rec) for key, rec in rows.items() if _typo(key, q)]
+    found.sort(key=lambda x: x[:2])
     top = [rec for *_, rec in found[:limit]]
     index = _card_index()
     return [{"name": rec["name"], "club": rec["club"], "cards": _cards_for(index, rec)} for rec in top]

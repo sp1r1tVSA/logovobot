@@ -58,14 +58,17 @@ class TestPlayers:
         assert _names(suggest.players(999, "saka")) == ["B. Saka"]
         assert _names(suggest.players(999, "odegard")) == ["Martin Odegaard"]
 
-    def test_named_club_comes_first(self):
+    def test_named_club_only_returns_club_players(self):
         got = suggest.players(999, "bruyne", club="Манчестер Сити")
-        assert [(g["name"], g["club"]) for g in got] == [
-            ("Kevin De Bruyne", "Манчестер Сити"), ("K. De Bruyne", "Челси")]
+        assert [(g["name"], g["club"]) for g in got] == [("Kevin De Bruyne", "Манчестер Сити")]
 
-    def test_own_scope_uses_coach_club(self):
+    def test_own_scope_strictly_uses_coach_club(self):
         got = suggest.players(101, "bruyne", own=True)
-        assert got[0] == {"name": "K. De Bruyne", "club": "Челси", "cards": []}
+        assert [(g["name"], g["club"]) for g in got] == [("K. De Bruyne", "Челси")]
+        assert suggest.players(999, "bruyne", own=True) == []
+
+    def test_unknown_club_returns_empty(self):
+        assert suggest.players(999, "bruyne", club="Несуществующий Клуб") == []
 
     def test_pool_players_are_offered_once(self):
         repo.upsert_player("Old Timer", last_club="Челси")
