@@ -40,6 +40,7 @@ from transfers.engine import (
     core_remaining,
     evaluate_request,
     format_k,
+    name_covers,
     norm_club,
     norm_player,
     parse_money_k,
@@ -496,11 +497,40 @@ def _loads(raw) -> list:
     return value if isinstance(value, list) else []
 
 
-def portrait_path(player_name: str | None, *clubs: str | None) -> str | None:
+RENDERZ_PORTRAITS_DIR = str(player_photos.PROJECT_ROOT / "assets" / "renderz_portraits")
+RENDERZ_PORTRAITS_URL = "/assets/renderz_portraits/"
+
+
+def _renderz_file(full_name: str) -> str | None:
+    path = os.path.join(RENDERZ_PORTRAITS_DIR, player_photos._slugify(full_name) + ".png")
+    return path if os.path.isfile(path) and os.path.getsize(path) > 0 else None
+
+
+def _renderz_portrait(player_name: str, clubs=()) -> str | None:
+    """Запасной портрет с карточки Renderz (`scripts/renderz_sync.py`): `assets/renderz_portraits/<slug>.png`.
+
+    Файлы названы полным именем с Transfermarkt («Bukayo Saka»), а в заявке чаще короткое из
+    состава («SAKA»). Поэтому сначала точное имя, затем — единственный игрок с карточкой в клубе
+    сделки, чьё полное имя покрывает короткое (`name_covers`). Двое под одну фамилию — не угадываем.
+    """
+    path = _renderz_file(player_name)
+    if path or not os.path.isdir(RENDERZ_PORTRAITS_DIR):
+        return path
+    for club in clubs:
+        if not club or norm_club(club) == norm_club(URN_CLUB):
+            continue
+        hits = [n for n in repo.card_player_names(resolve_team_name(club) or club) if name_covers(player_name, n)]
+        if len(hits) == 1:
+            return _renderz_file(hits[0])
+    return None
+
+
+def portrait_path(player_name: str | None, *clubs: str | None, fallback: bool = True) -> str | None:
     """Локальный файл портрета из кэша `assets/players/`; без сети и без записи.
 
     Портрет кэшируется под именем и клубом, где игрока опознали, поэтому пробуем клубы сделки
-    по очереди, а затем файл без клуба. «Урна» клубом не считается. Нет файла — `None`.
+    по очереди, а затем файл без клуба. «Урна» клубом не считается. Нет файла — портрет с карточки
+    Renderz из отдельной папки (`fallback=False` его не ищет). Нет и его — `None`.
     """
     if not player_name:
         return None
@@ -513,18 +543,21 @@ def portrait_path(player_name: str | None, *clubs: str | None) -> str | None:
         for path in candidates:
             if os.path.isfile(path) and os.path.getsize(path) > 0:
                 return path
+        return _renderz_portrait(player_name, clubs) if fallback else None
     except Exception:
         return None
-    return None
 
 
-def portrait_url(player_name: str | None, *clubs: str | None) -> str | None:
-    """Ссылка на портрет игрока из кэша `assets/players/`; без сети и без записи.
+def portrait_url(player_name: str | None, *clubs: str | None, fallback: bool = True) -> str | None:
+    """Ссылка на портрет игрока из кэша; без сети и без записи.
 
     Нет файла — `None`, и Mini App рисует монограмму.
     """
-    path = portrait_path(player_name, *clubs)
-    return "/assets/players/" + urllib.parse.quote(os.path.basename(path)) if path else None
+    path = portrait_path(player_name, *clubs, fallback=fallback)
+    if not path:
+        return None
+    base = RENDERZ_PORTRAITS_URL if os.path.dirname(path) == RENDERZ_PORTRAITS_DIR else "/assets/players/"
+    return base + urllib.parse.quote(os.path.basename(path))
 
 
 def prefetch_portrait(t: dict) -> str | None:
@@ -537,7 +570,7 @@ def prefetch_portrait(t: dict) -> str | None:
     name = t.get("player_name")
     clubs = [c for c in (t.get("from_club"), t.get("to_club"))
              if c and norm_club(c) != norm_club(URN_CLUB)]
-    if not name or not clubs or portrait_url(name, *clubs):
+    if not name or not clubs or portrait_url(name, *clubs, fallback=False):
         return None
     for club in clubs:
         try:
@@ -567,7 +600,7 @@ def backfill_portraits(transfers: list[dict]) -> dict:
                  if c and norm_club(c) != norm_club(URN_CLUB)]
         if not clubs:
             stats["missing"].append(name)
-        elif portrait_url(name, *clubs):
+        elif portrait_url(name, *clubs, fallback=False):
             stats["cached"] += 1
         elif prefetch_portrait(t):
             stats["fetched"] += 1

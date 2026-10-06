@@ -886,3 +886,35 @@
   text-overflow: ellipsis;
   max-width: 45%;
 }
+
+.suggest-ovr {
+  margin-left: auto;
+  color: var(--accent, #f5b027);
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.suggest-item .suggest-ovr + .suggest-club { margin-left: 0; }
+
+/* Версии карточки игрока под полем OVR */
+.card-versions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+.card-versions-label { color: var(--text-secondary, #94a3b8); font-size: 0.72rem; }
+.card-version {
+  padding: 3px 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  background: none;
+  color: #fff;
+  font-size: 0.78rem;
+  cursor: pointer;
+}
+.card-version.active {
+  border-color: var(--accent, #f5b027);
+  background: rgba(245, 176, 39, 0.16);
+}

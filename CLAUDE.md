@@ -7,8 +7,8 @@ e-sports championships: divisions and rounds, match result intake via AI screens
 standings and Pillow-rendered infographics, a debt/warn discipline system, and a virtual
 prediction market ("Logovo.bet") exposed through a Telegram Mini App.
 
-The project is well past MVP — 469 Python files (210 application modules and scripts +
-259 pytest files), 93 SQLite tables (migrations through `036`), and ten completed development phases documented in the
+The project is well past MVP — 474 Python files (213 application modules and scripts +
+261 pytest files), 94 SQLite tables (migrations through `036`), and ten completed development phases documented in the
 `PHASE_*.md` reports under `reports/`. Post-phase work is logged in the numbered
 `FIX_*.md` notes and the `*_AUDIT.md` reports beside them.
 
@@ -119,8 +119,8 @@ never prevents the bot itself from starting. Preserve that isolation.
 | `transfers/` (21 modules) | The transfer window («ТО») — own package with its own SQL (`repo.py`), schema (`schema.py`, migration `033` + additive tables), settings (`config.py`), pure rules (`engine.py`), window lifecycle and budgets (`service.py`), request lifecycle (`requests.py`, `approval.py`, `squad.py`, `slots.py`, `sanctions.py`), the `/to` panel (`handlers.py`), Mini App routes (`api.py`), form autocomplete (`suggest.py`), market (`market.py`), board (`board.py`), reconciliation (`reconcile.py`), window recap (`recap.py`), feed card (`card.py`), notifications (`notify.py`), reminders (`reminders.py`) and the jobs (`jobs.py`). See *Transfer window* below |
 | `web/` | Mini App frontend (static `index.html`, `css/`, `js/` — `api`, `app`, `admin` (the Logovo.bet panel), `charts`, `design` (dark / frost theme switch), `effects`, `irl` (the «🌍 IRL» lobby), `outrights`, `store`, `tg`, `ui`, `transfers` (tabs «📊 Статус», «📝 Заявка», «🛒 Рынок», «📌 Доска», «📜 История»), `shop`) |
 | `utils/` | `media_utils.py`, a thin re-export wrapper over `services/animation_sender.py` |
-| `scripts/` (31 scripts) | One-off operational scripts (DB audit, backfills, imports, bulk club binding, cup bracket seeding, cache refresh, season reset, previews and checkers) |
-| `tests/` | 259 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
+| `scripts/` (34 scripts) | One-off operational scripts (DB audit, backfills, imports, bulk club binding, cup bracket seeding, cache refresh, season reset, previews and checkers) |
+| `tests/` | 261 `test_*.py` files, one per feature area; no `__init__.py`, no local `conftest.py` |
 | `assets/` | **Not in git** — emptied on 2026-09-18 with the КПЛ season. Runtime recreates `avatars/` and `players/` on demand; `logos/` must be refilled by hand (see below) |
 | `reports/` | Historical `PHASE_*.md` plans/matrices/reports, `FIX_0*.md` notes and `*_AUDIT.md` audits, moved off the repo root |
 | `tasks/`, `docs/` | Working plan/todo notes and `PURGE_SEASON_GUIDE.md` |
@@ -667,6 +667,33 @@ and coaches do not file free agents from the Mini App.
 
 **Form autocomplete (`suggest.py`).** `GET /api/transfers/suggest?kind=club|player&q=…` (`club=` or `own=1` scope the players) feeds the dropdown under the club and player inputs of the Mini App request forms (`attachSuggest` in `web/js/transfers.js`). Clubs come from `config.CLUB_REGISTRY` plus `TEAM_ALIASES`, never the coach's own club or the urn; players come from `squad_players` and `transfer_players`, the scoped club first. Matching is prefix → word prefix → substring, then a typo fallback. It only suggests: the server still validates the typed name on submit.
 
+**Renderz cards (OVR autofill and fallback portraits).** `scripts/renderz_sync.py` is a standalone, offline-first
+pipeline (needs Playwright + Edge/Chrome locally, **not** in `requirements.txt`; never imports `database`; its `CLUBS` table
+maps our 80 clubs to Transfermarkt ids and `tests/test_renderz_sync.py` keeps it in step with `DIVISION_CLUBS`). Stages: `tm` —
+Transfermarkt squads (`/kader/verein/<id>/plus/1`; players who joined after `--as-of`, default 17.09.2026, are dropped);
+`scan` — the public `renderz.app/players?page=N` list (resumable; sorted by OVR and clamped at page 416, so it reaches only
+cards of about OVR ≥ 107; the scan bisects to the first page at or below `--ovr-max`, default 114 = the league ceiling);
+`scan-pos` — the five position lists `/players/position/<pos>?page=K`, which are not clamped, from the first page at or below
+`--ovr-max` down to `--ovr-min` (default 70); their `page` key is stored as `(position index + 1) * 100000 + K` and
+`_list_url` decodes it. Both scans drop icon / hero cards (program `*_ICON` / `*_HERO`, or an ICON / HERO token in the card
+background name, which catches legends with no program tag; `--keep-icons` restores them), retry dropped connections
+(`_fetch_retry`), and download action-shot portraits as they go because the URLs are signed and expire; `resolve` —
+detail pages of cards in ambiguous surname clusters (reads Schema.org JSON-LD full name and HTML team block, saving to
+`card_details.json`, resumable); `match` — tokens / EA-id clustering / club-image learning against the squads, disambiguated
+by `card_details.json`, remaining ambiguous names are dropped, every card picked for one
+Transfermarkt player is merged into one entry (cards without an EA id would otherwise each make their own), per
+(program, OVR) one card is `selected`, preferring the **tradable** copy (a lone untradable one is kept), every version stays in
+`ovr_db.json`; `cards` — screenshots of selected cards only. `scripts/import_renderz_cards.py --src <dir> [--apply]`
+(dry-run by default; run it on the host that holds the live database) loads the result: versions into `transfer_player_cards`
+(additive table of migration 033, full snapshot replace through `repo.replace_player_cards`, read by `list_player_cards`) and
+portraits into `assets/renderz_portraits/` (not in git, served as `/assets/renderz_portraits/<slug>.png`, never overwritten).
+`requests.portrait_path/portrait_url` fall back to that folder only after `assets/players/` misses; the download paths
+(`prefetch_portrait`, `backfill_portraits`) pass `fallback=False` so a card portrait never blocks fetching a real photo.
+`suggest.players` adds `cards` (`[{ovr, tradable, program, position}]`, highest first) to every item: exact name first, else —
+because `squad_players` keeps short surnames — the one card player of the same club whose words contain the squad name's
+words; two candidates give `[]`. The Mini App (`fillCardOvr` in `web/js/transfers.js`) fills the OVR field on pick and, with
+several versions, shows version chips («не прод.» marks an unsellable one). `tests/test_transfer_cards.py` covers it.
+
 **Squad (`squad.py`).** Approval does not touch `squad_players`. A separate «применить к составу» button
 writes the change and records each step in `transfer_squad_ops`; rollback restores exactly those
 operations and is refused if a later request touched the same player in the same club. Cancelling an
@@ -715,7 +742,7 @@ to `transfers.notify` in `post_init` and schedules `transfer_auto_close`; `web/`
 
 Tests — run them per subsystem, no full sweep: `test_transfer_engine`, `test_transfer_window`,
 `test_transfer_service`, `test_transfer_requests`, `test_transfer_approval`, `test_transfer_squad`,
-`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_swap`, `test_transfer_preview`, `test_transfer_reconcile`, `test_transfer_recap`, `test_transfer_board`, `test_transfer_fa_topic`, `test_transfer_panel`, `test_transfer_card`, plus `test_production_audit`
+`test_transfer_slots`, `test_transfer_sanctions`, `test_transfer_swap`, `test_transfer_preview`, `test_transfer_reconcile`, `test_transfer_recap`, `test_transfer_board`, `test_transfer_cards`, `test_renderz_sync`, `test_transfer_fa_topic`, `test_transfer_panel`, `test_transfer_card`, plus `test_production_audit`
 for any new button and `test_admin_journal` for new journal actions.
 
 ---

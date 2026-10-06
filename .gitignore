@@ -73,6 +73,8 @@ test_*.png
 
 # Dynamic Caches & Generation Output
 assets/players/
+# Запасные портреты с карточек Renderz, scripts/import_renderz_cards.py
+assets/renderz_portraits/
 assets/tmp_crops/
 assets/cards_preview/
 # Листы для глазной проверки лиц, scripts/fetch_squad_photos.py --contact-sheet

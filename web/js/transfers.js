@@ -668,17 +668,42 @@ class TransfersView {
       });
       this.attachSuggest('deal-player', (q) => this.dealRole === 'sell'
         ? api.getTransferSuggest('player', q, { own: true })
-        : api.getTransferSuggest('player', q, { club: val('deal-other-club') }));
-      this.attachSuggest('swap-give-player', (q) => api.getTransferSuggest('player', q, { own: true }));
-      this.attachSuggest('swap-get-player', (q) => api.getTransferSuggest('player', q, { club: val('deal-other-club') }));
+        : api.getTransferSuggest('player', q, { club: val('deal-other-club') }), null, 'deal-ovr');
+      this.attachSuggest('swap-give-player', (q) => api.getTransferSuggest('player', q, { own: true }), null, 'swap-give-ovr');
+      this.attachSuggest('swap-get-player', (q) => api.getTransferSuggest('player', q, { club: val('deal-other-club') }), null, 'swap-get-ovr');
     } else if (this.requestKind === 'surcharge') {
-      this.attachSuggest('surcharge-player', (q) => api.getTransferSuggest('player', q, { own: true }));
+      this.attachSuggest('surcharge-player', (q) => api.getTransferSuggest('player', q, { own: true }), null, 'surcharge-ovr');
     } else if (this.requestKind === 'urn_sale') {
       this.attachSuggest('urn-player', (q) => api.getTransferSuggest('player', q, { own: true }));
     }
   }
 
-  attachSuggest(inputId, fetcher, onPick) {
+  // Версии карточки игрока (Renderz): одна — подставляем её OVR, несколько — подставляем высшую
+  // и показываем под полем OVR кнопки версий, чтобы выбрать нужную.
+  fillCardOvr(ovrId, cards) {
+    const ovr = document.getElementById(ovrId);
+    if (!ovr) return;
+    ovr.parentElement.querySelector('.card-versions')?.remove();
+    if (!cards || !cards.length) return;
+    const apply = (value) => {
+      ovr.value = value;
+      ovr.dispatchEvent(new Event('input', { bubbles: true }));
+    };
+    apply(cards[0].ovr);
+    if (cards.length < 2) return;
+    const row = document.createElement('div');
+    row.className = 'card-versions';
+    row.innerHTML = '<span class="card-versions-label">Версии карты:</span>' + cards.map((c, i) =>
+      `<button type="button" class="card-version${i === 0 ? ' active' : ''}" data-ovr="${c.ovr}"
+        ${c.program ? `title="${escapeHtml(c.program)}"` : ''}>${c.ovr}${c.tradable ? '' : ' · не прод.'}</button>`).join('');
+    row.querySelectorAll('.card-version').forEach(btn => btn.addEventListener('click', () => {
+      row.querySelectorAll('.card-version').forEach(b => b.classList.toggle('active', b === btn));
+      apply(btn.dataset.ovr);
+    }));
+    ovr.insertAdjacentElement('afterend', row);
+  }
+
+  attachSuggest(inputId, fetcher, onPick, ovrId) {
     const input = document.getElementById(inputId);
     if (!input) return;
     input.setAttribute('autocomplete', 'off');
@@ -697,6 +722,7 @@ class TransfersView {
       box.innerHTML = items.map((it, i) => `
         <button type="button" class="suggest-item" data-i="${i}">
           <span class="suggest-name">${escapeHtml(it.name)}</span>
+          ${it.cards && it.cards.length ? `<span class="suggest-ovr">${it.cards.map(c => c.ovr).join(' / ')}</span>` : ''}
           ${it.club ? `<span class="suggest-club">${escapeHtml(it.club)}</span>` : ''}
         </button>`).join('');
       box.hidden = false;
@@ -704,15 +730,19 @@ class TransfersView {
         // pointerdown, а не click: к click поле уже теряет фокус и список прячется
         btn.addEventListener('pointerdown', (e) => {
           e.preventDefault();
-          input.value = items[Number(btn.dataset.i)].name;
+          const item = items[Number(btn.dataset.i)];
+          input.value = item.name;
           hide();
-          if (onPick) onPick();
+          if (ovrId) this.fillCardOvr(ovrId, item.cards);
+          if (onPick) onPick(item);
         });
       });
     };
 
     input.addEventListener('input', () => {
       clearTimeout(timer);
+      // другое имя — прежние версии карты больше не относятся к игроку
+      if (ovrId) document.getElementById(ovrId)?.parentElement.querySelector('.card-versions')?.remove();
       const q = input.value.trim();
       if (!q) return hide();
       timer = setTimeout(async () => {

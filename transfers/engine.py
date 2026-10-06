@@ -101,6 +101,24 @@ def norm_club(name: str | None) -> str:
     return normalize_team_name(name)
 
 
+def name_covers(short: str | None, full: str | None) -> bool:
+    """Короткое имя из состава («SAKA», «C. RONALDO») — часть полного («Bukayo Saka»).
+
+    Каждое слово короткого имени есть в полном, однобуквенное — как инициал слова. Нужна хотя
+    бы одна целая фамилия: «C.» само по себе не совпадает ни с кем.
+    """
+    words = sorted(norm_player(short).split(), key=len, reverse=True)
+    rest = norm_player(full).split()
+    if not words or len(words[0]) < 2:
+        return False
+    for w in words:
+        hit = next((f for f in rest if f == w or (len(w) == 1 and f.startswith(w))), None)
+        if hit is None:
+            return False
+        rest.remove(hit)
+    return True
+
+
 def is_full_latin_name(name: str | None) -> bool:
     """Имя латиницей и целиком: минимум два слова, только латинские буквы.
 

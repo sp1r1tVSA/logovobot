@@ -10,7 +10,7 @@ import difflib
 import club_registry
 import config
 from transfers import repo
-from transfers.engine import norm_club, norm_player
+from transfers.engine import name_covers, norm_club, norm_player
 from transfers.requests import URN_CLUB, _coach_club_or_none
 
 LIMIT = 8
@@ -95,4 +95,42 @@ def players(user_id: int, query: str, *, club: str | None = None, own: bool = Fa
     if not found:
         found = [(not rec["in_scope"], 4, key, rec) for key, rec in rows.items() if _typo(key, q)]
     found.sort(key=lambda x: x[:3])
-    return [{"name": rec["name"], "club": rec["club"]} for *_, rec in found[:limit]]
+    top = [rec for *_, rec in found[:limit]]
+    index = _card_index()
+    return [{"name": rec["name"], "club": rec["club"], "cards": _cards_for(index, rec)} for rec in top]
+
+
+def _card_index() -> dict:
+    """Карточки Renderz: `{"by_club": {клуб: {имя: [карты]}}, "by_name": {имя: [карты]}}`.
+
+    Только выбранные версии (без дубля продаваемая/непродаваемая). Нет таблицы или она пуста — пусто.
+    """
+    by_club: dict[str, dict[str, list]] = {}
+    by_name: dict[str, list] = {}
+    try:
+        cards = repo.list_player_cards()
+    except Exception:
+        return {"by_club": by_club, "by_name": by_name}
+    for c in cards:
+        card = {"ovr": c["ovr"], "tradable": bool(c["tradable"]), "program": c["program"],
+                "position": c["position"]}
+        by_name.setdefault(c["norm_name"], []).append(card)
+        club = norm_club(club_registry.resolve_team_name(c["club"]) or c["club"]) if c["club"] else ""
+        by_club.setdefault(club, {}).setdefault(c["norm_name"], []).append(card)
+    return {"by_club": by_club, "by_name": by_name}
+
+
+def _cards_for(index: dict, rec: dict) -> list[dict]:
+    """Версии карточки игрока подсказки, по убыванию OVR. Неоднозначность — пустой список.
+
+    В `squad_players` имена короткие («SAKA», «C. RONALDO»), на Renderz — полные («Bukayo Saka»),
+    поэтому внутри клуба совпадением считается полное имя, покрывающее короткое (`name_covers`).
+    Два игрока клуба под одну фамилию — не угадываем и OVR не подставляем.
+    """
+    key = norm_player(rec["name"])
+    cards = index["by_name"].get(key)
+    if cards is None and rec.get("club"):
+        club = norm_club(club_registry.resolve_team_name(rec["club"]) or rec["club"])
+        hits = [cs for full, cs in index["by_club"].get(club, {}).items() if name_covers(rec["name"], full)]
+        cards = hits[0] if len(hits) == 1 else None
+    return sorted(cards or [], key=lambda c: -c["ovr"])

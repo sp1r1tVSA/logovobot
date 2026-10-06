@@ -658,6 +658,49 @@ def list_pool_players() -> list[dict]:
             "SELECT player_name, last_club FROM transfer_players ORDER BY id").fetchall()]
 
 
+def replace_player_cards(cards: Iterable[Mapping]) -> int:
+    """Заменить снимок карточек Renderz целиком (одной транзакцией). Возвращает число записанных строк.
+
+    Каждая карточка: `renderz_id`, `player_name`, `ovr` и необязательные `club`, `position`,
+    `program`, `tradable`, `selected`. Пустой набор не стирает таблицу.
+    """
+    rows = []
+    now = now_msk_str()
+    for c in cards:
+        key = norm_player(c.get("player_name"))
+        if not key or c.get("renderz_id") is None or c.get("ovr") is None:
+            continue
+        rows.append((int(c["renderz_id"]), key, str(c["player_name"]).strip(), c.get("club"), int(c["ovr"]),
+                     c.get("position"), c.get("program"),
+                     1 if c.get("tradable", True) else 0, 1 if c.get("selected", True) else 0, now))
+    if not rows:
+        return 0
+    with transaction() as conn:
+        conn.execute("DELETE FROM transfer_player_cards")
+        conn.executemany(
+            "INSERT INTO transfer_player_cards "
+            "(renderz_id, norm_name, player_name, club, ovr, position, program, tradable, selected, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)", rows)
+    return len(rows)
+
+
+def list_player_cards(selected_only: bool = True) -> list[dict]:
+    """Карточки Renderz: по умолчанию только выбранные версии (без дублей продаваемая/непродаваемая)."""
+    sql = ("SELECT renderz_id, norm_name, player_name, club, ovr, position, program, tradable, selected "
+           "FROM transfer_player_cards")
+    if selected_only:
+        sql += " WHERE selected = 1"
+    with transaction() as conn:
+        return [dict(r) for r in conn.execute(sql + " ORDER BY ovr DESC, renderz_id").fetchall()]
+
+
+def card_player_names(club: str) -> list[str]:
+    """Полные имена игроков клуба, у которых есть карточка Renderz."""
+    with transaction() as conn:
+        return [r["player_name"] for r in conn.execute(
+            "SELECT DISTINCT player_name FROM transfer_player_cards WHERE club = ?", (club,)).fetchall()]
+
+
 def list_catalog_players() -> list[dict]:
     """Справочник игроков целиком (с OVR, ценой и баном) — для рынка."""
     with transaction() as conn:

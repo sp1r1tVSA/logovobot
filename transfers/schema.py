@@ -273,6 +273,27 @@ def apply_schema(cursor: sqlite3.Cursor) -> None:
         )
     """)
 
+    # Версии карточек игроков с Renderz (`scripts/renderz_sync.py` → `scripts/import_renderz_cards.py`):
+    # у одного игрока их может быть несколько. Нужны, чтобы подставить OVR в форму заявки.
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS transfer_player_cards (
+            renderz_id INTEGER PRIMARY KEY,
+            norm_name TEXT NOT NULL,
+            player_name TEXT NOT NULL,
+            club TEXT,
+            ovr INTEGER NOT NULL,
+            position TEXT,
+            program TEXT,
+            tradable INTEGER NOT NULL DEFAULT 1,
+            selected INTEGER NOT NULL DEFAULT 1,
+            updated_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+        )
+    """)
+    cursor.execute(
+        "CREATE INDEX IF NOT EXISTS idx_transfer_player_cards_name "
+        "ON transfer_player_cards(norm_name)"
+    )
+
     cursor.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
         (MIGRATION_033_TRANSFER_WINDOW,

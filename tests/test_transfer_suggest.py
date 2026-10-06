@@ -65,7 +65,7 @@ class TestPlayers:
 
     def test_own_scope_uses_coach_club(self):
         got = suggest.players(101, "bruyne", own=True)
-        assert got[0] == {"name": "K. De Bruyne", "club": "Челси"}
+        assert got[0] == {"name": "K. De Bruyne", "club": "Челси", "cards": []}
 
     def test_pool_players_are_offered_once(self):
         repo.upsert_player("Old Timer", last_club="Челси")
@@ -93,7 +93,7 @@ class TestRoute:
         status, body = self._call(monkeypatch, "?kind=club&q=арс")
         assert status == 200 and body["data"] == [{"name": "Арсенал"}]
         status, body = self._call(monkeypatch, "?kind=player&q=saka&club=Арсенал")
-        assert body["data"] == [{"name": "B. Saka", "club": "Арсенал"}]
+        assert body["data"] == [{"name": "B. Saka", "club": "Арсенал", "cards": []}]
         _, body = self._call(monkeypatch, "?kind=player&q=bruyne&own=1")
         assert body["data"][0]["club"] == "Челси"
 
@@ -105,7 +105,7 @@ class TestRoute:
 class TestBackfill:
     def test_counts_cached_fetched_missing_and_dedupes(self, monkeypatch):
         from services.graphics import player_photos
-        monkeypatch.setattr(req_mod, "portrait_url", lambda name, *c: "/x.png" if name == "Cached" else None)
+        monkeypatch.setattr(req_mod, "portrait_url", lambda name, *c, **kw: "/x.png" if name == "Cached" else None)
         monkeypatch.setattr(player_photos, "fetch_and_cache",
                             lambda name, team=None, **kw: "/y.png" if name == "Fresh" else None)
         items = [
@@ -125,7 +125,7 @@ class TestBackfill:
         def boom(*a, **kw):
             raise RuntimeError("down")
 
-        monkeypatch.setattr(req_mod, "portrait_url", lambda *a: None)
+        monkeypatch.setattr(req_mod, "portrait_url", lambda *a, **kw: None)
         monkeypatch.setattr(player_photos, "fetch_and_cache", boom)
         stats = req_mod.backfill_portraits([{"player_name": "A", "to_club": "Челси"}])
         assert stats["missing"] == ["A"]
