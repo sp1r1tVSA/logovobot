@@ -535,11 +535,17 @@ def portrait_path(player_name: str | None, *clubs: str | None, fallback: bool = 
     if not player_name:
         return None
     try:
-        # `get_photo_path` с клубом откатывается к файлу без клуба, поэтому сначала проверяем
-        # файлы по клубам напрямую, и только потом общий.
         candidates = [player_photos.get_cached_photo_path(player_name, club)
                       for club in clubs if club and norm_club(club) != norm_club(URN_CLUB)]
         candidates.append(player_photos.get_cached_photo_path(player_name, None))
+        for club in clubs:
+            if not club or norm_club(club) == norm_club(URN_CLUB):
+                continue
+            squad = service.club_squad(resolve_team_name(club) or club) or []
+            squad_hits = [s for s in squad if name_covers(s, player_name) or name_covers(player_name, s)]
+            for hit in squad_hits:
+                candidates.append(player_photos.get_cached_photo_path(hit, club))
+                candidates.append(player_photos.get_cached_photo_path(hit, None))
         for path in candidates:
             if os.path.isfile(path) and os.path.getsize(path) > 0:
                 return path

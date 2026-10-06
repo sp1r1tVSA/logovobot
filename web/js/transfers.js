@@ -1321,15 +1321,18 @@ class TransfersView {
 
     const initial = escapeHtml(String(it.player_name || '?').trim().charAt(0).toUpperCase() || '?');
     const fallback = `<span class="hist-portrait-fallback" ${it.portrait_url ? 'hidden' : ''}>${initial}</span>`;
+    const isRenderz = Boolean(it.portrait_url && it.portrait_url.includes('renderz'));
     const portrait = (it.portrait_url
-      ? `<img class="hist-portrait-img" src="${escapeHtml(it.portrait_url)}" alt="" loading="lazy"
+      ? `<img class="hist-portrait-img${isRenderz ? ' is-renderz' : ''}" src="${escapeHtml(it.portrait_url)}" alt="" loading="lazy"
               onerror="this.hidden=true;this.nextElementSibling.hidden=false" />`
       : '') + fallback;
 
     return `
       <div class="req-item req-item-hist">
         <div class="hist-portrait">
-          ${portrait}
+          <div class="hist-portrait-frame">
+            ${portrait}
+          </div>
           ${it.ovr ? `<span class="hist-portrait-ovr">${it.ovr}</span>` : ''}
         </div>
         <div class="hist-body">
