@@ -135,6 +135,15 @@ SPORTS_LIVE_POLL_SECONDS = int(os.getenv("SPORTS_LIVE_POLL_SECONDS", "15"))
 SPORTS_MAX_RETRIES = int(os.getenv("SPORTS_MAX_RETRIES", "3"))
 SPORTS_RATE_LIMIT_RPM = int(os.getenv("SPORTS_RATE_LIMIT_RPM", "60"))
 
+# The Odds API (the-odds-api.com) configuration for IRL betting
+ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip() or os.getenv("THE_ODDS_API_KEY", "").strip()
+ODDS_API_BASE_URL = os.getenv("ODDS_API_BASE_URL", "https://api.the-odds-api.com/v4").strip()
+ODDS_API_BOOKMAKER = os.getenv("ODDS_API_BOOKMAKER", "pinnacle").strip().lower()
+ODDS_API_REGIONS = os.getenv("ODDS_API_REGIONS", "eu").strip().lower()
+ODDS_API_TIMEOUT_SECONDS = float(os.getenv("ODDS_API_TIMEOUT_SECONDS", "10.0"))
+ODDS_API_CACHE_TTL_SECONDS = int(os.getenv("ODDS_API_CACHE_TTL_SECONDS", "300"))
+ODDS_API_RATE_LIMIT_RPM = int(os.getenv("ODDS_API_RATE_LIMIT_RPM", "30"))
+
 # Stale data protection thresholds
 LIVE_DATA_STALE_AFTER_SECONDS = int(os.getenv("LIVE_DATA_STALE_AFTER_SECONDS", "120"))
 LIVE_DATA_EXPIRED_AFTER_SECONDS = int(os.getenv("LIVE_DATA_EXPIRED_AFTER_SECONDS", "300"))
@@ -165,7 +174,9 @@ def _get_int_env(name: str, default: int) -> int:
 
 
 IRL_ENABLED = os.getenv("IRL_ENABLED", "false").strip().lower() in ("true", "1", "yes")
-IRL_BOOKMAKER_ID = _get_int_env("IRL_BOOKMAKER_ID", 0)
+IRL_BOOKMAKER_ID = _get_int_env(
+    "IRL_BOOKMAKER_ID", 1 if (os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")) else 0
+)
 # ЧМ, Евро, Кубок Америки, ЛЧ, Лига наций, АПЛ, Ла Лига, Серия А, Бундеслига, Лига 1,
 # Лига Европы, отбор ЧМ (Европа), отбор Евро. Товарищеские (10) не включены.
 IRL_COMPETITION_PRIORITY = _get_int_list(

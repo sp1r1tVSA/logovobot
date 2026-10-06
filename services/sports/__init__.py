@@ -15,6 +15,7 @@ from services.sports.adapters.api_sports import APISportsProvider
 from services.sports.adapters.base import SportsDataProvider
 from services.sports.adapters.mock_provider import MockSportsDataProvider
 from services.sports.adapters.null_provider import NullSportsDataProvider
+from services.sports.adapters.the_odds_api import TheOddsApiProvider
 from services.sports.cache import ProviderCache
 from services.sports.circuit import ProviderCircuitBreaker
 from services.sports.freshness import (
@@ -48,6 +49,8 @@ def get_sports_provider() -> SportsDataProvider:
     """
     Returns the active SportsDataProvider singleton.
     In testing environment (or if configured), returns MockSportsDataProvider.
+    If provider is explicitly set to 'the_odds_api' or ODDS_API_KEY is present without SPORTS_API_KEY,
+    initializes TheOddsApiProvider.
     If SPORTS_API_KEY is present, initializes APISportsProvider.
     Otherwise defaults to NullSportsDataProvider ("LIVE DATA UNAVAILABLE").
     """
@@ -64,12 +67,24 @@ def get_sports_provider() -> SportsDataProvider:
         _GLOBAL_PROVIDER = NullSportsDataProvider(reason="Configured to NULL provider.")
         return _GLOBAL_PROVIDER
 
+    if provider_setting in ("odds_api", "the_odds_api", "theoddsapi"):
+        odds_api_key = getattr(config, "ODDS_API_KEY", "").strip() or os.getenv("ODDS_API_KEY", "").strip()
+        if odds_api_key:
+            _GLOBAL_PROVIDER = TheOddsApiProvider(api_key=odds_api_key)
+        else:
+            _GLOBAL_PROVIDER = NullSportsDataProvider(reason="LIVE DATA UNAVAILABLE: ODDS_API_KEY not configured.")
+        return _GLOBAL_PROVIDER
+
     api_keys = getattr(config, "SPORTS_API_KEYS", None)
     api_key = getattr(config, "SPORTS_API_KEY", "").strip() or getattr(config, "APISPORTS_KEY", "").strip()
     if api_keys or api_key:
         _GLOBAL_PROVIDER = APISportsProvider(api_key=api_key, api_keys=api_keys)
     else:
-        _GLOBAL_PROVIDER = NullSportsDataProvider(reason="LIVE DATA UNAVAILABLE: No live provider configured.")
+        odds_api_key = getattr(config, "ODDS_API_KEY", "").strip() or os.getenv("ODDS_API_KEY", "").strip()
+        if odds_api_key:
+            _GLOBAL_PROVIDER = TheOddsApiProvider(api_key=odds_api_key)
+        else:
+            _GLOBAL_PROVIDER = NullSportsDataProvider(reason="LIVE DATA UNAVAILABLE: No live provider configured.")
 
     return _GLOBAL_PROVIDER
 
@@ -87,6 +102,7 @@ __all__ = [
     "NullSportsDataProvider",
     "MockSportsDataProvider",
     "APISportsProvider",
+    "TheOddsApiProvider",
     "ProviderTeam",
     "ProviderMatch",
     "ProviderEvent",

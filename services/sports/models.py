@@ -249,8 +249,8 @@ class PrematchFixture:
     `kickoff` is naive MSK. `home_goals`/`away_goals` are the main-time (90 min
     + stoppage) score and stay None until the provider has one — never a fake 0.
     """
-    fixture_id: int
-    league_id: int
+    fixture_id: int | str
+    league_id: int | str
     league_name: str
     home: str
     away: str
@@ -266,8 +266,8 @@ class PrematchFixture:
 @dataclass(frozen=True)
 class MatchWinnerOdds:
     """1X2 prices of one bookmaker for one fixture. Complete or not returned at all."""
-    fixture_id: int
-    bookmaker_id: int
+    fixture_id: int | str
+    bookmaker_id: int | str
     home: float
     draw: float
     away: float
