@@ -1353,7 +1353,10 @@ class TransfersView {
               Причина: ${escapeHtml(it.decided_reason)}
             </div>` : ''}
           <div class="req-footer">
-            <div class="req-price">${it.price}</div>
+            <div class="req-price">
+              ${it.price}
+              ${it.special_price_k ? `<span class="hist-price-detail">(${it.tm_price_k ? (it.tm_price_k / 1000).toFixed(0) : ((it.price_k - it.special_price_k) / 1000).toFixed(0)} + ${(it.special_price_k / 1000).toFixed(0)} спешл)</span>` : ''}
+            </div>
             ${it.has_photo ? `<button class="btn-withdraw btn-view-photo" data-id="${it.id}" type="button">📸 Фото</button>` : ''}
           </div>
         </div>

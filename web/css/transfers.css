@@ -264,6 +264,17 @@
   font-size: 0.95rem;
   font-weight: 800;
   color: var(--accent-gold, #f5b027);
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.hist-price-detail {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 0.72rem;
+  font-weight: 500;
+  color: var(--text-secondary, #94a3b8);
+  opacity: 0.85;
 }
 
 .req-actions {
