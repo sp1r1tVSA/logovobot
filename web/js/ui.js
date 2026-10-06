@@ -1372,11 +1372,9 @@ export class UIRenderer {
     const container = document.getElementById('tournaments-content-container');
     if (!container) return;
 
-    if (activeTab === 'standings') {
-      if (selectedDivisionId === 'all') {
-        // Общая лига не ведёт отдельную командную таблицу — сразу отображаем общую таблицу бомбардиров и ассистентов!
-        activeTab = 'scorers';
-      }
+    if (selectedDivisionId === 'all') {
+      // Для режима «Общая» доступен только сводный рейтинг лидеров лиги
+      activeTab = 'scorers';
     }
 
     if (activeTab === 'standings') {

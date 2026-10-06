@@ -340,17 +340,41 @@ class AppController {
     this._renderSigs.delete(key);
   }
 
+  updateTournamentSubtabsUI() {
+    const isOverall = store.state.selectedDivisionId === 'all';
+    const subtabsContainer = document.getElementById('tournament-subtabs-container');
+    if (subtabsContainer) {
+      if (isOverall) {
+        subtabsContainer.style.setProperty('display', 'none', 'important');
+        subtabsContainer.hidden = true;
+      } else {
+        subtabsContainer.style.removeProperty('display');
+        subtabsContainer.hidden = false;
+      }
+    }
+
+    const bStandings = document.getElementById('btn-tab-standings');
+    const bResults = document.getElementById('btn-tab-results');
+    const bScorers = document.getElementById('btn-tab-scorers');
+    const tabMap = {
+      standings: bStandings,
+      results: bResults,
+      scorers: bScorers
+    };
+
+    [bStandings, bResults, bScorers].forEach(b => b?.classList.remove('active'));
+    if (!isOverall && tabMap[this.currentTournamentTab]) {
+      tabMap[this.currentTournamentTab]?.classList.add('active');
+    }
+  }
+
   renderTournamentTab(tab = null) {
     if (tab) this.currentTournamentTab = tab;
     const s = store.state;
-    if (s.selectedDivisionId === 'all' && this.currentTournamentTab === 'standings') {
+    if (s.selectedDivisionId === 'all') {
       this.currentTournamentTab = 'scorers';
-      const bStandings = document.getElementById('btn-tab-standings');
-      const bResults = document.getElementById('btn-tab-results');
-      const bScorers = document.getElementById('btn-tab-scorers');
-      [bStandings, bResults, bScorers].forEach(b => b?.classList.remove('active'));
-      bScorers?.classList.add('active');
     }
+    this.updateTournamentSubtabsUI();
     const deps = [
       s.standings,
       s.results,
@@ -692,15 +716,15 @@ class AppController {
         if (btn && btn.dataset.divisionId !== undefined) {
           const rawId = btn.dataset.divisionId;
           const divId = rawId === 'all' ? 'all' : parseInt(rawId);
+          const wasOverall = store.state.selectedDivisionId === 'all';
           store.setSelectedDivisionId(divId);
           if (divId === 'all') {
             this.currentTournamentTab = 'scorers';
-            const bStandings = document.getElementById('btn-tab-standings');
-            const bResults = document.getElementById('btn-tab-results');
-            const bScorers = document.getElementById('btn-tab-scorers');
-            [bStandings, bResults, bScorers].forEach(b => b?.classList.remove('active'));
-            bScorers?.classList.add('active');
+          } else if (wasOverall) {
+            // При переходе из «Общей» в конкретный дивизион открываем его турнирную таблицу
+            this.currentTournamentTab = 'standings';
           }
+          this.updateTournamentSubtabsUI();
           tgBridge.hapticImpact('light');
           await this.fetchTournamentData(divId);
         }
@@ -873,17 +897,16 @@ class AppController {
     const btnScorers = document.getElementById('btn-tab-scorers');
 
     if (btnStandings && btnResults && btnScorers) {
-      const setTab = (tab, activeBtn) => {
+      const setTab = (tab) => {
         this.currentTournamentTab = tab;
-        [btnStandings, btnResults, btnScorers].forEach(b => b.classList.remove('active'));
-        activeBtn.classList.add('active');
+        this.updateTournamentSubtabsUI();
         this.renderTournamentTab(tab);
         tgBridge.hapticImpact('light');
       };
 
-      btnStandings.addEventListener('click', () => setTab('standings', btnStandings));
-      btnResults.addEventListener('click', () => setTab('results', btnResults));
-      btnScorers.addEventListener('click', () => setTab('scorers', btnScorers));
+      btnStandings.addEventListener('click', () => setTab('standings'));
+      btnResults.addEventListener('click', () => setTab('results'));
+      btnScorers.addEventListener('click', () => setTab('scorers'));
     }
 
     // 9b. Сортировка и управление внутри Турнирного Центра
@@ -895,12 +918,9 @@ class AppController {
         if (btnGoLeaders) {
           store.setSelectedDivisionId('all');
           this.currentTournamentTab = 'scorers';
-          if (btnScorers) {
-            [btnStandings, btnResults, btnScorers].forEach(b => b?.classList.remove('active'));
-            btnScorers.classList.add('active');
-            this.renderTournamentTab('scorers');
-          }
-          tgBridge.hapticImpact('light');
+          this.updateTournamentSubtabsUI();
+          this.renderTournamentTab('scorers');
+          tgBridge.hapticImpact('medium');
           await this.fetchTournamentData('all');
           return;
         }
@@ -927,6 +947,8 @@ class AppController {
           const rawDiv = leaderDivBtn.dataset.leaderDiv;
           const divId = rawDiv === 'all' ? 'all' : parseInt(rawDiv);
           store.setSelectedDivisionId(divId);
+          this.currentTournamentTab = 'scorers';
+          this.updateTournamentSubtabsUI();
           tgBridge.hapticImpact('light');
           await this.fetchTournamentData(divId);
           return;
