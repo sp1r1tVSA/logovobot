@@ -272,8 +272,14 @@ class ApiClient {
     return `/api/matches/${matchId}/photo`;
   }
 
-  getTopScorers(tournamentId = 1) {
-    return this.request(`/api/tournaments/${tournamentId}/top-scorers?division_id=${encodeURIComponent(tournamentId)}`);
+  getTopScorers(divisionId = null, limit = 50) {
+    const params = new URLSearchParams();
+    if (divisionId !== null && divisionId !== undefined && divisionId !== '') {
+      params.append('division_id', divisionId);
+    }
+    if (limit) params.append('limit', limit);
+    const q = params.toString() ? `?${params.toString()}` : '';
+    return this.request(`/api/top-scorers${q}`);
   }
 
   // 6. User Stats, Saved Coupons, Favorites & Notifications

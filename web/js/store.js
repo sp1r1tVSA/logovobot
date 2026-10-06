@@ -146,7 +146,11 @@ class StateStore {
   }
 
   setSelectedDivisionId(divisionId) {
-    this.state.selectedDivisionId = divisionId ? parseInt(divisionId) : 1;
+    if (divisionId === 'all' || divisionId === '0' || divisionId === 0) {
+      this.state.selectedDivisionId = 'all';
+    } else {
+      this.state.selectedDivisionId = divisionId ? parseInt(divisionId) : 1;
+    }
     this.notify();
   }
 
@@ -189,7 +193,8 @@ class StateStore {
       this.state.tournamentTopStats = {
         top_scorers: topStats.top_scorers || [],
         top_assists: topStats.top_assists || [],
-        top_mvps: topStats.top_mvps || []
+        top_mvps: topStats.top_mvps || [],
+        top_combined: topStats.top_combined || []
       };
     }
     // Форма последних матчей приходит вместе с таблицей; пустой ответ её не стирает.

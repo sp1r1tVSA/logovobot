@@ -8038,7 +8038,8 @@ def get_top_scorers(limit: int = 20, division_id: int | None = None, season_id: 
             target_season_id = act["id"] if act else 1
 
         query = """
-            SELECT me.player_name, me.team_name, SUM(me.count) AS total_goals
+            SELECT me.player_name, me.team_name, SUM(me.count) AS total_goals,
+                   MAX(m.division_id) AS division_id
             FROM match_events me
             JOIN matches m ON me.match_id = m.id
             WHERE me.event_type = 'goal'
@@ -8056,6 +8057,29 @@ def get_top_scorers(limit: int = 20, division_id: int | None = None, season_id: 
         """
         cursor.execute(query, tuple(params))
         rows = _fold_player_rows(cursor, cursor.fetchall(), ("total_goals",))
+
+        div_map = {}
+        try:
+            cursor.execute("SELECT id, name FROM divisions")
+            for r in cursor.fetchall():
+                div_map[r["id"]] = r["name"]
+        except Exception:
+            pass
+
+        for r in rows:
+            d_id = r.get("division_id")
+            if not d_id and r.get("team_name"):
+                try:
+                    cursor.execute("SELECT division_id FROM users WHERE LOWER(team_name) = LOWER(?) LIMIT 1", (r["team_name"],))
+                    u_row = cursor.fetchone()
+                    if u_row and u_row["division_id"]:
+                        d_id = u_row["division_id"]
+                        r["division_id"] = d_id
+                except Exception:
+                    pass
+            r["division_name"] = div_map.get(d_id, f"Дивизион {d_id}" if d_id else "")
+            r["goals"] = r.get("total_goals", 0)
+
         rows.sort(key=lambda r: (-(r["total_goals"] or 0), r["player_name"]))
         return rows[:limit]
 
@@ -8069,7 +8093,8 @@ def get_top_assists(limit: int = 20, division_id: int | None = None, season_id: 
             target_season_id = act["id"] if act else 1
 
         query = """
-            SELECT me.player_name, me.team_name, SUM(me.count) AS total_assists
+            SELECT me.player_name, me.team_name, SUM(me.count) AS total_assists,
+                   MAX(m.division_id) AS division_id
             FROM match_events me
             JOIN matches m ON me.match_id = m.id
             WHERE me.event_type = 'assist'
@@ -8087,7 +8112,91 @@ def get_top_assists(limit: int = 20, division_id: int | None = None, season_id: 
         """
         cursor.execute(query, tuple(params))
         rows = _fold_player_rows(cursor, cursor.fetchall(), ("total_assists",))
+
+        div_map = {}
+        try:
+            cursor.execute("SELECT id, name FROM divisions")
+            for r in cursor.fetchall():
+                div_map[r["id"]] = r["name"]
+        except Exception:
+            pass
+
+        for r in rows:
+            d_id = r.get("division_id")
+            if not d_id and r.get("team_name"):
+                try:
+                    cursor.execute("SELECT division_id FROM users WHERE LOWER(team_name) = LOWER(?) LIMIT 1", (r["team_name"],))
+                    u_row = cursor.fetchone()
+                    if u_row and u_row["division_id"]:
+                        d_id = u_row["division_id"]
+                        r["division_id"] = d_id
+                except Exception:
+                    pass
+            r["division_name"] = div_map.get(d_id, f"Дивизион {d_id}" if d_id else "")
+            r["assists"] = r.get("total_assists", 0)
+
         rows.sort(key=lambda r: (-(r["total_assists"] or 0), r["player_name"]))
+        return rows[:limit]
+
+
+def get_top_combined_leaders(limit: int = 50, division_id: int | None = None, season_id: int | None = None) -> list[dict]:
+    """Get overall leaders table combining goals and assists (Гол + Пас) across league matches."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        target_season_id = season_id
+        if target_season_id is None:
+            act = get_active_season()
+            target_season_id = act["id"] if act else 1
+
+        query = """
+            SELECT me.player_name, me.team_name,
+                   SUM(CASE WHEN me.event_type = 'goal' THEN me.count ELSE 0 END) AS goals,
+                   SUM(CASE WHEN me.event_type = 'assist' THEN me.count ELSE 0 END) AS assists,
+                   SUM(me.count) AS points,
+                   MAX(m.division_id) AS division_id
+            FROM match_events me
+            JOIN matches m ON me.match_id = m.id
+            WHERE me.event_type IN ('goal', 'assist')
+              AND (m.tournament_type IS NULL OR m.tournament_type = 'league')
+              AND m.round_number > 0
+              AND m.status = 'confirmed'
+              AND (m.season_id = ? OR m.season_id IS NULL)
+        """
+        params = [target_season_id]
+        if division_id is not None:
+            query += " AND m.division_id = ?"
+            params.append(division_id)
+        query += """
+            GROUP BY me.player_name, me.team_name
+        """
+        cursor.execute(query, tuple(params))
+        rows = _fold_player_rows(cursor, cursor.fetchall(), ("goals", "assists", "points"))
+
+        div_map = {}
+        try:
+            cursor.execute("SELECT id, name FROM divisions")
+            for r in cursor.fetchall():
+                div_map[r["id"]] = r["name"]
+        except Exception:
+            pass
+
+        for r in rows:
+            d_id = r.get("division_id")
+            if not d_id and r.get("team_name"):
+                try:
+                    cursor.execute("SELECT division_id FROM users WHERE LOWER(team_name) = LOWER(?) LIMIT 1", (r["team_name"],))
+                    u_row = cursor.fetchone()
+                    if u_row and u_row["division_id"]:
+                        d_id = u_row["division_id"]
+                        r["division_id"] = d_id
+                except Exception:
+                    pass
+            r["division_name"] = div_map.get(d_id, f"Дивизион {d_id}" if d_id else "")
+            r["goals"] = r.get("goals") or 0
+            r["assists"] = r.get("assists") or 0
+            r["points"] = r.get("points") or 0
+
+        rows.sort(key=lambda r: (-(r["points"] or 0), -(r["goals"] or 0), -(r["assists"] or 0), r["player_name"]))
         return rows[:limit]
 
 
@@ -8181,6 +8290,25 @@ def get_top_mvps(division_id: int | None = None, season_id: int | None = None, l
             else:
                 clubless[key] = a
                 rows.append(a)
+
+        div_map = {}
+        try:
+            cursor.execute("SELECT id, name FROM divisions")
+            for r in cursor.fetchall():
+                div_map[r["id"]] = r["name"]
+        except Exception:
+            pass
+        for r in rows:
+            if r.get("team_name") and not r.get("division_name"):
+                try:
+                    cursor.execute("SELECT division_id FROM users WHERE LOWER(team_name) = LOWER(?) LIMIT 1", (r["team_name"],))
+                    u_row = cursor.fetchone()
+                    if u_row and u_row["division_id"]:
+                        r["division_id"] = u_row["division_id"]
+                        r["division_name"] = div_map.get(u_row["division_id"], f"Дивизион {u_row['division_id']}")
+                except Exception:
+                    pass
+
         rows.sort(key=lambda r: (-r["mvp_count"], r["player_name"]))
         return rows[:limit]
 

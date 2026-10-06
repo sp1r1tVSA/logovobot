@@ -549,3 +549,28 @@ html[data-design="frost"] .nav-item.active { color: #0b6b5d; }
 html[data-design="frost"] .view-section [style*="color: #fff"],
 html[data-design="frost"] .view-section [style*="color:#fff"] { color: #10231f !important; }
 html[data-design="frost"] .btn-primary { color: #fff; }
+
+/* Leaders Hub in Frost theme */
+html[data-design="frost"] .overall-leaders-banner { background: linear-gradient(135deg, rgba(11,107,93, 0.12) 0%, rgba(45,212,191, 0.08) 100%); border-color: rgba(11,107,93, 0.28); box-shadow: 0 4px 16px rgba(16,35,31,0.08); }
+html[data-design="frost"] .overall-leaders-banner:hover { background: linear-gradient(135deg, rgba(11,107,93, 0.18) 0%, rgba(45,212,191, 0.14) 100%); border-color: #0b6b5d; }
+html[data-design="frost"] .overall-leaders-banner-icon { background: rgba(11,107,93,0.12); border-color: rgba(11,107,93,0.3); }
+html[data-design="frost"] .overall-leaders-banner-title { color: #10231f; }
+html[data-design="frost"] .overall-leaders-banner-arrow { color: #0b6b5d; }
+html[data-design="frost"] .leaders-hub-title { color: #10231f; }
+html[data-design="frost"] .leaders-hub-badge { background: rgba(11,107,93, 0.12); border-color: rgba(11,107,93, 0.3); color: #0b6b5d; }
+html[data-design="frost"] .leaders-subtabs .mc-subtab-btn.active { background: #0b6b5d; color: #fff; border-color: #0b6b5d; }
+html[data-design="frost"] .scope-chip.active { background: rgba(11,107,93,0.16); border-color: #0b6b5d; color: #0b6b5d; }
+html[data-design="frost"] .podium-player-name { color: #10231f; }
+html[data-design="frost"] .podium-first .podium-rank-tag { color: #0b6b5d; }
+html[data-design="frost"] .podium-stat-badge { background: rgba(16,35,31,0.06); }
+html[data-design="frost"] .podium-stat-val.val-gold { color: #0b6b5d; }
+html[data-design="frost"] .leaders-search-input { background: rgba(255,255,255,0.7); border-color: rgba(16,35,31,0.12); color: #10231f; }
+html[data-design="frost"] .leaders-search-input:focus { border-color: #0b6b5d; }
+html[data-design="frost"] .leaders-table-card { background: rgba(255,255,255,0.72); border-color: rgba(16,35,31,0.12); box-shadow: 0 4px 16px rgba(16,35,31,0.06); }
+html[data-design="frost"] .leaders-table thead tr { background: rgba(240, 245, 243, 0.95); border-color: rgba(16,35,31,0.1); }
+html[data-design="frost"] .leaders-table th { color: #4a625b; }
+html[data-design="frost"] .leaders-table th.sorted { color: #0b6b5d; background: rgba(11,107,93,0.08); }
+html[data-design="frost"] .player-name-txt { color: #10231f; }
+html[data-design="frost"] .col-num.col-points { color: #10231f; }
+html[data-design="frost"] .leaders-table tbody tr:hover td { background: rgba(11,107,93, 0.03); }
+

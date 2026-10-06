@@ -209,8 +209,11 @@ async def handle_get_results(request: web.Request) -> web.Response:
 
 async def handle_get_top_scorers(request: web.Request) -> web.Response:
     """
-    GET /api/tournaments/{id}/top-scorers?division_id=X
-    Returns top goalscorers, assist leaders and MVP (player-of-the-match) leaders.
+    GET /api/tournaments/{id}/top-scorers?division_id=X&limit=N
+    GET /api/top-scorers?division_id=X&limit=N
+    Returns top goalscorers, assist leaders, combined (G+A) leaders, and MVP leaders.
+    When division_id is 'all', None, 0, or omitted on /api/top-scorers,
+    returns overall (общая) statistics across all divisions.
     """
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     user_info = get_authenticated_user(init_data)
@@ -218,29 +221,38 @@ async def handle_get_top_scorers(request: web.Request) -> web.Response:
         return web.json_response({"status": "error", "error": "unauthorized"}, status=401)
 
     div_param = request.query.get("division_id")
-    if not div_param:
+    if div_param is None or div_param == "":
         path_id = request.match_info.get("id")
-        if path_id and path_id.isdigit():
+        if path_id and path_id.lower() == "all":
+            div_param = "all"
+        elif path_id and path_id.isdigit() and int(path_id) > 0:
             div_param = path_id
-    div_id = int(div_param) if div_param and div_param.isdigit() else None
 
-    raw_scorers = await asyncio.to_thread(database.get_top_scorers, limit=15, division_id=div_id)
-    raw_assists = await asyncio.to_thread(database.get_top_assists, limit=15, division_id=div_id)
-    raw_mvps = await asyncio.to_thread(database.get_top_mvps, division_id=div_id, limit=15)
+    div_id = None
+    if div_param and div_param.lower() not in ("all", "0", "none"):
+        if div_param.isdigit():
+            div_id = int(div_param)
+
+    limit = min(100, query_int(request, "limit", 30, minimum=5))
+
+    raw_scorers = await asyncio.to_thread(database.get_top_scorers, limit=limit, division_id=div_id)
+    raw_assists = await asyncio.to_thread(database.get_top_assists, limit=limit, division_id=div_id)
+    raw_mvps = await asyncio.to_thread(database.get_top_mvps, division_id=div_id, limit=limit)
+    raw_combined = await asyncio.to_thread(database.get_top_combined_leaders, limit=limit, division_id=div_id)
 
     top_scorers = [
         {
             **sc,
-            "goals": sc.get("total_goals", 0),
-            "total_goals": sc.get("total_goals", 0),
+            "goals": sc.get("total_goals", sc.get("goals", 0)),
+            "total_goals": sc.get("total_goals", sc.get("goals", 0)),
         }
         for sc in raw_scorers
     ]
     top_assists = [
         {
             **a,
-            "assists": a.get("total_assists", 0),
-            "total_assists": a.get("total_assists", 0),
+            "assists": a.get("total_assists", a.get("assists", 0)),
+            "total_assists": a.get("total_assists", a.get("assists", 0)),
         }
         for a in raw_assists
     ]
@@ -255,11 +267,25 @@ async def handle_get_top_scorers(request: web.Request) -> web.Response:
         for mv in raw_mvps
     ]
 
+    # ⚡ Общая таблица: Гол + Пас (очки результативности)
+    top_combined = [
+        {
+            **cb,
+            "goals": cb.get("goals", 0),
+            "assists": cb.get("assists", 0),
+            "points": cb.get("points", 0),
+        }
+        for cb in raw_combined
+    ]
+
     return web.json_response({
         "status": "ok",
+        "division_id": div_id,
+        "is_overall": div_id is None,
         "top_scorers": top_scorers,
         "top_assists": top_assists,
-        "top_mvps": top_mvps
+        "top_mvps": top_mvps,
+        "top_combined": top_combined,
     })
 
 

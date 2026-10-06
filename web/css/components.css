@@ -4173,6 +4173,483 @@ span.team-logo-fallback {
   padding: 10px;
 }
 
+/* ─── Баннер перехода к общей таблице бомбардиров и ассистентов ─── */
+.overall-leaders-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  background: linear-gradient(135deg, rgba(245, 176, 39, 0.14) 0%, rgba(0, 210, 255, 0.08) 100%);
+  border: 1px solid rgba(245, 176, 39, 0.28);
+  border-radius: var(--radius-md);
+  padding: 12px 16px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+}
+.overall-leaders-banner:hover,
+.overall-leaders-banner:active {
+  background: linear-gradient(135deg, rgba(245, 176, 39, 0.22) 0%, rgba(0, 210, 255, 0.14) 100%);
+  border-color: var(--accent-gold);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-gold);
+}
+.overall-leaders-banner-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.overall-leaders-banner-icon {
+  font-size: 1.5rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  background: rgba(245, 176, 39, 0.18);
+  border: 1px solid rgba(245, 176, 39, 0.35);
+  border-radius: var(--radius-sm);
+  filter: drop-shadow(0 2px 8px rgba(245, 176, 39, 0.3));
+  flex-shrink: 0;
+}
+.overall-leaders-banner-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: #fff;
+  line-height: 1.25;
+}
+.overall-leaders-banner-sub {
+  font-size: 0.75rem;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+.overall-leaders-banner-arrow {
+  font-size: 1.1rem;
+  color: var(--accent-gold);
+  font-weight: 800;
+  transition: transform var(--transition-fast);
+  flex-shrink: 0;
+}
+.overall-leaders-banner:hover .overall-leaders-banner-arrow {
+  transform: translateX(3px);
+}
+
+/* ─── Хаб лидеров: Бомбардиры, Ассистенты, Гол+Пас, MVP ─── */
+.leaders-hub {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.leaders-hub-header {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  box-shadow: var(--shadow-card);
+}
+.leaders-title-wrap {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.leaders-hub-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.15rem;
+  font-weight: 900;
+  color: #fff;
+  letter-spacing: -0.01em;
+}
+.leaders-hub-badge {
+  font-size: 0.72rem;
+  font-weight: 800;
+  padding: 4px 10px;
+  border-radius: var(--radius-full);
+  background: rgba(245, 176, 39, 0.15);
+  border: 1px solid rgba(245, 176, 39, 0.35);
+  color: var(--accent-gold);
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.leaders-hub-desc {
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  margin-top: 6px;
+  line-height: 1.4;
+}
+
+/* Категории лидеров (Гол+Пас, Бомбардиры, Ассистенты, MVP) */
+.leaders-subtabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 6px;
+}
+.mc-subtab-btn {
+  padding: 9px 4px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  cursor: pointer;
+  transition: all var(--transition-fast);
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.mc-subtab-btn:hover {
+  background: var(--bg-card-hover);
+  color: #fff;
+}
+.mc-subtab-btn.active {
+  background: var(--accent-gold);
+  border-color: var(--accent-gold);
+  color: #000;
+  font-weight: 900;
+  box-shadow: var(--shadow-gold);
+}
+
+/* Переключатель дивизионов (Общая / Дивизион 1..N) */
+.leaders-scope-bar {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 2px 0 6px;
+  -webkit-overflow-scrolling: touch;
+}
+.leaders-scope-bar::-webkit-scrollbar {
+  display: none;
+}
+.scope-chip {
+  padding: 6px 13px;
+  font-size: 0.76rem;
+  font-weight: 700;
+  border-radius: var(--radius-full);
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-secondary);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all var(--transition-fast);
+  flex-shrink: 0;
+}
+.scope-chip:hover {
+  background: rgba(255, 255, 255, 0.09);
+  color: #fff;
+}
+.scope-chip.active {
+  background: rgba(245, 176, 39, 0.2);
+  border-color: var(--accent-gold);
+  color: #fff;
+  font-weight: 800;
+  box-shadow: 0 0 12px rgba(245, 176, 39, 0.25);
+}
+
+/* Подиум лидеров (Топ-3) */
+.leaders-podium-wrap {
+  display: grid;
+  grid-template-columns: 1fr 1.15fr 1fr;
+  align-items: flex-end;
+  gap: 8px;
+  margin: 6px 0 4px;
+}
+.podium-col {
+  display: flex;
+  flex-direction: column;
+}
+.podium-col .podium-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 12px 6px;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  box-shadow: var(--shadow-card);
+  transition: transform var(--transition-fast);
+}
+.podium-col.podium-first .podium-card {
+  border-color: rgba(245, 176, 39, 0.6);
+  background: linear-gradient(180deg, rgba(245, 176, 39, 0.2) 0%, var(--bg-card) 100%);
+  padding-top: 18px;
+  padding-bottom: 18px;
+  box-shadow: 0 0 24px rgba(245, 176, 39, 0.25);
+}
+.podium-col.podium-second .podium-card {
+  border-color: rgba(148, 163, 184, 0.4);
+  background: linear-gradient(180deg, rgba(148, 163, 184, 0.12) 0%, var(--bg-card) 100%);
+  padding-bottom: 12px;
+}
+.podium-col.podium-third .podium-card {
+  border-color: rgba(205, 127, 50, 0.4);
+  background: linear-gradient(180deg, rgba(205, 127, 50, 0.12) 0%, var(--bg-card) 100%);
+  padding-bottom: 10px;
+}
+
+.podium-rank-tag {
+  font-size: 0.7rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  color: var(--text-secondary);
+}
+.podium-first .podium-rank-tag {
+  color: var(--accent-gold);
+}
+.podium-logo-wrap {
+  width: 42px;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin: 2px 0;
+}
+.podium-logo-wrap img {
+  filter: drop-shadow(0 2px 6px rgba(0, 0, 0, 0.4));
+}
+.podium-player-name {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.84rem;
+  font-weight: 800;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.podium-team-line {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+  max-width: 100%;
+}
+.podium-team-name {
+  font-size: 0.68rem;
+  color: var(--text-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+.podium-stat-badge {
+  margin-top: 4px;
+  background: rgba(0, 0, 0, 0.35);
+  border-radius: var(--radius-sm);
+  padding: 4px 8px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.podium-stat-val {
+  font-family: 'Outfit', sans-serif;
+  font-size: 1.15rem;
+  font-weight: 900;
+  line-height: 1.1;
+}
+.podium-stat-val.val-gold { color: var(--accent-gold); }
+.podium-stat-val.val-cyan { color: var(--accent-cyan); }
+.podium-stat-val.val-purple { color: #c084fc; }
+.podium-stat-sub {
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--text-secondary);
+  margin-top: 2px;
+}
+
+/* Поиск по футболистам и клубам */
+.leaders-search-bar {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.leaders-search-bar .search-icon {
+  position: absolute;
+  left: 12px;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  pointer-events: none;
+}
+.leaders-search-input {
+  width: 100%;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  padding: 9px 34px 9px 34px;
+  color: #fff;
+  font-size: 0.84rem;
+  outline: none;
+  transition: border-color var(--transition-fast);
+}
+.leaders-search-input:focus {
+  border-color: var(--accent-gold);
+}
+.leaders-search-clear {
+  position: absolute;
+  right: 10px;
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 4px;
+}
+.leaders-search-clear:hover {
+  color: #fff;
+}
+
+/* Карточка таблицы лидеров */
+.leaders-table-card {
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+}
+.leaders-table-scroll {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.leaders-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+  text-align: center;
+}
+.leaders-table thead tr {
+  background: rgba(14, 18, 27, 0.95);
+  border-bottom: 1px solid var(--border-subtle);
+}
+.leaders-table th {
+  padding: 10px 8px;
+  font-size: 0.74rem;
+  font-weight: 800;
+  color: var(--text-secondary);
+  white-space: nowrap;
+}
+.leaders-table th.leaders-sortable {
+  cursor: pointer;
+  transition: color var(--transition-fast);
+}
+.leaders-table th.leaders-sortable:hover {
+  color: #fff;
+}
+.leaders-table th.sorted {
+  color: var(--accent-gold);
+  background: rgba(245, 176, 39, 0.08);
+}
+.leaders-table td {
+  padding: 9px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  vertical-align: middle;
+}
+.leaders-table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.col-pos {
+  width: 38px;
+}
+.leaders-pos-pill {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 800;
+}
+.leaders-pos-pill.top-1 {
+  background: var(--accent-gold);
+  color: #000;
+  font-weight: 900;
+  box-shadow: 0 0 8px rgba(245, 176, 39, 0.4);
+}
+.leaders-pos-pill.top-2 {
+  background: #94a3b8;
+  color: #000;
+  font-weight: 900;
+}
+.leaders-pos-pill.top-3 {
+  background: #cd7f32;
+  color: #fff;
+  font-weight: 900;
+}
+.leaders-pos-pill.mid {
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary);
+}
+
+.col-player-name {
+  text-align: left;
+  min-width: 140px;
+}
+.leaders-player-wrap {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.leaders-player-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+}
+.player-name-txt {
+  font-weight: 700;
+  color: #fff;
+  font-size: 0.84rem;
+}
+.player-team-sub {
+  font-size: 0.7rem;
+  color: var(--text-muted);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.col-team {
+  text-align: left;
+  display: none;
+}
+@media (min-width: 500px) {
+  .col-team { display: table-cell; }
+}
+.leaders-team-name {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.division-badge-pill {
+  display: inline-block;
+  font-size: 0.62rem;
+  font-weight: 800;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(0, 210, 255, 0.12);
+  color: var(--accent-cyan);
+  border: 1px solid rgba(0, 210, 255, 0.28);
+  white-space: nowrap;
+}
+
+.col-num {
+  font-family: 'Outfit', sans-serif;
+  font-size: 0.88rem;
+  min-width: 44px;
+}
+.col-num.col-goals { color: var(--accent-gold); }
+.col-num.col-assists { color: var(--accent-cyan); }
+.col-num.col-points { color: #fff; font-size: 0.95rem; font-weight: 900; }
+.col-num.col-dim { color: var(--text-muted); font-size: 0.8rem; }
+.col-num.col-mvp { color: #c084fc; font-weight: 900; font-size: 0.95rem; }
+
 /* ─── История прогнозов: пустое состояние ─── */
 .coupons-empty-state.history-empty {
   text-align: center;

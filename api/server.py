@@ -479,6 +479,8 @@ def create_app(bot=None) -> web.Application:
     app.router.add_get("/api/tournaments/{id}/standings", handle_get_standings)
     app.router.add_get("/api/tournaments/{id}/results", handle_get_results)
     app.router.add_get("/api/tournaments/{id}/top-scorers", handle_get_top_scorers)
+    app.router.add_get("/api/top-scorers", handle_get_top_scorers)
+    app.router.add_get("/api/leaders", handle_get_top_scorers)
     app.router.add_get("/api/profile/tournament-stats", handle_get_my_tournament_stats)
 
     # 6. User Stats, Saved Coupons, Favorites & Notifications

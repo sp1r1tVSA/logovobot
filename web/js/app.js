@@ -18,8 +18,10 @@ import { initDesign } from './design.js';
 class AppController {
   constructor() {
     this.currentTournamentTab = 'standings';
-    // Какой список лидеров открыт внутри вкладки «Лидеры»: 'scorers' | 'assists' | 'mvps'.
-    this.currentLeaderTab = 'scorers';
+    // Какой список лидеров открыт внутри вкладки «Лидеры»: 'combined' | 'scorers' | 'assists' | 'mvps'.
+    this.currentLeaderTab = 'combined';
+    this.leaderSearchQuery = '';
+    this.leaderSort = { key: 'points', dir: 'desc' };
     // Сортировка таблицы: по умолчанию как её отдаёт бэкенд — по очкам, вниз.
     this.standingsSort = { key: 'points', dir: 'desc' };
     // Подписи входных данных уже нарисованных блоков: key -> JSON.
@@ -341,7 +343,26 @@ class AppController {
   renderTournamentTab(tab = null) {
     if (tab) this.currentTournamentTab = tab;
     const s = store.state;
-    const deps = [s.standings, s.results, s.tournamentTopStats, this.currentTournamentTab, s.standingsForm, this.standingsSort, this.currentLeaderTab];
+    if (s.selectedDivisionId === 'all' && this.currentTournamentTab === 'standings') {
+      this.currentTournamentTab = 'scorers';
+      const bStandings = document.getElementById('btn-tab-standings');
+      const bResults = document.getElementById('btn-tab-results');
+      const bScorers = document.getElementById('btn-tab-scorers');
+      [bStandings, bResults, bScorers].forEach(b => b?.classList.remove('active'));
+      bScorers?.classList.add('active');
+    }
+    const deps = [
+      s.standings,
+      s.results,
+      s.tournamentTopStats,
+      this.currentTournamentTab,
+      s.standingsForm,
+      this.standingsSort,
+      this.currentLeaderTab,
+      this.leaderSearchQuery,
+      this.leaderSort,
+      s.selectedDivisionId
+    ];
     this.renderBlock('tournaments', deps, () => UIRenderer.renderTournaments(
       s.standings,
       s.results,
@@ -349,17 +370,24 @@ class AppController {
       this.currentTournamentTab,
       s.standingsForm,
       this.standingsSort,
-      this.currentLeaderTab
+      this.currentLeaderTab,
+      this.leaderSearchQuery,
+      this.leaderSort,
+      s.selectedDivisionId
     ));
   }
 
   async fetchTournamentData(divisionId = null) {
     try {
-      const targetDiv = divisionId || store.state.selectedDivisionId || 1;
+      const targetDiv = (divisionId !== null && divisionId !== undefined)
+        ? divisionId
+        : (store.state.selectedDivisionId || 1);
+      const isOverall = targetDiv === 'all' || targetDiv === 0 || targetDiv === '0';
+      const standingsDiv = isOverall ? 1 : targetDiv;
       const [stRes, resRes, topRes] = await Promise.all([
-        api.getStandings(targetDiv),
-        api.getResults(targetDiv),
-        api.getTopScorers(targetDiv)
+        api.getStandings(standingsDiv),
+        api.getResults(isOverall ? null : targetDiv),
+        api.getTopScorers(isOverall ? 'all' : targetDiv, 50)
       ]);
       store.setTournamentData(
         stRes.status === 'ok' ? stRes.standings : [],
@@ -368,9 +396,10 @@ class AppController {
           ? {
               top_scorers: topRes.top_scorers || [],
               top_assists: topRes.top_assists || [],
-              top_mvps: topRes.top_mvps || []
+              top_mvps: topRes.top_mvps || [],
+              top_combined: topRes.top_combined || []
             }
-          : { top_scorers: [], top_assists: [], top_mvps: [] },
+          : { top_scorers: [], top_assists: [], top_mvps: [], top_combined: [] },
         stRes.status === 'ok' ? (stRes.form || {}) : {}
       );
     } catch (e) {
@@ -660,9 +689,18 @@ class AppController {
     if (tourDivTabs) {
       tourDivTabs.addEventListener('click', async (e) => {
         const btn = e.target.closest('.division-tab-btn');
-        if (btn && btn.dataset.divisionId) {
-          const divId = parseInt(btn.dataset.divisionId);
+        if (btn && btn.dataset.divisionId !== undefined) {
+          const rawId = btn.dataset.divisionId;
+          const divId = rawId === 'all' ? 'all' : parseInt(rawId);
           store.setSelectedDivisionId(divId);
+          if (divId === 'all') {
+            this.currentTournamentTab = 'scorers';
+            const bStandings = document.getElementById('btn-tab-standings');
+            const bResults = document.getElementById('btn-tab-results');
+            const bScorers = document.getElementById('btn-tab-scorers');
+            [bStandings, bResults, bScorers].forEach(b => b?.classList.remove('active'));
+            bScorers?.classList.add('active');
+          }
           tgBridge.hapticImpact('light');
           await this.fetchTournamentData(divId);
         }
@@ -848,20 +886,75 @@ class AppController {
       btnScorers.addEventListener('click', () => setTab('scorers', btnScorers));
     }
 
-    // 9b. Сортировка таблицы: делегированный клик по шапке (она перерисовывается)
+    // 9b. Сортировка и управление внутри Турнирного Центра
     const tournamentsContainer = document.getElementById('tournaments-content-container');
     if (tournamentsContainer) {
-      tournamentsContainer.addEventListener('click', (e) => {
-        // 9c. Переключатель списков лидеров (бомбардиры / ассистенты / MVP).
-        // Кнопки живут внутри перерисовываемого контейнера — только делегирование.
+      tournamentsContainer.addEventListener('click', async (e) => {
+        // Переход из заглушки или баннера общей таблицы в раздел лидеров
+        const btnGoLeaders = e.target.closest('#btn-go-to-leaders, #btn-banner-overall-leaders');
+        if (btnGoLeaders) {
+          store.setSelectedDivisionId('all');
+          this.currentTournamentTab = 'scorers';
+          if (btnScorers) {
+            [btnStandings, btnResults, btnScorers].forEach(b => b?.classList.remove('active'));
+            btnScorers.classList.add('active');
+            this.renderTournamentTab('scorers');
+          }
+          tgBridge.hapticImpact('light');
+          await this.fetchTournamentData('all');
+          return;
+        }
+
+        // Переключатель категорий лидеров (Гол+Пас / Бомбардиры / Ассистенты / MVP)
         const leaderBtn = e.target.closest('[data-leader-tab]');
         if (leaderBtn) {
           this.currentLeaderTab = leaderBtn.dataset.leaderTab;
+          const defaultKeyMap = {
+            combined: 'points',
+            scorers: 'goals',
+            assists: 'assists',
+            mvps: 'mvp_count'
+          };
+          this.leaderSort = { key: defaultKeyMap[this.currentLeaderTab] || 'points', dir: 'desc' };
           this.renderTournamentTab(this.currentTournamentTab);
           tgBridge.hapticImpact('light');
           return;
         }
 
+        // Быстрый переключатель дивизиона в шапке лидеров
+        const leaderDivBtn = e.target.closest('[data-leader-div]');
+        if (leaderDivBtn) {
+          const rawDiv = leaderDivBtn.dataset.leaderDiv;
+          const divId = rawDiv === 'all' ? 'all' : parseInt(rawDiv);
+          store.setSelectedDivisionId(divId);
+          tgBridge.hapticImpact('light');
+          await this.fetchTournamentData(divId);
+          return;
+        }
+
+        // Сортировка колонок таблицы лидеров
+        const leaderTh = e.target.closest('th[data-leader-sort-key]');
+        if (leaderTh) {
+          const key = leaderTh.dataset.leaderSortKey;
+          if (this.leaderSort.key === key) {
+            this.leaderSort.dir = this.leaderSort.dir === 'desc' ? 'asc' : 'desc';
+          } else {
+            this.leaderSort = { key, dir: (key === 'player_name' || key === 'team_name') ? 'asc' : 'desc' };
+          }
+          this.renderTournamentTab(this.currentTournamentTab);
+          tgBridge.hapticImpact('light');
+          return;
+        }
+
+        // Очистить поиск
+        const clearBtn = e.target.closest('.leaders-search-clear');
+        if (clearBtn) {
+          this.leaderSearchQuery = '';
+          this.renderTournamentTab(this.currentTournamentTab);
+          return;
+        }
+
+        // Сортировка турнирной таблицы
         const th = e.target.closest('th[data-sort-key]');
         if (!th) return;
         const key = th.dataset.sortKey;
@@ -873,6 +966,22 @@ class AppController {
         }
         this.renderTournamentTab(this.currentTournamentTab);
         tgBridge.hapticImpact('light');
+      });
+
+      // Живой поиск футболистов и клубов
+      tournamentsContainer.addEventListener('input', (e) => {
+        if (e.target.matches('.leaders-search-input')) {
+          this.leaderSearchQuery = e.target.value;
+          const cursorPos = e.target.selectionStart;
+          this.renderTournamentTab(this.currentTournamentTab);
+          const newInput = tournamentsContainer.querySelector('.leaders-search-input');
+          if (newInput) {
+            newInput.focus();
+            try {
+              newInput.setSelectionRange(cursorPos, cursorPos);
+            } catch (_) {}
+          }
+        }
       });
     }
 

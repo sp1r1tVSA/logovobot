@@ -583,8 +583,16 @@ export class UIRenderer {
       ${irlChip}
     ` : '';
 
-    container.innerHTML = cupChip + divs.map(d => `
-      <button class="division-tab-btn ${isLeague && d.id === selectedDivisionId ? 'active' : ''}" 
+    const isTourHub = containerId === 'tournament-division-tabs-container';
+    const isAll = selectedDivisionId === 'all';
+    const allChip = isTourHub ? `
+      <button class="division-tab-btn ${isAll ? 'active' : ''}" data-division-id="all">
+        🌐 Общая
+      </button>
+    ` : '';
+
+    container.innerHTML = cupChip + allChip + divs.map(d => `
+      <button class="division-tab-btn ${isLeague && !isAll && d.id === selectedDivisionId ? 'active' : ''}" 
               data-division-id="${d.id}">
         🛡️ ${d.name || `Дивизион ${d.id}`}
       </button>
@@ -1349,11 +1357,30 @@ export class UIRenderer {
     `).join('');
   }
 
-  static renderTournaments(standings, results, topStats = {}, activeTab = 'standings', form = {}, sort = null, leaderTab = 'scorers') {
+  static renderTournaments(
+    standings,
+    results,
+    topStats = {},
+    activeTab = 'standings',
+    form = {},
+    sort = null,
+    leaderTab = 'combined',
+    searchQuery = '',
+    leaderSort = null,
+    selectedDivisionId = 'all'
+  ) {
     const container = document.getElementById('tournaments-content-container');
     if (!container) return;
 
     if (activeTab === 'standings') {
+      if (selectedDivisionId === 'all') {
+        // Общая лига не ведёт отдельную командную таблицу — сразу отображаем общую таблицу бомбардиров и ассистентов!
+        activeTab = 'scorers';
+      }
+    }
+
+    if (activeTab === 'standings') {
+
       if (!standings || standings.length === 0) {
         container.innerHTML = '<div class="list-empty">Таблица пока пуста.</div>';
         return;
@@ -1400,6 +1427,16 @@ export class UIRenderer {
       const euroSlots = euroSlotsMap[divId] || { ucl: 0, uel: 0 };
 
       container.innerHTML = `
+        <div class="overall-leaders-banner" id="btn-banner-overall-leaders" title="Открыть общую таблицу бомбардиров и ассистентов">
+          <div class="overall-leaders-banner-left">
+            <span class="overall-leaders-banner-icon">⚡</span>
+            <div>
+              <div class="overall-leaders-banner-title">Общая таблица бомбардиров и ассистентов</div>
+              <div class="overall-leaders-banner-sub">Сводный рейтинг результативности всех дивизионов (Г+П)</div>
+            </div>
+          </div>
+          <span class="overall-leaders-banner-arrow">→</span>
+        </div>
         <div class="standings-card">
           <table class="standings-table">
             <thead>
@@ -1495,48 +1532,331 @@ export class UIRenderer {
         `;
       });
     } else if (activeTab === 'scorers') {
+      const isOverall = selectedDivisionId === 'all';
+
       const leaderViews = {
+        combined: {
+          id: 'combined',
+          label: '⚡ Гол + Пас',
+          badge: 'Общая результативность',
+          desc: 'Сводный рейтинг результативности лиги (голы + передачи)',
+          icon: '⚡',
+          empty: 'Общая таблица бомбардиров и ассистентов формируется.',
+          rows: topStats?.top_combined || [],
+          defaultSortKey: 'points'
+        },
         scorers: {
+          id: 'scorers',
           label: '⚽ Бомбардиры',
+          badge: 'Гонка снайперов',
+          desc: 'Лучшие голеадоры лиги по забитым мячам',
           icon: '⚽',
           empty: 'Список бомбардиров формируется.',
           rows: topStats?.top_scorers || [],
-          valueOf: (r) => r.goals ?? r.total_goals ?? 0
+          defaultSortKey: 'goals'
         },
         assists: {
+          id: 'assists',
           label: '🎯 Ассистенты',
+          badge: 'Мастера передач',
+          desc: 'Лучшие распасовщики лиги по голевым пасам',
           icon: '🎯',
           empty: 'Список ассистентов формируется.',
           rows: topStats?.top_assists || [],
-          valueOf: (r) => r.assists ?? r.total_assists ?? 0
+          defaultSortKey: 'assists'
         },
         mvps: {
+          id: 'mvps',
           label: '👑 Лидеры MVP',
+          badge: 'Игроки матча',
+          desc: 'Футболисты с наибольшим числом наград MVP матча',
           icon: '👑',
           empty: 'Наград «Игрок матча» пока нет.',
           rows: topStats?.top_mvps || [],
-          valueOf: (r) => r.mvp_count ?? 0
+          defaultSortKey: 'mvp_count'
         }
       };
 
-      const activeLeader = leaderViews[leaderTab] ? leaderTab : 'scorers';
+      const activeLeader = leaderViews[leaderTab] ? leaderTab : 'combined';
       const view = leaderViews[activeLeader];
+      let rawRows = view.rows || [];
 
-      const tabsHtml = `
-        <div class="mc-tabs">
-          ${Object.entries(leaderViews).map(([key, v]) => `
-            <button class="mc-subtab-btn${key === activeLeader ? ' active' : ''}" data-leader-tab="${key}">${v.label}</button>
+      // 1. Поиск
+      const q = (searchQuery || '').trim().toLowerCase();
+      if (q) {
+        rawRows = rawRows.filter(r =>
+          (r.player_name || '').toLowerCase().includes(q) ||
+          (r.team_name || '').toLowerCase().includes(q)
+        );
+      }
+
+      // 2. Исходная позиция до пересортировки колонок
+      const rowsWithPos = rawRows.map((r, i) => ({
+        ...r,
+        position: i + 1,
+        goals: r.goals ?? r.total_goals ?? 0,
+        assists: r.assists ?? r.total_assists ?? 0,
+        points: r.points ?? ((r.goals ?? r.total_goals ?? 0) + (r.assists ?? r.total_assists ?? 0)),
+        mvp_count: r.mvp_count ?? 0
+      }));
+
+      // 3. Сортировка таблицы
+      const sKey = leaderSort?.key || view.defaultSortKey;
+      const sDir = leaderSort?.dir || 'desc';
+      const dirMul = sDir === 'asc' ? 1 : -1;
+
+      const sortedRows = [...rowsWithPos].sort((a, b) => {
+        if (sKey === 'player_name') return dirMul * (a.player_name || '').localeCompare(b.player_name || '', 'ru');
+        if (sKey === 'team_name') return dirMul * (a.team_name || '').localeCompare(b.team_name || '', 'ru');
+        const vA = a[sKey] ?? 0;
+        const vB = b[sKey] ?? 0;
+        const delta = vA - vB;
+        if (delta !== 0) return dirMul * delta;
+        return a.position - b.position;
+      });
+
+      // 4. Подиум Топ-3 (если без поиска и есть минимум 3 игрока)
+      let podiumHtml = '';
+      if (!q && sortedRows.length >= 3) {
+        const p1 = sortedRows[0];
+        const p2 = sortedRows[1];
+        const p3 = sortedRows[2];
+
+        const renderPodiumItem = (p, rankNum, medal, rankClass) => {
+          let statHtml = '';
+          if (activeLeader === 'combined') {
+            statHtml = `<span class="podium-stat-val val-gold">${p.points}</span><span class="podium-stat-sub">${p.goals}⚽ ${p.assists}🎯</span>`;
+          } else if (activeLeader === 'scorers') {
+            statHtml = `<span class="podium-stat-val val-gold">${p.goals}</span><span class="podium-stat-sub">голов</span>`;
+          } else if (activeLeader === 'assists') {
+            statHtml = `<span class="podium-stat-val val-cyan">${p.assists}</span><span class="podium-stat-sub">пасов</span>`;
+          } else {
+            statHtml = `<span class="podium-stat-val val-purple">${p.mvp_count}</span><span class="podium-stat-sub">MVP</span>`;
+          }
+
+          const divBadge = p.division_name
+            ? `<span class="division-badge-pill div-${p.division_id || 1}">${escapeHtml(p.division_name)}</span>`
+            : '';
+
+          return `
+            <div class="podium-col ${rankClass}">
+              <div class="podium-card">
+                <div class="podium-rank-tag">${medal} #${rankNum}</div>
+                <div class="podium-logo-wrap">
+                  ${renderTeamLogoHtml(p.team_name, 38)}
+                </div>
+                <div class="podium-player-name" title="${escapeHtml(p.player_name)}">${escapeHtml(p.player_name)}</div>
+                <div class="podium-team-line">
+                  <span class="podium-team-name">${escapeHtml(p.team_name)}</span>
+                  ${divBadge}
+                </div>
+                <div class="podium-stat-badge">
+                  ${statHtml}
+                </div>
+              </div>
+            </div>
+          `;
+        };
+
+        podiumHtml = `
+          <div class="leaders-podium-wrap">
+            ${renderPodiumItem(p2, 2, '🥈', 'podium-second')}
+            ${renderPodiumItem(p1, 1, '🥇', 'podium-first')}
+            ${renderPodiumItem(p3, 3, '🥉', 'podium-third')}
+          </div>
+        `;
+      }
+
+      // 5. Шапка вкладок и дивизионов
+      const categoryTabsHtml = `
+        <div class="mc-tabs leaders-subtabs">
+          ${Object.values(leaderViews).map(v => `
+            <button class="mc-subtab-btn${v.id === activeLeader ? ' active' : ''}" data-leader-tab="${v.id}">
+              ${v.label}
+            </button>
           `).join('')}
         </div>
       `;
 
-      const bodyHtml = view.rows.length === 0
-        ? `<div class="list-empty">${view.empty}</div>`
-        : `<div class="leaders-card">
-             ${UIRenderer.renderLeaderRows(view.rows, view.icon, view.valueOf)}
-           </div>`;
+      // Дивизионы в шапке лидеров (динамически из store)
+      const divsList = (store.state.divisions && store.state.divisions.length > 0)
+        ? store.state.divisions
+        : [
+            { id: 1, name: 'Дивизион 1' },
+            { id: 2, name: 'Дивизион 2' },
+            { id: 3, name: 'Дивизион 3' },
+            { id: 4, name: 'Дивизион 4' },
+            { id: 5, name: 'Дивизион 5' }
+          ];
 
-      container.innerHTML = tabsHtml + bodyHtml;
+      const divFilterChips = `
+        <div class="leaders-scope-bar scroll-row">
+          <button class="scope-chip${isOverall ? ' active' : ''}" data-leader-div="all">
+            🌐 Общая (Все)
+          </button>
+          ${divsList.map(d => `
+            <button class="scope-chip${!isOverall && String(selectedDivisionId) === String(d.id) ? ' active' : ''}" data-leader-div="${d.id}">
+              🛡️ ${escapeHtml(d.name || `Дивизион ${d.id}`)}
+            </button>
+          `).join('')}
+        </div>
+      `;
+
+      // Строка поиска
+      const searchHtml = `
+        <div class="leaders-search-bar">
+          <span class="search-icon">🔍</span>
+          <input type="text" class="leaders-search-input" placeholder="Поиск футболиста или клуба..." value="${escapeHtml(q)}">
+          ${q ? '<button class="leaders-search-clear" type="button" title="Очистить">✕</button>' : ''}
+        </div>
+      `;
+
+      // 6. Отрисовка таблицы
+      let contentHtml = '';
+      if (sortedRows.length === 0) {
+        contentHtml = `
+          <div class="list-empty" style="padding: 36px 16px; text-align: center;">
+            <div style="font-size: 2rem; margin-bottom: 8px;">${view.icon}</div>
+            <div>${q ? 'По вашему запросу ничего не найдено.' : view.empty}</div>
+          </div>
+        `;
+      } else {
+        const renderSortTh = (key, label, title) => {
+          const isSorted = sKey === key;
+          const arrow = isSorted ? (sDir === 'asc' ? ' ▲' : ' ▼') : '';
+          return `
+            <th class="leaders-sortable${isSorted ? ' sorted' : ''}" data-leader-sort-key="${key}" title="${title}">
+              ${label}<span class="sort-arrow">${arrow}</span>
+            </th>
+          `;
+        };
+
+        let theadCols = '';
+        if (activeLeader === 'combined') {
+          theadCols = `
+            ${renderSortTh('position', '#', 'Место')}
+            ${renderSortTh('player_name', 'Игрок', 'Имя игрока')}
+            ${renderSortTh('team_name', 'Клуб', 'Клуб')}
+            ${renderSortTh('goals', '⚽ Г', 'Забитые голы')}
+            ${renderSortTh('assists', '🎯 П', 'Голевые передачи')}
+            ${renderSortTh('points', '⚡ Г+П', 'Всего очков (Гол + Пас)')}
+          `;
+        } else if (activeLeader === 'scorers') {
+          theadCols = `
+            ${renderSortTh('position', '#', 'Место')}
+            ${renderSortTh('player_name', 'Игрок', 'Имя игрока')}
+            ${renderSortTh('team_name', 'Клуб', 'Клуб')}
+            ${renderSortTh('goals', '⚽ Голы', 'Забитые голы')}
+            ${renderSortTh('assists', '🎯 Пасы', 'Голевые передачи')}
+            ${renderSortTh('points', '⚡ Г+П', 'Сумма очков')}
+          `;
+        } else if (activeLeader === 'assists') {
+          theadCols = `
+            ${renderSortTh('position', '#', 'Место')}
+            ${renderSortTh('player_name', 'Игрок', 'Имя игрока')}
+            ${renderSortTh('team_name', 'Клуб', 'Клуб')}
+            ${renderSortTh('assists', '🎯 Пасы', 'Голевые передачи')}
+            ${renderSortTh('goals', '⚽ Голы', 'Забитые голы')}
+            ${renderSortTh('points', '⚡ Г+П', 'Сумма очков')}
+          `;
+        } else {
+          theadCols = `
+            ${renderSortTh('position', '#', 'Место')}
+            ${renderSortTh('player_name', 'Игрок', 'Имя игрока')}
+            ${renderSortTh('team_name', 'Клуб', 'Клуб')}
+            ${renderSortTh('mvp_count', '👑 MVP', 'Награды «Игрок матча»')}
+          `;
+        }
+
+        const tbodyRows = sortedRows.map(r => {
+          let posClass = 'mid';
+          if (r.position === 1) posClass = 'top-1';
+          else if (r.position === 2) posClass = 'top-2';
+          else if (r.position === 3) posClass = 'top-3';
+
+          const divBadge = r.division_name
+            ? `<span class="division-badge-pill div-${r.division_id || 1}">${escapeHtml(r.division_name)}</span>`
+            : '';
+
+          let statCells = '';
+          if (activeLeader === 'combined') {
+            statCells = `
+              <td class="col-num col-goals">${r.goals}</td>
+              <td class="col-num col-assists">${r.assists}</td>
+              <td class="col-num col-points"><b>${r.points}</b></td>
+            `;
+          } else if (activeLeader === 'scorers') {
+            statCells = `
+              <td class="col-num col-goals font-bold"><b>${r.goals}</b></td>
+              <td class="col-num col-assists col-dim">${r.assists}</td>
+              <td class="col-num col-points">${r.points}</td>
+            `;
+          } else if (activeLeader === 'assists') {
+            statCells = `
+              <td class="col-num col-assists font-bold"><b>${r.assists}</b></td>
+              <td class="col-num col-goals col-dim">${r.goals}</td>
+              <td class="col-num col-points">${r.points}</td>
+            `;
+          } else {
+            statCells = `
+              <td class="col-num col-mvp font-bold"><b>${r.mvp_count}</b></td>
+            `;
+          }
+
+          return `
+            <tr>
+              <td class="col-pos">
+                <span class="leaders-pos-pill ${posClass}">${r.position}</span>
+              </td>
+              <td class="col-player-name">
+                <div class="leaders-player-wrap">
+                  ${renderTeamLogoHtml(r.team_name, 22)}
+                  <div class="leaders-player-info">
+                    <span class="player-name-txt">${escapeHtml(r.player_name)}</span>
+                    <span class="player-team-sub">${escapeHtml(r.team_name)} ${divBadge}</span>
+                  </div>
+                </div>
+              </td>
+              <td class="col-team">
+                <span class="leaders-team-name">${escapeHtml(r.team_name)}</span>
+              </td>
+              ${statCells}
+            </tr>
+          `;
+        }).join('');
+
+        contentHtml = `
+          <div class="leaders-table-card">
+            <div class="leaders-table-scroll">
+              <table class="leaders-table">
+                <thead>
+                  <tr>${theadCols}</tr>
+                </thead>
+                <tbody>
+                  ${tbodyRows}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        `;
+      }
+
+      container.innerHTML = `
+        <div class="leaders-hub">
+          <div class="leaders-hub-header">
+            <div class="leaders-title-wrap">
+              <span class="leaders-hub-title">${view.icon} ${view.label}</span>
+              <span class="leaders-hub-badge">${isOverall ? '🌐 Общая таблица лиги' : `🛡️ Дивизион ${selectedDivisionId}`}</span>
+            </div>
+            <div class="leaders-hub-desc">${isOverall ? `${view.desc} по всем дивизионам лиги` : view.desc}</div>
+          </div>
+          ${categoryTabsHtml}
+          ${divFilterChips}
+          ${podiumHtml}
+          ${searchHtml}
+          ${contentHtml}
+        </div>
+      `;
     }
   }
 
