@@ -1425,16 +1425,6 @@ export class UIRenderer {
       const euroSlots = euroSlotsMap[divId] || { ucl: 0, uel: 0 };
 
       container.innerHTML = `
-        <div class="overall-leaders-banner" id="btn-banner-overall-leaders" title="Открыть общую таблицу бомбардиров и ассистентов">
-          <div class="overall-leaders-banner-left">
-            <span class="overall-leaders-banner-icon">⚡</span>
-            <div>
-              <div class="overall-leaders-banner-title">Общая таблица бомбардиров и ассистентов</div>
-              <div class="overall-leaders-banner-sub">Сводный рейтинг результативности всех дивизионов (Г+П)</div>
-            </div>
-          </div>
-          <span class="overall-leaders-banner-arrow">→</span>
-        </div>
         <div class="standings-card">
           <table class="standings-table">
             <thead>
