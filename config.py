@@ -173,7 +173,10 @@ def _get_int_env(name: str, default: int) -> int:
         return default
 
 
-IRL_ENABLED = os.getenv("IRL_ENABLED", "false").strip().lower() in ("true", "1", "yes")
+IRL_ENABLED = os.getenv(
+    "IRL_ENABLED",
+    "true" if (os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")) else "false"
+).strip().lower() in ("true", "1", "yes")
 IRL_BOOKMAKER_ID = _get_int_env(
     "IRL_BOOKMAKER_ID", 1 if (os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")) else 0
 )
