@@ -4287,17 +4287,18 @@ span.team-logo-fallback {
   line-height: 1.4;
 }
 
-/* Категории лидеров (Гол+Пас, Бомбардиры, Ассистенты, MVP) */
+/* Категории лидеров (Бомбардиры и Ассистенты) */
 .leaders-subtabs {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 6px;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+  margin-bottom: 14px;
 }
-.mc-subtab-btn {
-  padding: 9px 4px;
-  font-size: 0.76rem;
-  font-weight: 700;
-  border-radius: var(--radius-sm);
+.leaders-subtabs .mc-subtab-btn {
+  padding: 10px 8px;
+  font-size: 0.88rem;
+  font-weight: 800;
+  border-radius: var(--radius-sm, 10px);
   background: var(--bg-tertiary);
   border: 1px solid var(--border-subtle);
   color: var(--text-secondary);
@@ -4305,14 +4306,16 @@ span.team-logo-fallback {
   transition: all var(--transition-fast);
   text-align: center;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
-.mc-subtab-btn:hover {
+.leaders-subtabs .mc-subtab-btn:hover {
   background: var(--bg-card-hover);
   color: #fff;
 }
-.mc-subtab-btn.active {
+.leaders-subtabs .mc-subtab-btn.active {
   background: var(--accent-gold);
   border-color: var(--accent-gold);
   color: #000;
@@ -4715,6 +4718,9 @@ span.team-logo-fallback {
   font-weight: 900;
   color: var(--accent-gold);
   line-height: 1.1;
+}
+.col-num.col-assists .col-points-main {
+  color: var(--accent-cyan);
 }
 .col-points-sub {
   font-size: 0.65rem;

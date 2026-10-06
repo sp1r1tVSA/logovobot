@@ -18,10 +18,10 @@ import { initDesign } from './design.js';
 class AppController {
   constructor() {
     this.currentTournamentTab = 'standings';
-    // Какой список лидеров открыт внутри вкладки «Лидеры»: 'combined' | 'scorers' | 'assists' | 'mvps'.
-    this.currentLeaderTab = 'combined';
+    // Какой список лидеров открыт внутри вкладки «Лидеры»: 'scorers' | 'assists'.
+    this.currentLeaderTab = 'scorers';
     this.leaderSearchQuery = '';
-    this.leaderSort = { key: 'points', dir: 'desc' };
+    this.leaderSort = { key: 'goals', dir: 'desc' };
     // Сортировка таблицы: по умолчанию как её отдаёт бэкенд — по очкам, вниз.
     this.standingsSort = { key: 'points', dir: 'desc' };
     // Подписи входных данных уже нарисованных блоков: key -> JSON.
@@ -720,6 +720,10 @@ class AppController {
           store.setSelectedDivisionId(divId);
           if (divId === 'all') {
             this.currentTournamentTab = 'scorers';
+            if (this.currentLeaderTab !== 'assists') {
+              this.currentLeaderTab = 'scorers';
+              this.leaderSort = { key: 'goals', dir: 'desc' };
+            }
           } else if (wasOverall) {
             // При переходе из «Общей» в конкретный дивизион открываем его турнирную таблицу
             this.currentTournamentTab = 'standings';
@@ -935,7 +939,7 @@ class AppController {
             assists: 'assists',
             mvps: 'mvp_count'
           };
-          this.leaderSort = { key: defaultKeyMap[this.currentLeaderTab] || 'points', dir: 'desc' };
+          this.leaderSort = { key: defaultKeyMap[this.currentLeaderTab] || 'goals', dir: 'desc' };
           this.renderTournamentTab(this.currentTournamentTab);
           tgBridge.hapticImpact('light');
           return;

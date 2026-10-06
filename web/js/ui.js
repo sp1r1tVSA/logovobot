@@ -1573,7 +1573,7 @@ export class UIRenderer {
         }
       };
 
-      const activeLeader = leaderViews[leaderTab] ? leaderTab : 'combined';
+      const activeLeader = (leaderTab === 'assists') ? 'assists' : 'scorers';
       const view = leaderViews[activeLeader];
       let rawRows = view.rows || [];
 
@@ -1820,10 +1820,21 @@ export class UIRenderer {
             </div>
           </div>
         `;
-      }
+      // 5. Две вкладки лидеров: Бомбардиры и Ассистенты всего турнира
+      const categoryTabsHtml = `
+        <div class="mc-tabs leaders-subtabs">
+          <button class="mc-subtab-btn${activeLeader === 'scorers' ? ' active' : ''}" data-leader-tab="scorers">
+            ⚽ Бомбардиры
+          </button>
+          <button class="mc-subtab-btn${activeLeader === 'assists' ? ' active' : ''}" data-leader-tab="assists">
+            🎯 Ассистенты
+          </button>
+        </div>
+      `;
 
       container.innerHTML = `
         <div class="leaders-hub">
+          ${categoryTabsHtml}
           ${podiumHtml}
           ${searchHtml}
           ${contentHtml}
