@@ -144,6 +144,23 @@ class TestTheOddsApiPrematch:
         provider = FakeOddsApi([])
         assert run(provider.get_prematch_fixtures("2026-10-06", [39])) == []
 
+    def test_upcoming_match_fixture_cached_from_prematch_call(self):
+        """When get_prematch_fixtures runs, get_prematch_fixture returns upcoming fixture from cache without extra API calls."""
+        # Future kickoff
+        item = make_odds_item("e1", commence_time="2099-10-06T16:30:00Z")
+        provider = FakeOddsApi([item])
+
+        fixtures = run(provider.get_prematch_fixtures("2099-10-06", [39]))
+        assert len(fixtures) == 1
+        initial_calls_count = len(provider.calls)
+
+        fx = run(provider.get_prematch_fixture("e1"))
+        assert fx is not None
+        assert fx.fixture_id == "e1"
+        assert fx.home == "Arsenal"
+        assert fx.away == "Chelsea"
+        assert len(provider.calls) == initial_calls_count  # Zero new API calls!
+
 
 class TestTheOddsApiScores:
     def test_finished_match_score_extraction(self):

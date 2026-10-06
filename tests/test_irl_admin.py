@@ -53,11 +53,13 @@ class FakeProvider:
         return [f for f in self.fixtures.values() if league_ids is None or f.league_id in league_ids]
 
     async def get_prematch_fixture(self, fixture_id):
-        return (self.fixtures or {}).get(int(fixture_id))
+        fid = int(fixture_id) if str(fixture_id).isdigit() else str(fixture_id)
+        return (self.fixtures or {}).get(fid)
 
     async def get_match_winner_odds(self, fixture_id, bookmaker_id):
-        o = self.odds.get(int(fixture_id))
-        return None if o is None else MatchWinnerOdds(int(fixture_id), bookmaker_id, *o)
+        fid = int(fixture_id) if str(fixture_id).isdigit() else str(fixture_id)
+        o = self.odds.get(fid)
+        return None if o is None else MatchWinnerOdds(fid, bookmaker_id, *o)
 
 
 def fx(fid, league=39, home="Arsenal", away="Chelsea", hours=8):
@@ -253,6 +255,15 @@ class TestAddReplace:
         m = database.get_irl_match_by_fixture(2)
         assert m["status"] == "draft" and m["picked_by"] == "admin" and m["odd_draw"] == 3.5
         assert _setup.await_args.args[1] == "irl_match_added"
+
+    def test_pick_string_hex_fixture_id(self, monkeypatch, _setup):
+        hex_fid = "c74384a37fbf9492e85a6fd2"
+        use_provider(monkeypatch, FakeProvider([fx(hex_fid, home="Belarus", away="Finland")], {hex_fid: (2.1, 3.2, 3.9)}))
+        u = press(f"irl:pk:{hex_fid}:{DAY}:0")
+        assert not u.callback_query.answer.await_args or u.callback_query.answer.await_args.args != ("Некорректная кнопка",)
+        m = database.get_irl_match_by_fixture(hex_fid)
+        assert m is not None
+        assert m["status"] == "draft" and m["picked_by"] == "admin" and m["odd_home"] == 2.1
 
     def test_pick_without_odds_creates_nothing(self, monkeypatch):
         use_provider(monkeypatch, FakeProvider([fx(2)], {}))

@@ -114,6 +114,7 @@ class TheOddsApiProvider(SportsDataProvider):
         # In-memory mapping of fixture_id -> MatchWinnerOdds & fixture_id -> sport_key
         self._odds_cache: dict[str, MatchWinnerOdds] = {}
         self._fixture_sport_map: dict[str, str] = {}
+        self._fixtures_cache: dict[str, PrematchFixture] = {}
 
     @property
     def provider_name(self) -> str:
@@ -292,16 +293,18 @@ class TheOddsApiProvider(SportsDataProvider):
                 if fx is None:
                     continue
 
-                # Filter by MSK day
-                if fx.kickoff.date().isoformat() != date:
-                    continue
+                self._fixtures_cache[str(fx.fixture_id)] = fx
+                self._fixture_sport_map[str(fx.fixture_id)] = sport_key
 
                 # Parse and cache odds for this fixture
                 odds = self._extract_match_winner_odds(item, fx.fixture_id)
                 if odds is not None:
                     self._odds_cache[str(fx.fixture_id)] = odds
 
-                self._fixture_sport_map[str(fx.fixture_id)] = sport_key
+                # Filter by MSK day
+                if fx.kickoff.date().isoformat() != date:
+                    continue
+
                 results.append(fx)
 
         if not any_success and sports_to_query:
@@ -313,11 +316,17 @@ class TheOddsApiProvider(SportsDataProvider):
     async def get_prematch_fixture(self, fixture_id: int | str) -> Optional[PrematchFixture]:
         """Fetch a single fixture with final/current main-time score."""
         str_fid = str(fixture_id)
+        if str_fid in self._fixtures_cache:
+            cached_fx = self._fixtures_cache[str_fid]
+            if cached_fx.kickoff > now_msk():
+                return cached_fx
+
         sport_key = self._fixture_sport_map.get(str_fid)
 
         # If sport_key is unknown, check priority sports
         sports_to_check = [sport_key] if sport_key else list(DEFAULT_ODDS_SPORT_TO_API_SPORTS.keys())
 
+        # 1. First check /scores (for live or completed matches)
         for sk in sports_to_check:
             if not sk:
                 continue
@@ -339,7 +348,41 @@ class TheOddsApiProvider(SportsDataProvider):
                 if str(item.get("id")) == str_fid:
                     lid = DEFAULT_ODDS_SPORT_TO_API_SPORTS.get(sk, 0)
                     self._fixture_sport_map[str_fid] = sk
-                    return self._normalize_fixture(item, lid, sk)
+                    fx = self._normalize_fixture(item, lid, sk)
+                    if fx:
+                        self._fixtures_cache[str_fid] = fx
+                    return fx
+
+        # 2. If not found in /scores, match might still be upcoming (in cache or event query)
+        if str_fid in self._fixtures_cache:
+            return self._fixtures_cache[str_fid]
+
+        for sk in sports_to_check:
+            if not sk:
+                continue
+            endpoint = f"sports/{sk}/events/{str_fid}/odds"
+            params = {
+                "regions": self.regions,
+                "markets": "h2h",
+                "dateFormat": "iso",
+                "oddsFormat": "decimal",
+            }
+            try:
+                data = await self._fetch_json(endpoint, params=params, cache_ttl=60)
+            except Exception as e:
+                logger.warning("TheOddsApi %s failed: %s", endpoint, e)
+                data = None
+
+            if isinstance(data, dict) and str(data.get("id")) == str_fid:
+                lid = DEFAULT_ODDS_SPORT_TO_API_SPORTS.get(sk, 0)
+                self._fixture_sport_map[str_fid] = sk
+                fx = self._normalize_fixture(data, lid, sk)
+                if fx:
+                    self._fixtures_cache[str_fid] = fx
+                    odds = self._extract_match_winner_odds(data, fx.fixture_id)
+                    if odds:
+                        self._odds_cache[str_fid] = odds
+                return fx
 
         return None
 

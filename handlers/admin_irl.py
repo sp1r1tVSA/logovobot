@@ -270,7 +270,7 @@ async def cb_irl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action == "add":
         await _answer(update)
         await _show_candidates(update, day_arg, 0)
-    elif action == "pk" and len(parts) == 5 and parts[2].isdigit() and _DAY_RE.match(parts[3]) \
+    elif action == "pk" and len(parts) == 5 and bool(parts[2]) and _DAY_RE.match(parts[3]) \
             and parts[4].isdigit():
         await _pick_fixture(update, actor_id, parts[2], parts[3], int(parts[4]))
     elif action == "can":
