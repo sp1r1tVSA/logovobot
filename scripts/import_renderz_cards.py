@@ -35,9 +35,8 @@ def load_cards(src: str) -> tuple[list[dict], list[tuple[str, str]]]:
     """Плоский список версий карточек и пары (файл-источник, имя-назначения) портретов."""
     with open(os.path.join(src, "ovr_db.json"), encoding="utf-8") as fh:
         db = json.load(fh)
-    from services.graphics.player_photos import _slugify
 
-    cards, portraits = [], []
+    cards = []
     for p in db["players"]:
         for v in p["versions"]:
             cards.append({
@@ -45,10 +44,29 @@ def load_cards(src: str) -> tuple[list[dict], list[tuple[str, str]]]:
                 "ovr": v["ovr"], "position": v.get("position"), "program": v.get("program"),
                 "tradable": bool(v["tradable"]), "selected": bool(v["selected"]),
             })
-        slug = _slugify(p["player"])
-        file = os.path.join(src, "portraits", slug + ".png")
-        if os.path.isfile(file):
-            portraits.append((file, slug + ".png"))
+
+    portraits = []
+    portraits_dir = os.path.join(src, "portraits")
+    # 1. Обычная папка src/portraits/
+    if os.path.isdir(portraits_dir):
+        for f in os.listdir(portraits_dir):
+            if f.endswith(".png"):
+                portraits.append((os.path.join(portraits_dir, f), f))
+    # 2. Файлы распакованы в src напрямую или с бэкслэшем в имени (архивы Windows на Linux)
+    if not portraits and os.path.isdir(src):
+        for f in os.listdir(src):
+            if f.endswith(".png"):
+                clean_name = f.replace("\\", "/").split("/")[-1]
+                portraits.append((os.path.join(src, f), clean_name))
+    # 3. Рекурсивный поиск во вложенных папках
+    if not portraits and os.path.isdir(src):
+        for root, dirs, files in os.walk(src):
+            for f in files:
+                if f.endswith(".png"):
+                    clean_name = f.replace("\\", "/").split("/")[-1]
+                    portraits.append((os.path.join(root, f), clean_name))
+
+    portraits.sort(key=lambda x: x[1])
     return cards, portraits
 
 
