@@ -1843,6 +1843,7 @@ export class UIRenderer {
 
     }
   }
+}
 
   static renderPredictionsHistory(bets, filter = 'all') {
     const container = document.getElementById('history-list-container');

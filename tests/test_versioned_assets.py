@@ -34,6 +34,39 @@ def test_index_references_are_rewritten_to_the_current_version():
     assert "https://telegram.org/js/telegram-web-app.js" in html
 
 
+def test_all_web_js_syntax():
+    """Verify that all files in web/js/ compile without strict mode syntax errors."""
+    import shutil
+    import subprocess
+    node = shutil.which("node")
+    if not node:
+        return
+    res = subprocess.run(
+        [
+            node,
+            "--input-type=module",
+            "-e",
+            r"""
+            import fs from 'node:fs';
+            import path from 'node:path';
+            const dir = 'web/js';
+            const files = fs.readdirSync(dir).filter(f => f.endsWith('.js'));
+            for (const file of files) {
+                const content = fs.readFileSync(path.join(dir, file), 'utf8');
+                const stripped = content
+                    .replace(/^import\s+.*?;/gm, '// import')
+                    .replace(/^export\s+(const|class|function|let|var|default)\s+/gm, '$1 ')
+                    .replace(/^export\s+\{.*?\};/gm, '// export');
+                new Function('"use strict";\\n' + stripped);
+            }
+            """,
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert res.returncode == 0, f"JS syntax check failed:\n{res.stderr}"
+
+
 class TestVersionedAssetRoutes(AioHTTPTestCase):
     async def get_application(self):
         return create_app()
