@@ -1,5 +1,6 @@
 import os
 import io
+import config
 import database
 from PIL import Image, ImageDraw, ImageFont
 
@@ -218,7 +219,10 @@ def generate_league_table_image(
     row_height_1x = 48
     table_top_1x = 130
     num_rows = len(standings) if standings else 16
-    footer_height_1x = 90
+    slots = config.get_eurocup_slots(division_id if division_id is not None else division_name)
+    ucl_places = slots.get("ucl_places", 0)
+    uel_places = slots.get("uel_places", 0)
+    footer_height_1x = 110 if ucl_places > 0 else 90
     height_1x = table_top_1x + (num_rows * row_height_1x) + footer_height_1x
 
     # 2x Scaled Canvas Dimensions
@@ -292,11 +296,22 @@ def generate_league_table_image(
         bg = row_bg_1 if i % 2 == 1 else row_bg_2
         draw.rectangle([(30 * SCALE, y_curr), (width - 30 * SCALE, y_curr + row_height - 2 * SCALE)], fill=bg)
 
+        # Eurocup qualification zone stripe on the left edge
+        zone_color = None
+        if ucl_places and i <= ucl_places:
+            zone_color = (59, 130, 246)   # #3B82F6 UCL Blue
+        elif uel_places and i <= ucl_places + uel_places:
+            zone_color = (249, 115, 22)   # #F97316 UEL Orange
+
+        if zone_color:
+            draw.rectangle([(30 * SCALE, y_curr), (34 * SCALE, y_curr + row_height - 2 * SCALE)], fill=zone_color)
+
         y_center = y_curr + (row_height // 2)
 
         # Place number
         place_str = str(i)
-        draw.text((col_x["place"] + 10 * SCALE, y_center), place_str, fill=primary_text_color, font=font_row_bold, anchor="mm")
+        place_color = (147, 197, 253) if (ucl_places and i <= ucl_places) else ((253, 186, 116) if (uel_places and i <= ucl_places + uel_places) else primary_text_color)
+        draw.text((col_x["place"] + 10 * SCALE, y_center), place_str, fill=place_color, font=font_row_bold, anchor="mm")
 
         # Team Logo with White Circular Container Badge
         team_name = s.get("team_name") or f"Команда {i}"
@@ -374,7 +389,7 @@ def generate_league_table_image(
         y_curr += row_height
 
     # Footer Legend
-    y_footer = y_curr + 25 * SCALE
+    y_footer = y_curr + 20 * SCALE
     legend_parts = [
         ("P", "Points"), ("M", "Matches"), ("W", "Wins"), ("T", "Ties"),
         ("L", "Losses"), ("GF", "Goals for"), ("GA", "Goals against"),
@@ -387,6 +402,29 @@ def generate_league_table_image(
         x_leg += draw.textlength(code, font=font_row_bold) + 4 * SCALE
         draw.text((x_leg, y_footer), desc, fill=header_text_color, font=font_footer)
         x_leg += draw.textlength(desc, font=font_footer) + 20 * SCALE
+
+    # Eurocup zones legend
+    if ucl_places > 0:
+        y_euro = y_footer + 24 * SCALE
+        x_euro = 35 * SCALE
+
+        # UCL indicator & label
+        draw.rectangle([(x_euro, y_euro + 3 * SCALE), (x_euro + 10 * SCALE, y_euro + 13 * SCALE)], fill=(59, 130, 246))
+        x_euro += 15 * SCALE
+        ucl_txt = f"1–{ucl_places} Лига Чемпионов"
+        draw.text((x_euro, y_euro), ucl_txt, fill=(147, 197, 253), font=font_footer)
+        x_euro += draw.textlength(ucl_txt, font=font_footer) + 20 * SCALE
+
+        # UEL indicator & label
+        draw.rectangle([(x_euro, y_euro + 3 * SCALE), (x_euro + 10 * SCALE, y_euro + 13 * SCALE)], fill=(249, 115, 22))
+        x_euro += 15 * SCALE
+        uel_txt = f"{ucl_places + 1}–{ucl_places + uel_places} Лига Европы"
+        draw.text((x_euro, y_euro), uel_txt, fill=(253, 186, 116), font=font_footer)
+        x_euro += draw.textlength(uel_txt, font=font_footer) + 24 * SCALE
+
+        # Start info note
+        note_txt = "⭐️ Еврокубки — после 15 тура (после ТО)"
+        draw.text((x_euro, y_euro), note_txt, fill=(245, 158, 11), font=font_footer)
 
     # Resample down from 2x scale to 1x scale using LANCZOS
     resampled_img = img.resize((width_1x, height_1x), Image.Resampling.LANCZOS)

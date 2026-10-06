@@ -4,6 +4,7 @@ import logging
 from telegram import Update
 from telegram.constants import ChatAction
 from telegram.ext import ContextTypes
+import config
 import database
 from services.ai import ai_chat
 from handlers.base import resolve_division_id
@@ -172,6 +173,9 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_division_below = div_index is not None and div_index < len(sorted_divs) - 1
     prom_slots = (season_rules or {}).get("promotion_slots", 3) if has_division_above else 0
     rel_slots = (season_rules or {}).get("relegation_slots", 3) if has_division_below else 0
+    euro_slots = config.get_eurocup_slots(division_id)
+    ucl_slots = euro_slots.get("ucl_places", 0)
+    uel_slots = euro_slots.get("uel_places", 0)
 
     # Standings (division-scoped) with zone markers and recent form inline —
     # отдельный блок формы повторял бы все клубы таблицы второй раз.
@@ -183,10 +187,14 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_teams = len(standings)
         for i, st in enumerate(standings, 1):
             zone = ""
+            if ucl_slots and i <= ucl_slots:
+                zone += " 🏆[ЛЧ]"
+            elif uel_slots and i <= ucl_slots + uel_slots:
+                zone += " 🥈[ЛЕ]"
             if prom_slots and i <= prom_slots:
-                zone = " 🚀"
+                zone += " 🚀"
             elif rel_slots and i > total_teams - rel_slots:
-                zone = " 🔻"
+                zone += " 🔻"
             form_list = recent_form_map.get((st.get("team_name") or "").lower(), [])
             form_str = "".join(form_list) if form_list else "—"
             standings_text += (
@@ -300,6 +308,9 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "• Запрещено: навесы (с игры, штрафных, угловых — угловые только «на балансе»), забросы с центра, "
         "в штрафную и «на ход», финты «пятка об пятку» и «переступ и выход», затягивание времени.\n"
         "• Ничьи не переигрываются; уйти с поста тренера до конца сезона нельзя (ЧС).\n"
+        "• ЕВРОКУБКИ (старт после трансферного окна, после 15 тура):\n"
+        "  - Лига Чемпионов: Д1 (топ-10), Д2 (топ-8), Д3 (топ-7), Д4 (топ-6), Д5 (топ-5)\n"
+        "  - Лига Европы: Д1 (11-12), Д2 (9-11), Д3 (8-10), Д4 (7-10), Д5 (6-9)\n"
         "• Судья: @onvamneVSAplayer. Правила и «Золотой Мяч»: @antonv2801.\n"
     )
 
@@ -337,6 +348,10 @@ async def handle_ai_chat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"кого нет в таблице ниже, того нет и в дивизионе.",
             f"• Сыграно/заведено туров в этом дивизионе: {total_rounds if total_rounds else 'туры ещё не заведены'}.",
         ]
+        if ucl_slots:
+            structure_lines.append(f"• Лига Чемпионов 🏆: верхние {ucl_slots} мест (места 1–{ucl_slots}) — старт после 15 тура (после ТО).")
+        if uel_slots:
+            structure_lines.append(f"• Лига Европы 🥈: следующие {uel_slots} мест (места {ucl_slots + 1}–{ucl_slots + uel_slots}) — старт после 15 тура (после ТО).")
         if prom_slots:
             structure_lines.append(f"• Повышение: верхние {prom_slots} мест уходят дивизионом ВЫШЕ. 🚀")
         else:

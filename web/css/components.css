@@ -1365,7 +1365,64 @@
   text-align: center;
 }
 .standings-pos-pill.top { background: rgba(245, 176, 39, 0.2); color: var(--accent-gold); }
+.standings-pos-pill.ucl {
+  background: rgba(59, 130, 246, 0.22);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.45);
+  box-shadow: 0 0 6px rgba(59, 130, 246, 0.2);
+}
+.standings-pos-pill.uel {
+  background: rgba(249, 115, 22, 0.22);
+  color: #fb923c;
+  border: 1px solid rgba(249, 115, 22, 0.45);
+  box-shadow: 0 0 6px rgba(249, 115, 22, 0.2);
+}
 .standings-pos-pill.mid { background: rgba(255, 255, 255, 0.06); color: var(--text-secondary); }
+
+.standings-euro-legend {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.02);
+  border-top: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 0.75rem;
+}
+.euro-legend-badges {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+.euro-legend-pill {
+  display: inline-block;
+  padding: 2px 7px;
+  border-radius: 8px;
+  font-weight: 700;
+  font-size: 0.7rem;
+}
+.euro-legend-pill.ucl {
+  background: rgba(59, 130, 246, 0.22);
+  color: #60a5fa;
+  border: 1px solid rgba(59, 130, 246, 0.4);
+}
+.euro-legend-pill.uel {
+  background: rgba(249, 115, 22, 0.22);
+  color: #fb923c;
+  border: 1px solid rgba(249, 115, 22, 0.4);
+}
+.euro-legend-text {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+}
+.euro-legend-note {
+  color: var(--accent-gold);
+  font-size: 0.72rem;
+  font-weight: 600;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 
 /* Кликабельная шапка таблицы: сортировка по любой колонке */
 .standings-table th.sortable {

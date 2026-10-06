@@ -1321,7 +1321,8 @@ export class UIRenderer {
       gf,
       ga,
       diff: gf - ga,
-      points: s.points ?? 0
+      points: s.points ?? 0,
+      eurocup_zone: s.eurocup_zone || null
     };
   }
 
@@ -1388,6 +1389,16 @@ export class UIRenderer {
       const isDefaultOrder = sortKey === 'points' && sortDir === 'desc';
       const arrow = sortDir === 'asc' ? '▲' : '▼';
 
+      const divId = Number(store.state.selectedDivisionId || 1);
+      const euroSlotsMap = {
+        1: { ucl: 10, uel: 2 },
+        2: { ucl: 8, uel: 3 },
+        3: { ucl: 7, uel: 3 },
+        4: { ucl: 6, uel: 4 },
+        5: { ucl: 5, uel: 4 }
+      };
+      const euroSlots = euroSlotsMap[divId] || { ucl: 0, uel: 0 };
+
       container.innerHTML = `
         <div class="standings-card">
           <table class="standings-table">
@@ -1409,11 +1420,23 @@ export class UIRenderer {
                   ? formList.map(o => `<span class="form-dot form-${String(o).toLowerCase()}">${o}</span>`).join('')
                   : '<span class="standings-dash">—</span>';
 
+                let posClass = 'mid';
+                let posTitle = '';
+                if (isDefaultOrder) {
+                  if (r.eurocup_zone === 'ucl' || (euroSlots.ucl && r.position <= euroSlots.ucl)) {
+                    posClass = 'ucl';
+                    posTitle = 'Лига Чемпионов';
+                  } else if (r.eurocup_zone === 'uel' || (euroSlots.uel && r.position <= euroSlots.ucl + euroSlots.uel)) {
+                    posClass = 'uel';
+                    posTitle = 'Лига Европы';
+                  }
+                }
+
                 return `
                   <tr>
                     <td class="standings-team-cell">
                       <div class="standings-team">
-                        <span class="standings-pos-pill ${isDefaultOrder && r.position <= 3 ? 'top' : 'mid'}">${r.position}</span>
+                        <span class="standings-pos-pill ${posClass}" title="${posTitle}">${r.position}</span>
                         ${renderTeamLogoHtml(r.team, 22)}
                         <span class="standings-team-name">${r.team}</span>
                       </div>
@@ -1432,6 +1455,19 @@ export class UIRenderer {
               }).join('')}
             </tbody>
           </table>
+          ${euroSlots.ucl > 0 ? `
+            <div class="standings-euro-legend">
+              <div class="euro-legend-badges">
+                <span class="euro-legend-pill ucl">1–${euroSlots.ucl}</span>
+                <span class="euro-legend-text">Лига Чемпионов</span>
+                <span class="euro-legend-pill uel">${euroSlots.ucl + 1}–${euroSlots.ucl + euroSlots.uel}</span>
+                <span class="euro-legend-text">Лига Европы</span>
+              </div>
+              <div class="euro-legend-note">
+                <span>⭐️ Еврокубки начнутся после ТО (после 15 тура)</span>
+              </div>
+            </div>
+          ` : ''}
         </div>
       `;
     } else if (activeTab === 'results') {

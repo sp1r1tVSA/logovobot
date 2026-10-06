@@ -11,6 +11,7 @@ Logovo.bet — Tournament Hub & Results Center API:
 import asyncio
 import logging
 from aiohttp import web
+import config
 import database
 from api.auth import get_authenticated_user
 from api.params import query_int
@@ -135,10 +136,30 @@ async def handle_get_standings(request: web.Request) -> web.Response:
         logger.warning(f"Error fetching recent form: {e}")
         form = {}
 
+    euro_slots = config.get_eurocup_slots(div_id)
+    ucl_places = euro_slots.get("ucl_places", 0)
+    uel_places = euro_slots.get("uel_places", 0)
+
+    enriched_standings = []
+    for idx, s in enumerate(standings, 1):
+        row = dict(s)
+        if ucl_places and idx <= ucl_places:
+            row["eurocup_zone"] = "ucl"
+        elif uel_places and idx <= ucl_places + uel_places:
+            row["eurocup_zone"] = "uel"
+        else:
+            row["eurocup_zone"] = None
+        enriched_standings.append(row)
+
     return web.json_response({
         "status": "ok",
-        "standings": standings,
-        "form": form
+        "standings": enriched_standings,
+        "form": form,
+        "eurocup_rules": {
+            "ucl_places": ucl_places,
+            "uel_places": uel_places,
+            "start_round": config.EUROCUP_START_ROUND,
+        }
     })
 
 

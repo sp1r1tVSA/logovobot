@@ -349,6 +349,62 @@ CUP_DIVISION_CLASS: dict[str, float] = {
 
 MAX_MATCH_GOALS = 50
 
+# ─── Еврокубки (Лига Чемпионов и Лига Европы) — Сезон 1 ─────────────────────
+# Места в Еврокубках на 1 сезон дивизионов:
+# 🏆 Лига Чемпионов:
+#   1 дивизион - 10 мест (1..10)
+#   2 дивизион - 8 мест (1..8)
+#   3 дивизион - 7 мест (1..7)
+#   4 дивизион - 6 мест (1..6)
+#   5 дивизион - 5 мест (1..5)
+# 🏆 Лига Европы:
+#   1 дивизион - 2 места (11..12)
+#   2 дивизион - 3 места (9..11)
+#   3 дивизион - 3 места (8..10)
+#   4 дивизион - 4 места (7..10)
+#   5 дивизион - 4 места (6..9)
+# 😈 Еврокубки начнутся после трансферного окна, а именно после 15 тура.
+EUROCUP_ZONES: dict[str, dict[str, int]] = {
+    "DIV_1": {"ucl_places": 10, "uel_places": 2},
+    "DIV_2": {"ucl_places": 8, "uel_places": 3},
+    "DIV_3": {"ucl_places": 7, "uel_places": 3},
+    "DIV_4": {"ucl_places": 6, "uel_places": 4},
+    "DIV_5": {"ucl_places": 5, "uel_places": 4},
+}
+
+EUROCUP_START_ROUND: int = 15
+
+
+def get_eurocup_slots(division: int | str | None) -> dict[str, int]:
+    """Возвращает {'ucl_places': N, 'uel_places': M} для дивизиона по id или code."""
+    if division is None:
+        return {"ucl_places": 0, "uel_places": 0}
+    if isinstance(division, int) or (isinstance(division, str) and division.isdigit()):
+        code = f"DIV_{division}"
+    else:
+        raw = str(division).strip().upper()
+        if raw.startswith("DIV_"):
+            code = raw
+        else:
+            # Например, 'Дивизион 2'
+            import re
+            m = re.search(r"\d+", raw)
+            code = f"DIV_{m.group(0)}" if m else raw
+    return EUROCUP_ZONES.get(code, {"ucl_places": 0, "uel_places": 0})
+
+
+def get_eurocup_zone(division: int | str | None, position: int) -> str | None:
+    """Возвращает 'ucl' (Лига Чемпионов), 'uel' (Лига Европы) или None по позиции в дивизионе."""
+    slots = get_eurocup_slots(division)
+    ucl = slots.get("ucl_places", 0)
+    uel = slots.get("uel_places", 0)
+    if 1 <= position <= ucl:
+        return "ucl"
+    if ucl < position <= ucl + uel:
+        return "uel"
+    return None
+
+
 # Telegram Mini App Configuration
 WEBAPP_URL = os.getenv("WEBAPP_URL", "http://localhost:8080").strip()
 API_PORT = int(os.getenv("API_PORT", "8080"))
