@@ -10,6 +10,7 @@ class StateStore {
     this.state = {
       user: null,
       tours: [],
+      toursLoaded: false, // до первого ответа линии лобби показывает скелетон
       marketCategoryFilter: 'all',
       searchQuery: '',
       slip: [], // [ { match_id, outcome, odd, market_id, selection_id, selection_name, market_name, team1_name, team2_name, tour }, ... ]
@@ -137,6 +138,7 @@ class StateStore {
 
   setTours(tours) {
     this.state.tours = tours || [];
+    this.state.toursLoaded = true;
     this.notify();
   }
 

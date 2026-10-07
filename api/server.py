@@ -184,9 +184,10 @@ async def cors_middleware(request: web.Request, handler):
     elif request.path.startswith(("/js/", "/css/", "/static/")):
         response.headers["Cache-Control"] = "no-cache, must-revalidate"
     # Логотипы, аватары и фото игроков меняются редко: сутки берём из кэша WebView,
-    # не спрашивая сервер. Ошибки (404 ещё не залитого логотипа) не кэшируем.
+    # не спрашивая сервер, ещё неделю показываем кэш и обновляем его в фоне.
+    # Ошибки (404 ещё не залитого логотипа) не кэшируем.
     elif request.path.startswith("/assets/") and response.status in (200, 304):
-        response.headers["Cache-Control"] = "public, max-age=86400"
+        response.headers["Cache-Control"] = "public, max-age=86400, stale-while-revalidate=604800"
 
     return response
 

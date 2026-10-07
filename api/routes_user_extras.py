@@ -209,20 +209,16 @@ async def handle_delete_favorite(request: web.Request) -> web.Response:
 async def handle_get_notifications(request: web.Request) -> web.Response:
     """
     GET /api/notifications
+    Последние 30 уведомлений и `unread_count` — счётчик колокольчика в шапке.
     """
     init_data = request.headers.get("X-Telegram-Init-Data", "")
     user_info = get_authenticated_user(init_data)
     if not user_info or "id" not in user_info:
         return web.json_response({"status": "error", "error": "unauthorized"}, status=401)
 
-    user_id = user_info["id"]
+    notifications, unread = database.get_notifications_feed(user_info["id"])
 
-    with database.transaction() as conn:
-        cursor = conn.cursor()
-        cursor.execute("SELECT * FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT 30", (user_id,))
-        notifications = [dict(r) for r in cursor.fetchall()]
-
-    return web.json_response({"status": "ok", "notifications": notifications})
+    return web.json_response({"status": "ok", "notifications": notifications, "unread_count": unread})
 
 
 async def handle_mark_notifications_read(request: web.Request) -> web.Response:

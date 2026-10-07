@@ -8,12 +8,32 @@ import { store } from './store.js';
 import { tgBridge } from './tg.js';
 import { UIRenderer, escapeHtml, cupStageLabel, cupMetaName } from './ui.js';
 import { ParticleEffects } from './effects.js';
-import { AdminPanel } from './admin.js';
 import { outrightsView } from './outrights.js';
-import { irlView } from './irl.js';
-import { transfersView } from './transfers.js';
 import { shopTransfers } from './shop.js';
 import { initDesign } from './design.js';
+
+// Панель управления, IRL-лобби и трансферы нужны немногим и не на старте —
+// грузим их по первому открытию. Промис кешируется, повторный import() бесплатен.
+const lazyModules = {
+  admin: () => import('./admin.js'),
+  irl: () => import('./irl.js'),
+  transfers: () => import('./transfers.js'),
+};
+
+// Как часто обновлять баланс, колокольчик и линию, пока Mini App на экране.
+const POLL_INTERVAL_MS = 45000;
+
+// Тело уведомления приходит с <b>/<i> из бота: экранируем всё и возвращаем только их.
+function sanitizeNotificationHtml(text) {
+  return escapeHtml(String(text || ''))
+    .replace(/&lt;(\/?)(b|i|strong|em)&gt;/gi, '<$1$2>')
+    .replace(/&lt;br\s*\/?&gt;/gi, '<br>')
+    .replace(/\n/g, '<br>');
+}
+
+function isNetworkError(err) {
+  return !!err && !err.status && (err instanceof TypeError || err.name === 'AbortError' || navigator.onLine === false);
+}
 
 class AppController {
   constructor() {
@@ -61,8 +81,13 @@ class AppController {
           () => UIRenderer.renderOddsMovers(state.oddsMovers));
         this.renderBlock('recommendations', [state.recommendations, state.searchQuery],
           () => UIRenderer.renderRecommendations(state.recommendations, state.searchQuery));
-        this.renderBlock('matches', [state.tours, state.marketCategoryFilter, state.searchQuery, state.selectedDivisionId],
-          () => UIRenderer.renderMatches(state.tours, state.marketCategoryFilter, state.searchQuery, state.selectedDivisionId));
+        // До первого ответа линии в контейнере остаётся скелетон из index.html.
+        if (state.toursLoaded) {
+          this.renderBlock('matches', [state.tours, state.marketCategoryFilter, state.searchQuery, state.selectedDivisionId], () => {
+            UIRenderer.renderMatches(state.tours, state.marketCategoryFilter, state.searchQuery, state.selectedDivisionId);
+            document.getElementById('matches-list-container')?.removeAttribute('aria-busy');
+          });
+        }
         this.renderBlock('lobbyMode', [state.lobbyMode],
           () => UIRenderer.renderLobbyMode(state.lobbyMode));
         if (state.lobbyMode === 'cup') {
@@ -110,6 +135,7 @@ class AppController {
       // Купон перерисовывается инкрементально — сравнивать его входы дороже, чем обновить.
       UIRenderer.renderSlipDrawer(state.slip, state.stakeAmount);
       if (state.slip.length === 0 && this.isCouponOpen()) this.toggleSlipDrawer(false);
+      this.syncMainButton();
 
       // Подсветку выбранных исходов обновляем классом, не перерисовывая списки:
       // поэтому купон и не входит во входные данные блоков выше.
@@ -125,6 +151,266 @@ class AppController {
 
     // 3. Initial Data Load
     await this.loadInitialData();
+
+    // 4. Автообновление, пока приложение на экране
+    this.startAutoRefresh();
+  }
+
+  startAutoRefresh() {
+    if (this._pollTimer) return;
+    this._lastRefreshAt = Date.now();
+    this._pollTimer = setInterval(() => {
+      if (document.visibilityState === 'visible') this.refreshLiveData();
+    }, POLL_INTERVAL_MS);
+    // Вернулись в Mini App (свернули Telegram, переключили чат) — догоняем сразу,
+    // но не чаще раза в 10 с, чтобы быстрые переключения не дёргали сервер.
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && Date.now() - this._lastRefreshAt > 10000) {
+        this.refreshLiveData();
+      }
+    });
+    window.addEventListener('online', () => {
+      if (this._bootFailed) this.retryBootstrap();
+      else this.refreshLiveData();
+    });
+  }
+
+  /** Баланс, колокольчик и линия открытого дивизиона — то, что меняется без участия игрока. */
+  async refreshLiveData({ force = false } = {}) {
+    if (this._bootFailed || !store.state.user?.has_access) return;
+    // Во время приёма пари не трогаем баланс — его обновит сам обработчик ставки.
+    if (document.getElementById('btn-submit-prediction')?.classList.contains('loading')) return;
+    if (this._refreshing && !force) return;
+    this._refreshing = true;
+    this._lastRefreshAt = Date.now();
+    try {
+      const jobs = [
+        api.getWallet().then(res => {
+          const balance = res?.wallet?.balance ?? res?.balance;
+          if (res?.status === 'ok' && typeof balance === 'number' && store.state.user && store.state.user.balance !== balance) {
+            store.setUser({ ...store.state.user, balance });
+          }
+        }),
+        this.fetchNotificationsBadge(),
+      ];
+      const divId = store.state.selectedDivisionId;
+      if (store.state.activeView === 'lobby' && store.state.lobbyMode === 'league' && divId && divId !== 'all') {
+        jobs.push(api.getTours(divId).then(res => {
+          // Пока шёл запрос, игрок мог переключить дивизион — чужую линию не подставляем.
+          if (res?.status === 'ok' && store.state.selectedDivisionId === divId) store.setTours(res.tours);
+        }));
+      }
+      await Promise.allSettled(jobs);
+    } finally {
+      this._refreshing = false;
+    }
+  }
+
+  async fetchNotificationsBadge() {
+    try {
+      const res = await api.getNotifications();
+      if (res?.status === 'ok') {
+        this._notifications = res.notifications || [];
+        this.renderNotifBadge(res.unread_count || 0);
+        return true;
+      }
+    } catch (e) {
+      // Колокольчик вторичен: без него приложение работает как раньше.
+    }
+    return false;
+  }
+
+  renderNotifBadge(count) {
+    const badge = document.getElementById('notif-badge');
+    const btn = document.getElementById('header-notif-btn');
+    if (badge) {
+      badge.hidden = !count;
+      badge.textContent = count > 99 ? '99+' : String(count);
+    }
+    btn?.setAttribute('aria-label', count ? `Уведомления: непрочитанных ${count}` : 'Уведомления');
+  }
+
+  async openNotifications() {
+    const modal = document.getElementById('notifications-modal');
+    const list = document.getElementById('notifications-list');
+    if (!modal || !list) return;
+    tgBridge.hapticImpact('light');
+    if (!this._notifications) list.innerHTML = '<div class="notif-empty">Загрузка…</div>';
+    else this.renderNotificationsList(this._notifications);
+    modal.style.display = '';
+    modal.classList.add('active');
+
+    const loaded = await this.fetchNotificationsBadge();
+    if (!loaded && !this._notifications) {
+      list.innerHTML = `
+        <div class="notif-empty">
+          <div class="notif-empty-icon">📡</div>
+          <div>Не удалось загрузить уведомления.</div>
+          <button type="button" class="offline-retry" id="btn-notif-retry" style="margin-top: 14px;">Повторить</button>
+        </div>`;
+      document.getElementById('btn-notif-retry')?.addEventListener('click', () => this.openNotifications());
+      return;
+    }
+    this.renderNotificationsList(this._notifications || []);
+    if ((this._notifications || []).some(n => !n.is_read)) {
+      try {
+        await api.markNotificationsRead();
+        this._notifications = this._notifications.map(n => ({ ...n, is_read: 1 }));
+        this.renderNotifBadge(0);
+      } catch (e) {
+        console.warn('Could not mark notifications read:', e);
+      }
+    }
+  }
+
+  renderNotificationsList(items) {
+    const list = document.getElementById('notifications-list');
+    if (!list) return;
+    if (!items.length) {
+      list.innerHTML = `
+        <div class="notif-empty">
+          <div class="notif-empty-icon">🔕</div>
+          <div>Пока уведомлений нет. Здесь появятся расчёты ставок, достижения и награды.</div>
+        </div>`;
+      return;
+    }
+    const icons = { BET_SETTLED: '🧾', achievement_unlocked: '🏅', reward_received: '🎁', promoted: '⬆️', relegated: '⬇️' };
+    list.innerHTML = items.map(n => {
+      const type = String(n.type || '');
+      const linksToHistory = type.toUpperCase().startsWith('BET_');
+      return `
+        <div class="notif-item${n.is_read ? '' : ' unread'}${linksToHistory ? ' is-link' : ''}"
+             ${linksToHistory ? 'role="button" tabindex="0" data-notif-link="history"' : ''}>
+          <div class="notif-icon" aria-hidden="true">${icons[type] || icons[type.toUpperCase()] || '🔔'}</div>
+          <div class="notif-body">
+            ${n.title ? `<div class="notif-title">${escapeHtml(n.title)}</div>` : ''}
+            <div class="notif-text">${sanitizeNotificationHtml(n.body ?? n.message ?? '')}</div>
+            <div class="notif-time">${escapeHtml(n.created_at || '')}</div>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  /** Тексты офлайн-экрана: сеть пропала / приложение открыто не из Telegram. */
+  showBootError(err) {
+    const container = document.getElementById('matches-list-container');
+    if (!container) return;
+    container.removeAttribute('aria-busy');
+    this.invalidateRender('matches');
+    if (isNetworkError(err)) {
+      this._bootFailed = true;
+      container.innerHTML = `
+        <div class="offline-state" role="alert">
+          <div class="offline-icon" aria-hidden="true">📡</div>
+          <div class="offline-title">Нет соединения</div>
+          <div class="offline-text">Не удалось загрузить линию. Проверьте интернет и попробуйте снова.</div>
+          <button type="button" class="offline-retry" id="btn-boot-retry">Повторить</button>
+        </div>`;
+      document.getElementById('btn-boot-retry')?.addEventListener('click', () => this.retryBootstrap());
+      return;
+    }
+    container.innerHTML = `
+      <div class="tg-required">
+        <div class="tg-required-icon">📱</div>
+        <div class="tg-required-title">Откройте через Telegram</div>
+        <div class="tg-required-text">
+          Для работы Mini App требуется авторизация Telegram WebApp. Откройте приложение через меню бота или команду /start в Telegram.
+        </div>
+      </div>
+    `;
+  }
+
+  async retryBootstrap() {
+    if (this._retrying) return;
+    this._retrying = true;
+    const btn = document.getElementById('btn-boot-retry');
+    if (btn) { btn.disabled = true; btn.textContent = 'Загрузка…'; }
+    this._bootFailed = false;
+    try {
+      await this.loadInitialData();
+    } finally {
+      this._retrying = false;
+    }
+  }
+
+  /** «Обновить» в лобби: линия текущего режима + баланс и колокольчик. */
+  async manualRefresh() {
+    const btn = document.getElementById('btn-refresh-line');
+    if (btn?.classList.contains('spinning')) return;
+    btn?.classList.add('spinning');
+    tgBridge.hapticImpact('light');
+    try {
+      if (this._bootFailed) {
+        await this.retryBootstrap();
+        return;
+      }
+      const mode = store.state.lobbyMode;
+      if (mode === 'cup') await this.openCupLobby();
+      else if (mode === 'outrights') await outrightsView.open();
+      else if (mode === 'irl') await (await lazyModules.irl()).irlView.open();
+      else this.fetchIntelligenceHub();
+      await this.refreshLiveData({ force: true });
+    } finally {
+      btn?.classList.remove('spinning');
+    }
+  }
+
+  /**
+   * Telegram MainButton повторяет CTA купона, пока купон открыт: большая кнопка
+   * внизу экрана удобнее под большим пальцем. Нажатие идёт в тот же обработчик.
+   */
+  syncMainButton() {
+    if (!tgBridge.hasMainButton()) return;
+    const submitBtn = document.getElementById('btn-submit-prediction');
+    if (!this.isCouponOpen() || !submitBtn) {
+      if (this._mainButtonShown) {
+        tgBridge.hideMainButton();
+        this._mainButtonShown = false;
+        document.body.classList.remove('tg-mainbutton');
+      }
+      return;
+    }
+    const loading = submitBtn.classList.contains('loading');
+    const text = loading ? 'Принятие пари…'
+      : (document.getElementById('coupon-cta-main')?.textContent || 'Поставить').trim();
+    if (!this._mainButtonShown) {
+      this._onMainButton = this._onMainButton
+        || (() => document.getElementById('btn-submit-prediction')?.click());
+      tgBridge.showMainButton(text, this._onMainButton);
+      this._mainButtonShown = true;
+      document.body.classList.add('tg-mainbutton');
+    }
+    tgBridge.updateMainButton({ text, enabled: !submitBtn.disabled, loading });
+  }
+
+  /** Купон одной строкой — для «Поделиться» после принятой ставки. */
+  buildShareText() {
+    const info = this._lastAccepted;
+    if (!info) return '';
+    const fmt = (n) => (n || 0).toLocaleString('ru-RU');
+    const lines = (info.legs || []).map(s => {
+      const teams = [s.team1_name, s.team2_name].filter(Boolean).join(' — ');
+      const pick = s.selection_name || s.outcome || '';
+      return `• ${teams}${pick ? `: ${pick}` : ''} @ ${s.odd}`;
+    });
+    return [
+      `🎰 Logovo.bet — ${info.title}`,
+      ...lines,
+      `Ставка ${fmt(info.stake)} 🪙 · ${info.oddLabel} ${info.oddValue} · выигрыш до ${fmt(info.win)} 🪙`,
+    ].join('\n');
+  }
+
+  /**
+   * `startapp` из ссылки t.me/<bot>/<app>?startapp=…: match_123 открывает Матч-Центр,
+   * div_2 — линию дивизиона. Возвращает {matchId, divisionId} или пустой объект.
+   */
+  parseStartParam() {
+    const raw = String(tgBridge.getStartParam() || '').trim();
+    let m = raw.match(/^match_(\d+)$/);
+    if (m) return { matchId: parseInt(m[1]) };
+    m = raw.match(/^div_(\d+)$/);
+    if (m) return { divisionId: parseInt(m[1]) };
+    return {};
   }
 
   showLockdownScreen() {
@@ -162,10 +448,17 @@ class AppController {
           return;
         }
 
-        // Parse URL query parameters (e.g. from deep links)
+        // Deep link: ?division_id=/&match_id= в URL или startapp=div_N / match_N из t.me-ссылки.
         const urlParams = new URLSearchParams(window.location.search);
-        const targetDivId = urlParams.get('division_id');
-        const targetMatchId = urlParams.get('match_id');
+        const startParam = this.parseStartParam();
+        let targetDivId = urlParams.get('division_id') || startParam.divisionId || null;
+        const targetMatchId = urlParams.get('match_id') || startParam.matchId || null;
+        // Без ссылки — дивизион, который игрок открывал в прошлый раз (с любого устройства).
+        const [savedDivId, savedHistoryFilter] = await Promise.all([
+          targetDivId ? null : tgBridge.cloudGet('division'),
+          tgBridge.cloudGet('history_filter'),
+        ]);
+        this.restoreHistoryFilter(savedHistoryFilter);
 
         // Дивизионы приходят в bootstrap; отдельный запрос — только для старого сервера.
         let divisions = Array.isArray(data.divisions) ? data.divisions : null;
@@ -179,6 +472,9 @@ class AppController {
         }
         if (divisions) {
           store.setDivisions(divisions);
+          if (!targetDivId && savedDivId && divisions.some(d => String(d.id) === String(savedDivId))) {
+            targetDivId = savedDivId;
+          }
           if (targetDivId) {
             store.setSelectedDivisionId(parseInt(targetDivId));
           } else if (divisions.length > 0 && !store.state.selectedDivisionId) {
@@ -213,19 +509,15 @@ class AppController {
         return;
       }
       console.error("Failed to bootstrap app:", err);
-      const matchesContainer = document.getElementById('matches-list-container');
-      if (matchesContainer) {
-        matchesContainer.innerHTML = `
-          <div class="tg-required">
-            <div class="tg-required-icon">📱</div>
-            <div class="tg-required-title">Откройте через Telegram</div>
-            <div class="tg-required-text">
-              Для работы Mini App требуется авторизация Telegram WebApp. Откройте приложение через меню бота или команду /start в Telegram.
-            </div>
-          </div>
-        `;
-      }
+      this.showBootError(err);
     }
+  }
+
+  restoreHistoryFilter(filter) {
+    const pill = filter && document.querySelector(`#history-filter-pills .category-pill[data-filter="${CSS.escape(filter)}"]`);
+    if (!pill) return;
+    document.querySelectorAll('#history-filter-pills .category-pill').forEach(p => p.classList.toggle('active', p === pill));
+    store.setMyBets(store.state.myBets, filter);
   }
 
   async fetchIntelligenceHub(divId = null) {
@@ -654,6 +946,30 @@ class AppController {
     document.getElementById('header-transfers-btn')?.addEventListener('click', () => {
       this.switchView('transfers');
     });
+
+    // 1e. Колокольчик и лента уведомлений
+    document.getElementById('header-notif-btn')?.addEventListener('click', () => this.openNotifications());
+    document.getElementById('notifications-list')?.addEventListener('click', (e) => {
+      if (!e.target.closest('[data-notif-link="history"]')) return;
+      const modal = document.getElementById('notifications-modal');
+      if (modal) {
+        modal.classList.remove('active', 'open');
+        modal.style.display = 'none';
+      }
+      this.switchView('history');
+    });
+
+    // 1f. «Обновить» рядом с поиском
+    document.getElementById('btn-refresh-line')?.addEventListener('click', () => this.manualRefresh());
+
+    // Элементы-не-кнопки с role="button" (пилюли шапки, пункты ленты) нажимаются с клавиатуры.
+    document.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      const el = e.target.closest?.('[role="button"][tabindex]');
+      if (!el || el.tagName === 'BUTTON') return;
+      e.preventDefault();
+      el.click();
+    });
     document.getElementById('shop-category-pills')?.addEventListener('click', (e) => {
       const pill = e.target.closest('.category-pill');
       if (!pill) return;
@@ -683,7 +999,12 @@ class AppController {
         if (e.target.closest('.irl-tab-btn')) {
           tgBridge.hapticImpact('light');
           store.setLobbyMode('irl');
-          await irlView.open();
+          try {
+            await (await lazyModules.irl()).irlView.open();
+          } catch (err) {
+            console.error("Could not load IRL lobby:", err);
+            tgBridge.showAlert('Не удалось открыть IRL. Проверьте соединение.');
+          }
           return;
         }
         const btn = e.target.closest('.division-tab-btn');
@@ -691,6 +1012,7 @@ class AppController {
           const divId = parseInt(btn.dataset.divisionId);
           store.setLobbyMode('league');
           store.setSelectedDivisionId(divId);
+          tgBridge.cloudSet('division', divId);
           tgBridge.hapticImpact('light');
           try {
             const [toursData] = await Promise.all([
@@ -1021,6 +1343,7 @@ class AppController {
           historyFilters.querySelectorAll('.category-pill').forEach(p => p.classList.remove('active'));
           btn.classList.add('active');
           store.setMyBets(store.state.myBets, filter);
+          tgBridge.cloudSet('history_filter', filter);
           tgBridge.hapticImpact('light');
 
           try {
@@ -1206,6 +1529,7 @@ class AppController {
         const ctaSub = document.getElementById('coupon-cta-sub');
         if (ctaMain) ctaMain.innerHTML = '<span class="coupon-spinner"></span>Принятие пари...';
         if (ctaSub) ctaSub.textContent = '';
+        this.syncMainButton();
 
         const refreshBets = async () => {
           this.fetchUserExtras();
@@ -1228,7 +1552,7 @@ class AppController {
               try {
                 const res = await api.placePrediction(amt, [item], key);
                 if (res.status === 'ok') {
-                  placed.push({ id: res.bet_id, amt, win: Math.round(amt * item.odd) });
+                  placed.push({ id: res.bet_id, amt, win: Math.round(amt * item.odd), item });
                   store.addOpenExposure(Math.round(amt * item.odd));
                   store.addOpenBet();
                   if (res.new_balance !== undefined) {
@@ -1257,7 +1581,8 @@ class AppController {
                 stake: placed.reduce((s, p) => s + p.amt, 0),
                 oddLabel: 'Ординаров',
                 oddValue: String(placed.length),
-                win: placed.reduce((s, p) => s + p.win, 0)
+                win: placed.reduce((s, p) => s + p.win, 0),
+                legs: placed.map(p => p.item)
               });
             }
             if (failedItems.length > 0) {
@@ -1270,6 +1595,7 @@ class AppController {
             const isExp = slip.length > 1;
             const idempotencyKey = `slip-${Date.now()}-${Math.random().toString(36).substring(2, 8)}`;
             const res = await api.placePrediction(amt, slip, idempotencyKey);
+            const legs = [...slip];
             if (res.status === 'ok') {
               store.setUser({ ...store.state.user, balance: res.new_balance });
               store.addOpenExposure(Math.round(amt * totalOdd));
@@ -1282,7 +1608,8 @@ class AppController {
                 stake: amt,
                 oddLabel: isExp ? 'Общий кэф' : 'Коэффициент',
                 oddValue: totalOdd.toFixed(2),
-                win: Math.round(amt * totalOdd)
+                win: Math.round(amt * totalOdd),
+                legs
               });
             }
           }
@@ -1328,6 +1655,7 @@ class AppController {
           if (ctaMain && !ctaMain.textContent.trim()) {
             ctaMain.textContent = 'Поставить';
           }
+          this.syncMainButton();
         }
       });
     }
@@ -1339,6 +1667,13 @@ class AppController {
         modal.style.display = 'none';
       }
       this.switchView('history');
+    });
+
+    document.getElementById('btn-bet-accepted-share')?.addEventListener('click', () => {
+      const text = this.buildShareText();
+      if (!text) return;
+      tgBridge.hapticImpact('light');
+      tgBridge.share(text);
     });
 
     // 15. Modals close triggers
@@ -1621,6 +1956,7 @@ class AppController {
     }
     // The bar hides while the sheet is open and comes back when it closes.
     UIRenderer.renderSlipDrawer(store.state.slip, store.state.stakeAmount);
+    this.syncMainButton();
   }
 
   /** Swipe the sheet down by its handle or header to close it. */
@@ -1660,8 +1996,9 @@ class AppController {
     });
   }
 
-  showBetAccepted({ title, ids, stake, oddLabel, oddValue, win }) {
+  showBetAccepted({ title, ids, stake, oddLabel, oddValue, win, legs = [] }) {
     this.toggleSlipDrawer(false);
+    this._lastAccepted = { title, ids, stake, oddLabel, oddValue, win, legs };
     const modal = document.getElementById('bet-accepted-modal');
     if (!modal) return;
 
@@ -1736,7 +2073,12 @@ class AppController {
     } else if (viewName === 'admin') {
       this.openAdminPanel();
     } else if (viewName === 'transfers') {
-      transfersView.init();
+      lazyModules.transfers()
+        .then(m => { if (store.state.activeView === 'transfers') m.transfersView.init(); })
+        .catch(err => {
+          console.error("Could not load transfers:", err);
+          tgBridge.showAlert('Не удалось загрузить трансферы. Проверьте соединение.');
+        });
     } else if (viewName === 'shop') {
       const active = document.querySelector('#shop-category-pills .category-pill.active');
       this.renderShopCategory(active?.dataset.shopCat || 'all', active?.textContent || '');
@@ -1748,11 +2090,26 @@ class AppController {
     tgBridge.hapticImpact('light');
   }
 
-  openAdminPanel() {
+  async openAdminPanel() {
     if (!this.adminPanel) {
       const root = document.getElementById('admin-root');
       const modal = document.getElementById('admin-modal');
       if (!root || !modal) return;
+      // Модуль панели (~сотни КБ) нужен только админам — грузим его при первом открытии.
+      let AdminPanel;
+      try {
+        ({ AdminPanel } = await lazyModules.admin());
+      } catch (err) {
+        console.error("Could not load admin panel:", err);
+        tgBridge.showAlert('Не удалось загрузить панель. Проверьте соединение.');
+        return;
+      }
+      // Пока модуль грузился, второе нажатие могло уже создать панель.
+      if (this.adminPanel) {
+        if (store.state.activeView === 'admin') this.adminPanel.open();
+        return;
+      }
+      if (store.state.activeView !== 'admin') return;
       this.adminPanel = new AdminPanel(root, modal, {
         // Сборщик купона из «ИИ-прогноза»: события — в купон, ставку админ подтверждает сам.
         toCoupon: (items, mode) => {

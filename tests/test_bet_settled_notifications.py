@@ -61,6 +61,7 @@ class TestBetSettledNotifications(unittest.TestCase):
     def _cleanup(self):
         with database.transaction() as conn:
             conn.execute("DELETE FROM notification_events WHERE user_id = ?", (USER_ID,))
+            conn.execute("DELETE FROM notifications WHERE user_id = ?", (USER_ID,))
             conn.execute("DELETE FROM user_notification_settings WHERE user_id = ?", (USER_ID,))
             conn.execute("DELETE FROM bet_items WHERE match_id IN (?, ?)", (MATCH_ID, MATCH_ID_2))
             conn.execute("DELETE FROM user_bets WHERE user_id = ?", (USER_ID,))
@@ -227,6 +228,30 @@ class TestBetSettledNotifications(unittest.TestCase):
             row = conn.execute("SELECT status FROM user_bets WHERE id = ?", (bet_id,)).fetchone()
         self.assertEqual(row["status"], "won")
         self.assertEqual(_events(), [])
+        self.assertEqual(database.get_notifications_feed(USER_ID), ([], 0))
+
+    def test_notice_is_mirrored_once_into_the_mini_app_feed(self):
+        bet_id = self._place([(MATCH_ID, "p1", 2.5)])
+        settlement_engine.settle_match_predictions(MATCH_ID, 2, 0, "finished")
+        settlement_engine.settle_match_predictions(MATCH_ID, 2, 0, "finished")
+
+        items, unread = database.get_notifications_feed(USER_ID)
+        self.assertEqual(unread, 1)
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["type"], "BET_SETTLED")
+        self.assertEqual(items[0]["reference_id"], bet_id)
+        self.assertEqual(items[0]["title"], _events()[0]["title"])
+
+    def test_opted_out_user_gets_nothing_in_the_feed(self):
+        with database.transaction() as conn:
+            conn.execute(
+                "INSERT INTO user_notification_settings (user_id, notification_type, is_enabled) "
+                "VALUES (?, 'BET_SETTLED', 0)",
+                (USER_ID,),
+            )
+        self._place([(MATCH_ID, "p1", 2.5)])
+        settlement_engine.settle_match_predictions(MATCH_ID, 2, 0, "finished")
+        self.assertEqual(database.get_notifications_feed(USER_ID), ([], 0))
 
     def test_queue_job_delivers_bet_notices_with_smart_flag_off(self):
         self._place([(MATCH_ID, "p1", 2.5)])

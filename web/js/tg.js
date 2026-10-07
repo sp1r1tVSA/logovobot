@@ -85,6 +85,90 @@ class TelegramBridge {
     }
   }
 
+  // MainButton дублирует CTA купона внизу экрана Telegram. Как и у BackButton,
+  // Telegram копит все onClick, поэтому прежний обработчик снимаем.
+  hasMainButton() {
+    return !!(this.tg?.MainButton && this.tg?.initData);
+  }
+
+  showMainButton(text, onClick) {
+    const mb = this.tg?.MainButton;
+    if (!mb) return;
+    if (this._mainHandler !== onClick) {
+      if (this._mainHandler) mb.offClick(this._mainHandler);
+      this._mainHandler = onClick;
+      mb.onClick(onClick);
+    }
+    if (text) mb.setText(text);
+    mb.show();
+  }
+
+  updateMainButton({ text, enabled = true, loading = false } = {}) {
+    const mb = this.tg?.MainButton;
+    if (!mb || !mb.isVisible) return;
+    try {
+      if (text && mb.text !== text) mb.setText(text);
+      if (enabled) mb.enable(); else mb.disable();
+      if (loading) mb.showProgress(false); else mb.hideProgress();
+    } catch (e) {}
+  }
+
+  hideMainButton() {
+    const mb = this.tg?.MainButton;
+    if (!mb) return;
+    if (this._mainHandler) {
+      mb.offClick(this._mainHandler);
+      this._mainHandler = null;
+    }
+    try { mb.hideProgress(); } catch (e) {}
+    mb.hide();
+  }
+
+  // CloudStorage хранит настройки между устройствами; вне Telegram (или на
+  // старом клиенте) — localStorage, который тоже может бросить исключение.
+  cloudGet(key) {
+    return new Promise((resolve) => {
+      const local = () => {
+        try { resolve(localStorage.getItem(`lb:${key}`)); } catch (e) { resolve(null); }
+      };
+      const cs = this.tg?.CloudStorage;
+      if (!cs || !this.tg?.initData) return local();
+      try {
+        cs.getItem(key, (err, value) => (err ? local() : resolve(value || null)));
+      } catch (e) { local(); }
+    });
+  }
+
+  cloudSet(key, value) {
+    const str = value == null ? '' : String(value);
+    try { localStorage.setItem(`lb:${key}`, str); } catch (e) {}
+    const cs = this.tg?.CloudStorage;
+    if (!cs || !this.tg?.initData) return;
+    try { cs.setItem(key, str, () => {}); } catch (e) {}
+  }
+
+  // `startapp` из ссылки t.me/<bot>/<app>?startapp=match_123
+  getStartParam() {
+    return this.tg?.initDataUnsafe?.start_param
+      || new URLSearchParams(window.location.search).get('tgWebAppStartParam')
+      || '';
+  }
+
+  // Отправить текст в чат: inline-режим бота, иначе стандартная ссылка «поделиться».
+  share(text, url = '') {
+    try {
+      if (this.tg?.switchInlineQuery && this.tg?.initDataUnsafe?.user) {
+        this.tg.switchInlineQuery(text, ['users', 'groups', 'channels']);
+        return;
+      }
+    } catch (e) {}
+    const link = `https://t.me/share/url?url=${encodeURIComponent(url || ' ')}&text=${encodeURIComponent(text)}`;
+    try {
+      if (this.tg?.openTelegramLink) { this.tg.openTelegramLink(link); return; }
+    } catch (e) {}
+    window.open(link, '_blank', 'noopener');
+  }
+
   showAlert(message, callback = null) {
     try {
       if (this.tg?.showAlert) {

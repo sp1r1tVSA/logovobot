@@ -57,7 +57,7 @@ def test_all_web_js_syntax():
                     .replace(/^import\s+.*?;/gm, '// import')
                     .replace(/^export\s+(const|class|function|let|var|default)\s+/gm, '$1 ')
                     .replace(/^export\s+\{.*?\};/gm, '// export');
-                new Function('"use strict";\\n' + stripped);
+                new Function('"use strict";\n' + stripped);
             }
             """,
         ],

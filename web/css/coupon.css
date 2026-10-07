@@ -694,6 +694,8 @@ body.coupon-open {
   padding: 10px 14px calc(12px + env(safe-area-inset-bottom, 8px));
   background: linear-gradient(180deg, rgba(11, 13, 19, 0) 0%, var(--coupon-sheet-bg) 30%);
 }
+/* В Telegram ту же роль играет нативная MainButton (app.js::syncMainButton). */
+body.tg-mainbutton .coupon-foot { display: none; }
 .coupon-cta {
   position: relative;
   width: 100%;

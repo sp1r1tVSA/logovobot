@@ -5397,6 +5397,132 @@ span.team-logo-fallback {
 }
 .admin-pill:active { transform: scale(0.92); }
 
+/* Колокольчик уведомлений: счётчик непрочитанных поверх кнопки. */
+.notif-pill { position: relative; }
+.notif-badge {
+  position: absolute;
+  top: -5px;
+  right: -6px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: var(--radius-full);
+  background: var(--color-danger);
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 900;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+}
+.notif-badge[hidden] { display: none; }
+
+.notif-item {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  margin-bottom: 8px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+.notif-item.unread {
+  border-color: rgba(245, 176, 39, 0.45);
+  background: var(--accent-gold-light);
+}
+.notif-item.is-link { cursor: pointer; }
+.notif-item.is-link:active { transform: scale(0.98); }
+.notif-icon { font-size: 1.15rem; line-height: 1.2; flex-shrink: 0; }
+.notif-body { min-width: 0; flex: 1; }
+.notif-title { font-weight: 800; font-size: 0.88rem; color: var(--text-primary); margin-bottom: 2px; }
+.notif-text { font-size: 0.82rem; color: var(--text-secondary); line-height: 1.4; overflow-wrap: anywhere; }
+.notif-time { font-size: 0.7rem; color: var(--text-muted); margin-top: 4px; }
+.notif-empty { text-align: center; padding: 28px 12px; color: var(--text-muted); font-size: 0.88rem; }
+.notif-empty-icon { font-size: 2rem; margin-bottom: 8px; }
+
+/* Кнопка «обновить линию» внутри поля поиска. */
+.search-box-container .match-search-input { padding-right: 44px; }
+.refresh-btn {
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-full);
+  font-size: 0.95rem;
+  cursor: pointer;
+}
+.refresh-btn:active { background: rgba(255, 255, 255, 0.06); }
+.refresh-btn.spinning { animation: refreshSpin 0.8s linear infinite; }
+@keyframes refreshSpin {
+  from { transform: translateY(-50%) rotate(0deg); }
+  to { transform: translateY(-50%) rotate(360deg); }
+}
+
+/* Скелетон линии до первой загрузки туров. */
+.skeleton-card {
+  padding: 14px;
+  margin-bottom: 10px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.sk-line,
+.sk-odds span {
+  display: block;
+  height: 12px;
+  border-radius: var(--radius-xs);
+  background: linear-gradient(90deg, rgba(255, 255, 255, 0.05) 25%, rgba(255, 255, 255, 0.12) 50%, rgba(255, 255, 255, 0.05) 75%);
+  background-size: 200% 100%;
+  animation: skShimmer 1.3s ease-in-out infinite;
+}
+.sk-line { margin-bottom: 10px; }
+.sk-w40 { width: 40%; }
+.sk-w70 { width: 70%; height: 16px; }
+.sk-odds { display: flex; gap: 8px; margin-top: 4px; }
+.sk-odds span { flex: 1; height: 34px; border-radius: var(--radius-sm); }
+@keyframes skShimmer {
+  from { background-position: 200% 0; }
+  to { background-position: -200% 0; }
+}
+
+/* Нет сети / сервер недоступен при первой загрузке. */
+.offline-state {
+  text-align: center;
+  padding: 36px 20px;
+  background: var(--bg-card);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+.offline-icon { font-size: 2.4rem; margin-bottom: 10px; }
+.offline-title { font-weight: 900; font-size: 1.05rem; color: var(--text-primary); margin-bottom: 6px; }
+.offline-text { font-size: 0.85rem; color: var(--text-secondary); line-height: 1.45; margin-bottom: 16px; }
+.offline-retry {
+  padding: 10px 22px;
+  border: none;
+  border-radius: var(--radius-full);
+  background: var(--accent-gold);
+  color: #000;
+  font-weight: 800;
+  font-size: 0.9rem;
+  cursor: pointer;
+}
+.offline-retry:active { transform: scale(0.96); }
+
+/* Видимый фокус для клавиатуры (div-кнопки с role="button"). */
+[role="button"][tabindex]:focus-visible,
+.admin-pill:focus-visible,
+.refresh-btn:focus-visible {
+  outline: 2px solid var(--accent-gold);
+  outline-offset: 2px;
+}
+
 #admin-root .green, .adm-modal .green { color: var(--color-success); }
 #admin-root .red, .adm-modal .red { color: var(--color-danger); }
 #admin-root .gold, .adm-modal .gold { color: var(--text-gold); }

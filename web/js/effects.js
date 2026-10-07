@@ -5,6 +5,8 @@
 
 export class ParticleEffects {
   static burstConfetti(x = window.innerWidth / 2, y = window.innerHeight / 2) {
+    // «Уменьшить движение» в системе: без салюта.
+    if (window.matchMedia?.('(prefers-reduced-motion: reduce)').matches) return;
     const canvas = document.createElement('canvas');
     canvas.style.position = 'fixed';
     canvas.style.inset = '0';

@@ -574,3 +574,13 @@ html[data-design="frost"] .player-name-txt { color: #10231f; }
 html[data-design="frost"] .col-num.col-points { color: #10231f; }
 html[data-design="frost"] .leaders-table tbody tr:hover td { background: rgba(11,107,93, 0.03); }
 
+
+/* Колокольчик, скелетон линии, офлайн-заглушка (components.css). */
+html[data-design="frost"] .notif-item { border-color: rgba(16,35,31,0.10); }
+html[data-design="frost"] .notif-item.unread { border-color: rgba(11,107,93, 0.40); }
+html[data-design="frost"] .refresh-btn:active { background: rgba(16,35,31,0.06); }
+html[data-design="frost"] .sk-line,
+html[data-design="frost"] .sk-odds span { background-image: linear-gradient(90deg, rgba(16,35,31,0.05) 25%, rgba(16,35,31,0.11) 50%, rgba(16,35,31,0.05) 75%); }
+html[data-design="frost"] .skeleton-card,
+html[data-design="frost"] .offline-state { border-color: rgba(16,35,31,0.10); }
+html[data-design="frost"] .offline-retry { color: #fff; }

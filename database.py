@@ -7371,10 +7371,42 @@ def enqueue_bet_settled_notice(
             (user_id, BET_SETTLED_EVENT, source_event_id, title, body,
              user_id, user_id, BET_SETTLED_EVENT),
         )
-        return cursor.rowcount > 0
+        queued = cursor.rowcount > 0
     except Exception as e:
         logger.warning("Could not enqueue bet notice for bet #%s: %s", bet_id, e)
         return False
+    if queued:
+        # Копия в ленту Mini App (колокольчик в шапке). Только вместе с личным
+        # уведомлением — те же дедупликация и отключение BET_SETTLED.
+        try:
+            cursor.execute(
+                """
+                INSERT INTO notifications (user_id, type, title, body, reference_id, is_read, created_at)
+                VALUES (?, ?, ?, ?, ?, 0, datetime('now', '+3 hours'))
+                """,
+                (user_id, BET_SETTLED_EVENT, title, body, bet_id),
+            )
+        except Exception as e:
+            logger.warning("Could not mirror bet notice for bet #%s to the feed: %s", bet_id, e)
+    return queued
+
+
+def get_notifications_feed(user_id: int, limit: int = 30) -> tuple[list[dict], int]:
+    """Лента уведомлений Mini App: последние `limit` записей и число непрочитанных."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT id, type, title, body, reference_id, is_read, created_at "
+            "FROM notifications WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+            (user_id, limit),
+        )
+        items = [dict(r) for r in cursor.fetchall()]
+        cursor.execute(
+            "SELECT COUNT(*) FROM notifications WHERE user_id = ? AND is_read = 0",
+            (user_id,),
+        )
+        unread = int(cursor.fetchone()[0] or 0)
+    return items, unread
 
 
 def get_bet_legs_for_notice(cursor, bet_id: int) -> list[dict]:

@@ -132,19 +132,21 @@
     </div>
     <div class="header-right">
       <!-- Admin Panel Button: shown only to admins -->
-      <button class="admin-pill" id="header-admin-btn" type="button" title="Управление Logovo.bet" hidden>⚙️</button>
+      <button class="admin-pill" id="header-admin-btn" type="button" title="Управление Logovo.bet" aria-label="Управление Logovo.bet" hidden>⚙️</button>
+      <!-- Уведомления: расчёты ставок, достижения, награды -->
+      <button class="admin-pill notif-pill" id="header-notif-btn" type="button" title="Уведомления" aria-label="Уведомления">🔔<span class="notif-badge" id="notif-badge" hidden></span></button>
       <!-- Shop: награды за монеты (клик по балансу открывает его же) -->
       <button class="admin-pill shop-pill" id="header-shop-btn" type="button" title="Магазин наград" aria-label="Магазин">🛒</button>
       <!-- Transfers: трансферное окно лиги (только для ADMIN_IDS) -->
       <button class="admin-pill transfers-pill" id="header-transfers-btn" type="button" title="Трансферное окно" aria-label="Трансферы" hidden>🔁</button>
       <!-- Level Badge Pill -->
-      <div class="level-pill" id="header-level-btn" title="Ваш уровень и опыт">
-        <span class="level-badge-icon">🎯</span>
+      <div class="level-pill" id="header-level-btn" title="Ваш уровень и опыт" role="button" tabindex="0" aria-label="Уровень и достижения">
+        <span class="level-badge-icon" aria-hidden="true">🎯</span>
         <span class="level-number" id="user-level-val">Lvl 1</span>
       </div>
       <!-- Coin Balance Pill -->
-      <div class="balance-pill" id="header-balance-btn">
-        <span class="balance-icon">🪙</span>
+      <div class="balance-pill" id="header-balance-btn" role="button" tabindex="0" aria-label="Баланс — открыть магазин">
+        <span class="balance-icon" aria-hidden="true">🪙</span>
         <span class="balance-amount" id="user-balance-val">1 000</span>
       </div>
     </div>
@@ -165,8 +167,9 @@
 
       <!-- Search Input -->
       <div class="search-box-container">
-        <span class="search-icon">🔍</span>
-        <input type="text" id="match-search-input" class="match-search-input" placeholder="Поиск матча или команды...">
+        <span class="search-icon" aria-hidden="true">🔍</span>
+        <input type="text" id="match-search-input" class="match-search-input" placeholder="Поиск матча или команды..." aria-label="Поиск матча или команды">
+        <button type="button" class="refresh-btn" id="btn-refresh-line" title="Обновить линию" aria-label="Обновить линию">🔄</button>
       </div>
 
       <!-- Phase 6: Hot Matches, Odds Movers & Recommendations Hub -->
@@ -182,10 +185,11 @@
       <div id="irl-view-container" style="display: none;"></div>
 
       <!-- Match Cards List -->
-      <div id="matches-list-container">
-        <div style="text-align: center; padding: 40px 20px; color: var(--text-muted);">
-          <div style="font-size: 2rem; margin-bottom: 8px;">⏳</div>
-          <div>Загрузка линии матчей...</div>
+      <div id="matches-list-container" aria-busy="true">
+        <div class="skeleton-list" aria-label="Загрузка линии матчей">
+          <div class="skeleton-card"><div class="sk-line sk-w40"></div><div class="sk-line sk-w70"></div><div class="sk-odds"><span></span><span></span><span></span></div></div>
+          <div class="skeleton-card"><div class="sk-line sk-w40"></div><div class="sk-line sk-w70"></div><div class="sk-odds"><span></span><span></span><span></span></div></div>
+          <div class="skeleton-card"><div class="sk-line sk-w40"></div><div class="sk-line sk-w70"></div><div class="sk-odds"><span></span><span></span><span></span></div></div>
         </div>
       </div>
     </section>
@@ -492,6 +496,7 @@
       <div class="bet-accepted-details" id="bet-accepted-details"></div>
       <div class="bet-accepted-actions">
         <button class="bet-accepted-btn secondary" id="btn-bet-accepted-history">В историю ставок</button>
+        <button class="bet-accepted-btn secondary" id="btn-bet-accepted-share" type="button">📤 Поделиться</button>
         <button class="bet-accepted-btn primary btn-modal-close">Продолжить</button>
       </div>
     </div>
@@ -534,6 +539,17 @@
         <button class="btn-modal-close btn-modal-x" aria-label="Закрыть">✕</button>
       </div>
       <div id="modal-markets-list"></div>
+    </div>
+  </div>
+
+  <!-- Notifications Modal (колокольчик в шапке) -->
+  <div class="modal-overlay" id="notifications-modal" role="dialog" aria-modal="true" aria-labelledby="notifications-modal-title">
+    <div class="modal-content" style="max-height: 85vh; overflow-y: auto; text-align: left;">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <div style="font-size: 1.15rem; font-weight: 900; color: #fff;" id="notifications-modal-title">🔔 Уведомления</div>
+        <button class="btn-modal-close btn-modal-x" aria-label="Закрыть">✕</button>
+      </div>
+      <div id="notifications-list" aria-live="polite"></div>
     </div>
   </div>
 
@@ -645,6 +661,6 @@
 
 
   <!-- Main JavaScript App with cache-busting -->
-  <script type="module" src="/js/app.js?v=3.5.6"></script>
+  <script type="module" src="/js/app.js?v=3.6.0"></script>
 </body>
 </html>
