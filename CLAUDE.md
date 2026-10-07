@@ -373,8 +373,11 @@ The JS side has no PREFIX or FUZZY tier, so it is strictly more conservative tha
 backend, never bolder; names reaching the Mini App are already canonicalized server-side.
 
 `TestLogoMapCoversTheRoster` in `tests/test_club_card.py` keeps the Python map in step with
-`DIVISION_CLUBS`; the JS copy has no such guard, so a roster or alias change means editing
-both by hand.
+`DIVISION_CLUBS`. `tests/test_web_logo_map.py` parses the two object literals out of `ui.js`
+and holds them against the Python map, the roster and `TEAM_ALIASES` (same keys and filenames
+after normalization; aliases equal to a canonical name, or to the latin form `ui.js` derives
+from a filename, may be absent on the JS side). A roster or alias change still means editing
+both copies by hand — the test only refuses to let them drift.
 
 **Rounds** carry an explicit `rounds.status` — `scheduled | open | closed` (migration `019`),
 with `closed_at` / `closed_by`; `is_open` is still written in step with it because the Mini
