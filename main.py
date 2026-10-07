@@ -57,6 +57,16 @@ async def post_init(application: Application) -> None:
     except Exception as e:
         logger.warning(f"Could not set WebApp menu button: {e}")
 
+    # 🧹 Рынки «Открыт» у матчей с закрытой линией (след старых «ленивых» генераций)
+    try:
+        import asyncio
+        import database
+        closed = await asyncio.to_thread(database.close_orphan_open_markets)
+        if closed:
+            logger.info(f"🧹 Closed {closed} orphan open markets (line closed) on startup")
+    except Exception as e:
+        logger.warning(f"Failed to close orphan open markets on startup: {e}")
+
     # 🔄 Auto-recalculate line markets on startup with calibrated Poisson engine
     try:
         import asyncio

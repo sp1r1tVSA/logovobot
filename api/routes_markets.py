@@ -233,7 +233,11 @@ async def handle_get_match_markets(request: web.Request) -> web.Response:
     if not markets and not is_cup:
         # Generate on the fly if not existing. Кубок сюда не идёт: его линию
         # выставляет панель этапа, а лиговая модель записала бы ему ничью.
-        markets = await asyncio.to_thread(odds_engine.generate_match_markets, match_id, t1, t2)
+        # И только для матча, чья линия сейчас открыта: иначе просмотр карточки
+        # матча будущего тура оставлял в БД рынки «Открыт» при закрытой линии
+        # (их потом видно в админ-панели «Рынки»).
+        if await asyncio.to_thread(database.match_line_is_open, match_id):
+            markets = await asyncio.to_thread(odds_engine.generate_match_markets, match_id, t1, t2)
 
     # Запрещённые в панели виды ставок в роспись не попадают.
     bans = await asyncio.to_thread(_safe_match_bans, match_id)

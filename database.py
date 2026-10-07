@@ -7264,6 +7264,44 @@ def prune_round_markets(
         return pruned
 
 
+def close_orphan_open_markets() -> int:
+    """Погасить рынки «Открыт» у несыгранных матчей лиги, чья линия закрыта.
+
+    Линию закрывают `close_round_betting_line` и `prune_round_markets`, но рынок
+    мог появиться уже ПОСЛЕ закрытия — например, `GET /api/matches/{id}/markets`
+    раньше строил роспись «на лету» для любого матча. Такой рынок не принимает
+    ставки (приём закрыт `evaluate_round_betting_gate`), зато висит «Открыт» в
+    админ-панели. Предикат тот же, что у гейта: тура нет в `rounds` или у него
+    не `is_open = 0 AND bets_open = 1`.
+
+    Трогает только лигу и матчи `scheduled` / `pending`; кубок и сыгранные матчи
+    (рассчитанные рынки) не затрагиваются. Идемпотентна. Возвращает число
+    погашенных рынков.
+    """
+    orphan_matches_sql = (
+        "SELECT m.id FROM matches m "
+        "WHERE COALESCE(m.tournament_type, 'league') = 'league' "
+        "AND m.status IN ('scheduled', 'pending') "
+        "AND NOT EXISTS ("
+        "    SELECT 1 FROM rounds r "
+        "    WHERE r.round_number = m.round_number "
+        "    AND r.division_id = COALESCE(m.division_id, 1) "
+        "    AND r.season_id = COALESCE(m.season_id, 1) "
+        "    AND r.is_open = 0 AND COALESCE(r.bets_open, 0) = 1"
+        ")"
+    )
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"SELECT COUNT(*) AS c FROM markets "
+            f"WHERE status IN ('open', 'suspended') AND match_id IN ({orphan_matches_sql})"
+        )
+        count = int(cursor.fetchone()["c"])
+        if count:
+            _close_line_scope(cursor, orphan_matches_sql, ())
+        return count
+
+
 def _match_line_is_open(cursor, match_id: int) -> bool:
     """Принимает ли матч ставки прямо сейчас — по `evaluate_betting_gate`.
 

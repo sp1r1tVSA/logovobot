@@ -454,6 +454,13 @@ Automatic repricing (`odds_engine.generate_match_markets`) is smoothed by
 keep stepping toward it. Line tiles (`bet_markets`) take their odds from the smoothed
 selections, which placement validates against — never save raw model odds into a tile.
 
+`generate_match_markets` always writes markets as `open`, and the admin «Рынки» board shows the
+raw `markets.status`, not the round gate. So never generate markets for a match whose line is
+closed: `GET /api/matches/{id}/markets` builds a missing line on the fly only when
+`database.match_line_is_open`, and `database.close_orphan_open_markets` (run from `post_init`,
+idempotent) closes leftovers of unplayed league matches whose round is not `is_open=0 AND
+bets_open=1`. `tests/test_orphan_open_markets.py` covers it.
+
 Every limit resolves through `BettingLimitsService` (user → division → global, falling back
 to the `DEFAULT_*` constants), and `RiskEngine.evaluate_bet` is the only gate — Telegram,
 Mini App and REST all reach it through `database.place_user_bet`, fail-closed. Besides the
