@@ -20,7 +20,7 @@ class StateStore {
       // falls back to stakeAmount; kept off the slip items so they never leak
       // into the API payload or saved drafts.
       singleStakes: {},
-      activeView: 'lobby', // 'lobby' | 'match_center' | 'tournaments' | 'history' | 'my_club' | 'profile'
+      activeView: 'home', // 'home' | 'lobby' | 'match_center' | 'tournaments' | 'history' | 'my_club' | 'profile'
       selectedMatchId: null,
       matchCenterSubTab: 'markets', // 'markets' | 'stats' | 'insights'
       matchDetail: null,

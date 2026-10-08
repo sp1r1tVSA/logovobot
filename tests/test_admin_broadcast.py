@@ -43,7 +43,7 @@ class TestBroadcastFormatting(unittest.TestCase):
 
     def test_betting_template(self):
         text, markup = format_broadcast_content("betting", "Кэфы 2.5 на победу Барселоны!")
-        self.assertIn("LOGOVO.BET", text)
+        self.assertIn("ЛОГОВО ФИФАРЕЙ", text)
         self.assertIn("Кэфы 2.5 на победу Барселоны!", text)
         self.assertIsNotNone(markup)
         btn = markup.inline_keyboard[0][0]

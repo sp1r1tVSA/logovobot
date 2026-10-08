@@ -29,8 +29,8 @@ logger = logging.getLogger(__name__)
 # Категории и шаблоны специальных рассылок
 BROADCAST_CATEGORIES = {
     "betting": {
-        "title": "🎰 Линия ставок (Logovo.bet)",
-        "header": "🎰 <b>LOGOVO.BET | НОВАЯ ЛИНИЯ СТАВОК</b>",
+        "title": "🎰 Линия ставок (Логово Фифарей)",
+        "header": "🎰 <b>ЛОГОВО ФИФАРЕЙ | НОВАЯ ЛИНИЯ СТАВОК</b>",
         "footer": "🔥 <i>Делайте ваши ставки и умножайте банк в турнирной линии!</i>",
         "btn_type": "betting",
     },
@@ -169,7 +169,7 @@ async def admin_broadcast_hub(update: Update, context: ContextTypes.DEFAULT_TYPE
     context.user_data["broadcast"] = {}
 
     keyboard = [
-        [InlineKeyboardButton("🎰 Линия ставок (Logovo.bet)", callback_data="admin_bcast_cat:betting")],
+        [InlineKeyboardButton("🎰 Линия ставок (Логово Фифарей)", callback_data="admin_bcast_cat:betting")],
         [InlineKeyboardButton("📢 Новости лиги", callback_data="admin_bcast_cat:news")],
         [InlineKeyboardButton("⚡ Старт тура / Матчи", callback_data="admin_bcast_cat:tour")],
         [InlineKeyboardButton("📝 Свободное объявление", callback_data="admin_bcast_cat:free")],
@@ -179,7 +179,7 @@ async def admin_broadcast_hub(update: Update, context: ContextTypes.DEFAULT_TYPE
     text = (
         "📢 <b>Центр рассылки сообщений</b>\n\n"
         "Выберите тип сообщения, которое хотите разослать участникам:\n\n"
-        "• <b>Линия ставок:</b> заголовок Logovo.bet + кнопка быстрого перехода в Mini App\n"
+        "• <b>Линия ставок:</b> заголовок Логово Фифарей + кнопка быстрого перехода в Mini App\n"
         "• <b>Новости лиги:</b> официальное оформление новостей + кнопка кабинета\n"
         "• <b>Старт тура:</b> анонс расписания и дедлайнов + кнопка матчей\n"
         "• <b>Свободное:</b> кастомный текст без шаблона"

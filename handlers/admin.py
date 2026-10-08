@@ -1078,9 +1078,9 @@ async def admin_generate_matches_execute(update: Update, context: ContextTypes.D
 
     keyboard = [[InlineKeyboardButton("« К турам", callback_data=f"admin_div_manage_matches:{div_id}")]]
     if line_rounds:
-        line_note = f"🎰 Линия Logovo.bet открыта на Туры: <b>{', '.join(str(r) for r in line_rounds)}</b>."
+        line_note = f"🎰 Линия прогнозов открыта на Туры: <b>{', '.join(str(r) for r in line_rounds)}</b>."
     else:
-        line_note = "⚠️ Линию Logovo.bet открыть не удалось — сделайте это вручную в карточке тура."
+        line_note = "⚠️ Линию прогнозов открыть не удалось — сделайте это вручную в карточке тура."
     await query.edit_message_text(
         f"📅 <b>Расписание успешно сгенерировано!</b>\n\n"
         f"• Дивизион: <b>{html.escape(div_title)}</b>\n"
@@ -1693,9 +1693,9 @@ async def _render_div_round_card(query, context: ContextTypes.DEFAULT_TYPE, div_
     elif is_open:
         text += "⚠️ Дедлайн не задан — долги по туру не начислятся. Задайте его кнопкой ниже.\n"
     if bets_open and not is_open:
-        text += "Линия Logovo.bet: 🎰 открыта заранее (тур ещё не открыт для игры)\n"
+        text += "Линия прогнозов: 🎰 открыта заранее (тур ещё не открыт для игры)\n"
     else:
-        text += f"Линия Logovo.bet: {'🎰 открыта' if bets_open else '🚫 закрыта'}\n"
+        text += f"Линия прогнозов: {'🎰 открыта' if bets_open else '🚫 закрыта'}\n"
 
     keyboard = []
     if is_open:

@@ -1,5 +1,5 @@
 /* ==========================================================================
-   LOGOVO.BET — Premium Esports Dark Glassmorphism CSS Design System
+   ЛОГОВО ФИФАРЕЙ — Premium Esports Dark Glassmorphism CSS Design System
    ========================================================================== */
 
 :root {
@@ -115,44 +115,18 @@ body::before {
   box-shadow: 0 4px 20px rgba(0, 0, 0, 0.3);
 }
 
-.brand-block {
+.header-left {
   display: flex;
   align-items: center;
   gap: 8px;
-  /* Логотип уступает место пилюлям, а не наоборот. */
-  min-width: 0;
-  flex: 0 1 auto;
-  overflow: hidden;
-}
-
-.brand-logo-icon {
-  font-size: 1.5rem;
-  filter: drop-shadow(0 0 10px var(--accent-gold-glow));
-  animation: floatIcon 3s ease-in-out infinite;
-}
-
-@keyframes floatIcon {
-  0%, 100% { transform: translateY(0); }
-  50% { transform: translateY(-3px); }
-}
-
-.brand-title {
-  font-family: 'Outfit', sans-serif;
-  font-size: 1.22rem;
-  font-weight: 900;
-  letter-spacing: 0.02em;
-  background: linear-gradient(135deg, #ffffff 30%, var(--accent-gold) 100%);
-  -webkit-background-clip: text;
-  -webkit-text-fill-color: transparent;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  flex: 0 0 auto;
 }
 
 .header-right {
   display: flex;
   align-items: center;
   gap: 8px;
+  margin-left: auto;
   flex: 0 0 auto;
 }
 

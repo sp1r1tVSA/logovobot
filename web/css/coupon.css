@@ -1,5 +1,5 @@
 /* ==========================================================================
-   LOGOVO.BET — Bet Coupon: floating bar, bottom sheet, bet-accepted modal
+   ЛОГОВО ФИФАРЕЙ — Bet Coupon: floating bar, bottom sheet, bet-accepted modal
    Layering: modals 100 < bar 150 < sheet backdrop 155 < sheet 160
              < modals opened over the sheet (odds changed, accepted) 200+
    ========================================================================== */

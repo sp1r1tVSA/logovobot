@@ -1,5 +1,5 @@
 /* ==========================================================================
-   LOGOVO.BET — Interactive UI Components & Micro-Animations
+   ЛОГОВО ФИФАРЕЙ — Interactive UI Components & Micro-Animations
    ========================================================================== */
 
 /* ─── 1b. Sticky Lobby Filter Bar (divisions / tours / markets) ─── */
@@ -1536,7 +1536,7 @@
    он используется в линии и в купонах. ─── */
 
 /* ==========================================================================
-   15. LOGOVO.BET — Premium Sportsbook Coupons & Club Logos Design System
+   15. ЛОГОВО ФИФАРЕЙ — Premium Sportsbook Coupons & Club Logos Design System
    ========================================================================== */
 
 /* ─── Coupons Page Header ─── */
@@ -2215,7 +2215,7 @@ img.team-logo-img + .team-logo-fallback {
 }
 
 .club-hero::after {
-  /* Неоновая подсветка в углу — фирменный акцент Logovo.bet. */
+  /* Неоновая подсветка в углу — фирменный акцент Логово Фифарей. */
   content: '';
   position: absolute;
   top: -60px;

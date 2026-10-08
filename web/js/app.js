@@ -394,7 +394,7 @@ class AppController {
       return `• ${teams}${pick ? `: ${pick}` : ''} @ ${s.odd}`;
     });
     return [
-      `🎰 Logovo.bet — ${info.title}`,
+      `🎰 Логово Фифарей — ${info.title}`,
       ...lines,
       `Ставка ${fmt(info.stake)} 🪙 · ${info.oddLabel} ${info.oddValue} · выигрыш до ${fmt(info.win)} 🪙`,
     ].join('\n');
@@ -961,6 +961,11 @@ class AppController {
 
     // 1f. «Обновить» рядом с поиском
     document.getElementById('btn-refresh-line')?.addEventListener('click', () => this.manualRefresh());
+
+    // 1g. Назад в Линию из Матч-Центра
+    document.getElementById('btn-mc-back-lobby')?.addEventListener('click', () => {
+      this.switchView('lobby');
+    });
 
     // Элементы-не-кнопки с role="button" (пилюли шапки, пункты ленты) нажимаются с клавиатуры.
     document.addEventListener('keydown', (e) => {
@@ -2070,6 +2075,7 @@ class AppController {
       this.fetchMyClubData();
     } else if (viewName === 'match_center') {
       this.ensureMatchCenterMatch();
+      tgBridge.showBackButton(() => this.switchView('lobby'));
     } else if (viewName === 'admin') {
       this.openAdminPanel();
     } else if (viewName === 'transfers') {
@@ -2082,6 +2088,10 @@ class AppController {
     } else if (viewName === 'shop') {
       const active = document.querySelector('#shop-category-pills .category-pill.active');
       this.renderShopCategory(active?.dataset.shopCat || 'all', active?.textContent || '');
+    }
+
+    if (viewName !== 'match_center' && !this.isCouponOpen()) {
+      tgBridge.hideBackButton();
     }
 
     document.getElementById('header-admin-btn')?.classList.toggle('active', viewName === 'admin');
