@@ -21393,13 +21393,24 @@ def _ensure_shop_schema(cursor: sqlite3.Cursor) -> None:
             status TEXT NOT NULL DEFAULT 'active'
                 CHECK(status IN ('active', 'used', 'expired', 'refunded')),
             tx_id INTEGER NOT NULL,
+            window_id INTEGER,
+            source TEXT NOT NULL DEFAULT 'purchase',
             meta_json TEXT,
             created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
             applied_at TIMESTAMP
         )
     """)
+    try:
+        cursor.execute("ALTER TABLE shop_inventory ADD COLUMN window_id INTEGER")
+    except Exception:
+        pass
+    try:
+        cursor.execute("ALTER TABLE shop_inventory ADD COLUMN source TEXT NOT NULL DEFAULT 'purchase'")
+    except Exception:
+        pass
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_user ON shop_inventory(user_id, status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_club ON shop_inventory(club_name, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_window ON shop_inventory(window_id, club_name)")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS shop_roulette_spins (
@@ -21452,18 +21463,46 @@ def get_user_shop_inventory(user_id: int) -> list[dict]:
 
 
 def add_shop_inventory_item(user_id: int, club_name: str, item_id: str, charges: int,
-                            tx_id: int, meta: dict | None = None) -> int:
+                            tx_id: int, meta: dict | None = None,
+                            window_id: int | None = None, source: str = "purchase") -> int:
     """Добавить предмет в инвентарь пользователя."""
     import json
-    meta_str = json.dumps(meta, ensure_ascii=False) if meta else None
+    meta_copy = dict(meta or {})
+    if window_id is not None:
+        meta_copy["window_id"] = int(window_id)
+    meta_str = json.dumps(meta_copy, ensure_ascii=False) if meta_copy else None
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO shop_inventory (user_id, club_name, item_id, charges_total, charges_left, status, tx_id, meta_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, datetime('now', '+3 hours'))",
-            (int(user_id), club_name.strip(), item_id.strip(), int(charges), int(charges), int(tx_id), meta_str),
+            "INSERT INTO shop_inventory (user_id, club_name, item_id, charges_total, charges_left, status, tx_id, window_id, source, meta_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, datetime('now', '+3 hours'))",
+            (int(user_id), club_name.strip(), item_id.strip(), int(charges), int(charges), int(tx_id),
+             int(window_id) if window_id is not None else None, str(source).strip(), meta_str),
         )
         return int(cursor.lastrowid)
+
+
+def count_window_shop_transfer_purchases(user_id: int, club_name: str, window_id: int,
+                                        transfer_item_ids: tuple[str, ...] | list[str] = (
+                                            "credit_transfer", "slot_swap", "urna_boost", "surcharge_coupon"
+                                        )) -> int:
+    """Подсчёт купленных трансферных наград (5500 - 10000 монет) в указанном окне ТО для тренера/клуба."""
+    placeholders = ",".join("?" for _ in transfer_item_ids)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            f"""
+            SELECT COUNT(*) FROM shop_inventory
+            WHERE (window_id = ? OR json_extract(meta_json, '$.window_id') = ?)
+              AND (user_id = ? OR club_name = ?)
+              AND item_id IN ({placeholders})
+              AND source = 'purchase'
+              AND status != 'refunded'
+            """,
+            (int(window_id), int(window_id), int(user_id), club_name.strip(), *transfer_item_ids),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
 
 
 def consume_shop_inventory_item(user_id: int, item_id: str, club_name: str | None = None) -> bool:

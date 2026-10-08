@@ -128,3 +128,91 @@ def test_secret_player_claim_and_admin_decline_refund(test_user):
     assert ok is True
     # Проверяем возврат монет
     assert database.get_wallet_balance(test_user["id"]) == init_balance
+
+
+def test_transfer_rewards_window_limit(test_user):
+    """
+    Лимит наград за трансферное окно:
+    В одно ТО можно купить МАКСИМУМ 2 награды, относящиеся к трансферам (5500 - 10000 🪙).
+    Третья покупка блокируется. Не-трансферные награды (тренировки, рулетка) остаются доступными.
+    """
+    wid = transfer_repo.create_window(1, 10, title="ТО Зима")
+    transfer_repo.open_window(wid, 1)
+
+    # В каталоге изначально 0 покупок из 2
+    cat = shop_service.get_shop_catalog(test_user["id"])
+    assert cat["is_window_open"] is True
+    assert cat["window_transfer_rewards_bought"] == 0
+    assert cat["window_transfer_rewards_limit"] == 2
+
+    items = {it["id"]: it for it in cat["items"]}
+    assert items["credit_transfer"]["available"] is True
+    assert items["slot_swap"]["available"] is True
+    assert items["urna_boost"]["available"] is True
+    assert items["surcharge_coupon"]["available"] is True
+
+    # 1-я покупка: Трансферный кредит (5 500 🪙)
+    r1 = shop_service.buy_shop_item(test_user["id"], "credit_transfer")
+    assert r1["status"] == "ok"
+
+    cat1 = shop_service.get_shop_catalog(test_user["id"])
+    assert cat1["window_transfer_rewards_bought"] == 1
+    items1 = {it["id"]: it for it in cat1["items"]}
+    assert items1["urna_boost"]["available"] is True
+
+    # 2-я покупка: Выгодная урна (7 000 🪙)
+    r2 = shop_service.buy_shop_item(test_user["id"], "urna_boost")
+    assert r2["status"] == "ok"
+
+    cat2 = shop_service.get_shop_catalog(test_user["id"])
+    assert cat2["window_transfer_rewards_bought"] == 2
+    items2 = {it["id"]: it for it in cat2["items"]}
+    # Все 4 трансферные награды теперь заблокированы
+    assert items2["credit_transfer"]["available"] is False
+    assert items2["slot_swap"]["available"] is False
+    assert items2["urna_boost"]["available"] is False
+    assert items2["surcharge_coupon"]["available"] is False
+    assert "Лимит наград за окно исчерпан" in items2["slot_swap"]["reason"]
+
+    # 3-я покупка трансферной награды вызывает ошибку
+    with pytest.raises(ValueError, match="максимум 2"):
+        shop_service.buy_shop_item(test_user["id"], "slot_swap")
+
+    # Но тренировки (4 500 🪙) по-прежнему доступны!
+    assert items2["train_5"]["available"] is True
+    r_train = shop_service.buy_shop_item(test_user["id"], "train_5")
+    assert r_train["status"] == "ok"
+
+    transfer_repo.close_window(wid, 1)
+
+
+def test_transfer_rewards_new_window_resets_limit(test_user):
+    """
+    В новом трансферном окне лимит покупок трансферных наград считается заново.
+    """
+    active = transfer_repo.get_active_window()
+    if active:
+        transfer_repo.close_window(active["id"], 1)
+
+    wid1 = transfer_repo.create_window(1, 10, title="ТО Зима")
+    transfer_repo.open_window(wid1, 1)
+
+    shop_service.buy_shop_item(test_user["id"], "credit_transfer")
+    shop_service.buy_shop_item(test_user["id"], "slot_swap")
+
+    # Закрываем 1-е окно и открываем 2-е окно
+    transfer_repo.close_window(wid1, 1)
+    wid2 = transfer_repo.create_window(1, 11, title="ТО Лето")
+    transfer_repo.open_window(wid2, 1)
+
+    cat = shop_service.get_shop_catalog(test_user["id"])
+    assert cat["window_transfer_rewards_bought"] == 0
+    items = {it["id"]: it for it in cat["items"]}
+    assert items["credit_transfer"]["available"] is True
+    assert items["urna_boost"]["available"] is True
+
+    # Успешно покупаем в новом окне
+    r = shop_service.buy_shop_item(test_user["id"], "urna_boost")
+    assert r["status"] == "ok"
+    transfer_repo.close_window(wid2, 1)
+

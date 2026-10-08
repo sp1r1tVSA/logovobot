@@ -18,6 +18,10 @@ import time_utils
 
 logger = logging.getLogger(__name__)
 
+# Награды, относящиеся к трансферам (стоимостью от 5 500 до 10 000 монет)
+TRANSFER_SHOP_ITEM_IDS = ("credit_transfer", "slot_swap", "urna_boost", "surcharge_coupon")
+MAX_TRANSFER_REWARDS_PER_WINDOW = 2
+
 # Цены и каталог товаров магазина Логова
 SHOP_CATALOG: list[dict[str, Any]] = [
     {
@@ -225,6 +229,18 @@ def get_shop_catalog(user_id: int) -> dict[str, Any]:
     balance = database.get_wallet_balance(int(user_id))
     active_window = transfer_repo.get_active_window()
     is_window_open = bool(active_window and active_window.get("status") == "open")
+    window_id = active_window.get("id") if active_window else None
+
+    # Подсчёт купленных трансферных наград за текущее окно (максимум 2 на окно)
+    window_transfer_purchases = 0
+    if window_id is not None:
+        window_transfer_purchases = database.count_window_shop_transfer_purchases(
+            user_id=int(user_id),
+            club_name=club or "",
+            window_id=int(window_id),
+            transfer_item_ids=TRANSFER_SHOP_ITEM_IDS,
+        )
+    transfer_limit_reached = (window_transfer_purchases >= MAX_TRANSFER_REWARDS_PER_WINDOW)
 
     items = []
     for item in SHOP_CATALOG:
@@ -242,6 +258,9 @@ def get_shop_catalog(user_id: int) -> dict[str, Any]:
             elif not is_window_open:
                 available = False
                 reason = "Трансферное окно сейчас закрыто"
+            elif item["id"] in TRANSFER_SHOP_ITEM_IDS and transfer_limit_reached:
+                available = False
+                reason = f"Лимит наград за окно исчерпан ({window_transfer_purchases} из {MAX_TRANSFER_REWARDS_PER_WINDOW})"
         elif item["id"] == "secret_player" and not club:
             available = False
             reason = "За вами не закреплён клуб лиги"
@@ -260,6 +279,9 @@ def get_shop_catalog(user_id: int) -> dict[str, Any]:
         "club": club,
         "is_window_open": is_window_open,
         "window_title": active_window.get("title") if active_window else None,
+        "window_id": window_id,
+        "window_transfer_rewards_bought": window_transfer_purchases,
+        "window_transfer_rewards_limit": MAX_TRANSFER_REWARDS_PER_WINDOW,
         "inventory": inventory,
     }
 
@@ -285,6 +307,19 @@ def buy_shop_item(user_id: int, item_id: str, notes: str | None = None) -> dict[
             raise ValueError("За вами не закреплён клуб лиги.")
         if not is_window_open:
             raise ValueError("Трансферное окно сейчас закрыто.")
+        if target["id"] in TRANSFER_SHOP_ITEM_IDS:
+            window_id = active_window["id"]
+            current_purchases = database.count_window_shop_transfer_purchases(
+                user_id=user_id,
+                club_name=club or "",
+                window_id=window_id,
+                transfer_item_ids=TRANSFER_SHOP_ITEM_IDS,
+            )
+            if current_purchases >= MAX_TRANSFER_REWARDS_PER_WINDOW:
+                raise ValueError(
+                    f"В одно трансферное окно можно купить максимум {MAX_TRANSFER_REWARDS_PER_WINDOW} "
+                    f"трансферные награды (у вас уже куплено {current_purchases})."
+                )
 
     if target["id"] == "secret_player" and not club:
         raise ValueError("За вами не закреплён клуб лиги.")
@@ -333,6 +368,8 @@ def buy_shop_item(user_id: int, item_id: str, notes: str | None = None) -> dict[
                 charges=charges,
                 tx_id=tx_id,
                 meta=meta,
+                window_id=active_window.get("id") if active_window else None,
+                source="purchase",
             )
             return {
                 "status": "ok",
@@ -364,6 +401,9 @@ def spin_roulette(user_id: int) -> dict[str, Any]:
             winning_sector = sector
             break
         rand_val -= sector["weight"]
+
+    active_window = transfer_repo.get_active_window()
+    window_id = active_window.get("id") if active_window else None
 
     with database.transaction():
         balance = database.get_wallet_balance(user_id)
@@ -405,6 +445,8 @@ def spin_roulette(user_id: int) -> dict[str, Any]:
                 charges=charges,
                 tx_id=tx_id,
                 meta=meta,
+                window_id=window_id,
+                source="roulette",
             )
 
         spin_id = database.record_shop_roulette_spin(

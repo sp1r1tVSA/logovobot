@@ -140,10 +140,42 @@ class ShopManager {
       return;
     }
 
-    container.innerHTML = items.map(it => {
+    const isWindowOpen = Boolean(this.catalog?.is_window_open);
+    const bought = this.catalog?.window_transfer_rewards_bought ?? 0;
+    const limit = this.catalog?.window_transfer_rewards_limit ?? 2;
+    const windowTitle = this.catalog?.window_title || 'Трансферное окно';
+
+    let windowBannerHtml = '';
+    if (isWindowOpen && (this.currentCat === 'all' || this.currentCat === 'transfers')) {
+      const isLimitFull = bought >= limit;
+      windowBannerHtml = `
+        <div class="shop-window-limit-banner ${isLimitFull ? 'limit-reached' : ''}" style="grid-column: 1 / -1;">
+          <div class="swl-info">
+            <span class="swl-icon">⏳</span>
+            <div>
+              <div class="swl-title">${escapeHtml(windowTitle)}: лимит наград ТО</div>
+              <div class="swl-desc">В одно окно доступно максимум <strong>${limit} награды</strong> для трансферов (от 5 500 до 10 000 🪙).</div>
+            </div>
+          </div>
+          <div class="swl-counter">
+            <span class="swl-count ${isLimitFull ? 'full' : ''}">${bought} / ${limit}</span>
+            <span class="swl-sub">${isLimitFull ? 'Лимит исчерпан' : 'куплено'}</span>
+          </div>
+        </div>
+      `;
+    }
+
+    const cardsHtml = items.map(it => {
       const canBuy = it.available && balance >= it.price;
       const isTop = it.id === 'secret_player' || it.id === 'urna_boost';
-      const windowBadge = it.requires_window ? '<span class="shop-card-badge tag-window">Трансферное окно</span>' : '';
+      let windowBadge = '';
+      if (it.requires_window) {
+        if (bought >= limit) {
+          windowBadge = '<span class="shop-card-badge tag-limit-reached">Лимит окна (2/2)</span>';
+        } else {
+          windowBadge = '<span class="shop-card-badge tag-window">Трансферное окно</span>';
+        }
+      }
       return `
         <div class="shop-card ${isTop ? 'featured' : ''}" data-item-id="${escapeHtml(it.id)}">
           <div class="shop-card-header">
@@ -169,6 +201,8 @@ class ShopManager {
         </div>
       `;
     }).join('');
+
+    container.innerHTML = windowBannerHtml + cardsHtml;
 
     container.querySelectorAll('.shop-card-buy-btn').forEach(btn => {
       btn.addEventListener('click', () => this.buyItem(btn.dataset.buy));
