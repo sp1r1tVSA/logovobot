@@ -2333,6 +2333,9 @@ def init_db() -> None:
         # ─── 036: сырые строки таблицы статистики в прогоне OCR ──────────────
         _ensure_ocr_raw_rows_column(cursor)
 
+        # ─── 037: магазин наград и рулетка фортуны ───────────────────────────
+        _ensure_shop_schema(cursor)
+
         # Seed initial catalog data
         seed_gamification_catalog(cursor)
 
@@ -21360,4 +21363,228 @@ def get_broadcast_chat_targets() -> list[dict]:
         except (ValueError, TypeError):
             pass
     return targets
+
+
+# =========================================================================
+# 🛍 МАГАЗИН НАГРАД, ИНВЕНТАРЬ И РУЛЕТКА (Миграция 037)
+# =========================================================================
+
+MIGRATION_037_SHOP_REWARDS = "037_shop_rewards"
+
+
+def _ensure_shop_schema(cursor: sqlite3.Cursor) -> None:
+    """Миграция 037: магазин наград, инвентарь, рулетка и заявки на секретного игрока.
+
+    Все временные метки используют московское время (+3 hours).
+    Списание монет идёт через `spend_coins` без изменения оборота ставок.
+    """
+    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (MIGRATION_037_SHOP_REWARDS,))
+    if cursor.fetchone():
+        return
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS shop_inventory (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            club_name TEXT NOT NULL,
+            item_id TEXT NOT NULL,
+            charges_total INTEGER NOT NULL DEFAULT 1,
+            charges_left INTEGER NOT NULL DEFAULT 1,
+            status TEXT NOT NULL DEFAULT 'active'
+                CHECK(status IN ('active', 'used', 'expired', 'refunded')),
+            tx_id INTEGER NOT NULL,
+            meta_json TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+            applied_at TIMESTAMP
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_user ON shop_inventory(user_id, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_club ON shop_inventory(club_name, status)")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS shop_roulette_spins (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            club_name TEXT NOT NULL,
+            cost INTEGER NOT NULL DEFAULT 25000,
+            won_item_id TEXT NOT NULL,
+            won_label TEXT NOT NULL,
+            won_payload TEXT,
+            tx_id INTEGER NOT NULL,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_roulette_user ON shop_roulette_spins(user_id)")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS shop_secret_player_claims (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            club_name TEXT NOT NULL,
+            tx_id INTEGER NOT NULL,
+            cost INTEGER NOT NULL DEFAULT 50000,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'approved', 'declined', 'cancelled')),
+            assigned_player_name TEXT,
+            assigned_by INTEGER,
+            notes TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+            resolved_at TIMESTAMP
+        )
+    """)
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_claims_status ON shop_secret_player_claims(status)")
+
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_037_SHOP_REWARDS, "Shop rewards, inventory, roulette spins and secret player claims"),
+    )
+
+
+def get_user_shop_inventory(user_id: int) -> list[dict]:
+    """Вернуть список активных предметов в инвентаре пользователя."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT * FROM shop_inventory WHERE user_id = ? AND status = 'active' AND charges_left > 0 ORDER BY id DESC",
+            (int(user_id),),
+        )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def add_shop_inventory_item(user_id: int, club_name: str, item_id: str, charges: int,
+                            tx_id: int, meta: dict | None = None) -> int:
+    """Добавить предмет в инвентарь пользователя."""
+    import json
+    meta_str = json.dumps(meta, ensure_ascii=False) if meta else None
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO shop_inventory (user_id, club_name, item_id, charges_total, charges_left, status, tx_id, meta_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, datetime('now', '+3 hours'))",
+            (int(user_id), club_name.strip(), item_id.strip(), int(charges), int(charges), int(tx_id), meta_str),
+        )
+        return int(cursor.lastrowid)
+
+
+def consume_shop_inventory_item(user_id: int, item_id: str, club_name: str | None = None) -> bool:
+    """Использовать 1 заряд предмета из инвентаря. Возвращает True, если предмет найден и списан."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        if club_name:
+            cursor.execute(
+                "SELECT id, charges_left FROM shop_inventory WHERE (user_id = ? OR club_name = ?) AND item_id = ? AND status = 'active' AND charges_left > 0 ORDER BY id ASC LIMIT 1",
+                (int(user_id), club_name.strip(), item_id.strip()),
+            )
+        else:
+            cursor.execute(
+                "SELECT id, charges_left FROM shop_inventory WHERE user_id = ? AND item_id = ? AND status = 'active' AND charges_left > 0 ORDER BY id ASC LIMIT 1",
+                (int(user_id), item_id.strip()),
+            )
+        row = cursor.fetchone()
+        if not row:
+            return False
+        inv_id = row["id"]
+        new_charges = row["charges_left"] - 1
+        new_status = "used" if new_charges <= 0 else "active"
+        applied_at_sql = ", applied_at = datetime('now', '+3 hours')" if new_status == "used" else ""
+        cursor.execute(
+            f"UPDATE shop_inventory SET charges_left = ?, status = ?{applied_at_sql} WHERE id = ?",
+            (new_charges, new_status, inv_id),
+        )
+        return True
+
+
+def count_active_shop_item(user_id: int, item_id: str) -> int:
+    """Количество доступных зарядов конкретного предмета у пользователя."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT SUM(charges_left) FROM shop_inventory WHERE user_id = ? AND item_id = ? AND status = 'active'",
+            (int(user_id), item_id.strip()),
+        )
+        val = cursor.fetchone()[0]
+        return int(val) if val else 0
+
+
+def record_shop_roulette_spin(user_id: int, club_name: str, cost: int, won_item_id: str,
+                              won_label: str, tx_id: int, won_payload: dict | None = None) -> int:
+    """Записать результат прокрута рулетки."""
+    import json
+    payload_str = json.dumps(won_payload, ensure_ascii=False) if won_payload else None
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO shop_roulette_spins (user_id, club_name, cost, won_item_id, won_label, won_payload, tx_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))",
+            (int(user_id), club_name.strip(), int(cost), won_item_id.strip(), won_label.strip(), payload_str, int(tx_id)),
+        )
+        return int(cursor.lastrowid)
+
+
+def create_secret_player_claim(user_id: int, club_name: str, tx_id: int, cost: int = 50000, notes: str | None = None) -> int:
+    """Создать заявку на получение секретного игрока."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT INTO shop_secret_player_claims (user_id, club_name, tx_id, cost, status, notes, created_at) "
+            "VALUES (?, ?, ?, ?, 'pending', ?, datetime('now', '+3 hours'))",
+            (int(user_id), club_name.strip(), int(tx_id), int(cost), notes),
+        )
+        return int(cursor.lastrowid)
+
+
+def list_secret_player_claims(status: str | None = None, limit: int = 50) -> list[dict]:
+    """Список заявок на секретного игрока (для админов)."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        if status:
+            cursor.execute(
+                "SELECT * FROM shop_secret_player_claims WHERE status = ? ORDER BY id DESC LIMIT ?",
+                (status.strip(), int(limit)),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM shop_secret_player_claims ORDER BY id DESC LIMIT ?",
+                (int(limit),),
+            )
+        return [dict(r) for r in cursor.fetchall()]
+
+
+def resolve_secret_player_claim(claim_id: int, admin_id: int, player_name: str = "",
+                                action: str = "approved", notes: str | None = None) -> tuple[bool, str]:
+    """Утвердить или отклонить заявку на секретного игрока."""
+    from transfers import repo as transfer_repo
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM shop_secret_player_claims WHERE id = ?", (int(claim_id),))
+        claim = cursor.fetchone()
+        if not claim:
+            return False, "Заявка не найдена."
+        if claim["status"] != "pending":
+            return False, f"Заявка уже обработана (статус: {claim['status']})."
+
+        if action == "approved":
+            if not player_name or not player_name.strip():
+                return False, "Укажите имя игрока для добавления в состав."
+            clean_name = player_name.strip()
+            # Добавляем в состав клуба
+            transfer_repo.squad_insert(claim["club_name"], clean_name, position=None)
+            cursor.execute(
+                "UPDATE shop_secret_player_claims SET status = 'approved', assigned_player_name = ?, assigned_by = ?,"
+                " notes = ?, resolved_at = datetime('now', '+3 hours') WHERE id = ?",
+                (clean_name, int(admin_id), notes, int(claim_id)),
+            )
+            return True, f"Игрок {clean_name} успешно добавлен в состав {claim['club_name']}."
+        elif action == "declined":
+            # Возврат монет
+            refund_coins(claim["user_id"], claim["cost"], tx_type="shop_refund", ref_type="shop_claim", ref_id=claim_id)
+            cursor.execute(
+                "UPDATE shop_secret_player_claims SET status = 'declined', assigned_by = ?, notes = ?,"
+                " resolved_at = datetime('now', '+3 hours') WHERE id = ?",
+                (int(admin_id), notes, int(claim_id)),
+            )
+            return True, f"Заявка отклонена, {claim['cost']} 🪙 возвращены пользователю."
+        else:
+            return False, f"Неизвестное действие: {action}"
+
 

@@ -9,7 +9,7 @@ import { tgBridge } from './tg.js';
 import { UIRenderer, escapeHtml, cupStageLabel, cupMetaName } from './ui.js';
 import { ParticleEffects } from './effects.js';
 import { outrightsView } from './outrights.js';
-import { shopTransfers } from './shop.js';
+import { shopTransfers, shopManager } from './shop.js';
 import { initDesign } from './design.js';
 
 // Панель управления, IRL-лобби и трансферы нужны немногим и не на старте —
@@ -2035,14 +2035,11 @@ class AppController {
     try { ParticleEffects.burstConfetti(); } catch (e) { console.warn('confetti failed', e); }
   }
 
-  /** Каталог магазина: слоты ТО лежат в «Все» и «Трансферы», остальные разделы пока пусты. */
+  /** Каталог магазина: слоты ТО и эксклюзивные награды */
   renderShopCategory(cat, label = '') {
-    const hasItems = cat === 'all' || cat === 'transfers';
-    shopTransfers.show(hasItems);
-    const empty = document.getElementById('shop-items-container');
-    if (empty) empty.style.display = hasItems ? 'none' : '';
-    const desc = document.getElementById('shop-empty-desc');
-    if (desc && !hasItems) desc.textContent = `Раздел «${label.replace(/^\S+\s/, '')}» пока пуст.`;
+    const hasSlots = cat === 'all' || cat === 'transfers';
+    shopTransfers.show(hasSlots);
+    shopManager.filterCategory(cat);
   }
 
   switchView(viewName) {
@@ -2088,6 +2085,7 @@ class AppController {
     } else if (viewName === 'shop') {
       const active = document.querySelector('#shop-category-pills .category-pill.active');
       this.renderShopCategory(active?.dataset.shopCat || 'all', active?.textContent || '');
+      shopManager.load();
     }
 
     if (viewName !== 'match_center' && !this.isCouponOpen()) {

@@ -594,6 +594,10 @@ def create_app(bot=None) -> web.Application:
     from transfers import register_routes as register_transfer_routes
     register_transfer_routes(app)
 
+    # 13c. Магазин наград («Shop»): каталог, рулетка фортуны, инвентарь, заявки
+    from api.routes_shop import register_shop_routes
+    register_shop_routes(app)
+
     # Static SPA Frontend & Assets
     app.router.add_get("/", handle_index)
     app.router.add_get("/app", handle_index)

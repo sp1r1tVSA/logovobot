@@ -1,0 +1,787 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Welcome Digest — Приветственное Меню Лиги</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Outfit:wght@600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    /* ==========================================================================
+       1. ДИЗАЙН-СИСТЕМА И ПЕРЕМЕННЫЕ
+       ========================================================================== */
+    :root {
+      --bg-base: #090b0e;
+      --bg-surface: #12161f;
+      --bg-surface-elevated: #1a202c;
+      --border-subtle: rgba(255, 255, 255, 0.08);
+      --border-glow: rgba(255, 183, 3, 0.3);
+      
+      /* Фирменные акцентные цвета */
+      --accent-gold: #f5b027;
+      --accent-gold-gradient: linear-gradient(135deg, #f5b027 0%, #ff8800 100%);
+      --accent-cyan: #00d2ff;
+      --accent-red: #ff4757;
+      --accent-green: #10b981;
+      --accent-purple: #a855f7;
+      --accent-blue: #3b82f6;
+      
+      /* Текстовые цвета */
+      --text-primary: #ffffff;
+      --text-secondary: #94a3b8;
+      --text-muted: #64748b;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-base);
+      color: var(--text-primary);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: flex-start;
+      padding: 16px;
+      position: relative;
+      overflow-x: hidden;
+    }
+
+    /* Фоновые градиенты для глубины интерфейса */
+    .ambient-glow-1 {
+      position: fixed;
+      top: -80px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 320px;
+      height: 320px;
+      background: radial-gradient(circle, rgba(245, 176, 39, 0.15) 0%, transparent 70%);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    .ambient-glow-2 {
+      position: fixed;
+      bottom: -60px;
+      right: -60px;
+      width: 260px;
+      height: 260px;
+      background: radial-gradient(circle, rgba(0, 210, 255, 0.1) 0%, transparent 70%);
+      border-radius: 50%;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    /* Мобильный контейнер экрана */
+    .app-screen {
+      width: 100%;
+      max-width: 440px;
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+      padding-bottom: 24px;
+      transition: opacity 0.3s, transform 0.3s;
+    }
+
+    /* ==========================================================================
+       2. ХЕДЕР УЧАСТНИКА
+       ========================================================================== */
+    .welcome-header {
+      background: linear-gradient(180deg, rgba(26, 32, 44, 0.8) 0%, rgba(18, 22, 31, 0.6) 100%);
+      border: 1px solid var(--border-subtle);
+      border-radius: 20px;
+      padding: 16px 18px;
+      backdrop-filter: blur(12px);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .welcome-header::before {
+      content: '';
+      position: absolute;
+      top: 0;
+      left: 0;
+      width: 4px;
+      height: 100%;
+      background: var(--accent-gold-gradient);
+    }
+
+    .greeting-badge {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--accent-gold);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .user-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 20px;
+      font-weight: 900;
+      color: #fff;
+    }
+
+    .user-subtitle {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .user-avatar-badge {
+      width: 44px;
+      height: 44px;
+      background: rgba(255, 183, 3, 0.1);
+      border: 1.5px solid var(--border-glow);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 22px;
+    }
+
+    /* ==========================================================================
+       3. СРОЧНАЯ ПЛАШКА (BREAKING TICKER)
+       ========================================================================== */
+    .ticker-bar {
+      background: linear-gradient(90deg, rgba(255, 71, 87, 0.18) 0%, rgba(245, 176, 39, 0.15) 100%);
+      border: 1px solid rgba(255, 71, 87, 0.3);
+      border-radius: 14px;
+      padding: 11px 14px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      box-shadow: 0 4px 15px rgba(255, 71, 87, 0.15);
+    }
+
+    .ticker-pulse {
+      background: var(--accent-red);
+      color: #fff;
+      font-size: 9px;
+      font-weight: 900;
+      text-transform: uppercase;
+      padding: 3px 6px;
+      border-radius: 6px;
+      letter-spacing: 0.5px;
+      animation: pulse-red 1.5s infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes pulse-red {
+      0% { opacity: 0.7; }
+      50% { opacity: 1; }
+      100% { opacity: 0.7; }
+    }
+
+    .ticker-text {
+      font-size: 12.5px;
+      font-weight: 700;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    /* ==========================================================================
+       4. КОМПАКТНАЯ ЛЕНТА ПЛАШЕК (FEED ITEMS)
+       ========================================================================== */
+    .feed-section {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .feed-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 14px;
+      padding: 12px 14px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      cursor: pointer;
+      transition: all 0.18s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .feed-card:hover {
+      background: var(--bg-surface-elevated);
+      border-color: rgba(255, 255, 255, 0.15);
+      transform: translateY(-1px);
+    }
+
+    .feed-card:active {
+      transform: scale(0.99);
+    }
+
+    .feed-icon {
+      font-size: 22px;
+      width: 38px;
+      height: 38px;
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      flex-shrink: 0;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+    }
+
+    .feed-content {
+      flex: 1;
+      min-width: 0;
+    }
+
+    .feed-meta {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      font-size: 10.5px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 0.3px;
+    }
+
+    .feed-meta .feed-time {
+      color: var(--text-muted);
+      font-weight: 500;
+    }
+
+    .feed-title {
+      font-size: 13px;
+      font-weight: 700;
+      color: #fff;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-top: 3px;
+    }
+
+    .feed-arrow {
+      color: var(--text-muted);
+      font-size: 14px;
+      font-weight: 700;
+      padding-left: 4px;
+      flex-shrink: 0;
+    }
+
+    /* Цветовые стили тегов плашек */
+    .tag-gold { color: var(--accent-gold); }
+    .tag-green { color: var(--accent-green); }
+    .tag-cyan { color: var(--accent-cyan); }
+    .tag-purple { color: var(--accent-purple); }
+    .tag-blue { color: var(--accent-blue); }
+    .tag-red { color: var(--accent-red); }
+
+    /* ==========================================================================
+       5. БИТВА ДНЯ (ЦЕНТРАЛЬНЫЙ МАТЧ)
+       ========================================================================== */
+    .match-of-the-day {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 20px;
+      padding: 16px 18px;
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+    }
+
+    .section-label {
+      font-size: 11px;
+      font-weight: 800;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+
+    .match-card {
+      background: rgba(255, 255, 255, 0.02);
+      border: 1px solid rgba(255, 255, 255, 0.05);
+      border-radius: 16px;
+      padding: 14px;
+    }
+
+    .match-teams {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 14px;
+    }
+
+    .team-col {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex: 1;
+    }
+
+    .team-col.away {
+      flex-direction: row-reverse;
+      text-align: right;
+    }
+
+    .team-crest {
+      width: 38px;
+      height: 38px;
+      background: rgba(255, 255, 255, 0.05);
+      border-radius: 10px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 20px;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      flex-shrink: 0;
+    }
+
+    .team-info .name {
+      font-family: 'Outfit', sans-serif;
+      font-size: 14px;
+      font-weight: 800;
+      color: #fff;
+    }
+
+    .team-info .form {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 1px;
+    }
+
+    .match-vs-badge {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 0 8px;
+    }
+
+    .vs-text {
+      font-family: 'Outfit', sans-serif;
+      font-size: 13px;
+      font-weight: 900;
+      color: var(--text-muted);
+    }
+
+    .match-time {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--accent-gold);
+      background: rgba(245, 176, 39, 0.1);
+      padding: 2px 7px;
+      border-radius: 6px;
+      margin-top: 4px;
+    }
+
+    .odds-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr 1fr;
+      gap: 8px;
+    }
+
+    .odd-btn {
+      background: rgba(26, 32, 44, 0.9);
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      padding: 8px 6px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      cursor: pointer;
+      transition: all 0.15s;
+    }
+
+    .odd-btn:hover {
+      border-color: rgba(245, 176, 39, 0.4);
+    }
+
+    .odd-btn.selected {
+      background: rgba(245, 176, 39, 0.2);
+      border-color: var(--accent-gold);
+      box-shadow: 0 0 10px rgba(245, 176, 39, 0.25);
+    }
+
+    .odd-btn .label {
+      font-size: 10px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+    }
+
+    .odd-btn .value {
+      font-family: 'Outfit', sans-serif;
+      font-size: 14px;
+      font-weight: 800;
+      color: #fff;
+      margin-top: 2px;
+    }
+
+    .odd-btn.selected .value {
+      color: var(--accent-gold);
+    }
+
+    /* ==========================================================================
+       6. СЕТКА СТАТУСОВ (ТРАНСФЕРЫ, БАЛАНС, КУПОНЫ)
+       ========================================================================== */
+    .status-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px;
+    }
+
+    .status-tile {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-subtle);
+      border-radius: 18px;
+      padding: 14px 16px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      box-shadow: 0 6px 18px rgba(0, 0, 0, 0.25);
+    }
+
+    .tile-header {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+
+    .tile-val {
+      font-family: 'Outfit', sans-serif;
+      font-size: 17px;
+      font-weight: 800;
+      color: #fff;
+    }
+
+    .tile-desc {
+      font-size: 11px;
+      color: var(--text-secondary);
+      margin-top: 4px;
+    }
+
+    /* ==========================================================================
+       7. ГЛАВНАЯ КНОПКА ВХОДА (CTA)
+       ========================================================================== */
+    .btn-enter-app {
+      width: 100%;
+      height: 56px;
+      background: var(--accent-gold-gradient);
+      color: #000;
+      font-family: 'Outfit', sans-serif;
+      font-size: 17px;
+      font-weight: 900;
+      border: none;
+      border-radius: 16px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      box-shadow: 0 8px 25px rgba(245, 176, 39, 0.4);
+      margin-top: 6px;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+
+    .btn-enter-app:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 10px 30px rgba(245, 176, 39, 0.6);
+    }
+
+    .btn-enter-app:active {
+      transform: translateY(1px);
+    }
+
+    .quick-nav-links {
+      display: flex;
+      justify-content: center;
+      gap: 16px;
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 600;
+    }
+
+    .quick-link {
+      color: var(--text-secondary);
+      text-decoration: none;
+      cursor: pointer;
+      transition: color 0.15s;
+    }
+
+    .quick-link:hover {
+      color: var(--accent-gold);
+    }
+
+    /* Модалка подробностей новости при клике */
+    .news-detail-modal {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(10px);
+      z-index: 100;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+
+    .news-detail-modal.active {
+      display: flex;
+    }
+
+    .news-detail-card {
+      background: var(--bg-surface);
+      border: 1px solid var(--border-glow);
+      border-radius: 20px;
+      padding: 24px;
+      width: 100%;
+      max-width: 360px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .news-detail-title {
+      font-family: 'Outfit', sans-serif;
+      font-size: 18px;
+      font-weight: 800;
+      color: #fff;
+    }
+
+    .news-detail-text {
+      font-size: 13.5px;
+      color: #cbd5e1;
+      line-height: 1.55;
+    }
+
+    .btn-close-detail {
+      background: var(--accent-gold);
+      color: #000;
+      border: none;
+      border-radius: 12px;
+      padding: 12px;
+      font-weight: 800;
+      cursor: pointer;
+      margin-top: 6px;
+    }
+
+    /* Анимация закрытия при входе */
+    .app-screen.closing {
+      opacity: 0;
+      transform: translateY(20px) scale(0.97);
+    }
+  </style>
+</head>
+<body>
+
+  <div class="ambient-glow-1"></div>
+  <div class="ambient-glow-2"></div>
+
+  <div class="app-screen" id="app-screen">
+
+    <!-- 1. ХЕДЕР УЧАСТНИКА -->
+    <header class="welcome-header">
+      <div class="user-greeting">
+        <span class="greeting-badge">🐺 С возвращением</span>
+        <div class="user-title">Ислам (Real Madrid)</div>
+        <div class="user-subtitle">Сезон 4 · Высшая Лига · 5-й тур</div>
+      </div>
+      <div class="user-avatar-badge" title="Клуб">👑</div>
+    </header>
+
+    <!-- 2. СРОЧНАЯ ПЛАШКА (BREAKING LIVE TICKER) -->
+    <div class="ticker-bar">
+      <span class="ticker-pulse">LIVE</span>
+      <span class="ticker-text" id="ticker-live-text">🔥 Дедлайн 5-го тура наступит сегодня в 21:00 МСК!</span>
+    </div>
+
+    <!-- 3. КОМПАКТНАЯ ЛЕНТА НОВОСТЕЙ И ПЛАШЕК (FEED ITEMS) -->
+    <div class="section-label" style="margin-bottom: 2px;">
+      <span>Новости и события лиги</span>
+      <span style="color: var(--accent-gold); font-size: 11px;">● Актуально</span>
+    </div>
+
+    <div class="feed-section" id="news-feed-container">
+      
+      <!-- Плашка 1: Анонс тура -->
+      <div class="feed-card" onclick="showNewsDetail('Стартовал 5-й тур Лиги', 'Все матчи 4-го тура успешно рассчитаны. Прием прогнозов и проверка заявок открыты во всех дивизионах. Поспешите подать купоны до дедлайна.')">
+        <div class="feed-icon">📢</div>
+        <div class="feed-content">
+          <div class="feed-meta tag-gold">
+            <span>Анонс тура</span> • <span class="feed-time">13:40</span>
+          </div>
+          <div class="feed-title">Стартовал 5-й тур: Прием прогнозов открыт во всех лигах</div>
+        </div>
+        <div class="feed-arrow">➔</div>
+      </div>
+
+      <!-- Плашка 2: Трансферное окно -->
+      <div class="feed-card" onclick="showNewsDetail('Трансферное окно открыто', 'До субботы открыта подача заявок на обмены без слотов и продажу в урну на выгодных условиях. Внимательно следите за лимитами слотов.')">
+        <div class="feed-icon">🔁</div>
+        <div class="feed-content">
+          <div class="feed-meta tag-green">
+            <span>Трансферы</span> • <span class="feed-time">12:15</span>
+          </div>
+          <div class="feed-title">Трансферное окно открыто! Дозаявки спешл-карт до субботы</div>
+        </div>
+        <div class="feed-arrow">➔</div>
+      </div>
+
+      <!-- Плашка 3: Регламент / Дисциплина -->
+      <div class="feed-card" onclick="showNewsDetail('Правила отправки протоколов', 'Напоминание всем участникам: скриншот счета и протокола матча должен быть отправлен в течение 1 часа после финального свистка во избежание тех. поражения.')">
+        <div class="feed-icon">⚖️</div>
+        <div class="feed-content">
+          <div class="feed-meta tag-cyan">
+            <span>Регламент</span> • <span class="feed-time">Вчера</span>
+          </div>
+          <div class="feed-title">Напоминание: задержка отправки протокола карается штрафом</div>
+        </div>
+        <div class="feed-arrow">➔</div>
+      </div>
+
+      <!-- Плашка 4: Герой тура / MVP -->
+      <div class="feed-card" onclick="showNewsDetail('MVP 4-го тура: Килиан Мбаппе', 'Хет-трик француза в дерби приносит Реалу лидерство в таблице и специальную золотую карточку в магазине!')">
+        <div class="feed-icon">⭐</div>
+        <div class="feed-content">
+          <div class="feed-meta tag-purple">
+            <span>MVP Недели</span> • <span class="feed-time">Вчера</span>
+          </div>
+          <div class="feed-title">Мбаппе признан лучшим игроком 4-го тура Чемпионата</div>
+        </div>
+        <div class="feed-arrow">➔</div>
+      </div>
+
+    </div>
+
+    <!-- 4. АВТОСВОДКА: ЦЕНТРАЛЬНЫЙ МАТЧ ДНЯ -->
+    <section class="match-of-the-day">
+      <div class="section-label">
+        <span>🔥 Битва дня</span>
+        <span style="color: var(--accent-gold); font-size: 11px;">● Топ-котировки</span>
+      </div>
+      <div class="match-card">
+        <div class="match-teams">
+          <div class="team-col home">
+            <div class="team-crest">⚪</div>
+            <div class="team-info">
+              <div class="name">Real Madrid</div>
+              <div class="form">2 место · 10 очков</div>
+            </div>
+          </div>
+
+          <div class="match-vs-badge">
+            <span class="vs-text">VS</span>
+            <span class="match-time">20:30 МСК</span>
+          </div>
+
+          <div class="team-col away">
+            <div class="team-crest">🔵</div>
+            <div class="team-info">
+              <div class="name">Barcelona</div>
+              <div class="form">1 место · 12 очков</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="odds-row">
+          <button class="odd-btn" onclick="this.classList.toggle('selected')">
+            <span class="label">П1</span>
+            <span class="value">2.15</span>
+          </button>
+          <button class="odd-btn" onclick="this.classList.toggle('selected')">
+            <span class="label">Ничья</span>
+            <span class="value">3.40</span>
+          </button>
+          <button class="odd-btn" onclick="this.classList.toggle('selected')">
+            <span class="label">П2</span>
+            <span class="value">2.85</span>
+          </button>
+        </div>
+      </div>
+    </section>
+
+    <!-- 5. АВТОСВОДКА: ТРАНСФЕРЫ И СТАТУС ИГРОКА -->
+    <div class="status-grid">
+      <div class="status-tile">
+        <div class="tile-header">🔁 Трансферы</div>
+        <div class="tile-val" style="color: var(--accent-green);">2 дня 14ч</div>
+        <div class="tile-desc">Слоты: 2/2 доступны</div>
+      </div>
+
+      <div class="status-tile">
+        <div class="tile-header">🪙 Твой статус</div>
+        <div class="tile-val" style="color: var(--accent-gold);">15 400 🪙</div>
+        <div class="tile-desc">2 активных пари в игре</div>
+      </div>
+    </div>
+
+    <!-- 6. ГЛАВНАЯ КНОПКА ПЕРЕХОДА (CTA) -->
+    <div style="display: flex; flex-direction: column; gap: 10px;">
+      <button class="btn-enter-app" id="btn-enter-app">
+        ⚽ Перейти к Линии Матчей
+      </button>
+
+      <div class="quick-nav-links">
+        <span class="quick-link" onclick="alert('Переход в Таблицу')">🏆 Таблица</span>
+        <span>•</span>
+        <span class="quick-link" onclick="alert('Переход в Мой Клуб')">🛡 Мой Клуб</span>
+        <span>•</span>
+        <span class="quick-link" onclick="alert('Переход в Мои Ставки')">📜 Мои Ставки</span>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Модальное окно просмотра новости -->
+  <div class="news-detail-modal" id="news-modal">
+    <div class="news-detail-card">
+      <div class="news-detail-title" id="modal-news-title">Новость</div>
+      <div class="news-detail-text" id="modal-news-text">Текст новости...</div>
+      <button class="btn-close-detail" onclick="closeNewsDetail()">Понятно 👍</button>
+    </div>
+  </div>
+
+  <script>
+    // Закрытие приветственного экрана при входе
+    const btnEnter = document.getElementById('btn-enter-app');
+    const appScreen = document.getElementById('app-screen');
+
+    btnEnter.addEventListener('click', () => {
+      appScreen.classList.add('closing');
+      setTimeout(() => {
+        alert('Экран закрыт! Пользователь перешел в основной интерфейс Mini-App.');
+        appScreen.classList.remove('closing');
+      }, 350);
+    });
+
+    // Просмотр подробностей новости
+    const newsModal = document.getElementById('news-modal');
+    const modalTitle = document.getElementById('modal-news-title');
+    const modalText = document.getElementById('modal-news-text');
+
+    function showNewsDetail(title, text) {
+      modalTitle.textContent = title;
+      modalText.textContent = text;
+      newsModal.classList.add('active');
+    }
+
+    function closeNewsDetail() {
+      newsModal.classList.remove('active');
+    }
+  </script>
+</body>
+</html>

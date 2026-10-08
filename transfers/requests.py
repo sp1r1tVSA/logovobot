@@ -313,9 +313,12 @@ def create_surcharge(user_id: int, *, player: str, ovr) -> dict:
         window = _window()
         _no_duplicate(window["id"], req)
         ev = _require(_check(window, req, user_ids=(int(user_id),)))
+        final_price_k = ev.price_k
+        if database.consume_shop_inventory_item(int(user_id), "surcharge_coupon", own):
+            final_price_k = 0
         tid = repo.insert_transfer(
             window["id"], "surcharge", name, "pending_manager", _warnings(ev),
-            to_club=own, to_user=int(user_id), price_k=ev.price_k, ovr=ovr_v, initiator_id=int(user_id))
+            to_club=own, to_user=int(user_id), price_k=final_price_k, ovr=ovr_v, initiator_id=int(user_id))
         return repo.get_transfer(tid)
 
 
@@ -331,9 +334,12 @@ def create_urn_sale(user_id: int, *, player: str, tm_price, special_price, sella
         window = _window()
         _no_duplicate(window["id"], req)
         ev = _require(_check(window, req, user_ids=(int(user_id),)))
+        final_price_k = ev.price_k
+        if database.consume_shop_inventory_item(int(user_id), "urna_boost", own) and final_price_k:
+            final_price_k = int(round(final_price_k * 1.25))
         tid = repo.insert_transfer(
             window["id"], "urn_sale", name, "pending_manager", _warnings(ev),
-            from_club=own, from_user=int(user_id), price_k=ev.price_k, tm_price_k=tm_k,
+            from_club=own, from_user=int(user_id), price_k=final_price_k, tm_price_k=tm_k,
             special_price_k=special_k, sellable=bool(sellable), initiator_id=int(user_id))
         return repo.get_transfer(tid)
 

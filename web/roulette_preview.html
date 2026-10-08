@@ -1,0 +1,704 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Рулетка Магазина — Preview</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-main: #0c0d10;
+      --bg-card: #16181d;
+      --bg-card-hover: #1e2128;
+      --accent-gold: #ffb703;
+      --accent-orange: #fb8500;
+      --text-main: #f8f9fa;
+      --text-muted: #8d99ae;
+      
+      --common-color: #8d99ae;
+      --rare-color: #3a86ff;
+      --epic-color: #8338ec;
+      --legendary-color: #ffb703;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+    }
+
+    body {
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-main);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+      overflow-x: hidden;
+    }
+
+    /* Container */
+    .app-container {
+      width: 100%;
+      max-width: 480px;
+      background: rgba(22, 24, 29, 0.8);
+      backdrop-filter: blur(16px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 24px;
+      padding: 24px;
+      box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6);
+    }
+
+    /* Header */
+    .header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 24px;
+    }
+
+    .title-group h1 {
+      font-size: 22px;
+      font-weight: 800;
+      background: linear-gradient(135deg, #fff, var(--text-muted));
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .title-group p {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    .balance-badge {
+      background: rgba(255, 183, 3, 0.12);
+      border: 1px solid rgba(255, 183, 3, 0.3);
+      border-radius: 20px;
+      padding: 8px 16px;
+      font-weight: 700;
+      font-size: 15px;
+      color: var(--accent-gold);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      box-shadow: 0 0 15px rgba(255, 183, 3, 0.15);
+    }
+
+    /* Roulette Stage */
+    .roulette-box {
+      position: relative;
+      background: #0f1013;
+      border-radius: 18px;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      padding: 16px 0;
+      overflow: hidden;
+      box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.8);
+    }
+
+    /* Target Pointer */
+    .pointer {
+      position: absolute;
+      top: 0;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 4px;
+      height: 100%;
+      background: linear-gradient(180deg, var(--accent-gold), var(--accent-orange));
+      z-index: 10;
+      box-shadow: 0 0 15px var(--accent-gold);
+    }
+
+    .pointer::before, .pointer::after {
+      content: '';
+      position: absolute;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 0;
+      height: 0;
+      border-left: 8px solid transparent;
+      border-right: 8px solid transparent;
+    }
+
+    .pointer::before {
+      top: 0;
+      border-top: 10px solid var(--accent-gold);
+    }
+
+    .pointer::after {
+      bottom: 0;
+      border-bottom: 10px solid var(--accent-orange);
+    }
+
+    /* Side Vignettes for Depth */
+    .vignette-left, .vignette-right {
+      position: absolute;
+      top: 0;
+      width: 60px;
+      height: 100%;
+      z-index: 5;
+      pointer-events: none;
+    }
+    .vignette-left { left: 0; background: linear-gradient(90deg, #0f1013 20%, transparent); }
+    .vignette-right { right: 0; background: linear-gradient(-90deg, #0f1013 20%, transparent); }
+
+    /* Track & Tape */
+    .roulette-viewport {
+      width: 100%;
+      height: 110px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .roulette-tape {
+      display: flex;
+      gap: 12px;
+      position: absolute;
+      left: 0;
+      top: 5px;
+      will-change: transform;
+    }
+
+    /* Cards */
+    .item-card {
+      width: 100px;
+      height: 100px;
+      flex-shrink: 0;
+      background: var(--bg-card);
+      border-radius: 14px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 8px;
+      border: 2px solid transparent;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+      position: relative;
+      overflow: hidden;
+    }
+
+    .item-card::after {
+      content: '';
+      position: absolute;
+      inset: 0;
+      border-radius: 12px;
+      opacity: 0.15;
+      pointer-events: none;
+    }
+
+    .item-card.common { border-color: rgba(141, 153, 174, 0.4); }
+    .item-card.common::after { background: var(--common-color); }
+
+    .item-card.rare { border-color: rgba(58, 134, 255, 0.5); box-shadow: 0 0 10px rgba(58, 134, 255, 0.2); }
+    .item-card.rare::after { background: var(--rare-color); }
+
+    .item-card.epic { border-color: rgba(131, 56, 236, 0.6); box-shadow: 0 0 12px rgba(131, 56, 236, 0.3); }
+    .item-card.epic::after { background: var(--epic-color); }
+
+    .item-card.legendary { 
+      border-color: var(--legendary-color); 
+      box-shadow: 0 0 20px rgba(255, 183, 3, 0.5);
+      animation: pulse-gold 2s infinite alternate;
+    }
+    .item-card.legendary::after { background: var(--legendary-color); }
+
+    @keyframes pulse-gold {
+      from { box-shadow: 0 0 10px rgba(255, 183, 3, 0.4); }
+      to { box-shadow: 0 0 22px rgba(255, 183, 3, 0.8); }
+    }
+
+    .item-icon {
+      font-size: 32px;
+      margin-bottom: 6px;
+      filter: drop-shadow(0 2px 4px rgba(0,0,0,0.5));
+    }
+
+    .item-name {
+      font-size: 11px;
+      font-weight: 700;
+      text-align: center;
+      line-height: 1.1;
+      color: #e2e8f0;
+    }
+
+    /* Nav toggle between styles */
+    .nav-tabs {
+      display: flex;
+      background: #0f1013;
+      border-radius: 12px;
+      padding: 4px;
+      margin-bottom: 20px;
+      width: 100%;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .nav-tab {
+      flex: 1;
+      text-align: center;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-decoration: none;
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+
+    .nav-tab.active {
+      background: var(--bg-card);
+      color: var(--text-main);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    }
+
+    /* Actions */
+    .controls {
+      margin-top: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .btn-spin {
+      width: 100%;
+      height: 54px;
+      border: none;
+      border-radius: 16px;
+      background: linear-gradient(135deg, var(--accent-gold), var(--accent-orange));
+      color: #0c0d10;
+      font-family: inherit;
+      font-size: 17px;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: 0 6px 20px rgba(251, 133, 0, 0.35);
+      transition: transform 0.15s, box-shadow 0.15s, opacity 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .btn-spin:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 25px rgba(251, 133, 0, 0.5);
+    }
+
+    .btn-spin:active:not(:disabled) {
+      transform: translateY(1px);
+    }
+
+    .btn-spin:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .reset-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13px;
+      cursor: pointer;
+      text-decoration: underline;
+      align-self: center;
+      margin-top: 4px;
+    }
+
+    /* History Log */
+    .history-section {
+      margin-top: 24px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding-top: 16px;
+    }
+
+    .history-title {
+      font-size: 13px;
+      color: var(--text-muted);
+      margin-bottom: 10px;
+      font-weight: 600;
+    }
+
+    .history-list {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .history-item {
+      padding: 6px 12px;
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 10px;
+      font-size: 12px;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    /* Winner Overlay / Modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+    }
+
+    .modal-overlay.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .winner-card {
+      background: var(--bg-card);
+      border: 2px solid var(--accent-gold);
+      border-radius: 24px;
+      padding: 32px 24px;
+      width: 90%;
+      max-width: 340px;
+      text-align: center;
+      box-shadow: 0 0 50px rgba(255, 183, 3, 0.4);
+      transform: scale(0.8);
+      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+
+    .modal-overlay.active .winner-card {
+      transform: scale(1);
+    }
+
+    .winner-subtitle {
+      color: var(--accent-gold);
+      font-size: 14px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 12px;
+    }
+
+    .winner-icon {
+      font-size: 64px;
+      margin: 12px 0;
+      animation: bounce 1s ease infinite alternate;
+    }
+
+    @keyframes bounce {
+      from { transform: translateY(0); }
+      to { transform: translateY(-10px); }
+    }
+
+    .winner-title {
+      font-size: 22px;
+      font-weight: 800;
+      margin-bottom: 20px;
+    }
+
+    .btn-claim {
+      width: 100%;
+      padding: 14px;
+      background: var(--accent-gold);
+      color: #0c0d10;
+      border: none;
+      border-radius: 14px;
+      font-weight: 800;
+      font-size: 16px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="app-container">
+    <!-- Style Switcher -->
+    <div class="nav-tabs">
+      <a href="roulette_preview.html" class="nav-tab active">Лента (Вариант 1)</a>
+      <a href="wheel_preview.html" class="nav-tab">Колесо (Вариант 2)</a>
+    </div>
+
+    <div class="header">
+      <div class="title-group">
+        <h1>🎰 Рулетка Удачи</h1>
+        <p>Испытай фортуну магазина</p>
+      </div>
+      <div class="balance-badge" id="balance-badge">
+        <span>100 000</span> 🪙
+      </div>
+    </div>
+
+    <div class="roulette-box">
+      <div class="pointer"></div>
+      <div class="vignette-left"></div>
+      <div class="vignette-right"></div>
+      
+      <div class="roulette-viewport" id="viewport">
+        <div class="roulette-tape" id="tape">
+          <!-- Cards injected via JS -->
+        </div>
+      </div>
+    </div>
+
+    <div class="controls">
+      <button class="btn-spin" id="spin-btn">
+        Крутить за 25 000 🪙
+      </button>
+      <button class="reset-btn" id="reset-balance-btn">Пополнить баланс</button>
+    </div>
+
+    <div class="history-section">
+      <div class="history-title">История выигрышей:</div>
+      <div class="history-list" id="history-list">
+        <span style="color: var(--text-muted); font-size: 12px;">Пока нет наград...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Winner Modal -->
+  <div class="modal-overlay" id="modal">
+    <div class="winner-card">
+      <div class="winner-subtitle">🎉 Поздравляем!</div>
+      <div class="winner-icon" id="modal-icon">🎁</div>
+      <div class="winner-title" id="modal-title">Приз</div>
+      <button class="btn-claim" id="modal-claim-btn">Забрать награду</button>
+    </div>
+  </div>
+
+  <!-- Canvas for Confetti -->
+  <canvas id="confetti-canvas" style="position:fixed; inset:0; pointer-events:none; z-index:99;"></canvas>
+
+  <script>
+    // --- ПООБЕКТНЫЙ СПИСОК НАГРАД (С ШАНСАМИ) ---
+    const ITEMS = [
+      { id: 'money', name: '+10 млн к бюджету', icon: '💰', rarity: 'common', weight: 35 },
+      { id: 'urna', name: 'Выгодная урна', icon: '🗑', rarity: 'common', weight: 25 },
+      { id: 'train', name: '+5 тренировок', icon: '🏋️', rarity: 'rare', weight: 18 },
+      { id: 'coupon', name: 'Купон на доплату -50%', icon: '📄', rarity: 'rare', weight: 12 },
+      { id: 'exchange', name: 'Обмен без слотов', icon: '🤝', rarity: 'epic', weight: 6 },
+      { id: 'credit', name: 'Трансферный кредит 20M', icon: '🏦', rarity: 'epic', weight: 3.5 },
+      { id: 'secret', name: 'Секретный игрок', icon: '🕵️', rarity: 'legendary', weight: 0.5 }
+    ];
+
+    const SPIN_PRICE = 25000;
+    let balance = 100000;
+    let isSpinning = false;
+    const CARD_WIDTH = 100 + 12; // 100px width + 12px gap
+
+    // DOM Elements
+    const tapeEl = document.getElementById('tape');
+    const viewportEl = document.getElementById('viewport');
+    const spinBtn = document.getElementById('spin-btn');
+    const balanceBadge = document.getElementById('balance-badge');
+    const modalEl = document.getElementById('modal');
+    const modalIcon = document.getElementById('modal-icon');
+    const modalTitle = document.getElementById('modal-title');
+    const modalClaimBtn = document.getElementById('modal-claim-btn');
+    const historyList = document.getElementById('history-list');
+    const resetBalanceBtn = document.getElementById('reset-balance-btn');
+
+    // Web Audio API Sound Synthesizer (Звук щелчка рулетки)
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playTickSound() {
+      try {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(1200, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(200, audioCtx.currentTime + 0.03);
+        gain.gain.setValueAtTime(0.08, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.03);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.03);
+      } catch (e) {}
+    }
+
+    // Выбор случайного приза на основе весов (Drop-rate simulation)
+    function getRandomWinner() {
+      const totalWeight = ITEMS.reduce((acc, item) => acc + item.weight, 0);
+      let rand = Math.random() * totalWeight;
+      for (const item of ITEMS) {
+        if (rand < item.weight) return item;
+        rand -= item.weight;
+      }
+      return ITEMS[0];
+    }
+
+    // Отрисовка базовой ленты при старте
+    function initTape() {
+      let html = '';
+      for (let i = 0; i < 50; i++) {
+        const item = ITEMS[Math.floor(Math.random() * ITEMS.length)];
+        html += renderCard(item);
+      }
+      tapeEl.innerHTML = html;
+      tapeEl.style.transform = 'translateX(0px)';
+    }
+
+    function renderCard(item) {
+      return `
+        <div class="item-card ${item.rarity}">
+          <div class="item-icon">${item.icon}</div>
+          <div class="item-name">${item.name}</div>
+        </div>
+      `;
+    }
+
+    function updateBalanceUI() {
+      balanceBadge.innerHTML = `<span>${balance.toLocaleString('ru-RU')}</span> 🪙`;
+      spinBtn.disabled = isSpinning || balance < SPIN_PRICE;
+    }
+
+    // Запуск спина
+    async function startSpin() {
+      if (isSpinning || balance < SPIN_PRICE) return;
+      
+      // Списание средств
+      balance -= SPIN_PRICE;
+      isSpinning = true;
+      updateBalanceUI();
+
+      // Определяем победителя (эмулируем сервер)
+      const winner = getRandomWinner();
+
+      // Генерируем новый массив карт (45 штук, победитель на 36-м месте)
+      const WIN_INDEX = 36;
+      const tapeItems = [];
+      for (let i = 0; i < 45; i++) {
+        if (i === WIN_INDEX) {
+          tapeItems.push(winner);
+        } else {
+          tapeItems.push(ITEMS[Math.floor(Math.random() * ITEMS.length)]);
+        }
+      }
+
+      tapeEl.innerHTML = tapeItems.map(renderCard).join('');
+
+      // Вычисляем точную позицию останова
+      const viewportWidth = viewportEl.offsetWidth;
+      const targetOffset = (WIN_INDEX * CARD_WIDTH) - (viewportWidth / 2) + (CARD_WIDTH / 2);
+      const randomJitter = (Math.random() * 40) - 20; // случайный сдвиг +-20px внутри карточки
+      const finalPosition = targetOffset + randomJitter;
+
+      // Сброс трансформы
+      tapeEl.style.transition = 'none';
+      tapeEl.style.transform = 'translateX(0px)';
+      tapeEl.offsetHeight; // reflow
+
+      // Звуковой таймер прокрутки
+      let tickCount = 0;
+      const totalDuration = 4500;
+      const startTime = performance.now();
+
+      function playTicks(now) {
+        const elapsed = now - startTime;
+        if (elapsed < totalDuration) {
+          const progress = elapsed / totalDuration;
+          // Скорость щелчков снижается по кубической кривой
+          const currentDelay = 50 + Math.pow(progress, 3) * 400;
+          playTickSound();
+          setTimeout(() => requestAnimationFrame(playTicks), currentDelay);
+        }
+      }
+      requestAnimationFrame(playTicks);
+
+      // Плавная анимация остановки через CSS transition cubic-bezier
+      tapeEl.style.transition = 'transform 4.5s cubic-bezier(0.12, 0.8, 0.15, 1)';
+      tapeEl.style.transform = `translateX(-${finalPosition}px)`;
+
+      // Завершение спина
+      setTimeout(() => {
+        isSpinning = false;
+        showWinModal(winner);
+        addHistory(winner);
+        updateBalanceUI();
+      }, 4700);
+    }
+
+    function showWinModal(winner) {
+      modalIcon.textContent = winner.icon;
+      modalTitle.textContent = winner.name;
+      modalEl.classList.add('active');
+      triggerConfetti();
+    }
+
+    function addHistory(winner) {
+      if (historyList.querySelector('span')) {
+        historyList.innerHTML = '';
+      }
+      const itemEl = document.createElement('div');
+      itemEl.className = 'history-item';
+      itemEl.innerHTML = `<span>${winner.icon}</span> <b>${winner.name}</b>`;
+      historyList.prepend(itemEl);
+    }
+
+    // Простой конфетти салют
+    function triggerConfetti() {
+      const canvas = document.getElementById('confetti-canvas');
+      const ctx = canvas.getContext('2d');
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
+
+      const particles = [];
+      const colors = ['#ffb703', '#fb8500', '#3a86ff', '#8338ec', '#ffffff'];
+
+      for (let i = 0; i < 80; i++) {
+        particles.push({
+          x: canvas.width / 2,
+          y: canvas.height / 2,
+          vx: (Math.random() - 0.5) * 14,
+          vy: (Math.random() - 0.8) * 14,
+          size: Math.random() * 8 + 4,
+          color: colors[Math.floor(Math.random() * colors.length)],
+          alpha: 1,
+          decay: Math.random() * 0.02 + 0.015
+        });
+      }
+
+      function animate() {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+        let alive = false;
+        particles.forEach(p => {
+          if (p.alpha > 0) {
+            alive = true;
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vy += 0.25; // gravity
+            p.alpha -= p.decay;
+            ctx.fillStyle = p.color;
+            ctx.globalAlpha = Math.max(0, p.alpha);
+            ctx.beginPath();
+            ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        });
+        if (alive) requestAnimationFrame(animate);
+      }
+      animate();
+    }
+
+    // Listeners
+    spinBtn.addEventListener('click', startSpin);
+    modalClaimBtn.addEventListener('click', () => modalEl.classList.remove('active'));
+    resetBalanceBtn.addEventListener('click', () => {
+      balance = 100000;
+      updateBalanceUI();
+    });
+
+    // Start
+    initTape();
+    updateBalanceUI();
+  </script>
+</body>
+</html>

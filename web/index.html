@@ -23,6 +23,7 @@
   <link rel="stylesheet" href="/css/components.css?v=3.5.6">
   <link rel="stylesheet" href="/css/coupon.css?v=3.5.1">
   <link rel="stylesheet" href="/css/transfers.css?v=3.5.2">
+  <link rel="stylesheet" href="/css/shop.css?v=1">
 
   <!-- Critical Coupons & Team Logos Styles -->
   <style id="coupons-critical-css">
@@ -371,11 +372,11 @@
       <div id="my-club-history-container" class="club-panel" style="display: none;"></div>
     </section>
 
-    <!-- 7. Shop — награды за монеты. Каталога пока нет: только меню и заглушка. -->
+    <!-- 7. Shop — награды за монеты и Колесо Фортуны -->
     <section id="view-shop" class="view-section">
       <div class="coupons-page-header">
-        <h1 class="coupons-page-title">🛒 Магазин</h1>
-        <p class="coupons-page-subtitle">Трать монеты на усиление состава</p>
+        <h1 class="coupons-page-title">🛒 Магазин наград</h1>
+        <p class="coupons-page-subtitle">Трать монеты на усиление состава и испытывай удачу</p>
       </div>
 
       <div class="shop-balance-card">
@@ -391,16 +392,66 @@
         <button class="category-pill active" data-shop-cat="all">Все</button>
         <button class="category-pill" data-shop-cat="squad">⚽ Состав</button>
         <button class="category-pill" data-shop-cat="transfers">🔁 Трансферы</button>
-        <button class="category-pill" data-shop-cat="bot">🤖 Бот</button>
-        <button class="category-pill" data-shop-cat="style">🎨 Оформление</button>
+        <button class="category-pill" data-shop-cat="roulette">🎰 Рулетка</button>
+        <button class="category-pill" data-shop-cat="inventory">🎒 Инвентарь</button>
       </div>
 
+      <!-- Докупка слотов ТО (при категории 'all' или 'transfers') -->
       <div id="shop-transfers" class="shop-slots" style="display:none"></div>
 
-      <div class="shop-empty-state" id="shop-items-container">
-        <div class="shop-empty-icon">🔒</div>
-        <div class="shop-empty-title">Награды скоро появятся</div>
-        <div class="shop-empty-desc" id="shop-empty-desc">Магазин готовится к открытию. Копи монеты — они пригодятся.</div>
+      <!-- Сетка наград магазина -->
+      <div id="shop-items-grid" class="shop-items-grid"></div>
+
+      <!-- Интерактивное Колесо Фортуны -->
+      <div id="shop-wheel-section" class="shop-wheel-section">
+        <div class="shop-wheel-header">
+          <h2 class="shop-wheel-title">🎡 Колесо Фортуны</h2>
+          <p class="shop-wheel-sub">Крути рулетку с шансом выиграть супер-призы лиги или Секретного игрока</p>
+        </div>
+
+        <div class="wheel-stage">
+          <div class="wheel-outer-ring"></div>
+          
+          <div class="pointer-wrap">
+            <div class="pointer-arrow" id="pointer-arrow"></div>
+            <div class="pointer-pin"></div>
+          </div>
+
+          <canvas id="wheel-canvas" class="wheel-canvas" width="760" height="760"></canvas>
+
+          <div class="center-hub" id="center-hub" title="Крутить колесо">
+            <span class="center-hub-icon">🎲</span>
+          </div>
+        </div>
+
+        <div class="wheel-controls">
+          <button class="wheel-spin-btn" id="wheel-spin-btn">
+            <span>Вращать колесо</span> • <span>25 000 🪙</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- Инвентарь тренера -->
+      <div id="shop-inventory-section" class="shop-inventory-section">
+        <div class="inventory-header">
+          <div class="inventory-title">
+            <span>🎒 Мой инвентарь наград</span>
+          </div>
+          <span class="inventory-badge" id="inventory-count-badge">0 активных</span>
+        </div>
+        <div class="inventory-list" id="shop-inventory-list">
+          <div class="inventory-empty">Загрузка инвентаря…</div>
+        </div>
+      </div>
+
+      <!-- Модальное окно выигрыша в Рулетке -->
+      <div class="wheel-modal-overlay" id="wheel-modal">
+        <div class="wheel-modal-content">
+          <div class="wheel-modal-icon" id="wheel-modal-icon">🎉</div>
+          <div class="wheel-modal-title" id="wheel-modal-title">Поздравляем!</div>
+          <div class="wheel-modal-desc" id="wheel-modal-desc">Вы выиграли награду!</div>
+          <button class="wheel-modal-btn" id="wheel-modal-claim-btn">Забрать награду</button>
+        </div>
       </div>
     </section>
 

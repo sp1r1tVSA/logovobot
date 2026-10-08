@@ -552,6 +552,41 @@ class ApiClient {
     });
   }
 
+  // 5b. Shop & Wheel of Fortune Rewards
+  getShopCatalog() {
+    return this.request('/api/shop/catalog');
+  }
+
+  getShopInventory() {
+    return this.request('/api/shop/inventory');
+  }
+
+  buyShopItem(itemId, notes = null) {
+    return this.request('/api/shop/buy', {
+      method: 'POST',
+      body: JSON.stringify({ item_id: itemId, notes: notes })
+    });
+  }
+
+  spinRoulette() {
+    return this.request('/api/shop/roulette/spin', {
+      method: 'POST',
+      body: JSON.stringify({})
+    });
+  }
+
+  getShopClaims(status = null) {
+    const q = status ? `?status=${encodeURIComponent(status)}` : '';
+    return this.request(`/api/admin/shop/claims${q}`);
+  }
+
+  resolveShopClaim(claimId, { action = 'approved', playerName = '', notes = null } = {}) {
+    return this.request(`/api/admin/shop/claims/${claimId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify({ action, player_name: playerName, notes })
+    });
+  }
+
   getTransferHistory({ windowId = null, mine = false, club = '' } = {}) {
     const qs = new URLSearchParams();
     if (windowId) qs.set('window', String(windowId));

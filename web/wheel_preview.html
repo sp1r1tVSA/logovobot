@@ -1,0 +1,762 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Колесо Фортуны — Preview (Вариант 2)</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@400;600;700;800;900&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg-main: #0c0d10;
+      --bg-card: #16181d;
+      --accent-gold: #ffb703;
+      --accent-orange: #fb8500;
+      --text-main: #f8f9fa;
+      --text-muted: #8d99ae;
+      --wheel-size: 360px;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+      user-select: none;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    body {
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg-main);
+      color: var(--text-main);
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      overflow-x: hidden;
+    }
+
+    /* Container */
+    .app-container {
+      width: 100%;
+      max-width: 440px;
+      background: rgba(22, 24, 29, 0.85);
+      backdrop-filter: blur(20px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 28px;
+      padding: 24px 20px;
+      box-shadow: 0 25px 60px rgba(0, 0, 0, 0.7);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      position: relative;
+    }
+
+    /* Nav toggle between styles */
+    .nav-tabs {
+      display: flex;
+      background: #0f1013;
+      border-radius: 12px;
+      padding: 4px;
+      margin-bottom: 20px;
+      width: 100%;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    .nav-tab {
+      flex: 1;
+      text-align: center;
+      padding: 8px 12px;
+      font-size: 13px;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-decoration: none;
+      border-radius: 8px;
+      transition: all 0.2s;
+    }
+
+    .nav-tab.active {
+      background: var(--bg-card);
+      color: var(--text-main);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    }
+
+    /* Header */
+    .header {
+      width: 100%;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+
+    .title-group h1 {
+      font-size: 21px;
+      font-weight: 800;
+      background: linear-gradient(135deg, #ffffff, #dcdde1);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+
+    .title-group p {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+
+    .balance-badge {
+      background: rgba(255, 183, 3, 0.12);
+      border: 1px solid rgba(255, 183, 3, 0.3);
+      border-radius: 20px;
+      padding: 6px 14px;
+      font-weight: 800;
+      font-size: 14px;
+      color: var(--accent-gold);
+      box-shadow: 0 0 15px rgba(255, 183, 3, 0.12);
+    }
+
+    /* Wheel Stage */
+    .wheel-stage {
+      position: relative;
+      width: var(--wheel-size);
+      height: var(--wheel-size);
+      margin: 10px 0 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    /* Glowing Outer Ring */
+    .wheel-outer-ring {
+      position: absolute;
+      inset: -12px;
+      border-radius: 50%;
+      background: radial-gradient(circle, transparent 65%, rgba(255, 183, 3, 0.2) 80%, rgba(251, 133, 0, 0.3) 100%);
+      box-shadow: 0 0 35px rgba(255, 183, 3, 0.25), inset 0 0 25px rgba(0, 0, 0, 0.8);
+      pointer-events: none;
+      z-index: 1;
+    }
+
+    /* Ticker Pointer on Top */
+    .pointer-wrap {
+      position: absolute;
+      top: -14px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 20;
+      filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.7));
+    }
+
+    .pointer-arrow {
+      width: 32px;
+      height: 40px;
+      background: linear-gradient(180deg, #ffcc00, #ff8800);
+      clip-path: polygon(50% 100%, 0 0, 100% 0);
+      transform-origin: 50% 10%;
+      transition: transform 0.08s ease-out;
+    }
+
+    .pointer-pin {
+      position: absolute;
+      top: 2px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 8px #fff;
+    }
+
+    /* Canvas Wheel */
+    #wheel-canvas {
+      width: var(--wheel-size);
+      height: var(--wheel-size);
+      border-radius: 50%;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.8);
+      transition: transform 15s cubic-bezier(0.08, 0.95, 0.15, 1);
+      cursor: pointer;
+    }
+
+    /* Center Spin Hub */
+    .center-hub {
+      position: absolute;
+      width: 70px;
+      height: 70px;
+      border-radius: 50%;
+      background: radial-gradient(circle, #252830 0%, #111216 100%);
+      border: 3px solid var(--accent-gold);
+      box-shadow: 0 0 20px rgba(255, 183, 3, 0.4), inset 0 2px 6px rgba(255, 255, 255, 0.2);
+      z-index: 10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+
+    .center-hub:hover {
+      transform: scale(1.05);
+      box-shadow: 0 0 30px rgba(255, 183, 3, 0.7);
+    }
+
+    .center-hub:active {
+      transform: scale(0.96);
+    }
+
+    .center-hub .hub-icon {
+      font-size: 20px;
+    }
+
+    .center-hub .hub-text {
+      font-size: 9px;
+      font-weight: 800;
+      letter-spacing: 0.5px;
+      color: var(--accent-gold);
+      text-transform: uppercase;
+      margin-top: 1px;
+    }
+
+    /* Controls */
+    .controls {
+      width: 100%;
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+
+    .btn-spin {
+      width: 100%;
+      height: 54px;
+      border: none;
+      border-radius: 16px;
+      background: linear-gradient(135deg, var(--accent-gold), var(--accent-orange));
+      color: #0c0d10;
+      font-family: inherit;
+      font-size: 17px;
+      font-weight: 800;
+      cursor: pointer;
+      box-shadow: 0 6px 22px rgba(251, 133, 0, 0.35);
+      transition: transform 0.15s, box-shadow 0.15s, opacity 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+    }
+
+    .btn-spin:hover:not(:disabled) {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 28px rgba(251, 133, 0, 0.5);
+    }
+
+    .btn-spin:active:not(:disabled) {
+      transform: translateY(1px);
+    }
+
+    .btn-spin:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+      box-shadow: none;
+    }
+
+    .reset-btn {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 13px;
+      cursor: pointer;
+      text-decoration: underline;
+      align-self: center;
+    }
+
+    /* History Log */
+    .history-section {
+      width: 100%;
+      margin-top: 20px;
+      border-top: 1px solid rgba(255, 255, 255, 0.08);
+      padding-top: 14px;
+    }
+
+    .history-title {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 8px;
+      font-weight: 600;
+    }
+
+    .history-list {
+      display: flex;
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .history-item {
+      padding: 6px 10px;
+      background: rgba(255, 255, 255, 0.04);
+      border-radius: 8px;
+      font-size: 12px;
+      white-space: nowrap;
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      border: 1px solid rgba(255, 255, 255, 0.05);
+    }
+
+    /* Winner Modal */
+    .modal-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.85);
+      backdrop-filter: blur(10px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 100;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.3s ease;
+    }
+
+    .modal-overlay.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .winner-card {
+      background: var(--bg-card);
+      border: 2px solid var(--accent-gold);
+      border-radius: 24px;
+      padding: 32px 24px;
+      width: 90%;
+      max-width: 330px;
+      text-align: center;
+      box-shadow: 0 0 50px rgba(255, 183, 3, 0.4);
+      transform: scale(0.8);
+      transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+    }
+
+    .modal-overlay.active .winner-card {
+      transform: scale(1);
+    }
+
+    .winner-subtitle {
+      color: var(--accent-gold);
+      font-size: 13px;
+      font-weight: 800;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 8px;
+    }
+
+    .winner-icon {
+      font-size: 64px;
+      margin: 10px 0;
+      animation: bounce 1s ease infinite alternate;
+    }
+
+    @keyframes bounce {
+      from { transform: translateY(0); }
+      to { transform: translateY(-8px); }
+    }
+
+    .winner-title {
+      font-size: 20px;
+      font-weight: 800;
+      margin-bottom: 20px;
+    }
+
+    .btn-claim {
+      width: 100%;
+      padding: 13px;
+      background: var(--accent-gold);
+      color: #0c0d10;
+      border: none;
+      border-radius: 12px;
+      font-weight: 800;
+      font-size: 15px;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body>
+
+  <div class="app-container">
+    <!-- Style Switcher -->
+    <div class="nav-tabs">
+      <a href="roulette_preview.html" class="nav-tab">Лента (Вариант 1)</a>
+      <a href="wheel_preview.html" class="nav-tab active">Колесо (Вариант 2)</a>
+    </div>
+
+    <div class="header">
+      <div class="title-group">
+        <h1>🎡 Колесо Фортуны</h1>
+        <p>Круглый вариант рулетки</p>
+      </div>
+      <div class="balance-badge" id="balance-badge">
+        <span>100 000</span> 🪙
+      </div>
+    </div>
+
+    <!-- Wheel Assembly -->
+    <div class="wheel-stage">
+      <div class="wheel-outer-ring"></div>
+      
+      <!-- Top Pointer -->
+      <div class="pointer-wrap">
+        <div class="pointer-arrow" id="pointer-arrow"></div>
+        <div class="pointer-pin"></div>
+      </div>
+
+      <!-- Canvas Wheel -->
+      <canvas id="wheel-canvas" width="760" height="760"></canvas>
+
+      <!-- Center Hub / Button -->
+      <div class="center-hub" id="center-hub" title="Нажмите, чтобы крутить">
+        <span class="hub-icon">🎲</span>
+        <span class="hub-text">КРУТИТЬ</span>
+      </div>
+    </div>
+
+    <!-- Controls -->
+    <div class="controls">
+      <button class="btn-spin" id="spin-btn">
+        Крутить за 25 000 🪙
+      </button>
+      <button class="reset-btn" id="reset-balance-btn">Пополнить баланс</button>
+    </div>
+
+    <!-- History -->
+    <div class="history-section">
+      <div class="history-title">История выигрышей:</div>
+      <div class="history-list" id="history-list">
+        <span style="color: var(--text-muted); font-size: 12px;">Пока нет наград...</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Winner Modal -->
+  <div class="modal-overlay" id="modal">
+    <div class="winner-card">
+      <div class="winner-subtitle">🎉 Сектор Приз!</div>
+      <div class="winner-icon" id="modal-icon">🎁</div>
+      <div class="winner-title" id="modal-title">Приз</div>
+      <button class="btn-claim" id="modal-claim-btn">Забрать награду</button>
+    </div>
+  </div>
+
+  <canvas id="confetti-canvas" style="position:fixed; inset:0; pointer-events:none; z-index:99;"></canvas>
+
+  <script>
+    // --- 8 СЕКТОРОВ КОЛЕСА ---
+    const SECTORS = [
+      { id: 'money_1', name: '+10 млн', icon: '💰', color: '#1f242d', textColor: '#ffffff', weight: 20 },
+      { id: 'urna', name: 'Выгодная урна', icon: '🗑', color: '#2a2f3a', textColor: '#ffffff', weight: 25 },
+      { id: 'train', name: '+5 тренировок', icon: '🏋️', color: '#1d3557', textColor: '#64b5f6', weight: 18 },
+      { id: 'coupon', name: 'Купон -50%', icon: '📄', color: '#163b4d', textColor: '#4dd0e1', weight: 15 },
+      { id: 'money_2', name: '+10 млн', icon: '💰', color: '#1f242d', textColor: '#ffffff', weight: 15 },
+      { id: 'exchange', name: 'Обмен без слотов', icon: '🤝', color: '#381a4d', textColor: '#ce93d8', weight: 5 },
+      { id: 'credit', name: 'Кредит 20M', icon: '🏦', color: '#4a1525', textColor: '#ff80ab', weight: 3 },
+      { id: 'secret', name: 'Секретный игрок', icon: '🕵️', color: '#805b00', textColor: '#ffe082', isLegendary: true, weight: 0.5 }
+    ];
+
+    const NUM_SECTORS = SECTORS.length;
+    const ARC = (2 * Math.PI) / NUM_SECTORS;
+    const SPIN_PRICE = 25000;
+
+    let balance = 100000;
+    let isSpinning = false;
+    let currentRotation = 0; // в градусах
+
+    const canvas = document.getElementById('wheel-canvas');
+    const ctx = canvas.getContext('2d');
+    const spinBtn = document.getElementById('spin-btn');
+    const centerHub = document.getElementById('center-hub');
+    const balanceBadge = document.getElementById('balance-badge');
+    const modalEl = document.getElementById('modal');
+    const modalIcon = document.getElementById('modal-icon');
+    const modalTitle = document.getElementById('modal-title');
+    const modalClaimBtn = document.getElementById('modal-claim-btn');
+    const historyList = document.getElementById('history-list');
+    const resetBalanceBtn = document.getElementById('reset-balance-btn');
+    const pointerArrow = document.getElementById('pointer-arrow');
+
+    // Web Audio Synthesizer для трещотки
+    const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    function playClick() {
+      try {
+        if (audioCtx.state === 'suspended') audioCtx.resume();
+        const osc = audioCtx.createOscillator();
+        const gain = audioCtx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(1400, audioCtx.currentTime);
+        osc.frequency.exponentialRampToValueAtTime(300, audioCtx.currentTime + 0.025);
+        gain.gain.setValueAtTime(0.09, audioCtx.currentTime);
+        gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.025);
+        osc.connect(gain);
+        gain.connect(audioCtx.destination);
+        osc.start();
+        osc.stop(audioCtx.currentTime + 0.025);
+
+        // Стрелка дергается вверх-вниз при щелчке
+        pointerArrow.style.transform = 'rotate(-12deg)';
+        setTimeout(() => { pointerArrow.style.transform = 'rotate(0deg)'; }, 45);
+      } catch (e) {}
+    }
+
+    // Отрисовка колеса на Canvas
+    function drawWheel() {
+      const size = canvas.width;
+      const center = size / 2;
+      const radius = center - 14;
+
+      ctx.clearRect(0, 0, size, size);
+
+      // Отрисовка каждого сектора
+      for (let i = 0; i < NUM_SECTORS; i++) {
+        const sector = SECTORS[i];
+        const angle = i * ARC;
+
+        ctx.save();
+        ctx.beginPath();
+        ctx.moveTo(center, center);
+        ctx.arc(center, center, radius, angle, angle + ARC);
+        ctx.closePath();
+
+        // Заливка сектора
+        ctx.fillStyle = sector.color;
+        ctx.fill();
+
+        // Разделительная линия
+        ctx.strokeStyle = sector.isLegendary ? '#ffb703' : 'rgba(255, 255, 255, 0.12)';
+        ctx.lineWidth = sector.isLegendary ? 4 : 2;
+        ctx.stroke();
+
+        // Легендарное свечение
+        if (sector.isLegendary) {
+          ctx.save();
+          ctx.clip();
+          const grad = ctx.createRadialGradient(center, center, 40, center, center, radius);
+          grad.addColorStop(0, 'rgba(255, 183, 3, 0.1)');
+          grad.addColorStop(1, 'rgba(255, 183, 3, 0.45)');
+          ctx.fillStyle = grad;
+          ctx.fill();
+          ctx.restore();
+        }
+
+        // Текст и иконка в секторе
+        ctx.save();
+        ctx.translate(center, center);
+        ctx.rotate(angle + ARC / 2);
+
+        // Иконка у самого внешнего края сектора
+        ctx.font = '40px "Outfit", sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(sector.icon, radius * 0.83, 0);
+
+        // Название награды: значительно крупнее, экстра-жирный (800) и четкий с тенью
+        let fontSize = 28;
+        ctx.font = `800 ${fontSize}px "Outfit", sans-serif`;
+        const maxTextWidth = radius * 0.52; // Безопасное пространство (~190px)
+        while (ctx.measureText(sector.name).width > maxTextWidth && fontSize > 21) {
+          fontSize -= 1;
+          ctx.font = `800 ${fontSize}px "Outfit", sans-serif`;
+        }
+
+        ctx.fillStyle = sector.textColor;
+        ctx.shadowColor = 'rgba(0, 0, 0, 0.95)';
+        ctx.shadowBlur = 8;
+        ctx.shadowOffsetX = 0;
+        ctx.shadowOffsetY = 2;
+        // Центрируем название ровно посередине свободной зоны между центром и иконкой
+        ctx.fillText(sector.name, radius * 0.48, 0);
+
+        ctx.restore();
+        ctx.restore();
+      }
+
+      // Внешний обод с декоративными заклепками/пинами
+      ctx.beginPath();
+      ctx.arc(center, center, radius, 0, 2 * Math.PI);
+      ctx.lineWidth = 10;
+      ctx.strokeStyle = '#1d2027';
+      ctx.stroke();
+
+      // Пины по краям
+      for (let i = 0; i < NUM_SECTORS * 2; i++) {
+        const pinAngle = i * (Math.PI / NUM_SECTORS);
+        const px = center + (radius - 2) * Math.cos(pinAngle);
+        const py = center + (radius - 2) * Math.sin(pinAngle);
+
+        ctx.beginPath();
+        ctx.arc(px, py, 4, 0, 2 * Math.PI);
+        ctx.fillStyle = '#ffcc00';
+        ctx.fill();
+        ctx.shadowColor = '#ffcc00';
+        ctx.shadowBlur = 6;
+      }
+    }
+
+    function updateBalanceUI() {
+      balanceBadge.innerHTML = `<span>${balance.toLocaleString('ru-RU')}</span> 🪙`;
+      spinBtn.disabled = isSpinning || balance < SPIN_PRICE;
+    }
+
+    // Выбор победителя по дроп-рейтам
+    function pickWinner() {
+      const total = SECTORS.reduce((sum, s) => sum + s.weight, 0);
+      let rand = Math.random() * total;
+      for (let i = 0; i < SECTORS.length; i++) {
+        if (rand < SECTORS[i].weight) return i;
+        rand -= SECTORS[i].weight;
+      }
+      return 0;
+    }
+
+    // Запуск вращения колеса
+    function spinWheel() {
+      if (isSpinning || balance < SPIN_PRICE) return;
+
+      balance -= SPIN_PRICE;
+      isSpinning = true;
+      updateBalanceUI();
+
+      const winIndex = pickWinner();
+      const winningSector = SECTORS[winIndex];
+
+      // Угол сектора в градусах (360 / 8 = 45 deg)
+      const degPerSector = 360 / NUM_SECTORS;
+      
+      // Стрелка указывает на самый верх (270 градусов относительно центра Canvas)
+      // Центр сектора i находится в: (i * 45) + 22.5 градусов
+      const sectorCenterDeg = (winIndex * degPerSector) + (degPerSector / 2);
+
+      // Рассчитываем итоговый поворот: 18 полных оборотов (быстрый старт) + доворот так, чтобы нужный сектор встал ровно под стрелку (270°)
+      const extraSpins = 360 * 18; // 18 полных кругов для захватывающего 15-секундного спина
+      const jitter = (Math.random() * 20) - 10; // небольшая естественная случайность (+-10°)
+      
+      // Чтобы сектор i оказался под стрелкой вверху (270°), колесо должно повернуться на:
+      const targetSectorAngle = 270 - sectorCenterDeg;
+      
+      // Корректируем относительно текущего угла
+      const currentModulo = currentRotation % 360;
+      let diff = targetSectorAngle - currentModulo;
+      if (diff < 0) diff += 360;
+
+      const finalRotation = currentRotation + extraSpins + diff + jitter;
+
+      // Запуск трещотки по времени (15 секунд плавного замедления)
+      const spinDuration = 15000;
+      const startTime = performance.now();
+      
+      const hubText = centerHub.querySelector('.hub-text');
+      if (hubText) hubText.textContent = 'ЖДЕМ...';
+      
+      function soundLoop(now) {
+        const elapsed = now - startTime;
+        if (elapsed < spinDuration) {
+          const progress = elapsed / spinDuration;
+          // Экспоненциальное замедление звука трещотки:
+          // в начале частые щелчки (каждые 30-40мс), в конце — долгие напряженные щелчки (до 750мс)
+          const delay = 35 + Math.pow(progress, 3.2) * 750;
+          playClick();
+          setTimeout(() => requestAnimationFrame(soundLoop), delay);
+        }
+      }
+      requestAnimationFrame(soundLoop);
+
+      // CSS transition rotation (15 секунд)
+      canvas.style.transform = `rotate(${finalRotation}deg)`;
+      currentRotation = finalRotation;
+
+      // Конец анимации через 15.3 секунды
+      setTimeout(() => {
+        isSpinning = false;
+        if (hubText) hubText.textContent = 'КРУТИТЬ';
+        showWin(winningSector);
+        addHistory(winningSector);
+        updateBalanceUI();
+      }, spinDuration + 300);
+    }
+
+    function showWin(sector) {
+      modalIcon.textContent = sector.icon;
+      modalTitle.textContent = sector.name;
+      modalEl.classList.add('active');
+      triggerConfetti();
+    }
+
+    function addHistory(sector) {
+      if (historyList.querySelector('span')) {
+        historyList.innerHTML = '';
+      }
+      const itemEl = document.createElement('div');
+      itemEl.className = 'history-item';
+      itemEl.innerHTML = `<span>${sector.icon}</span> <b>${sector.name}</b>`;
+      historyList.prepend(itemEl);
+    }
+
+    // Конфетти
+    function triggerConfetti() {
+      const c = document.getElementById('confetti-canvas');
+      const cx = c.getContext('2d');
+      c.width = window.innerWidth;
+      c.height = window.innerHeight;
+
+      const particles = [];
+      const colors = ['#ffb703', '#fb8500', '#64b5f6', '#ce93d8', '#ffffff'];
+
+      for (let i = 0; i < 90; i++) {
+        particles.push({
+          x: c.width / 2,
+          y: c.height / 2,
+          vx: (Math.random() - 0.5) * 16,
+          vy: (Math.random() - 0.8) * 16,
+          size: Math.random() * 8 + 4,
+          color: colors[Math.floor(Math.random() * colors.length)],
+          alpha: 1,
+          decay: Math.random() * 0.02 + 0.015
+        });
+      }
+
+      function anim() {
+        cx.clearRect(0, 0, c.width, c.height);
+        let alive = false;
+        particles.forEach(p => {
+          if (p.alpha > 0) {
+            alive = true;
+            p.x += p.vx;
+            p.y += p.vy;
+            p.vy += 0.28;
+            p.alpha -= p.decay;
+            cx.fillStyle = p.color;
+            cx.globalAlpha = Math.max(0, p.alpha);
+            cx.beginPath();
+            cx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+            cx.fill();
+          }
+        });
+        if (alive) requestAnimationFrame(anim);
+      }
+      anim();
+    }
+
+    // Listeners
+    spinBtn.addEventListener('click', spinWheel);
+    centerHub.addEventListener('click', spinWheel);
+    modalClaimBtn.addEventListener('click', () => modalEl.classList.remove('active'));
+    resetBalanceBtn.addEventListener('click', () => {
+      balance = 100000;
+      updateBalanceUI();
+    });
+
+    // Инициализация
+    drawWheel();
+    updateBalanceUI();
+  </script>
+</body>
+</html>

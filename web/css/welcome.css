@@ -1,0 +1,555 @@
+/* ==========================================================================
+   web/css/welcome.css
+   Стили для приветственного экрана (Welcome Digest) в Mini-App
+   ========================================================================== */
+
+/* Полноэкранный оверлей поверх всего интерфейса */
+.welcome-modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 950;
+  background: rgba(8, 10, 14, 0.88);
+  backdrop-filter: blur(14px);
+  -webkit-backdrop-filter: blur(14px);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  overflow-y: auto;
+  padding: 16px 12px 32px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.3s ease, visibility 0.3s ease;
+}
+
+.welcome-modal-overlay.active {
+  opacity: 1;
+  visibility: visible;
+}
+
+/* Контейнер контента */
+.welcome-container {
+  width: 100%;
+  max-width: 440px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  transform: translateY(16px) scale(0.98);
+  transition: transform 0.3s cubic-bezier(0.16, 1, 0.3, 1);
+  padding-bottom: 20px;
+}
+
+.welcome-modal-overlay.active .welcome-container {
+  transform: translateY(0) scale(1);
+}
+
+.welcome-container.closing {
+  transform: translateY(20px) scale(0.96);
+  opacity: 0;
+  transition: transform 0.25s ease, opacity 0.25s ease;
+}
+
+/* Кнопка быстрого закрытия крестиком в углу */
+.welcome-btn-close-top {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--text-secondary, #94a3b8);
+  font-size: 16px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+  transition: all 0.15s;
+}
+
+.welcome-btn-close-top:hover {
+  background: rgba(255, 255, 255, 0.15);
+  color: #fff;
+}
+
+/* 1. Хедер участника */
+.welcome-header-card {
+  background: linear-gradient(180deg, rgba(26, 32, 44, 0.9) 0%, rgba(18, 22, 31, 0.8) 100%);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  padding: 16px 18px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+  position: relative;
+  overflow: hidden;
+}
+
+.welcome-header-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 4px;
+  height: 100%;
+  background: linear-gradient(135deg, #f5b027 0%, #ff8800 100%);
+}
+
+.welcome-greeting-badge {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-gold, #f5b027);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.welcome-user-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 20px;
+  font-weight: 900;
+  color: #fff;
+  margin-top: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.welcome-user-subtitle {
+  font-size: 12px;
+  color: var(--text-secondary, #94a3b8);
+  margin-top: 2px;
+}
+
+.welcome-avatar-badge {
+  width: 44px;
+  height: 44px;
+  background: rgba(255, 183, 3, 0.1);
+  border: 1.5px solid rgba(255, 183, 3, 0.3);
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 22px;
+  flex-shrink: 0;
+}
+
+/* 2. Срочная плашка (LIVE Ticker) */
+.welcome-ticker-bar {
+  background: linear-gradient(90deg, rgba(255, 71, 87, 0.18) 0%, rgba(245, 176, 39, 0.15) 100%);
+  border: 1px solid rgba(255, 71, 87, 0.3);
+  border-radius: 14px;
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  box-shadow: 0 4px 15px rgba(255, 71, 87, 0.12);
+}
+
+.welcome-ticker-pulse {
+  background: #ff4757;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 900;
+  text-transform: uppercase;
+  padding: 3px 6px;
+  border-radius: 6px;
+  letter-spacing: 0.5px;
+  animation: welcome-pulse-red 1.5s infinite;
+  flex-shrink: 0;
+}
+
+@keyframes welcome-pulse-red {
+  0% { opacity: 0.7; }
+  50% { opacity: 1; }
+  100% { opacity: 0.7; }
+}
+
+.welcome-ticker-text {
+  font-size: 12.5px;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* 3. Лента новостей */
+.welcome-feed-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.welcome-section-label {
+  font-size: 11px;
+  font-weight: 800;
+  color: var(--text-muted, #64748b);
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 4px;
+}
+
+.welcome-feed-card {
+  background: var(--bg-surface, #12161f);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 14px;
+  padding: 12px 14px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  cursor: pointer;
+  transition: all 0.18s ease;
+  position: relative;
+  overflow: hidden;
+}
+
+.welcome-feed-card:hover {
+  background: var(--bg-surface-elevated, #1a202c);
+  border-color: rgba(255, 255, 255, 0.16);
+  transform: translateY(-1px);
+}
+
+.welcome-feed-card:active {
+  transform: scale(0.99);
+}
+
+.welcome-feed-icon {
+  font-size: 22px;
+  width: 38px;
+  height: 38px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.welcome-feed-content {
+  flex: 1;
+  min-width: 0;
+}
+
+.welcome-feed-meta {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 10.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.3px;
+}
+
+.welcome-feed-meta .welcome-feed-time {
+  color: var(--text-muted, #64748b);
+  font-weight: 500;
+}
+
+.welcome-feed-title {
+  font-size: 13px;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-top: 3px;
+}
+
+.welcome-feed-arrow {
+  color: var(--text-muted, #64748b);
+  font-size: 14px;
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+/* Цвета тегов */
+.tag-gold { color: #f5b027; }
+.tag-green { color: #10b981; }
+.tag-cyan { color: #00d2ff; }
+.tag-purple { color: #a855f7; }
+.tag-blue { color: #3b82f6; }
+.tag-red { color: #ff4757; }
+
+/* 4. Битва дня */
+.welcome-match-card {
+  background: var(--bg-surface, #12161f);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 20px;
+  padding: 16px 18px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.3);
+}
+
+.welcome-match-inner {
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 16px;
+  padding: 14px;
+}
+
+.welcome-match-teams {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.welcome-team-col {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+}
+
+.welcome-team-col.away {
+  flex-direction: row-reverse;
+  text-align: right;
+}
+
+.welcome-team-crest {
+  width: 38px;
+  height: 38px;
+  background: rgba(255, 255, 255, 0.05);
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  flex-shrink: 0;
+}
+
+.welcome-team-info .name {
+  font-family: 'Outfit', sans-serif;
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+}
+
+.welcome-team-info .form {
+  font-size: 11px;
+  color: var(--text-muted, #64748b);
+  margin-top: 1px;
+}
+
+.welcome-vs-badge {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  padding: 0 8px;
+}
+
+.welcome-vs-text {
+  font-family: 'Outfit', sans-serif;
+  font-size: 13px;
+  font-weight: 900;
+  color: var(--text-muted, #64748b);
+}
+
+.welcome-match-time {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--accent-gold, #f5b027);
+  background: rgba(245, 176, 39, 0.1);
+  padding: 2px 7px;
+  border-radius: 6px;
+  margin-top: 4px;
+  white-space: nowrap;
+}
+
+.welcome-odds-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 8px;
+}
+
+.welcome-odd-btn {
+  background: rgba(26, 32, 44, 0.9);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 10px;
+  padding: 8px 6px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+
+.welcome-odd-btn:hover {
+  border-color: rgba(245, 176, 39, 0.4);
+}
+
+.welcome-odd-btn.selected {
+  background: rgba(245, 176, 39, 0.2);
+  border-color: var(--accent-gold, #f5b027);
+  box-shadow: 0 0 10px rgba(245, 176, 39, 0.25);
+}
+
+.welcome-odd-btn .label {
+  font-size: 10px;
+  font-weight: 700;
+  color: var(--text-muted, #64748b);
+  text-transform: uppercase;
+}
+
+.welcome-odd-btn .value {
+  font-family: 'Outfit', sans-serif;
+  font-size: 14px;
+  font-weight: 800;
+  color: #fff;
+  margin-top: 2px;
+}
+
+.welcome-odd-btn.selected .value {
+  color: var(--accent-gold, #f5b027);
+}
+
+/* 5. Сетка статуса */
+.welcome-status-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+
+.welcome-status-tile {
+  background: var(--bg-surface, #12161f);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 18px;
+  padding: 14px 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+}
+
+.welcome-tile-header {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted, #64748b);
+  text-transform: uppercase;
+  margin-bottom: 6px;
+}
+
+.welcome-tile-val {
+  font-family: 'Outfit', sans-serif;
+  font-size: 17px;
+  font-weight: 800;
+  color: #fff;
+}
+
+.welcome-tile-desc {
+  font-size: 11px;
+  color: var(--text-secondary, #94a3b8);
+  margin-top: 4px;
+}
+
+/* 6. Кнопка CTA */
+.welcome-btn-enter {
+  width: 100%;
+  height: 56px;
+  background: linear-gradient(135deg, #f5b027 0%, #ff8800 100%);
+  color: #000;
+  font-family: 'Outfit', sans-serif;
+  font-size: 17px;
+  font-weight: 900;
+  border: none;
+  border-radius: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  box-shadow: 0 8px 25px rgba(245, 176, 39, 0.4);
+  margin-top: 4px;
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.welcome-btn-enter:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 30px rgba(245, 176, 39, 0.6);
+}
+
+.welcome-btn-enter:active {
+  transform: translateY(1px);
+}
+
+.welcome-quick-links {
+  display: flex;
+  justify-content: center;
+  gap: 16px;
+  font-size: 12px;
+  color: var(--text-muted, #64748b);
+  font-weight: 600;
+  margin-top: 4px;
+}
+
+.welcome-quick-link {
+  color: var(--text-secondary, #94a3b8);
+  cursor: pointer;
+  transition: color 0.15s;
+}
+
+.welcome-quick-link:hover {
+  color: var(--accent-gold, #f5b027);
+}
+
+/* Модалка подробностей новости */
+.welcome-detail-modal {
+  display: none;
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
+  z-index: 1000;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.welcome-detail-modal.active {
+  display: flex;
+}
+
+.welcome-detail-card {
+  background: var(--bg-surface, #12161f);
+  border: 1px solid rgba(245, 176, 39, 0.3);
+  border-radius: 20px;
+  padding: 24px;
+  width: 100%;
+  max-width: 360px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+}
+
+.welcome-detail-title {
+  font-family: 'Outfit', sans-serif;
+  font-size: 18px;
+  font-weight: 800;
+  color: #fff;
+}
+
+.welcome-detail-text {
+  font-size: 13.5px;
+  color: #cbd5e1;
+  line-height: 1.55;
+}
+
+.welcome-btn-close-detail {
+  background: var(--accent-gold, #f5b027);
+  color: #000;
+  border: none;
+  border-radius: 12px;
+  padding: 12px;
+  font-weight: 800;
+  font-size: 15px;
+  cursor: pointer;
+  margin-top: 6px;
+}

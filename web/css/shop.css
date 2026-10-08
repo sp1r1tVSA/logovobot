@@ -1,0 +1,508 @@
+/* ==========================================================================
+   web/css/shop.css — Логово Фифарей: Магазин наград и Колесо Фортуны
+   ========================================================================== */
+
+:root {
+  --shop-gold: #ffb703;
+  --shop-orange: #fb8500;
+  --shop-blue: #3a86ff;
+  --shop-purple: #8338ec;
+  --shop-card-bg: rgba(22, 24, 29, 0.85);
+  --shop-card-border: rgba(255, 255, 255, 0.08);
+}
+
+/* 1. Сетка товаров магазина */
+.shop-items-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 14px;
+  margin-top: 16px;
+  margin-bottom: 24px;
+}
+
+@media (min-width: 480px) {
+  .shop-items-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.shop-card {
+  background: var(--shop-card-bg);
+  border: 1px solid var(--shop-card-border);
+  border-radius: 18px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.shop-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(255, 183, 3, 0.3);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5), 0 0 15px rgba(255, 183, 3, 0.1);
+}
+
+.shop-card.featured {
+  border-color: rgba(255, 183, 3, 0.4);
+  background: linear-gradient(145deg, rgba(32, 28, 20, 0.85), rgba(18, 20, 25, 0.9));
+}
+
+.shop-card.featured::after {
+  content: 'TOP';
+  position: absolute;
+  top: 10px;
+  right: -25px;
+  background: linear-gradient(135deg, var(--shop-orange), var(--shop-gold));
+  color: #000;
+  font-size: 9px;
+  font-weight: 900;
+  padding: 3px 28px;
+  transform: rotate(45deg);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.5);
+}
+
+.shop-card-header {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 10px;
+}
+
+.shop-card-icon {
+  width: 44px;
+  height: 44px;
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.shop-card-headings {
+  flex: 1;
+}
+
+.shop-card-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: #fff;
+  margin-bottom: 3px;
+  line-height: 1.2;
+}
+
+.shop-card-badge {
+  display: inline-block;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: rgba(255, 183, 3, 0.15);
+  color: var(--shop-gold);
+  border: 1px solid rgba(255, 183, 3, 0.25);
+}
+
+.shop-card-badge.tag-window {
+  background: rgba(58, 134, 255, 0.15);
+  color: #64b5f6;
+  border-color: rgba(58, 134, 255, 0.25);
+}
+
+.shop-card-desc {
+  font-size: 12px;
+  color: #8d99ae;
+  line-height: 1.4;
+  margin-bottom: 14px;
+  flex-grow: 1;
+}
+
+.shop-card-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.shop-card-price {
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--shop-gold);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.shop-card-buy-btn {
+  background: linear-gradient(135deg, var(--shop-orange), var(--shop-gold));
+  color: #0c0d10;
+  font-weight: 800;
+  font-size: 13px;
+  padding: 8px 16px;
+  border-radius: 10px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s ease;
+  box-shadow: 0 4px 12px rgba(251, 133, 0, 0.3);
+}
+
+.shop-card-buy-btn:hover:not(:disabled) {
+  transform: scale(1.03);
+  box-shadow: 0 6px 16px rgba(251, 133, 0, 0.45);
+}
+
+.shop-card-buy-btn:disabled {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.3);
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+.shop-card-reason {
+  font-size: 11px;
+  color: #ef476f;
+  margin-top: 6px;
+  font-weight: 600;
+}
+
+/* 2. Колесо Фортуны */
+.shop-wheel-section {
+  background: var(--shop-card-bg);
+  border: 1px solid var(--shop-card-border);
+  border-radius: 24px;
+  padding: 24px 16px;
+  margin: 16px 0 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  position: relative;
+  overflow: hidden;
+  box-shadow: 0 15px 40px rgba(0, 0, 0, 0.5);
+}
+
+.shop-wheel-header {
+  text-align: center;
+  margin-bottom: 16px;
+  width: 100%;
+}
+
+.shop-wheel-title {
+  font-size: 20px;
+  font-weight: 900;
+  background: linear-gradient(135deg, #fff, #ffb703);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  margin-bottom: 4px;
+}
+
+.shop-wheel-sub {
+  font-size: 12px;
+  color: #8d99ae;
+}
+
+.wheel-stage {
+  position: relative;
+  width: 320px;
+  height: 320px;
+  margin: 10px auto 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+@media (max-width: 360px) {
+  .wheel-stage {
+    width: 280px;
+    height: 280px;
+  }
+}
+
+.wheel-outer-ring {
+  position: absolute;
+  inset: -10px;
+  border-radius: 50%;
+  background: radial-gradient(circle, transparent 65%, rgba(255, 183, 3, 0.15) 80%, rgba(251, 133, 0, 0.25) 100%);
+  box-shadow: 0 0 30px rgba(255, 183, 3, 0.2), inset 0 0 20px rgba(0, 0, 0, 0.8);
+  pointer-events: none;
+  z-index: 1;
+}
+
+.pointer-wrap {
+  position: absolute;
+  top: -12px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  filter: drop-shadow(0 4px 10px rgba(0, 0, 0, 0.8));
+}
+
+.pointer-arrow {
+  width: 32px;
+  height: 40px;
+  background: linear-gradient(180deg, #ffcc00, #ff8800);
+  clip-path: polygon(50% 100%, 0 0, 100% 0);
+  transform-origin: 50% 10%;
+  transition: transform 0.08s ease-out;
+}
+
+.pointer-pin {
+  position: absolute;
+  top: 2px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 8px #fff;
+}
+
+.wheel-canvas {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  filter: drop-shadow(0 10px 25px rgba(0, 0, 0, 0.8));
+  cursor: pointer;
+}
+
+.center-hub {
+  position: absolute;
+  width: 66px;
+  height: 66px;
+  border-radius: 50%;
+  background: radial-gradient(circle, #2d313d 0%, #15171d 100%);
+  border: 3px solid var(--shop-gold);
+  box-shadow: 0 0 20px rgba(255, 183, 3, 0.5), inset 0 2px 6px rgba(255, 255, 255, 0.3);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  z-index: 10;
+  transition: transform 0.15s ease;
+}
+
+.center-hub:hover {
+  transform: scale(1.08);
+}
+
+.center-hub:active {
+  transform: scale(0.95);
+}
+
+.center-hub-icon {
+  font-size: 26px;
+}
+
+.wheel-controls {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  max-width: 320px;
+}
+
+.wheel-spin-btn {
+  width: 100%;
+  background: linear-gradient(135deg, var(--shop-orange), var(--shop-gold));
+  color: #0c0d10;
+  font-weight: 900;
+  font-size: 15px;
+  padding: 13px 20px;
+  border-radius: 14px;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 8px 24px rgba(251, 133, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  transition: all 0.2s ease;
+}
+
+.wheel-spin-btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 30px rgba(251, 133, 0, 0.5);
+}
+
+.wheel-spin-btn:disabled {
+  background: rgba(255, 255, 255, 0.08);
+  color: rgba(255, 255, 255, 0.3);
+  cursor: not-allowed;
+  box-shadow: none;
+}
+
+/* 3. Инвентарь тренера */
+.shop-inventory-section {
+  background: var(--shop-card-bg);
+  border: 1px solid var(--shop-card-border);
+  border-radius: 20px;
+  padding: 16px;
+  margin-bottom: 24px;
+}
+
+.inventory-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+
+.inventory-title {
+  font-size: 16px;
+  font-weight: 800;
+  color: #fff;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.inventory-badge {
+  background: rgba(255, 255, 255, 0.08);
+  font-size: 11px;
+  padding: 3px 8px;
+  border-radius: 8px;
+  color: #8d99ae;
+}
+
+.inventory-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.inventory-item-card {
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.05);
+  border-radius: 12px;
+  padding: 10px 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.inventory-item-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.inventory-item-icon {
+  font-size: 20px;
+}
+
+.inventory-item-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #f8f9fa;
+}
+
+.inventory-item-detail {
+  font-size: 11px;
+  color: #8d99ae;
+}
+
+.inventory-item-charges {
+  background: rgba(255, 183, 3, 0.15);
+  color: var(--shop-gold);
+  border: 1px solid rgba(255, 183, 3, 0.3);
+  font-size: 12px;
+  font-weight: 800;
+  padding: 3px 10px;
+  border-radius: 8px;
+}
+
+.inventory-empty {
+  text-align: center;
+  padding: 20px 0;
+  color: #8d99ae;
+  font-size: 13px;
+}
+
+/* 4. Модальное окно выигрыша */
+.wheel-modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(10px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.3s ease;
+  padding: 16px;
+}
+
+.wheel-modal-overlay.active {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.wheel-modal-content {
+  background: #16181d;
+  border: 1px solid rgba(255, 183, 3, 0.3);
+  border-radius: 28px;
+  padding: 32px 24px;
+  max-width: 360px;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.8), 0 0 40px rgba(255, 183, 3, 0.2);
+  transform: scale(0.9);
+  transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+}
+
+.wheel-modal-overlay.active .wheel-modal-content {
+  transform: scale(1);
+}
+
+.wheel-modal-icon {
+  font-size: 64px;
+  margin-bottom: 12px;
+  animation: bounce 1.5s infinite;
+}
+
+@keyframes bounce {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-10px); }
+}
+
+.wheel-modal-title {
+  font-size: 20px;
+  font-weight: 900;
+  color: #fff;
+  margin-bottom: 8px;
+}
+
+.wheel-modal-desc {
+  font-size: 14px;
+  color: var(--shop-gold);
+  font-weight: 700;
+  margin-bottom: 24px;
+}
+
+.wheel-modal-btn {
+  width: 100%;
+  background: linear-gradient(135deg, var(--shop-orange), var(--shop-gold));
+  color: #0c0d10;
+  font-weight: 800;
+  font-size: 15px;
+  padding: 12px;
+  border-radius: 14px;
+  border: none;
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(251, 133, 0, 0.4);
+}

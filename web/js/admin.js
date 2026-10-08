@@ -31,6 +31,7 @@ const TABS = [
   { id: 'outrights', label: 'Долгосрочные', globalOnly: true },
   { id: 'irl', label: '🌍 IRL', globalOnly: true },
   { id: 'players', label: 'Игроки', globalOnly: true },
+  { id: 'claims', label: '🕵️ Заявки ТО', globalOnly: true },
   { id: 'limits', label: 'Лимиты' },
   { id: 'risk', label: 'Риски' },
 ];
@@ -421,6 +422,7 @@ export class AdminPanel {
       outrights: () => this.loadOutrights(),
       irl: () => this.loadIrl(),
       players: () => this.loadPlayers(),
+      claims: () => this.loadShopClaims(),
       limits: () => this.loadLimits(),
       risk: () => this.loadRisk(),
     };
@@ -2658,6 +2660,60 @@ export class AdminPanel {
 
   // ─── События ───────────────────────────────────────────────────────────
 
+  async loadShopClaims() {
+    const body = this.body();
+    if (!body || this.tab !== 'claims') return;
+    body.innerHTML = '<div class="adm-empty">Загрузка заявок…</div>';
+    try {
+      const res = await api.getShopClaims();
+      const claims = res?.claims || [];
+      if (claims.length === 0) {
+        body.innerHTML = '<div class="adm-empty">Нет заявок на Секретного игрока.</div>';
+        return;
+      }
+      const cards = claims.map(c => {
+        const isPending = c.status === 'pending';
+        const statusBadge = isPending
+          ? '<span style="color:#ffb703; font-weight:700;">🟡 Ожидает</span>'
+          : c.status === 'approved'
+            ? '<span style="color:#06d6a0; font-weight:700;">🟢 Одобрено</span>'
+            : '<span style="color:#ef476f; font-weight:700;">🔴 Отклонено</span>';
+        return `
+          <div class="adm-card" style="margin-bottom:12px; padding:14px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:12px;">
+            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
+              <div>
+                <div style="font-weight:800; font-size:15px; color:#fff;">Заявка #${c.id} — Клуб: ${esc(c.club_name || 'Не указан')}</div>
+                <div style="font-size:12px; color:#8d99ae;">Пользователь ID: ${c.user_id} • Стоимость: ${UIRenderer.formatNumber(c.cost)} 🪙</div>
+              </div>
+              <div>${statusBadge}</div>
+            </div>
+            ${c.notes ? `<div style="font-size:12px; color:#dcdde1; margin-bottom:8px; background:rgba(0,0,0,0.3); padding:6px 10px; border-radius:6px;">Пожелания: ${esc(c.notes)}</div>` : ''}
+            ${c.assigned_player_name ? `<div style="font-size:13px; color:#06d6a0; font-weight:700; margin-bottom:6px;">Выдан игрок: ${esc(c.assigned_player_name)}</div>` : ''}
+            ${isPending ? `
+              <div style="display:flex; gap:8px; margin-top:10px;">
+                <button class="adm-btn" data-shop-claim-approve="${c.id}" style="background:#06d6a0; color:#000; font-weight:700; padding:6px 14px; border-radius:8px; border:none; cursor:pointer;">
+                  ✅ Одобрить и выдать игрока
+                </button>
+                <button class="adm-btn" data-shop-claim-decline="${c.id}" style="background:#ef476f; color:#fff; font-weight:700; padding:6px 14px; border-radius:8px; border:none; cursor:pointer;">
+                  ❌ Отклонить (с возвратом)
+                </button>
+              </div>
+            ` : ''}
+          </div>
+        `;
+      }).join('');
+      body.innerHTML = `
+        <div style="margin-bottom:14px;">
+          <h3 style="font-size:16px; font-weight:800; color:#fff; margin-bottom:4px;">🕵️ Заявки на Секретного игрока</h3>
+          <p style="font-size:12px; color:#8d99ae;">Утверждайте заявки — игрок сразу добавляется в состав клуба.</p>
+        </div>
+        ${cards}
+      `;
+    } catch (e) {
+      body.innerHTML = `<div class="adm-empty">${esc(e.message || 'Ошибка загрузки заявок')}</div>`;
+    }
+  }
+
   bind() {
     this.root.addEventListener('click', (e) => this.onClick(e));
     this.modal.addEventListener('click', (e) => {
@@ -2715,7 +2771,28 @@ export class AdminPanel {
     const t = (sel) => e.target.closest(sel);
     let el;
 
-    if ((el = t('[data-adm-irl-day]'))) {
+    if ((el = t('[data-shop-claim-approve]'))) {
+      const claimId = el.dataset.shopClaimApprove;
+      const playerName = prompt('Введите точное имя игрока для добавления в состав клуба:');
+      if (playerName && playerName.trim()) {
+        api.resolveShopClaim(claimId, { action: 'approved', playerName: playerName.trim() })
+          .then(res => {
+            this.toast(res.message || 'Игрок выдан!');
+            this.loadShopClaims();
+          })
+          .catch(e => this.toast(e.message || 'Ошибка', true));
+      }
+    } else if ((el = t('[data-shop-claim-decline]'))) {
+      const claimId = el.dataset.shopClaimDecline;
+      if (confirm('Отклонить заявку? Монеты будут возвращены пользователю.')) {
+        api.resolveShopClaim(claimId, { action: 'declined' })
+          .then(res => {
+            this.toast(res.message || 'Заявка отклонена');
+            this.loadShopClaims();
+          })
+          .catch(e => this.toast(e.message || 'Ошибка', true));
+      }
+    } else if ((el = t('[data-adm-irl-day]'))) {
       this.loadIrl(el.dataset.admIrlDay);
     } else if (t('[data-adm-irl-add]')) {
       this.askIrlAdd();
