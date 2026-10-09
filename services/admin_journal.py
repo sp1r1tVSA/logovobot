@@ -117,6 +117,7 @@ ACTIONS: dict[str, tuple[str, str]] = {
     "irl_match_cancelled": ("bets", "IRL: матч отменён"),
     "irl_match_settled": ("bets", "IRL: матч рассчитан вручную"),
     "irl_match_restored": ("bets", "IRL: матч восстановлен"),
+    "irl_broadcast_sent": ("bets", "IRL: рассылка в ЛС"),
     # Сезоны
     "create_season": ("seasons", "Создан сезон"),
     "activate_season": ("seasons", "Активирован сезон"),

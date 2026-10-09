@@ -43,7 +43,7 @@ from aiohttp import web
 
 import config
 from services import admin_journal
-from time_utils import now_msk, today_msk_str
+from time_utils import now_msk, parse_msk, today_msk_str
 
 import database
 from api.auth import get_authenticated_user
@@ -1144,12 +1144,71 @@ async def handle_panel_irl_run_pick(request: web.Request) -> web.Response:
     return web.json_response({"status": "ok", "report": report})
 
 
+async def handle_panel_irl_broadcast(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/broadcast  {day}"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    data = await _json_body(request)
+    if isinstance(data, web.Response):
+        day = today_msk_str()
+    else:
+        day = str(data.get("day") or today_msk_str()).strip()
+
+    now = now_msk()
+    matches = await asyncio.to_thread(database.list_irl_matches, bet_day=day, statuses=("open",))
+    active = [m for m in matches if not parse_msk(m["kickoff_at"]) or parse_msk(m["kickoff_at"]) > now]
+    if not active:
+        return _error(400, "no_active_matches", f"Нет открытых активных матчей на {day} для рассылки.")
+
+    user_ids = await asyncio.to_thread(database.get_broadcast_user_ids)
+    if not user_ids:
+        return _error(400, "no_recipients", "Нет игроков для получения рассылки.")
+
+    from handlers.admin_irl import format_irl_broadcast
+    text, markup = format_irl_broadcast(day, active)
+
+    bot = request.app.get("bot")
+    sent = 0
+    failed = 0
+    if bot:
+        from handlers.admin_broadcast import safe_send_broadcast
+        for uid in user_ids:
+            await asyncio.sleep(0.04)
+            ok = await safe_send_broadcast(bot, chat_id=uid, thread_id=None, text=text, reply_markup=markup)
+            if ok:
+                sent += 1
+            else:
+                failed += 1
+
+    await admin_journal.record(
+        scope.actor_id,
+        "irl_broadcast_sent",
+        "irl_match",
+        len(active),
+        new=f"отправлено: {sent}, ошибок: {failed}, день: {day}"
+    )
+
+    return web.json_response({
+        "status": "ok",
+        "day": day,
+        "matches_count": len(active),
+        "sent": sent,
+        "failed": failed,
+    })
+
+
 def register_admin_panel_routes(app: web.Application) -> None:
     r = app.router
     r.add_get("/api/admin/panel/irl/matches", handle_panel_irl_matches)
     r.add_get("/api/admin/panel/irl/candidates", handle_panel_irl_candidates)
     r.add_post("/api/admin/panel/irl/matches", handle_panel_irl_add_match)
     r.add_post("/api/admin/panel/irl/matches/publish-all", handle_panel_irl_publish_all)
+    r.add_post("/api/admin/panel/irl/broadcast", handle_panel_irl_broadcast)
     r.add_post("/api/admin/panel/irl/matches/{id}/publish", handle_panel_irl_publish)
     r.add_post("/api/admin/panel/irl/matches/{id}/cancel", handle_panel_irl_cancel)
     r.add_post("/api/admin/panel/irl/matches/{id}/restore", handle_panel_irl_restore)

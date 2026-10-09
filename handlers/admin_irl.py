@@ -20,16 +20,18 @@ handlers/admin_irl.py
 и публикуется отдельным нажатием (или автопубликацией).
 """
 
+import asyncio
 from datetime import timedelta
 import html
 import logging
 import re
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update, WebAppInfo
 from telegram.ext import ContextTypes
 
 import config
 import database
+from handlers.admin_broadcast import safe_send_broadcast
 from handlers.admin_ops import _answer, _guard, _show
 from services import admin_journal, irl_betting, irl_jobs
 from time_utils import fmt_msk, now_msk, parse_msk, today_msk_str
@@ -47,6 +49,51 @@ _VOID_WORDS = ("void", "cancel", "аннул", "возврат")
 def _get_provider():
     from services.sports import get_sports_provider
     return get_sports_provider()
+
+
+def format_irl_broadcast(day: str, matches: list[dict]) -> tuple[str, InlineKeyboardMarkup]:
+    """Форматирует сообщение рассылки об активных IRL-матчах и формирует кнопку в Mini App."""
+    today = today_msk_str()
+    tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
+    if day == today:
+        day_label = "сегодня"
+    elif day == tomorrow:
+        day_label = "завтра"
+    else:
+        day_label = day
+
+    header = "⚽ <b>ЛОГОВО ФИФАРЕЙ | IRL-СТАВКИ</b>"
+    bar = "━━━━━━━━━━━━━━━━━━━━━━"
+    subhead = f"🔥 <b>Открыты ставки на реальные футбольные матчи ({day_label})!</b>"
+
+    match_lines = []
+    for m in matches:
+        league = f" <i>({html.escape(str(m['league_name']))})</i>" if m.get("league_name") else ""
+        kickoff_time = fmt_msk(m["kickoff_at"], "%H:%M")
+        odds = f"П1 <b>{m['odd_home']:.2f}</b> · Х <b>{m['odd_draw']:.2f}</b> · П2 <b>{m['odd_away']:.2f}</b>"
+        match_lines.append(
+            f"• <b>{html.escape(str(m['home']))} — {html.escape(str(m['away']))}</b>{league}\n"
+            f"  🕒 <i>{kickoff_time} МСК</i> · {odds}"
+        )
+
+    matches_text = "\n\n".join(match_lines)
+    footer = "💡 <i>Ставки принимаются до стартового свистка. Делайте ваши ставки и умножайте банк!</i>"
+
+    full_text = "\n".join([header, bar, subhead, "", matches_text, "", bar, footer])
+
+    webapp_url = getattr(config, "WEBAPP_URL", "")
+    if webapp_url and (webapp_url.startswith("https://") or "localhost" in webapp_url or "127.0.0.1" in webapp_url):
+        url = f"{webapp_url}?mode=irl" if "?" not in webapp_url else f"{webapp_url}&mode=irl"
+        btn = InlineKeyboardButton("🎰 Сделать ставку", web_app=WebAppInfo(url=url))
+    elif webapp_url and webapp_url.startswith("http"):
+        url = f"{webapp_url}?mode=irl" if "?" not in webapp_url else f"{webapp_url}&mode=irl"
+        btn = InlineKeyboardButton("🎰 Сделать ставку", url=url)
+    else:
+        bot_user = getattr(config, "BOT_USERNAME", "") or "logovobot"
+        btn = InlineKeyboardButton("🎰 Сделать ставку", url=f"https://t.me/{bot_user}?start=miniapp")
+
+    markup = InlineKeyboardMarkup([[btn]])
+    return full_text, markup
 
 
 # ─── Панель дня ──────────────────────────────────────────────────────────────
@@ -72,6 +119,7 @@ def day_keyboard(matches: list[dict], day: str) -> InlineKeyboardMarkup:
     if any(m["status"] == "draft" for m in matches):
         common.insert(0, InlineKeyboardButton("✅ Опубликовать все", callback_data=f"irl:puball:{day}"))
     rows.append(common)
+    rows.append([InlineKeyboardButton("📢 Рассылка в ЛС", callback_data=f"irl:bcast:{day}")])
 
     now = now_msk()
     today = today_msk_str()
@@ -319,6 +367,88 @@ async def _restore(update: Update, actor_id: int, match_id: int) -> None:
     await _show_day(update, m["bet_day"] or today_msk_str(), note)
 
 
+async def _confirm_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, day: str) -> None:
+    now = now_msk()
+    matches = database.list_irl_matches(bet_day=day, statuses=("open",))
+    active = [m for m in matches if not parse_msk(m["kickoff_at"]) or parse_msk(m["kickoff_at"]) > now]
+    if not active:
+        all_day_matches = database.list_irl_matches(bet_day=day)
+        has_drafts = any(m["status"] == "draft" for m in all_day_matches)
+        if has_drafts:
+            msg = "⚠️ На этот день нет опубликованных матчей.\nСначала опубликуйте черновики (кнопка ✅)!"
+        else:
+            msg = f"⚠️ На {day} нет активных открытых матчей для ставок."
+        await update.callback_query.answer(msg, show_alert=True)
+        return
+
+    await _answer(update)
+    user_ids = await asyncio.to_thread(database.get_broadcast_user_ids)
+    preview_text, _ = format_irl_broadcast(day, active)
+
+    today = today_msk_str()
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    day_name = "сегодня" if day == today else ("завтра" if day == tomorrow else day)
+
+    lines = [
+        "📢 <b>Рассылка уведомления об активных матчах</b>",
+        "",
+        f"Будет отправлено уведомление всем игрокам (<b>{len(user_ids)}</b> чел.) в личные сообщения с анонсом открытых матчей на <b>{day_name}</b>.",
+        "",
+        "<b>Предпросмотр сообщения:</b>",
+        preview_text,
+        "",
+        "Отправить рассылку сейчас?",
+    ]
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f"🚀 Да, отправить ({len(user_ids)} чел.)", callback_data=f"irl:bcastok:{day}")],
+        [InlineKeyboardButton("◀️ Отмена", callback_data=f"irl:day:{day}")],
+    ])
+    await _show(update, "\n".join(lines), kb)
+
+
+async def _run_broadcast(update: Update, context: ContextTypes.DEFAULT_TYPE, actor_id: int, day: str) -> None:
+    now = now_msk()
+    matches = database.list_irl_matches(bet_day=day, statuses=("open",))
+    active = [m for m in matches if not parse_msk(m["kickoff_at"]) or parse_msk(m["kickoff_at"]) > now]
+    if not active:
+        await update.callback_query.answer("Матчи уже начались или закрыты", show_alert=True)
+        await _show_day(update, day)
+        return
+
+    await _answer(update)
+    query = update.callback_query
+    try:
+        if query and query.message:
+            await query.edit_message_text("⏳ <i>Выполняю рассылку сообщений... Пожалуйста, подождите.</i>", parse_mode="HTML")
+    except Exception:
+        pass
+
+    user_ids = await asyncio.to_thread(database.get_broadcast_user_ids)
+    text, markup = format_irl_broadcast(day, active)
+
+    bot = context.bot
+    sent = 0
+    failed = 0
+    for uid in user_ids:
+        await asyncio.sleep(0.04)
+        ok = await safe_send_broadcast(bot, chat_id=uid, thread_id=None, text=text, reply_markup=markup)
+        if ok:
+            sent += 1
+        else:
+            failed += 1
+
+    await admin_journal.record(
+        actor_id,
+        "irl_broadcast_sent",
+        "irl_match",
+        len(active),
+        new=f"отправлено: {sent}, ошибок: {failed}, день: {day}"
+    )
+
+    note = f"📢 Рассылка завершена!\nДоставлено: <b>{sent}</b> чел., не доставлено: <b>{failed}</b> чел."
+    await _show_day(update, day, note)
+
+
 # ─── Диспетчер кнопок ────────────────────────────────────────────────────────
 
 async def cb_irl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -369,6 +499,10 @@ async def cb_irl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action == "rest":
         await _answer(update)
         await _restore(update, actor_id, int(arg))
+    elif action == "bcast":
+        await _confirm_broadcast(update, context, day_arg)
+    elif action == "bcastok":
+        await _run_broadcast(update, context, actor_id, day_arg)
     else:
         await update.callback_query.answer("Некорректная кнопка", show_alert=True)
 

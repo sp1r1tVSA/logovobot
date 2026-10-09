@@ -374,7 +374,8 @@ class TestSettleCommand:
 class TestWiring:
     def test_actions_are_catalogued(self):
         for action in ("irl_match_added", "irl_match_replaced", "irl_match_published",
-                       "irl_match_cancelled", "irl_match_settled", "irl_match_restored"):
+                       "irl_match_cancelled", "irl_match_settled", "irl_match_restored",
+                       "irl_broadcast_sent"):
             assert action in admin_journal.ACTIONS
 
 
@@ -466,3 +467,58 @@ class TestTomorrowNavigation:
         assert matches[0]["provider_fixture_id"] == "20"
         assert matches[0]["bet_day"] == tomorrow
         assert matches[0]["status"] == "draft"
+
+
+class TestBroadcast:
+    def test_keyboard_has_broadcast_button(self):
+        u = press(f"irl:day:{DAY}")
+        kb = u.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert f"irl:bcast:{DAY}" in callbacks
+
+    def test_broadcast_without_open_matches_alerts(self):
+        draft(1)
+        u = press(f"irl:bcast:{DAY}")
+        alert_text = u.callback_query.answer.await_args.kwargs.get("text") or u.callback_query.answer.await_args.args[0]
+        assert "Сначала опубликуйте черновики" in alert_text
+
+    def test_broadcast_without_any_matches_alerts(self):
+        u = press(f"irl:bcast:{DAY}")
+        alert_text = u.callback_query.answer.await_args.kwargs.get("text") or u.callback_query.answer.await_args.args[0]
+        assert "нет активных открытых матчей" in alert_text
+
+    def test_broadcast_shows_confirmation_preview(self):
+        mid = draft(1)
+        database.publish_irl_match(mid)
+        make_user(7771)
+        make_user(7772)
+        u = press(f"irl:bcast:{DAY}")
+        text = shown(u)
+        assert "Рассылка уведомления" in text
+        assert "Arsenal" in text
+        kb = u.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert f"irl:bcastok:{DAY}" in callbacks
+        assert f"irl:day:{DAY}" in callbacks
+
+    def test_broadcast_sends_to_all_users(self, _setup, monkeypatch):
+        mid = draft(1)
+        database.publish_irl_match(mid)
+        make_user(7771)
+        make_user(7772)
+        sent = []
+        async def fake_send(bot, chat_id, thread_id, text, photo_id=None, reply_markup=None):
+            sent.append((chat_id, text, reply_markup))
+            return True
+        monkeypatch.setattr(admin_irl, "safe_send_broadcast", fake_send)
+        monkeypatch.setattr(database, "get_broadcast_user_ids", lambda: [7771, 7772])
+
+        u = press(f"irl:bcastok:{DAY}")
+        assert len(sent) == 2
+        user_ids = [s[0] for s in sent]
+        assert 7771 in user_ids and 7772 in user_ids
+        assert "Arsenal" in sent[0][1]
+        assert "П1" in sent[0][1]
+        assert sent[0][2] is not None
+        assert _setup.await_args.args[1] == "irl_broadcast_sent"
+        assert "Рассылка завершена" in shown(u)

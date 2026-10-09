@@ -952,6 +952,7 @@ export class AdminPanel {
             <button class="adm-btn primary sm" data-adm-irl-add>➕ Добавить матч</button>
             <button class="adm-btn secondary sm" data-adm-irl-autopick title="Запустить фоновый поиск матчей дня сейчас">⚡ Автоподбор</button>
             ${drafts.length ? `<button class="adm-btn primary sm" data-adm-irl-puball style="background:var(--color-success); border-color:var(--color-success);">✅ Опубликовать все (${drafts.length})</button>` : ''}
+            ${matches.some(m => m.status === 'open') ? `<button class="adm-btn secondary sm" data-adm-irl-bcast title="Разослать уведомление игрокам в ЛС">📢 Рассылка в ЛС</button>` : ''}
           </div>
         </div>
       </div>
@@ -1387,6 +1388,42 @@ export class AdminPanel {
       this.toast(e.message || 'Не удалось опубликовать матчи', true);
     } finally {
       this.busy = false;
+    }
+  }
+
+  async broadcastIrl() {
+    if (this.busy) return;
+    const day = this.irl?.day || '';
+    const openCount = (this.irl?.matches || []).filter(m => m.status === 'open').length;
+    if (!openCount) {
+      this.toast('Нет открытых матчей для рассылки', true);
+      return;
+    }
+    this.showModal(this.modalFrame('Рассылка в ЛС', `
+      <div class="adm-form-desc" style="margin-bottom:12px;">
+        Разослать уведомление в личные сообщения всем игрокам лиги об открытых IRL-матчах на <b>${esc(day)}</b>?
+      </div>
+      <div class="adm-modal-actions" style="display:flex; justify-content:flex-end; gap:8px;">
+        <button class="adm-btn secondary" data-adm-modal-close>Отмена</button>
+        <button class="adm-btn primary" id="adm-irl-bcast-confirm">📢 Отправить всем</button>
+      </div>
+    `));
+
+    const confirmBtn = document.getElementById('adm-irl-bcast-confirm');
+    if (confirmBtn) {
+      confirmBtn.addEventListener('click', async () => {
+        this.closeModal();
+        this.busy = true;
+        try {
+          this.toast('Отправка рассылки игрокам…');
+          const res = await this.post(`${PANEL}/irl/broadcast`, { day });
+          this.toast(`Рассылка завершена: доставлено ${res.sent || 0} чел.`);
+        } catch (e) {
+          this.toast(e.message || 'Ошибка рассылки', true);
+        } finally {
+          this.busy = false;
+        }
+      });
     }
   }
 
@@ -3157,6 +3194,8 @@ export class AdminPanel {
       this.publishIrlMatch(Number(el.dataset.admIrlPub));
     } else if (t('[data-adm-irl-puball]')) {
       this.publishAllIrl();
+    } else if (t('[data-adm-irl-bcast]')) {
+      this.broadcastIrl();
     } else if ((el = t('[data-adm-irl-can]'))) {
       this.askIrlCancel(Number(el.dataset.admIrlCan));
     } else if ((el = t('[data-adm-irl-restore]'))) {

@@ -406,6 +406,7 @@ class AppController {
    */
   parseStartParam() {
     const raw = String(tgBridge.getStartParam() || '').trim();
+    if (raw === 'irl') return { irl: true };
     let m = raw.match(/^match_(\d+)$/);
     if (m) return { matchId: parseInt(m[1]) };
     m = raw.match(/^div_(\d+)$/);
@@ -451,6 +452,7 @@ class AppController {
         // Deep link: ?division_id=/&match_id= в URL или startapp=div_N / match_N из t.me-ссылки.
         const urlParams = new URLSearchParams(window.location.search);
         const startParam = this.parseStartParam();
+        const targetIrl = urlParams.get('mode') === 'irl' || Boolean(startParam.irl);
         let targetDivId = urlParams.get('division_id') || startParam.divisionId || null;
         const targetMatchId = urlParams.get('match_id') || startParam.matchId || null;
         // Без ссылки — дивизион, который игрок открывал в прошлый раз (с любого устройства).
@@ -493,6 +495,9 @@ class AppController {
         if (targetMatchId) {
           this.loadMatchCenter(parseInt(targetMatchId));
           this.switchView('match_center');
+        } else if (targetIrl) {
+          store.setLobbyMode('irl');
+          await (await lazyModules.irl()).irlView.open();
         }
 
         const toursData = await api.getTours(divId);

@@ -262,3 +262,34 @@ class TestAdminPanelIrl(AioHTTPTestCase):
         self.assertEqual(resp.status, 400)
         data = await resp.json()
         self.assertEqual(data["error"], "not_void")
+
+    async def test_broadcast_matches(self):
+        kickoff = now_msk() + timedelta(hours=3)
+        mid, _ = database.create_irl_draft(
+            "fix_bcast", 39, "Premier League", "Arsenal", "Chelsea", kickoff, 2.0, 3.2, 3.8,
+            bet_day=today_msk_str()
+        )
+        database.publish_irl_match(mid)
+        with database.transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO users (telegram_id, username, role) VALUES (?, ?, 'user')",
+                         (9901, "bcastuser"))
+
+        resp = await self.client.post(
+            "/api/admin/panel/irl/broadcast",
+            headers=self._headers(),
+            json={"day": today_msk_str()}
+        )
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["matches_count"], 1)
+
+    async def test_broadcast_without_matches_rejected(self):
+        resp = await self.client.post(
+            "/api/admin/panel/irl/broadcast",
+            headers=self._headers(),
+            json={"day": today_msk_str()}
+        )
+        self.assertEqual(resp.status, 400)
+        data = await resp.json()
+        self.assertEqual(data["error"], "no_active_matches")
