@@ -176,6 +176,159 @@ async def handle_post_admin_shop_claim_resolve(request: web.Request) -> web.Resp
         return web.json_response({"status": "error", "message": str(e)}, status=500)
 
 
+async def handle_get_admin_shop_overview(request: web.Request) -> web.Response:
+    """GET /api/admin/shop/overview - сводка и списки для полного управления магазином."""
+    user_info = _auth(request)
+    if not user_info:
+        return web.json_response({"status": "error", "message": "Unauthorized"}, status=401)
+
+    user_id = user_info["id"]
+    if not is_admin(user_id) and not is_super_admin(user_id):
+        return web.json_response({"status": "error", "message": "Доступ запрещён"}, status=403)
+
+    try:
+        stats = await asyncio.to_thread(database.get_shop_admin_stats)
+        claims = await asyncio.to_thread(database.list_secret_player_claims, None, 50)
+        inventory = await asyncio.to_thread(database.list_all_shop_inventory, None, 100)
+        spins = await asyncio.to_thread(database.list_shop_roulette_spins, 50)
+        coaches = await asyncio.to_thread(database.get_coaches_for_division, None)
+        return web.json_response({
+            "status": "ok",
+            "stats": stats,
+            "claims": claims,
+            "inventory": inventory,
+            "spins": spins,
+            "coaches": coaches,
+            "catalog": shop_service.SHOP_CATALOG,
+        })
+    except Exception as e:
+        logger.exception("Failed to get shop admin overview")
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+
+async def handle_post_admin_shop_grant(request: web.Request) -> web.Response:
+    """POST /api/admin/shop/grant - ручная выдача предмета пользователю/клубу."""
+    user_info = _auth(request)
+    if not user_info:
+        return web.json_response({"status": "error", "message": "Unauthorized"}, status=401)
+
+    user_id = user_info["id"]
+    if not is_admin(user_id) and not is_super_admin(user_id):
+        return web.json_response({"status": "error", "message": "Доступ запрещён"}, status=403)
+
+    try:
+        body = await request.read()
+        data = json.loads(body.decode("utf-8")) if body.strip() else {}
+    except Exception:
+        return web.json_response({"status": "error", "message": "Некорректный JSON запрос"}, status=400)
+
+    if not isinstance(data, dict):
+        return web.json_response({"status": "error", "message": "Ожидается JSON объект"}, status=400)
+
+    target_user_id = data.get("user_id")
+    item_id = str(data.get("item_id", "")).strip()
+    charges = int(data.get("charges", 1))
+    notes = data.get("notes")
+
+    if not target_user_id or not item_id:
+        return web.json_response({"status": "error", "message": "Укажите user_id и item_id"}, status=400)
+
+    try:
+        inv_id = await asyncio.to_thread(
+            database.admin_grant_shop_item,
+            int(target_user_id),
+            item_id,
+            charges,
+            notes,
+            user_id,
+        )
+        return web.json_response({
+            "status": "ok",
+            "message": f"Предмет {item_id} успешно выдан (зарядов: {charges})",
+            "inventory_id": inv_id,
+        })
+    except Exception as e:
+        logger.exception("Failed to grant shop item")
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+
+async def handle_post_admin_shop_revoke(request: web.Request) -> web.Response:
+    """POST /api/admin/shop/revoke - аннулирование/списание предмета из инвентаря."""
+    user_info = _auth(request)
+    if not user_info:
+        return web.json_response({"status": "error", "message": "Unauthorized"}, status=401)
+
+    user_id = user_info["id"]
+    if not is_admin(user_id) and not is_super_admin(user_id):
+        return web.json_response({"status": "error", "message": "Доступ запрещён"}, status=403)
+
+    try:
+        body = await request.read()
+        data = json.loads(body.decode("utf-8")) if body.strip() else {}
+    except Exception:
+        return web.json_response({"status": "error", "message": "Некорректный JSON запрос"}, status=400)
+
+    if not isinstance(data, dict):
+        return web.json_response({"status": "error", "message": "Ожидается JSON объект"}, status=400)
+
+    inventory_id = data.get("inventory_id")
+    reason = data.get("reason", "Административное списание")
+
+    if not inventory_id:
+        return web.json_response({"status": "error", "message": "Укажите inventory_id"}, status=400)
+
+    try:
+        ok = await asyncio.to_thread(database.admin_revoke_shop_item, int(inventory_id), user_id, reason)
+        if not ok:
+            return web.json_response({"status": "error", "message": "Предмет не найден"}, status=404)
+        return web.json_response({"status": "ok", "message": "Предмет успешно списан"})
+    except Exception as e:
+        logger.exception("Failed to revoke shop item")
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+
+async def handle_post_admin_shop_reset_limits(request: web.Request) -> web.Response:
+    """POST /api/admin/shop/reset-limits - сброс лимитов наград для тренера."""
+    user_info = _auth(request)
+    if not user_info:
+        return web.json_response({"status": "error", "message": "Unauthorized"}, status=401)
+
+    user_id = user_info["id"]
+    if not is_admin(user_id) and not is_super_admin(user_id):
+        return web.json_response({"status": "error", "message": "Доступ запрещён"}, status=403)
+
+    try:
+        body = await request.read()
+        data = json.loads(body.decode("utf-8")) if body.strip() else {}
+    except Exception:
+        return web.json_response({"status": "error", "message": "Некорректный JSON запрос"}, status=400)
+
+    if not isinstance(data, dict):
+        return web.json_response({"status": "error", "message": "Ожидается JSON объект"}, status=400)
+
+    target_user_id = data.get("user_id")
+    limit_type = str(data.get("limit_type", "all")).strip()
+
+    if not target_user_id:
+        return web.json_response({"status": "error", "message": "Укажите user_id"}, status=400)
+
+    try:
+        res = await asyncio.to_thread(
+            database.admin_reset_shop_user_limits,
+            int(target_user_id),
+            limit_type,
+            user_id,
+        )
+        return web.json_response({
+            "status": "ok",
+            "message": f"Лимиты ({', '.join(res.get('cleared', []))}) успешно сброшены для пользователя {target_user_id}",
+            "cleared": res.get("cleared", []),
+        })
+    except Exception as e:
+        logger.exception("Failed to reset shop limits")
+        return web.json_response({"status": "error", "message": str(e)}, status=500)
+
+
 def register_shop_routes(app: web.Application) -> None:
     """Регистрация всех маршрутов магазина наград в aiohttp приложении."""
     app.router.add_get("/api/shop/catalog", handle_get_shop_catalog)
@@ -184,3 +337,7 @@ def register_shop_routes(app: web.Application) -> None:
     app.router.add_post("/api/shop/roulette/spin", handle_post_shop_roulette_spin)
     app.router.add_get("/api/admin/shop/claims", handle_get_admin_shop_claims)
     app.router.add_post("/api/admin/shop/claims/{id}/resolve", handle_post_admin_shop_claim_resolve)
+    app.router.add_get("/api/admin/shop/overview", handle_get_admin_shop_overview)
+    app.router.add_post("/api/admin/shop/grant", handle_post_admin_shop_grant)
+    app.router.add_post("/api/admin/shop/revoke", handle_post_admin_shop_revoke)
+    app.router.add_post("/api/admin/shop/reset-limits", handle_post_admin_shop_reset_limits)

@@ -31,7 +31,7 @@ const TABS = [
   { id: 'outrights', label: 'Долгосрочные', globalOnly: true },
   { id: 'irl', label: '🌍 IRL', globalOnly: true },
   { id: 'players', label: 'Игроки', globalOnly: true },
-  { id: 'claims', label: '🕵️ Заявки ТО', globalOnly: true },
+  { id: 'shop', label: '🛍️ Магазин', globalOnly: true },
   { id: 'limits', label: 'Лимиты' },
   { id: 'risk', label: 'Риски' },
 ];
@@ -282,6 +282,7 @@ export class AdminPanel {
     // Анализ рынка: период в днях и последний ответ сервера.
     this.analysis = { days: 14, res: null };
     this.irl = { day: '', today: '', days: [], matches: [], autoPublish: false, bookmakerId: null, enabled: true };
+    this.shop = { section: 'claims', data: null };
 
     this._searchTimer = null;
     this._modalSubmit = null;
@@ -422,7 +423,8 @@ export class AdminPanel {
       outrights: () => this.loadOutrights(),
       irl: () => this.loadIrl(),
       players: () => this.loadPlayers(),
-      claims: () => this.loadShopClaims(),
+      shop: () => this.loadShop(),
+      claims: () => this.loadShop('claims'),
       limits: () => this.loadLimits(),
       risk: () => this.loadRisk(),
     };
@@ -2660,58 +2662,330 @@ export class AdminPanel {
 
   // ─── События ───────────────────────────────────────────────────────────
 
-  async loadShopClaims() {
+  async loadShop(preferredSection = null) {
     const body = this.body();
-    if (!body || this.tab !== 'claims') return;
-    body.innerHTML = '<div class="adm-empty">Загрузка заявок…</div>';
-    try {
-      const res = await api.getShopClaims();
-      const claims = res?.claims || [];
-      if (claims.length === 0) {
-        body.innerHTML = '<div class="adm-empty">Нет заявок на Секретного игрока.</div>';
-        return;
-      }
-      const cards = claims.map(c => {
-        const isPending = c.status === 'pending';
-        const statusBadge = isPending
-          ? '<span style="color:#ffb703; font-weight:700;">🟡 Ожидает</span>'
-          : c.status === 'approved'
-            ? '<span style="color:#06d6a0; font-weight:700;">🟢 Одобрено</span>'
-            : '<span style="color:#ef476f; font-weight:700;">🔴 Отклонено</span>';
-        return `
-          <div class="adm-card" style="margin-bottom:12px; padding:14px; background:rgba(255,255,255,0.03); border:1px solid rgba(255,255,255,0.08); border-radius:12px;">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
-              <div>
-                <div style="font-weight:800; font-size:15px; color:#fff;">Заявка #${c.id} — Клуб: ${esc(c.club_name || 'Не указан')}</div>
-                <div style="font-size:12px; color:#8d99ae;">Пользователь ID: ${c.user_id} • Стоимость: ${UIRenderer.formatNumber(c.cost)} 🪙</div>
-              </div>
-              <div>${statusBadge}</div>
-            </div>
-            ${c.notes ? `<div style="font-size:12px; color:#dcdde1; margin-bottom:8px; background:rgba(0,0,0,0.3); padding:6px 10px; border-radius:6px;">Пожелания: ${esc(c.notes)}</div>` : ''}
-            ${c.assigned_player_name ? `<div style="font-size:13px; color:#06d6a0; font-weight:700; margin-bottom:6px;">Выдан игрок: ${esc(c.assigned_player_name)}</div>` : ''}
-            ${isPending ? `
-              <div style="display:flex; gap:8px; margin-top:10px;">
-                <button class="adm-btn" data-shop-claim-approve="${c.id}" style="background:#06d6a0; color:#000; font-weight:700; padding:6px 14px; border-radius:8px; border:none; cursor:pointer;">
-                  ✅ Одобрить и выдать игрока
-                </button>
-                <button class="adm-btn" data-shop-claim-decline="${c.id}" style="background:#ef476f; color:#fff; font-weight:700; padding:6px 14px; border-radius:8px; border:none; cursor:pointer;">
-                  ❌ Отклонить (с возвратом)
-                </button>
-              </div>
-            ` : ''}
-          </div>
-        `;
-      }).join('');
-      body.innerHTML = `
-        <div style="margin-bottom:14px;">
-          <h3 style="font-size:16px; font-weight:800; color:#fff; margin-bottom:4px;">🕵️ Заявки на Секретного игрока</h3>
-          <p style="font-size:12px; color:#8d99ae;">Утверждайте заявки — игрок сразу добавляется в состав клуба.</p>
-        </div>
-        ${cards}
-      `;
-    } catch (e) {
-      body.innerHTML = `<div class="adm-empty">${esc(e.message || 'Ошибка загрузки заявок')}</div>`;
+    if (!body || (this.tab !== 'shop' && this.tab !== 'claims')) return;
+    if (preferredSection) {
+      this.shop.section = preferredSection;
     }
+    body.innerHTML = '<div class="adm-empty">Загрузка данных магазина…</div>';
+    try {
+      const res = await api.getAdminShopOverview();
+      this.shop.data = res;
+      this.renderShop();
+    } catch (e) {
+      body.innerHTML = `<div class="adm-empty">${esc(e.message || 'Ошибка загрузки данных магазина')}</div>`;
+    }
+  }
+
+  async loadShopClaims() {
+    return this.loadShop('claims');
+  }
+
+  renderShop() {
+    const body = this.body();
+    if (!body || (this.tab !== 'shop' && this.tab !== 'claims')) return;
+    const data = this.shop.data || {};
+    const stats = data.stats || {
+      total_purchases: 0,
+      active_inventory_items: 0,
+      total_roulette_spins: 0,
+      pending_claims: 0,
+      total_coins_spent: 0,
+    };
+    const curSection = this.shop.section || 'claims';
+
+    const subtabs = [
+      { id: 'claims', label: `🕵️ Заявки ${stats.pending_claims ? `(${stats.pending_claims})` : ''}` },
+      { id: 'inventory', label: '🎒 Инвентарь' },
+      { id: 'grant', label: '🎁 Выдать' },
+      { id: 'roulette', label: '🎰 Рулетка / Сброс' },
+      { id: 'catalog', label: '📦 Каталог' },
+    ];
+
+    let sectionHtml = '';
+    if (curSection === 'claims') {
+      sectionHtml = this.renderShopClaimsSection(data.claims || []);
+    } else if (curSection === 'inventory') {
+      sectionHtml = this.renderShopInventorySection(data.inventory || []);
+    } else if (curSection === 'grant') {
+      sectionHtml = this.renderShopGrantSection(data.coaches || [], data.catalog || []);
+    } else if (curSection === 'roulette') {
+      sectionHtml = this.renderShopRouletteSection(data.spins || [], data.coaches || []);
+    } else if (curSection === 'catalog') {
+      sectionHtml = this.renderShopCatalogSection(data.catalog || []);
+    }
+
+    body.innerHTML = `
+      <div class="kpi-grid">
+        ${this.kpi('Всего покупок', fmt(stats.total_purchases), 'gold')}
+        ${this.kpi('Активных предметов', fmt(stats.active_inventory_items), 'green')}
+        ${this.kpi('Заявок на игрока', fmt(stats.pending_claims), stats.pending_claims > 0 ? 'red' : '', stats.pending_claims > 0 ? 'Требуют решения' : 'Все обработаны')}
+        ${this.kpi('Спинов рулетки', fmt(stats.total_roulette_spins), '')}
+        ${this.kpi('Оборот магазина', coins(stats.total_coins_spent), 'gold', 'покупки + рулетка')}
+      </div>
+
+      <div class="category-pills" style="margin-bottom:14px; overflow-x:auto;">
+        ${subtabs.map(st => `
+          <button class="category-pill ${st.id === curSection ? 'active' : ''}" data-shop-subtab="${st.id}">
+            ${esc(st.label)}
+          </button>
+        `).join('')}
+      </div>
+
+      <div class="adm-shop-content">
+        ${sectionHtml}
+      </div>
+    `;
+  }
+
+  renderShopClaimsSection(claims) {
+    if (!claims.length) {
+      return '<div class="adm-empty">Нет заявок на Секретного игрока.</div>';
+    }
+    const cards = claims.map(c => {
+      const isPending = c.status === 'pending';
+      const statusBadge = isPending
+        ? '<span style="color:#ffb703; font-weight:700;">🟡 Ожидает</span>'
+        : c.status === 'approved'
+          ? '<span style="color:#06d6a0; font-weight:700;">🟢 Одобрено</span>'
+          : '<span style="color:#ef476f; font-weight:700;">🔴 Отклонено</span>';
+      return `
+        <div class="adm-card" style="margin-bottom:12px; padding:14px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start; margin-bottom:8px;">
+            <div>
+              <div style="font-weight:800; font-size:15px; color:#fff;">Заявка #${c.id} — Клуб: ${esc(c.club_name || 'Не указан')}</div>
+              <div style="font-size:12px; color:#8d99ae;">Пользователь: ${c.username ? '@' + esc(c.username) : `ID ${c.user_id}`} • Стоимость: ${coins(c.cost)} • ${esc(c.created_at || '')}</div>
+            </div>
+            <div>${statusBadge}</div>
+          </div>
+          ${c.notes ? `<div style="font-size:12px; color:#dcdde1; margin-bottom:8px; background:rgba(0,0,0,0.3); padding:6px 10px; border-radius:6px;">Пожелания: ${esc(c.notes)}</div>` : ''}
+          ${c.assigned_player_name ? `<div style="font-size:13px; color:#06d6a0; font-weight:700; margin-bottom:6px;">Выдан игрок: ${esc(c.assigned_player_name)}</div>` : ''}
+          ${isPending ? `
+            <div style="display:flex; gap:8px; margin-top:10px;">
+              <button class="adm-btn" data-shop-claim-approve="${c.id}" style="background:#06d6a0; color:#000; font-weight:700; padding:6px 14px; border-radius:8px; border:none; cursor:pointer;">
+                ✅ Одобрить и выдать игрока
+              </button>
+              <button class="adm-btn" data-shop-claim-decline="${c.id}" style="background:#ef476f; color:#fff; font-weight:700; padding:6px 14px; border-radius:8px; border:none; cursor:pointer;">
+                ❌ Отклонить (с возвратом)
+              </button>
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }).join('');
+    return `
+      <div style="margin-bottom:12px;">
+        <h3 style="font-size:15px; font-weight:800; color:#fff; margin-bottom:4px;">🕵️ Заявки на Секретного игрока (50 000 🪙)</h3>
+        <p style="font-size:12px; color:#8d99ae;">При одобрении введите точное имя игрока — он будет добавлен в состав клуба.</p>
+      </div>
+      ${cards}
+    `;
+  }
+
+  renderShopInventorySection(inventory) {
+    if (!inventory.length) {
+      return '<div class="adm-empty">Инвентарь лиги пуст.</div>';
+    }
+    const itemNames = {
+      train_5: '🏋️ Тренировка (+5)',
+      credit_transfer: '💳 Трансферный кредит (-20M)',
+      slot_swap: '🔄 Слот обмена (+1)',
+      urna_boost: '🗑️ Выгодная урна (+1 слот)',
+      surcharge_coupon: '🎟️ Купон доплаты (30M)',
+      roulette_spin: '🎰 Спин рулетки',
+      secret_player: '🕵️ Секретный игрок',
+    };
+    const rows = inventory.map(item => {
+      const isAct = item.status === 'active';
+      const stColor = isAct ? '#06d6a0' : item.status === 'used' ? '#8d99ae' : '#ef476f';
+      const stLabel = isAct ? 'Активен' : item.status === 'used' ? 'Использован' : 'Аннулирован';
+      const coachDisplay = `${item.username ? '@' + esc(item.username) : `ID ${item.user_id}`} (${esc(item.user_team || item.club_name || '—')})`;
+      const itemTitle = itemNames[item.item_id] || item.item_id;
+      return `
+        <div class="adm-card" style="margin-bottom:10px; padding:12px;">
+          <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+            <div>
+              <div style="font-weight:700; font-size:14px; color:#fff;">${esc(itemTitle)}</div>
+              <div style="font-size:12px; color:#8d99ae; margin-top:2px;">
+                Тренер: <b style="color:#fff;">${coachDisplay}</b> • Заряды: <b style="color:#f5b027;">${item.charges_left} / ${item.charges_total}</b>
+              </div>
+              <div style="font-size:11px; color:#6c757d; margin-top:2px;">
+                Источник: ${item.source === 'admin_grant' ? '🎁 Выдача админом' : '🛒 Покупка'} • ${esc(item.created_at || '')}
+              </div>
+            </div>
+            <div style="text-align:right;">
+              <span style="display:inline-block; padding:3px 8px; border-radius:6px; font-size:11px; font-weight:700; color:${stColor}; background:rgba(255,255,255,0.05);">
+                ${stLabel}
+              </span>
+              ${isAct ? `
+                <div style="margin-top:6px;">
+                  <button class="adm-btn" data-shop-revoke="${item.id}" style="background:rgba(239,71,111,0.15); color:#ef476f; border:1px solid rgba(239,71,111,0.3); font-size:11px; font-weight:700; padding:4px 8px; border-radius:6px; cursor:pointer;">
+                    🗑️ Списать
+                  </button>
+                </div>
+              ` : ''}
+            </div>
+          </div>
+        </div>
+      `;
+    }).join('');
+    return `
+      <div style="margin-bottom:12px;">
+        <h3 style="font-size:15px; font-weight:800; color:#fff; margin-bottom:4px;">🎒 Инвентарь тренеров лиги</h3>
+        <p style="font-size:12px; color:#8d99ae;">Все купленные и выданные награды. Активные предметы можно аннулировать.</p>
+      </div>
+      ${rows}
+    `;
+  }
+
+  renderShopGrantSection(coaches, catalog) {
+    const coachOptions = coaches.map(c => `
+      <option value="${c.telegram_id}">
+        ${c.username ? '@' + esc(c.username) : `ID ${c.telegram_id}`} — ${esc(c.team_name || 'Без клуба')}
+      </option>
+    `).join('');
+
+    const itemOptions = [
+      { id: 'train_5', title: '🏋️ Тренировка (+5)' },
+      { id: 'credit_transfer', title: '💳 Трансферный кредит (-20M)' },
+      { id: 'slot_swap', title: '🔄 Слот обмена (+1)' },
+      { id: 'urna_boost', title: '🗑️ Выгодная урна (+1 слот)' },
+      { id: 'surcharge_coupon', title: '🎟️ Купон доплаты (30M)' },
+      { id: 'roulette_spin', title: '🎰 Спин рулетки' },
+      { id: 'secret_player', title: '🕵️ Секретный игрок' },
+    ].map(it => `<option value="${it.id}">${it.title}</option>`).join('');
+
+    return `
+      <div class="adm-card" style="padding:16px; max-width:600px;">
+        <h3 style="font-size:16px; font-weight:800; color:#fff; margin-bottom:6px;">🎁 Ручная выдача награды тренеру</h3>
+        <p style="font-size:12px; color:#8d99ae; margin-bottom:16px;">
+          Начислите награду напрямую в инвентарь тренера (награды за турниры, конкурсы, компенсации).
+        </p>
+
+        <div style="margin-bottom:12px;">
+          <label style="display:block; font-size:12px; font-weight:700; color:#dcdde1; margin-bottom:6px;">Выберите тренера / клуб:</label>
+          <select id="adm-shop-grant-user" style="width:100%; padding:10px; background:#1c202a; border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; font-size:13px;">
+            ${coachOptions || '<option value="">Нет зарегистрированных тренеров</option>'}
+          </select>
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <label style="display:block; font-size:12px; font-weight:700; color:#dcdde1; margin-bottom:6px;">Или введите Telegram ID вручную (если нет в списке):</label>
+          <input type="number" id="adm-shop-grant-custom-user" placeholder="Например: 123456789" style="width:100%; padding:10px; background:#1c202a; border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; font-size:13px;">
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <label style="display:block; font-size:12px; font-weight:700; color:#dcdde1; margin-bottom:6px;">Награда:</label>
+          <select id="adm-shop-grant-item" style="width:100%; padding:10px; background:#1c202a; border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; font-size:13px;">
+            ${itemOptions}
+          </select>
+        </div>
+
+        <div style="margin-bottom:12px;">
+          <label style="display:block; font-size:12px; font-weight:700; color:#dcdde1; margin-bottom:6px;">Количество зарядов / использований:</label>
+          <input type="number" id="adm-shop-grant-charges" value="1" min="1" max="10" style="width:100%; padding:10px; background:#1c202a; border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; font-size:13px;">
+        </div>
+
+        <div style="margin-bottom:16px;">
+          <label style="display:block; font-size:12px; font-weight:700; color:#dcdde1; margin-bottom:6px;">Примечание / обоснование:</label>
+          <input type="text" id="adm-shop-grant-notes" placeholder="Например: Победитель кубка / компенсация" style="width:100%; padding:10px; background:#1c202a; border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; font-size:13px;">
+        </div>
+
+        <button class="adm-btn" data-shop-grant-submit style="width:100%; background:linear-gradient(135deg, #f5b027, #e09f1f); color:#000; font-weight:800; font-size:14px; padding:12px; border-radius:8px; border:none; cursor:pointer;">
+          🎁 Начислить награду в инвентарь
+        </button>
+      </div>
+    `;
+  }
+
+  renderShopRouletteSection(spins, coaches) {
+    const coachOptions = coaches.map(c => `
+      <option value="${c.telegram_id}">
+        ${c.username ? '@' + esc(c.username) : `ID ${c.telegram_id}`} — ${esc(c.team_name || 'Без клуба')}
+      </option>
+    `).join('');
+
+    const spinRows = spins.slice(0, 30).map(s => `
+      <div style="display:flex; justify-content:space-between; align-items:center; padding:8px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+        <div>
+          <div style="font-size:13px; font-weight:700; color:#fff;">${esc(s.sector_title || s.sector_id)}</div>
+          <div style="font-size:11px; color:#8d99ae;">
+            ${s.username ? '@' + esc(s.username) : `ID ${s.user_id}`} (${esc(s.user_team || s.club_name || '—')}) • ${esc(s.created_at || '')}
+          </div>
+        </div>
+        <div style="text-align:right;">
+          <span style="font-size:12px; font-weight:700; color:#f5b027;">${coins(s.cost)}</span>
+        </div>
+      </div>
+    `).join('') || '<div class="adm-empty" style="padding:10px 0;">Спинов пока не было</div>';
+
+    return `
+      <div style="display:grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap:16px;">
+        <div class="adm-card" style="padding:16px;">
+          <h3 style="font-size:16px; font-weight:800; color:#fff; margin-bottom:6px;">⚡ Сброс лимитов наград для тренера</h3>
+          <p style="font-size:12px; color:#8d99ae; margin-bottom:14px;">
+            Позволяет тренеру снова купить сезонную рулетку, тренировки или награды текущего трансферного окна.
+          </p>
+
+          <div style="margin-bottom:12px;">
+            <label style="display:block; font-size:12px; font-weight:700; color:#dcdde1; margin-bottom:6px;">Тренер:</label>
+            <select id="adm-shop-reset-user" style="width:100%; padding:10px; background:#1c202a; border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; font-size:13px;">
+              ${coachOptions || '<option value="">Нет зарегистрированных тренеров</option>'}
+            </select>
+          </div>
+
+          <div style="margin-bottom:16px;">
+            <label style="display:block; font-size:12px; font-weight:700; color:#dcdde1; margin-bottom:6px;">Что сбросить:</label>
+            <select id="adm-shop-reset-type" style="width:100%; padding:10px; background:#1c202a; border:1px solid rgba(255,255,255,0.15); border-radius:8px; color:#fff; font-size:13px;">
+              <option value="all">🔄 Все лимиты (Рулетка + ТО + Тренировки)</option>
+              <option value="roulette">🎰 Сбросить лимит рулетки (разрешить новый спин)</option>
+              <option value="transfers">💳 Сбросить лимиты текущего ТО (кредит, урна, своп, купон)</option>
+              <option value="trainings">🏋️ Сбросить лимит тренировок сезона (+5)</option>
+            </select>
+          </div>
+
+          <button class="adm-btn" data-shop-reset-submit style="width:100%; background:rgba(239,71,111,0.2); border:1px solid #ef476f; color:#ff6b8b; font-weight:800; font-size:13px; padding:12px; border-radius:8px; cursor:pointer;">
+            ⚡ Сбросить выбранный лимит
+          </button>
+        </div>
+
+        <div class="adm-card" style="padding:16px;">
+          <h3 style="font-size:16px; font-weight:800; color:#fff; margin-bottom:6px;">🎰 История спинов рулетки</h3>
+          <p style="font-size:12px; color:#8d99ae; margin-bottom:12px;">Последние вращения Колеса Фортуны.</p>
+          <div style="max-height:360px; overflow-y:auto;">
+            ${spinRows}
+          </div>
+        </div>
+      </div>
+    `;
+  }
+
+  renderShopCatalogSection(catalog) {
+    const items = catalog || [];
+    const cards = items.map(it => `
+      <div class="adm-card" style="margin-bottom:10px; padding:14px;">
+        <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+          <div style="display:flex; align-items:center; gap:10px;">
+            <span style="font-size:24px;">${it.icon || '🎁'}</span>
+            <div>
+              <div style="font-weight:800; font-size:15px; color:#fff;">${esc(it.title)}</div>
+              <div style="font-size:12px; color:#f5b027; font-weight:700;">${coins(it.cost)} • ${esc(it.limit_text || '')}</div>
+            </div>
+          </div>
+          <span style="font-size:11px; background:rgba(255,255,255,0.08); padding:3px 8px; border-radius:6px; color:#8d99ae;">${it.id}</span>
+        </div>
+        <p style="font-size:12px; color:#a0a4b8; margin:8px 0 0 0; line-height:1.4;">${esc(it.desc || '')}</p>
+      </div>
+    `).join('');
+
+    return `
+      <div style="margin-bottom:12px;">
+        <h3 style="font-size:15px; font-weight:800; color:#fff; margin-bottom:4px;">📦 Справочник наград магазина</h3>
+        <p style="font-size:12px; color:#8d99ae;">Официальные правила, стоимость и лимиты наград лиги.</p>
+      </div>
+      ${cards}
+    `;
   }
 
   bind() {
@@ -2771,14 +3045,69 @@ export class AdminPanel {
     const t = (sel) => e.target.closest(sel);
     let el;
 
-    if ((el = t('[data-shop-claim-approve]'))) {
+    if ((el = t('[data-shop-subtab]'))) {
+      const subtab = el.dataset.shopSubtab;
+      this.shop.section = subtab;
+      this.renderShop();
+    } else if ((el = t('[data-shop-revoke]'))) {
+      const invId = el.dataset.shopRevoke;
+      const reason = prompt('Причина списания предмета (будет записана в историю):', 'Административное списание');
+      if (reason !== null) {
+        api.adminRevokeShopItem({ inventoryId: Number(invId), reason: reason.trim() || 'Административное списание' })
+          .then(res => {
+            this.toast(res.message || 'Предмет списан');
+            this.loadShop('inventory');
+          })
+          .catch(e => this.toast(e.message || 'Ошибка списания', true));
+      }
+    } else if (t('[data-shop-grant-submit]')) {
+      const userSel = this.root.querySelector('#adm-shop-grant-user');
+      const customUser = this.root.querySelector('#adm-shop-grant-custom-user');
+      const itemSel = this.root.querySelector('#adm-shop-grant-item');
+      const chargesInput = this.root.querySelector('#adm-shop-grant-charges');
+      const notesInput = this.root.querySelector('#adm-shop-grant-notes');
+
+      const userId = (customUser && customUser.value.trim()) ? Number(customUser.value.trim()) : (userSel ? Number(userSel.value) : 0);
+      const itemId = itemSel ? itemSel.value : '';
+      const charges = chargesInput ? Number(chargesInput.value) || 1 : 1;
+      const notes = notesInput ? notesInput.value.trim() : '';
+
+      if (!userId || !itemId) {
+        this.toast('Выберите тренера и предмет', true);
+        return;
+      }
+      api.adminGrantShopItem({ userId, itemId, charges, notes })
+        .then(res => {
+          this.toast(res.message || 'Награда начислена!');
+          this.loadShop('inventory');
+        })
+        .catch(e => this.toast(e.message || 'Ошибка начисления', true));
+    } else if (t('[data-shop-reset-submit]')) {
+      const userSel = this.root.querySelector('#adm-shop-reset-user');
+      const typeSel = this.root.querySelector('#adm-shop-reset-type');
+      const userId = userSel ? Number(userSel.value) : 0;
+      const limitType = typeSel ? typeSel.value : 'all';
+
+      if (!userId) {
+        this.toast('Выберите тренера для сброса', true);
+        return;
+      }
+      if (confirm('Сбросить лимиты для выбранного тренера?')) {
+        api.adminResetShopLimits({ userId, limitType })
+          .then(res => {
+            this.toast(res.message || 'Лимиты сброшены!');
+            this.loadShop('roulette');
+          })
+          .catch(e => this.toast(e.message || 'Ошибка сброса', true));
+      }
+    } else if ((el = t('[data-shop-claim-approve]'))) {
       const claimId = el.dataset.shopClaimApprove;
       const playerName = prompt('Введите точное имя игрока для добавления в состав клуба:');
       if (playerName && playerName.trim()) {
         api.resolveShopClaim(claimId, { action: 'approved', playerName: playerName.trim() })
           .then(res => {
             this.toast(res.message || 'Игрок выдан!');
-            this.loadShopClaims();
+            this.loadShop('claims');
           })
           .catch(e => this.toast(e.message || 'Ошибка', true));
       }
@@ -2788,7 +3117,7 @@ export class AdminPanel {
         api.resolveShopClaim(claimId, { action: 'declined' })
           .then(res => {
             this.toast(res.message || 'Заявка отклонена');
-            this.loadShopClaims();
+            this.loadShop('claims');
           })
           .catch(e => this.toast(e.message || 'Ошибка', true));
       }

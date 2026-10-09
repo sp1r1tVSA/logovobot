@@ -587,6 +587,31 @@ class ApiClient {
     });
   }
 
+  getAdminShopOverview() {
+    return this.request('/api/admin/shop/overview');
+  }
+
+  adminGrantShopItem({ userId, itemId, charges = 1, notes = '' }) {
+    return this.request('/api/admin/shop/grant', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId, item_id: itemId, charges, notes })
+    });
+  }
+
+  adminRevokeShopItem({ inventoryId, reason = '' }) {
+    return this.request('/api/admin/shop/revoke', {
+      method: 'POST',
+      body: JSON.stringify({ inventory_id: inventoryId, reason })
+    });
+  }
+
+  adminResetShopLimits({ userId, limitType = 'all' }) {
+    return this.request('/api/admin/shop/reset-limits', {
+      method: 'POST',
+      body: JSON.stringify({ user_id: userId, limit_type: limitType })
+    });
+  }
+
   getTransferHistory({ windowId = null, mine = false, club = '' } = {}) {
     const qs = new URLSearchParams();
     if (windowId) qs.set('window', String(windowId));

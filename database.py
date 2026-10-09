@@ -21723,3 +21723,151 @@ def resolve_secret_player_claim(claim_id: int, admin_id: int, player_name: str =
             return False, f"Неизвестное действие: {action}"
 
 
+def list_all_shop_inventory(status: str | None = None, limit: int = 100) -> list[dict]:
+    """Список предметов инвентаря всех пользователей для админ-панели."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        query = """
+            SELECT i.*, u.username, u.team_name as user_team
+            FROM shop_inventory i
+            LEFT JOIN users u ON i.user_id = u.telegram_id
+        """
+        params: list[Any] = []
+        if status:
+            query += " WHERE i.status = ?"
+            params.append(status)
+        query += " ORDER BY i.id DESC LIMIT ?"
+        params.append(int(limit))
+        cursor.execute(query, tuple(params))
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def admin_grant_shop_item(user_id: int, item_id: str, charges: int = 1,
+                          notes: str | None = None, admin_id: int = 0) -> int:
+    """Выдача предмета магазина пользователю администратором."""
+    user_id = int(user_id)
+    charges = max(1, int(charges))
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT team_name FROM users WHERE telegram_id = ?", (user_id,))
+        row = cursor.fetchone()
+        club_name = row["team_name"] if row and row["team_name"] else ""
+        meta = {"notes": notes, "granted_by": int(admin_id)}
+        return add_shop_inventory_item(
+            user_id=user_id,
+            club_name=club_name or "",
+            item_id=item_id,
+            charges=charges,
+            tx_id=0,
+            meta=meta,
+            source="admin_grant",
+        )
+
+
+def admin_revoke_shop_item(inventory_id: int, admin_id: int = 0, reason: str | None = None) -> bool:
+    """Аннулирование/списание предмета из инвентаря пользователя администратором."""
+    import json
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM shop_inventory WHERE id = ?", (int(inventory_id),))
+        row = cursor.fetchone()
+        if not row:
+            return False
+        meta = json.loads(row["meta_json"]) if row["meta_json"] else {}
+        meta["revoked_by"] = int(admin_id)
+        meta["revoke_reason"] = reason or "Административное списание"
+        cursor.execute(
+            """
+            UPDATE shop_inventory
+            SET status = 'refunded', charges_left = 0, meta_json = ?
+            WHERE id = ?
+            """,
+            (json.dumps(meta, ensure_ascii=False), int(inventory_id)),
+        )
+        return True
+
+
+def list_shop_roulette_spins(limit: int = 50) -> list[dict]:
+    """Список последних прокрутов рулетки для админ-панели."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT s.*, u.username, u.team_name as user_team
+            FROM shop_roulette_spins s
+            LEFT JOIN users u ON s.user_id = u.telegram_id
+            ORDER BY s.id DESC LIMIT ?
+            """,
+            (int(limit),),
+        )
+        return [dict(row) for row in cursor.fetchall()]
+
+
+def admin_reset_shop_user_limits(user_id: int, limit_type: str = "all", admin_id: int = 0) -> dict:
+    """Сброс лимитов магазина (рулетка / ТО / тренировки / все) для пользователя администратором."""
+    user_id = int(user_id)
+    cleared = []
+    with transaction() as conn:
+        cursor = conn.cursor()
+        active_season = get_active_season()
+        cur_season_id = int(active_season["id"]) if active_season else 1
+
+        if limit_type in ("roulette", "all"):
+            cursor.execute(
+                "DELETE FROM shop_roulette_spins WHERE user_id = ? AND (season_id = ? OR season_id IS NULL)",
+                (user_id, cur_season_id),
+            )
+            cleared.append("roulette")
+
+        if limit_type in ("transfers", "all"):
+            from transfers import repo as transfer_repo
+            active_window = transfer_repo.get_active_window()
+            if active_window:
+                cursor.execute(
+                    """
+                    UPDATE shop_inventory
+                    SET status = 'refunded', source = 'admin_reset'
+                    WHERE user_id = ? AND window_id = ? AND source = 'purchase'
+                    """,
+                    (user_id, active_window["id"]),
+                )
+                cleared.append("transfers")
+
+        if limit_type in ("trainings", "all"):
+            cursor.execute(
+                """
+                UPDATE shop_inventory
+                SET status = 'refunded', source = 'admin_reset'
+                WHERE user_id = ? AND item_id = 'train_5' AND season_id = ? AND source = 'purchase'
+                """,
+                (user_id, cur_season_id),
+            )
+            cleared.append("trainings")
+
+    return {"status": "ok", "cleared": cleared}
+
+
+def get_shop_admin_stats() -> dict:
+    """Общая статистика магазина для админ-панели."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT COUNT(*), COALESCE(SUM(charges_total), 0) FROM shop_inventory WHERE source = 'purchase'")
+        inv_row = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*) FROM shop_inventory WHERE status = 'active' AND charges_left > 0")
+        active_inv_row = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*), COALESCE(SUM(cost), 0) FROM shop_roulette_spins")
+        roulette_row = cursor.fetchone()
+        cursor.execute("SELECT COUNT(*) FROM shop_secret_player_claims WHERE status = 'pending'")
+        claims_row = cursor.fetchone()
+        cursor.execute("SELECT COALESCE(SUM(amount), 0) FROM coin_transactions WHERE transaction_type IN ('shop_purchase', 'shop_roulette')")
+        coins_spent_row = cursor.fetchone()
+        return {
+            "total_purchases": int(inv_row[0]) if inv_row else 0,
+            "active_inventory_items": int(active_inv_row[0]) if active_inv_row else 0,
+            "total_roulette_spins": int(roulette_row[0]) if roulette_row else 0,
+            "pending_claims": int(claims_row[0]) if claims_row else 0,
+            "total_coins_spent": abs(int(coins_spent_row[0])) if coins_spent_row else 0,
+        }
+
+
+

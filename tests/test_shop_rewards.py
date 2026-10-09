@@ -370,3 +370,58 @@ def test_urna_boost_transfer_integration(test_user):
     # Заряд урны списан
     assert database.count_active_shop_item(test_user["id"], "urna_boost") == 0
     transfer_repo.close_window(wid, 1)
+
+
+def test_admin_shop_overview_and_stats(test_user):
+    """Проверка сбора статистики и обзора магазина для админ-панели."""
+    # Покупка тренировки
+    shop_service.buy_shop_item(test_user["id"], "train_5")
+
+    stats = database.get_shop_admin_stats()
+    assert stats["total_purchases"] >= 1
+    assert stats["active_inventory_items"] >= 1
+    assert stats["total_coins_spent"] >= 4500
+
+    inv = database.list_all_shop_inventory()
+    assert len(inv) >= 1
+    assert any(i["user_id"] == test_user["id"] and i["item_id"] == "train_5" for i in inv)
+
+
+def test_admin_shop_grant_and_revoke(test_user):
+    """Администратор может вручную выдать награду и списать/аннулировать ее."""
+    admin_id = 999999
+    # 1. Выдача награды
+    inv_id = database.admin_grant_shop_item(
+        user_id=test_user["id"],
+        item_id="slot_swap",
+        charges=2,
+        notes="Приз за турнир",
+        admin_id=admin_id,
+    )
+    assert inv_id > 0
+    assert database.count_active_shop_item(test_user["id"], "slot_swap") == 2
+
+    # 2. Аннулирование награды
+    ok = database.admin_revoke_shop_item(inv_id, admin_id=admin_id, reason="Срок истек")
+    assert ok is True
+    assert database.count_active_shop_item(test_user["id"], "slot_swap") == 0
+
+
+def test_admin_shop_reset_limits(test_user):
+    """Сброс лимитов покупок и рулетки администратором."""
+    # Крутим рулетку
+    spin_res = shop_service.spin_roulette(test_user["id"])
+    assert spin_res["status"] == "ok"
+
+    # Второй раз нельзя
+    with pytest.raises(ValueError):
+        shop_service.spin_roulette(test_user["id"])
+
+    # Админ сбрасывает лимит рулетки
+    res = database.admin_reset_shop_user_limits(test_user["id"], limit_type="roulette", admin_id=999999)
+    assert "roulette" in res["cleared"]
+
+    # Теперь можно крутить снова
+    spin_res2 = shop_service.spin_roulette(test_user["id"])
+    assert spin_res2["status"] == "ok"
+
