@@ -48,6 +48,7 @@ def test_user():
         conn.execute("DELETE FROM user_wallets WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM coin_transactions WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM squad_players WHERE player_name = 'Thierry Henry'")
+        conn.execute("DELETE FROM transfer_swap_links")
         conn.execute("DELETE FROM transfers WHERE initiator_id = ? OR to_user = ? OR from_user = ?", (user_id, user_id, user_id))
         conn.execute("DELETE FROM transfer_slot_purchases WHERE user_id = ?", (user_id,))
         conn.execute("DELETE FROM users WHERE telegram_id = ? OR LOWER(TRIM(team_name)) = LOWER(?)", (user_id, team))
@@ -514,5 +515,51 @@ def test_slot_swap_compensates_both_clubs(test_user):
     assert len(chelsea_slots_2) == 2  # 2 от второго обмена, где Челси заплатил 6к!
 
     transfer_repo.close_window(wid, 1)
+
+
+def test_migration_038_legacy_database_without_season_id(test_user):
+    """
+    Регрессионный тест для миграции 038:
+    Если на проде уже была применена миграция 037, а таблица shop_roulette_spins
+    была создана старой версией без колонки season_id, то вызовы каталога
+    и подсчёта прокрутов рулетки должны автоматически применить миграцию 038,
+    добавить колонку season_id и вернуть каталог без ошибки 500 / OperationalError.
+    """
+    with database.transaction() as conn:
+        # Симулируем старое состояние базы до миграции 038:
+        conn.execute("DELETE FROM schema_migrations WHERE version = '038_shop_season_columns'")
+        conn.execute("INSERT OR IGNORE INTO schema_migrations (version, description) VALUES ('037_shop_rewards', 'Shop rewards')")
+        conn.execute("DROP TABLE IF EXISTS shop_roulette_spins")
+        conn.execute("""
+            CREATE TABLE shop_roulette_spins (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                club_name TEXT NOT NULL,
+                cost INTEGER NOT NULL DEFAULT 25000,
+                won_item_id TEXT NOT NULL,
+                won_label TEXT NOT NULL,
+                won_payload TEXT,
+                tx_id INTEGER NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
+            )
+        """)
+
+    # Проверяем, что в старой таблице действительно нет колонки season_id:
+    with database.transaction() as conn:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(shop_roulette_spins)").fetchall()]
+        assert "season_id" not in cols
+
+    # Вызов каталога магазина (тот самый запрос GET /api/shop/catalog):
+    cat = shop_service.get_shop_catalog(test_user["id"])
+    assert cat["balance"] >= 0
+    assert any(it["id"] == "roulette_spin" for it in cat["items"])
+
+    # Проверяем, что колонка season_id была успешно добавлена и миграция 038 зафиксирована:
+    with database.transaction() as conn:
+        cols_after = [r[1] for r in conn.execute("PRAGMA table_info(shop_roulette_spins)").fetchall()]
+        assert "season_id" in cols_after
+        migrated = conn.execute("SELECT 1 FROM schema_migrations WHERE version = '038_shop_season_columns'").fetchone()
+        assert migrated is not None
+
 
 

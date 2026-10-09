@@ -21370,15 +21370,16 @@ def get_broadcast_chat_targets() -> list[dict]:
 # =========================================================================
 
 MIGRATION_037_SHOP_REWARDS = "037_shop_rewards"
+MIGRATION_038_SHOP_SEASON_COLUMNS = "038_shop_season_columns"
 
 
 def _ensure_shop_schema(cursor: sqlite3.Cursor) -> None:
-    """Миграция 037: магазин наград, инвентарь, рулетка и заявки на секретного игрока.
+    """Миграции 037 и 038: магазин наград, инвентарь, рулетка и заявки на секретного игрока.
 
     Все временные метки используют московское время (+3 hours).
     Списание монет идёт через `spend_coins` без изменения оборота ставок.
     """
-    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (MIGRATION_037_SHOP_REWARDS,))
+    cursor.execute("SELECT 1 FROM schema_migrations WHERE version = ?", (MIGRATION_038_SHOP_SEASON_COLUMNS,))
     if cursor.fetchone():
         return
 
@@ -21394,24 +21395,23 @@ def _ensure_shop_schema(cursor: sqlite3.Cursor) -> None:
                 CHECK(status IN ('active', 'used', 'expired', 'refunded')),
             tx_id INTEGER NOT NULL,
             window_id INTEGER,
+            season_id INTEGER,
             source TEXT NOT NULL DEFAULT 'purchase',
             meta_json TEXT,
             created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
             applied_at TIMESTAMP
         )
     """)
-    try:
-        cursor.execute("ALTER TABLE shop_inventory ADD COLUMN window_id INTEGER")
-    except Exception:
-        pass
-    try:
-        cursor.execute("ALTER TABLE shop_inventory ADD COLUMN season_id INTEGER")
-    except Exception:
-        pass
-    try:
-        cursor.execute("ALTER TABLE shop_inventory ADD COLUMN source TEXT NOT NULL DEFAULT 'purchase'")
-    except Exception:
-        pass
+    for col_name, col_type in [
+        ("window_id", "INTEGER"),
+        ("season_id", "INTEGER"),
+        ("source", "TEXT NOT NULL DEFAULT 'purchase'"),
+    ]:
+        try:
+            cursor.execute(f"ALTER TABLE shop_inventory ADD COLUMN {col_name} {col_type}")
+        except Exception:
+            pass
+
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_user ON shop_inventory(user_id, status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_club ON shop_inventory(club_name, status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_window ON shop_inventory(window_id, club_name)")
@@ -21460,6 +21460,10 @@ def _ensure_shop_schema(cursor: sqlite3.Cursor) -> None:
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
         (MIGRATION_037_SHOP_REWARDS, "Shop rewards, inventory, roulette spins and secret player claims"),
     )
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_038_SHOP_SEASON_COLUMNS, "Ensure season_id, window_id, source columns and indices in shop tables"),
+    )
 
 
 def get_user_shop_inventory(user_id: int) -> list[dict]:
@@ -21489,6 +21493,7 @@ def add_shop_inventory_item(user_id: int, club_name: str, item_id: str, charges:
     meta_str = json.dumps(meta_copy, ensure_ascii=False) if meta_copy else None
     with transaction() as conn:
         cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
         cursor.execute(
             "INSERT INTO shop_inventory (user_id, club_name, item_id, charges_total, charges_left, status, tx_id, window_id, season_id, source, meta_json, created_at) "
             "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, datetime('now', '+3 hours'))",
@@ -21508,6 +21513,7 @@ def count_window_shop_transfer_purchases(user_id: int, club_name: str, window_id
     placeholders = ",".join("?" for _ in transfer_item_ids)
     with transaction() as conn:
         cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
         cursor.execute(
             f"""
             SELECT COUNT(*) FROM shop_inventory
@@ -21527,6 +21533,7 @@ def count_window_shop_item_purchases(user_id: int, club_name: str, item_id: str,
     """Подсчёт покупок конкретного товара в рамках трансферного окна."""
     with transaction() as conn:
         cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
         cursor.execute(
             """
             SELECT COUNT(*) FROM shop_inventory
@@ -21546,6 +21553,7 @@ def count_season_shop_item_purchases(user_id: int, club_name: str, item_id: str,
     """Подсчёт покупок конкретного товара за указанный сезон."""
     with transaction() as conn:
         cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
         cursor.execute(
             """
             SELECT COUNT(*) FROM shop_inventory
@@ -21568,6 +21576,7 @@ def count_recent_seasons_shop_item_purchases(user_id: int, club_name: str, item_
     max_season = int(current_season_id)
     with transaction() as conn:
         cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
         cursor.execute(
             """
             SELECT COUNT(*) FROM shop_inventory
@@ -21588,16 +21597,35 @@ def count_season_roulette_spins(user_id: int, club_name: str, season_id: int) ->
     with transaction() as conn:
         cursor = conn.cursor()
         _ensure_shop_schema(cursor)
-        cursor.execute(
-            """
-            SELECT COUNT(*) FROM shop_roulette_spins
-            WHERE (season_id = ? OR (season_id IS NULL AND ? = 1))
-              AND (user_id = ? OR club_name = ?)
-            """,
-            (int(season_id), int(season_id), int(user_id), club_name.strip()),
-        )
-        row = cursor.fetchone()
-        return int(row[0]) if row else 0
+        try:
+            cursor.execute(
+                """
+                SELECT COUNT(*) FROM shop_roulette_spins
+                WHERE (season_id = ? OR (season_id IS NULL AND ? = 1))
+                  AND (user_id = ? OR club_name = ?)
+                """,
+                (int(season_id), int(season_id), int(user_id), club_name.strip()),
+            )
+            row = cursor.fetchone()
+            return int(row[0]) if row else 0
+        except sqlite3.OperationalError as e:
+            if "no such column: season_id" in str(e).lower():
+                try:
+                    cursor.execute("ALTER TABLE shop_roulette_spins ADD COLUMN season_id INTEGER")
+                    cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_roulette_season ON shop_roulette_spins(season_id, user_id)")
+                except Exception:
+                    pass
+                cursor.execute(
+                    """
+                    SELECT COUNT(*) FROM shop_roulette_spins
+                    WHERE (season_id = ? OR (season_id IS NULL AND ? = 1))
+                      AND (user_id = ? OR club_name = ?)
+                    """,
+                    (int(season_id), int(season_id), int(user_id), club_name.strip()),
+                )
+                row = cursor.fetchone()
+                return int(row[0]) if row else 0
+            raise
 
 
 def consume_shop_inventory_item(user_id: int, item_id: str, club_name: str | None = None) -> bool:
@@ -21649,6 +21677,7 @@ def record_shop_roulette_spin(user_id: int, club_name: str, cost: int, won_item_
     payload_str = json.dumps(won_payload, ensure_ascii=False) if won_payload else None
     with transaction() as conn:
         cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
         cursor.execute(
             "INSERT INTO shop_roulette_spins (user_id, club_name, cost, won_item_id, won_label, won_payload, tx_id, season_id, created_at) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))",
@@ -21662,6 +21691,7 @@ def create_secret_player_claim(user_id: int, club_name: str, tx_id: int, cost: i
     """Создать заявку на получение секретного игрока."""
     with transaction() as conn:
         cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
         cursor.execute(
             "INSERT INTO shop_secret_player_claims (user_id, club_name, tx_id, cost, status, notes, created_at) "
             "VALUES (?, ?, ?, ?, 'pending', ?, datetime('now', '+3 hours'))",
@@ -21674,6 +21704,7 @@ def list_secret_player_claims(status: str | None = None, limit: int = 50) -> lis
     """Список заявок на секретного игрока (для админов)."""
     with transaction() as conn:
         cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
         if status:
             cursor.execute(
                 "SELECT * FROM shop_secret_player_claims WHERE status = ? ORDER BY id DESC LIMIT ?",
