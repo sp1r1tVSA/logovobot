@@ -21466,6 +21466,7 @@ def get_user_shop_inventory(user_id: int) -> list[dict]:
     """Вернуть список активных предметов в инвентаре пользователя."""
     with transaction() as conn:
         cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
         cursor.execute(
             "SELECT * FROM shop_inventory WHERE user_id = ? AND status = 'active' AND charges_left > 0 ORDER BY id DESC",
             (int(user_id),),
@@ -21586,6 +21587,7 @@ def count_season_roulette_spins(user_id: int, club_name: str, season_id: int) ->
     """Подсчёт прокрутов рулетки за указанный сезон."""
     with transaction() as conn:
         cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
         cursor.execute(
             """
             SELECT COUNT(*) FROM shop_roulette_spins

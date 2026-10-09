@@ -86,15 +86,26 @@ class ShopManager {
 
   async load() {
     this.init();
+    const grid = document.getElementById('shop-items-grid');
+    if (grid && !this.catalog && this.currentCat !== 'roulette' && this.currentCat !== 'inventory') {
+      grid.innerHTML = '<div class="inventory-empty" style="grid-column: 1 / -1; text-align: center; padding: 24px;">Загрузка наград…</div>';
+    }
     try {
       const res = await api.getShopCatalog();
-      if (res.status === 'ok') {
+      if (res && res.status === 'ok') {
         this.catalog = res;
         this.inventory = res.inventory || [];
         this.render();
+      } else {
+        if (grid && !this.catalog) {
+          grid.innerHTML = `<div class="inventory-empty" style="grid-column: 1 / -1;">${escapeHtml(res?.message || 'Не удалось загрузить награды')}</div>`;
+        }
       }
     } catch (e) {
       console.warn('Could not load shop catalog:', e);
+      if (grid && !this.catalog) {
+        grid.innerHTML = '<div class="inventory-empty" style="grid-column: 1 / -1;">Не удалось загрузить награды. Проверьте соединение и обновите страницу.</div>';
+      }
     }
   }
 
@@ -123,8 +134,12 @@ class ShopManager {
     if (invSec) invSec.style.display = showInv ? 'block' : 'none';
     if (grid) grid.style.display = showItems ? 'grid' : 'none';
 
-    if (showItems && grid && this.catalog?.items) {
-      this.renderItems(grid, balance);
+    if (showItems && grid) {
+      if (this.catalog?.items) {
+        this.renderItems(grid, balance);
+      } else {
+        grid.innerHTML = '<div class="inventory-empty" style="grid-column: 1 / -1; text-align: center; padding: 24px;">Загрузка наград…</div>';
+      }
     }
 
     if (showInv) {

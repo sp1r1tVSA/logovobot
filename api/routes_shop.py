@@ -12,7 +12,7 @@ import logging
 from aiohttp import web
 
 import database
-from api.auth import get_authenticated_user
+from api.auth import extract_init_data, get_authenticated_user
 from handlers.base import is_admin, is_super_admin
 from services import shop_service
 
@@ -20,8 +20,8 @@ logger = logging.getLogger(__name__)
 
 
 def _auth(request: web.Request) -> dict | None:
-    init_data = request.headers.get("X-Telegram-Init-Data", "")
-    return get_authenticated_user(init_data)
+    init_data = extract_init_data(request)
+    return get_authenticated_user(init_data) if init_data else None
 
 
 async def handle_get_shop_catalog(request: web.Request) -> web.Response:
