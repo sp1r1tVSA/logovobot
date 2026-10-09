@@ -16,10 +16,13 @@ Comprehensive tests for Shop Rewards System:
 
 import itertools
 import pytest
+import config
 import database
 from services import shop_service
 from transfers import repo as transfer_repo
 from transfers import requests as req_mod
+from transfers import engine as transfer_engine
+from transfers import approval as transfer_approval
 
 _user_id_gen = itertools.count(8881001)
 
@@ -317,11 +320,13 @@ def test_transfer_rewards_new_window_resets_limit(test_user):
     transfer_repo.close_window(wid2, 1)
 
 
-def test_surcharge_coupon_transfer_integration(test_user):
+def test_surcharge_coupon_transfer_integration(test_user, monkeypatch):
     """
     Купон на доплату (10 000 🪙):
     Дает скидку 50% на доплату за спешл-карты и списывается при создании заявки.
+    При отклонении заявки купон восстанавливается.
     """
+    monkeypatch.setattr(config, "TRANSFER_MANAGER_ID", 1, raising=False)
     wid = transfer_repo.create_window(1, 10, title="ТО Доплата")
     transfer_repo.open_window(wid, 1)
     transfer_repo.update_window_settings(wid, {"surcharge_table": {105: 30000}})
@@ -335,9 +340,146 @@ def test_surcharge_coupon_transfer_integration(test_user):
     sc = req_mod.create_surcharge(test_user["id"], player="Special Player", ovr=105)
     assert sc["status"] == "pending_manager"
     assert sc["price_k"] == 15000
+    assert sc["special_price_k"] == 30000
+    assert sc["discount_k"] == 15000
 
     # Купон израсходован
     assert database.count_active_shop_item(test_user["id"], "surcharge_coupon") == 0
+
+    # Если заявка отклонена администратором — купон восстанавливается
+    transfer_approval.reject(1, sc["id"], reason="Тестовый отказ")
+    assert database.count_active_shop_item(test_user["id"], "surcharge_coupon") == 1
+
+    transfer_repo.close_window(wid, 1)
+
+
+def test_surcharge_coupon_deal_buyer_role_seller_full_buyer_half(test_user, monkeypatch):
+    """
+    Купон на доплату при сделке (role='buy'):
+    Продавцу приходит полная сумма сделки, а покупатель платит базовую цену + половину за спешл.
+    Лимит — 1 покупка на ТО.
+    При отклонении купон возвращается покупателю.
+    """
+    monkeypatch.setattr(config, "TRANSFER_MANAGER_ID", 1, raising=False)
+    other_user_id = 8882003
+    with database.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO users (telegram_id, username, team_name) VALUES (?, ?, ?)",
+            (other_user_id, "seller_coach", "Манчестер Сити"),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO squad_players (team_name, player_name, position) VALUES ('Манчестер Сити', 'E. Haaland', 'ST')"
+        )
+
+    wid = transfer_repo.create_window(1, 10, title="ТО Покупка со спешлом")
+    transfer_repo.open_window(wid, 1)
+    transfer_repo.set_club_budget(wid, "Арсенал", 60000, 1)
+    transfer_repo.set_club_budget(wid, "Манчестер Сити", 60000, 1)
+
+    # Покупатель (Арсенал) берет купон
+    shop_service.buy_shop_item(test_user["id"], "surcharge_coupon")
+    assert database.count_active_shop_item(test_user["id"], "surcharge_coupon") == 1
+
+    # Арсенал покупает Холанда за 35 млн, из них 10 млн — спешл (база 25 + спешл 10)
+    deal = req_mod.create_deal(
+        test_user["id"],
+        role="buy",
+        other_club="Манчестер Сити",
+        player="E. Haaland",
+        ovr="107",
+        price="35",
+        special_price="10",
+    )
+    assert deal["status"] == "pending_counterparty"
+    assert deal["price_k"] == 35000
+    assert deal["special_price_k"] == 10000
+    assert deal["discount_k"] == 5000  # Скидка 50% от 10 млн = 5 млн
+    assert deal["price_k"] - deal["discount_k"] == 30000
+    assert req_mod.serialize(deal)["buyer_price_k"] == 30000  # Покупатель платит 30 млн
+
+    # Купон израсходован
+    assert database.count_active_shop_item(test_user["id"], "surcharge_coupon") == 0
+
+    # Продавец (Сити) подтверждает
+    req_mod.confirm(other_user_id, deal["id"])
+    updated = transfer_repo.get_transfer(deal["id"])
+    assert updated["status"] == "pending_manager"
+
+    # Проверяем бюджет/ледгер в движке:
+    # Покупатель тратит сумму за вычетом скидки (30 млн)
+    ledger_arsenal = transfer_repo.get_club_ledger(wid, "Арсенал")
+    assert ledger_arsenal.spent_k == 30000
+
+    # Одобрение заявки
+    transfer_approval.approve(1, deal["id"])
+    final_tx = transfer_repo.get_transfer(deal["id"])
+    assert final_tx["status"] == "approved"
+
+    # После одобрения продавец получает ВСЮ сумму сделки (35 млн)
+    ledger_city = transfer_repo.get_club_ledger(wid, "Манчестер Сити")
+    assert ledger_city.earned_k == 35000
+
+    transfer_repo.close_window(wid, 1)
+
+
+def test_surcharge_coupon_deal_seller_role_seller_full_buyer_half(test_user, monkeypatch):
+    """
+    Купон на доплату при сделке, где продавец создал заявку (role='sell'):
+    Купон покупателя применяется в момент подтверждения (confirm) покупателем.
+    Продавцу начисляется полная сумма, покупатель платит половину за спешл.
+    """
+    monkeypatch.setattr(config, "TRANSFER_MANAGER_ID", 1, raising=False)
+    seller_user_id = 8882004
+    with database.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO users (telegram_id, username, team_name) VALUES (?, ?, ?)",
+            (seller_user_id, "seller_coach_2", "Бавария"),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO squad_players (team_name, player_name, position) VALUES ('Бавария', 'H. Kane', 'ST')"
+        )
+
+    wid = transfer_repo.create_window(1, 10, title="ТО Продавец со спешлом")
+    transfer_repo.open_window(wid, 1)
+    transfer_repo.set_club_budget(wid, "Арсенал", 60000, 1)
+    transfer_repo.set_club_budget(wid, "Бавария", 60000, 1)
+
+    # Покупатель (Арсенал) покупает купон
+    shop_service.buy_shop_item(test_user["id"], "surcharge_coupon")
+    assert database.count_active_shop_item(test_user["id"], "surcharge_coupon") == 1
+
+    # Продавец (Бавария) подает заявку: продает Кейна Арсеналу за 40 млн, из них 10 млн спешл
+    deal = req_mod.create_deal(
+        seller_user_id,
+        role="sell",
+        other_club="Арсенал",
+        player="H. Kane",
+        ovr="106",
+        price="40",
+        special_price="10",
+    )
+    assert deal["status"] == "pending_counterparty"
+    assert deal["price_k"] == 40000
+    assert deal["discount_k"] == 0  # До подтверждения покупателем купон еще не списан
+    assert database.count_active_shop_item(test_user["id"], "surcharge_coupon") == 1
+
+    # Покупатель (Арсенал) подтверждает заявку
+    req_mod.confirm(test_user["id"], deal["id"])
+
+    # Купон списан, скидка зафиксирована
+    assert database.count_active_shop_item(test_user["id"], "surcharge_coupon") == 0
+    updated = transfer_repo.get_transfer(deal["id"])
+    assert updated["status"] == "pending_manager"
+    assert updated["discount_k"] == 5000  # 50% от 10 млн = 5 млн
+
+    # Ледгер: Арсенал тратит со скидкой 35 млн
+    ledger_arsenal = transfer_repo.get_club_ledger(wid, "Арсенал")
+    assert ledger_arsenal.spent_k == 35000
+
+    # Если менеджер отклоняет заявку — купон возвращается Арсеналу
+    transfer_approval.reject(1, deal["id"], reason="Отказ")
+    assert database.count_active_shop_item(test_user["id"], "surcharge_coupon") == 1
+
     transfer_repo.close_window(wid, 1)
 
 

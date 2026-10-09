@@ -117,4 +117,7 @@ def reject(manager_id: int, transfer_id, reason: str | None = None) -> dict:
             if not repo.set_transfer_status(leg["id"], "rejected", expected=("pending_manager",),
                                             actor_id=int(manager_id), reason=text):
                 raise InputError("Заявку уже решили.")
+            if leg.get("discount_k") and int(leg["discount_k"]) > 0:
+                database.restore_shop_inventory_item(leg["to_user"], "surcharge_coupon", leg["to_club"])
+                repo.set_transfer_discount(leg["id"], 0)
         return repo.get_transfer(t["id"])

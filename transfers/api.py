@@ -303,7 +303,8 @@ async def handle_post_deal(request: web.Request) -> web.Response:
     lot = None
     try:
         deal_fields = dict(role=fields.get("role", ""), other_club=fields.get("other_club", ""),
-                           player=fields.get("player", ""), price=fields.get("price"), ovr=fields.get("ovr"))
+                           player=fields.get("player", ""), price=fields.get("price"), ovr=fields.get("ovr"),
+                           special_price=fields.get("special_price"))
         if lot_id:
             deal = board.respond(user_id, lot_id, **deal_fields)
             lot = repo.get_lot(int(lot_id))

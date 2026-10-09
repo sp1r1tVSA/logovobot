@@ -44,6 +44,7 @@ from transfers.engine import (
     norm_club,
     norm_player,
     parse_money_k,
+    surcharge_cost,
 )
 from transfers.service import InputError
 
@@ -243,14 +244,16 @@ def _request_from_row(t: dict) -> TransferRequest:
     return TransferRequest(
         kind=t["kind"], player_name=t["player_name"], from_club=t["from_club"], to_club=t["to_club"],
         price_k=t["price_k"], ovr=t["ovr"], tm_price_k=t["tm_price_k"],
-        special_price_k=t["special_price_k"], sellable=t["sellable"] != 0,
+        special_price_k=t["special_price_k"], discount_k=int(t.get("discount_k") or 0),
+        sellable=t["sellable"] != 0,
         commented_at=t["commented_at"], reported_budget_k=t["reported_budget_k"],
     )
 
 
 # ─── Подача заявок тренером ──────────────────────────────────────────────────
 
-def create_deal(user_id: int, *, role: str, other_club: str, player: str, price, ovr) -> dict:
+def create_deal(user_id: int, *, role: str, other_club: str, player: str, price, ovr,
+                special_price=None) -> dict:
     """Сделка между двумя тренерами. Подаёт любая сторона, вторая подтверждает.
 
     `role` — `buy` (тренер покупает у `other_club`) или `sell` (продаёт ему).
@@ -266,20 +269,40 @@ def create_deal(user_id: int, *, role: str, other_club: str, player: str, price,
         raise InputError(f"У клуба {other} нет тренера в боте — сделку некому подтвердить.")
     other_id = int(counterparty["telegram_id"])
     name, price_k, ovr_v = _clean_player(player), _parse_price(price, "цену"), _parse_ovr(ovr, required=True)
+    special_k = _parse_price(special_price, "цену за спешл") if special_price is not None and str(special_price).strip() != "" else None
 
     if role == "buy":
         buyer, seller, buyer_id, seller_id = own, other, int(user_id), other_id
     else:
         buyer, seller, buyer_id, seller_id = other, own, other_id, int(user_id)
-    req = TransferRequest("deal", name, from_club=seller, to_club=buyer, price_k=price_k, ovr=ovr_v)
+
     with database.transaction():
         window = _window()
+        settings = repo.get_window_settings(window["id"])
+        if settings and special_k is None and ovr_v is not None and ovr_v >= settings.surcharge_min_ovr:
+            cost = surcharge_cost(ovr_v, settings.surcharge_table)
+            if cost is not None and cost > 0:
+                special_k = min(cost, price_k)
+
+        discount_k = 0
+        if role == "buy":
+            # Инициатор — покупатель. Если у покупателя есть «Купон на доплату», скидка 50% к спешл
+            if special_k and special_k > 0 and database.count_active_shop_item(buyer_id, "surcharge_coupon") > 0:
+                discount_k = special_k // 2
+                database.consume_shop_inventory_item(buyer_id, "surcharge_coupon", buyer)
+
+        req = TransferRequest("deal", name, from_club=seller, to_club=buyer, price_k=price_k, ovr=ovr_v,
+                              special_price_k=special_k if (special_k and special_k > 0) else None,
+                              discount_k=discount_k)
         _no_duplicate(window["id"], req)
         ev = _require(_check(window, req, user_ids=(buyer_id, seller_id)))
         tid = repo.insert_transfer(
             window["id"], "deal", name, "pending_counterparty", _warnings(ev),
             from_club=seller, to_club=buyer, from_user=seller_id, to_user=buyer_id,
-            price_k=price_k, ovr=ovr_v, initiator_id=int(user_id))
+            price_k=price_k, ovr=ovr_v,
+            special_price_k=special_k if (special_k and special_k > 0) else None,
+            discount_k=discount_k,
+            initiator_id=int(user_id))
         return repo.get_transfer(tid)
 
 
@@ -345,12 +368,15 @@ def create_surcharge(user_id: int, *, player: str, ovr) -> dict:
         window = _window()
         _no_duplicate(window["id"], req)
         ev = _require(_check(window, req, user_ids=(int(user_id),)))
-        final_price_k = ev.price_k
+        base_cost = ev.price_k or 0
+        discount_k = 0
         if database.consume_shop_inventory_item(int(user_id), "surcharge_coupon", own):
-            final_price_k = final_price_k // 2
+            discount_k = base_cost // 2
+        final_price_k = max(0, base_cost - discount_k)
         tid = repo.insert_transfer(
             window["id"], "surcharge", name, "pending_manager", _warnings(ev),
-            to_club=own, to_user=int(user_id), price_k=final_price_k, ovr=ovr_v, initiator_id=int(user_id))
+            to_club=own, to_user=int(user_id), price_k=final_price_k, ovr=ovr_v,
+            special_price_k=base_cost, discount_k=discount_k, initiator_id=int(user_id))
         return repo.get_transfer(tid)
 
 
@@ -384,13 +410,21 @@ def create_urn_buy(user_id: int, *, urn_item_id) -> dict:
         item = repo.get_transfer(item_id)
         if item is None or item["window_id"] != window["id"]:
             raise InputError("Этого игрока нет в урне.")
+
+        discount_k = 0
+        if item.get("special_price_k") and int(item["special_price_k"]) > 0:
+            if database.count_active_shop_item(int(user_id), "surcharge_coupon") > 0:
+                discount_k = int(item["special_price_k"]) // 2
+                database.consume_shop_inventory_item(int(user_id), "surcharge_coupon", own)
+
         req = TransferRequest("urn_buy", item["player_name"], from_club=URN_CLUB, to_club=own,
-                              ovr=item["ovr"])
+                              ovr=item["ovr"], discount_k=discount_k)
         ev = _require(_check(window, req, urn_item=item, user_ids=(int(user_id),)))
         tid = repo.insert_transfer(
             window["id"], "urn_buy", item["player_name"], "pending_manager", _warnings(ev),
             from_club=URN_CLUB, to_club=own, to_user=int(user_id), price_k=ev.price_k,
             ovr=item["ovr"], tm_price_k=item["tm_price_k"], special_price_k=item["special_price_k"],
+            discount_k=discount_k,
             sellable=item["sellable"], urn_item_id=item["id"], initiator_id=int(user_id))
         return repo.get_transfer(tid)
 
@@ -410,7 +444,8 @@ def _truthy(value, default: bool = True) -> bool:
 _PREVIEW_RUNNERS = {
     "deal": lambda uid, f: create_deal(
         uid, role=f.get("role") or "", other_club=f.get("other_club") or "",
-        player=f.get("player") or "", price=f.get("price"), ovr=f.get("ovr")),
+        player=f.get("player") or "", price=f.get("price"), ovr=f.get("ovr"),
+        special_price=f.get("special_price")),
     "swap": lambda uid, f: create_swap(
         uid, other_club=f.get("other_club") or "",
         give_player=f.get("give_player") or "", give_price=f.get("give_price"), give_ovr=f.get("give_ovr"),
@@ -492,6 +527,14 @@ def confirm(user_id: int, transfer_id) -> dict:
         if window is None or window["status"] != "open":
             raise InputError("Трансферное окно закрыто.")
         for leg in _legs(t):
+            # Если подтверждающий — покупатель, и в сделке есть спешл, и скидка ещё не применилась:
+            if leg.get("to_user") == int(user_id) and leg.get("special_price_k"):
+                spec_k = int(leg["special_price_k"])
+                if spec_k > 0 and not (leg.get("discount_k") or 0) and database.count_active_shop_item(user_id, "surcharge_coupon") > 0:
+                    disc = spec_k // 2
+                    if database.consume_shop_inventory_item(user_id, "surcharge_coupon", leg.get("to_club")):
+                        repo.set_transfer_discount(leg["id"], disc)
+                        leg = repo.get_transfer(leg["id"])
             ev = _require(_check(window, _request_from_row(leg), exclude_id=leg["id"],
                                  user_ids=(leg["to_user"], leg["from_user"])))
             if not repo.set_transfer_status(leg["id"], "pending_manager", expected=("pending_counterparty",)):
@@ -507,6 +550,9 @@ def decline(user_id: int, transfer_id) -> dict:
             if not repo.set_transfer_status(leg["id"], "rejected", expected=("pending_counterparty",),
                                             actor_id=int(user_id), reason=COUNTERPARTY_DECLINED):
                 raise InputError("Заявка уже не ждёт вашего подтверждения.")
+            if leg.get("discount_k") and int(leg["discount_k"]) > 0:
+                database.restore_shop_inventory_item(leg["to_user"], "surcharge_coupon", leg.get("to_club"))
+                repo.set_transfer_discount(leg["id"], 0)
         return repo.get_transfer(t["id"])
 
 
@@ -521,6 +567,9 @@ def withdraw(user_id: int, transfer_id) -> dict:
         for leg in _legs(t):
             if not repo.set_transfer_status(leg["id"], "withdrawn", expected=PENDING_STATUSES):
                 raise InputError("По заявке уже решили — отозвать её нельзя.")
+            if leg.get("discount_k") and int(leg["discount_k"]) > 0:
+                database.restore_shop_inventory_item(leg["to_user"], "surcharge_coupon", leg.get("to_club"))
+                repo.set_transfer_discount(leg["id"], 0)
         return repo.get_transfer(t["id"])
 
 
@@ -663,6 +712,9 @@ def serialize(t: dict, viewer_id: int | None = None, *, private: bool = False) -
         "player_name": t["player_name"], "from_club": t["from_club"], "to_club": t["to_club"],
         "price_k": t["price_k"], "price": format_k(t["price_k"]), "ovr": t["ovr"],
         "tm_price_k": t["tm_price_k"], "special_price_k": t["special_price_k"],
+        "discount_k": t.get("discount_k") or 0,
+        "buyer_price_k": max(0, int(t["price_k"] or 0) - int(t.get("discount_k") or 0)),
+        "buyer_price": format_k(max(0, int(t["price_k"] or 0) - int(t.get("discount_k") or 0))),
         "sellable": None if t["sellable"] is None else bool(t["sellable"]),
         "commented_at": t["commented_at"], "created_at": t["created_at"], "decided_at": t["decided_at"],
         "has_photo": bool(t["photo_file_id"]),

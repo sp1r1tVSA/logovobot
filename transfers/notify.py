@@ -223,7 +223,11 @@ def format_request_card(t: dict) -> str:
     if t.get("kind") == "deal":
         lines.append(f"Продавец: <b>{html.escape(t.get('from_club') or '—')}</b>")
         lines.append(f"Покупатель: <b>{html.escape(t.get('to_club') or '—')}</b>")
-        lines.append(f"Сумма: <b>{format_k(t.get('price_k'))}</b>")
+        price_line = f"Сумма: <b>{format_k(t.get('price_k'))}</b>"
+        if t.get("discount_k"):
+            buyer_price = max(0, int(t.get("price_k") or 0) - int(t.get("discount_k") or 0))
+            price_line += f" (покупатель платит: <b>{format_k(buyer_price)}</b> по купону)"
+        lines.append(price_line)
     elif t.get("kind") == "surcharge":
         lines.append(f"Клуб: <b>{html.escape(t.get('to_club') or '—')}</b>")
         lines.append(f"Доплата за спешл: <b>{format_k(t.get('price_k'))}</b>")

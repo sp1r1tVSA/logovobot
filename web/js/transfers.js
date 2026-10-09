@@ -336,7 +336,10 @@ class TransfersView {
           </div>` : ''}
 
         <div class="req-footer">
-          <div class="req-price">${r.price}</div>
+          <div class="req-price">
+            ${r.price}
+            ${r.discount_k ? `<span class="badge-discount" style="background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.3); border-radius: 4px; padding: 2px 6px; font-size: 0.72rem; margin-left: 6px;">🎟 Купон -${(r.discount_k / 1000).toFixed(0)} млн</span>` : ''}
+          </div>
           <div class="req-actions">
             ${r.has_photo ? `<button class="btn-withdraw btn-view-photo" data-id="${r.id}" type="button">📸 Фото</button>` : ''}
             ${r.can_confirm ? `
@@ -528,6 +531,13 @@ class TransfersView {
             <label class="form-label" for="deal-price">Сумма (в млн)</label>
             <input type="text" id="deal-price" class="form-input" placeholder="12.5" required>
           </div>
+        </div>
+        <div class="form-group" style="margin-top: 4px;">
+          <label class="form-label" for="deal-special" style="display: flex; justify-content: space-between;">
+            <span>Из них доплата за спешл (млн)</span>
+            <span style="font-weight: normal; color: var(--text-secondary); font-size: 0.75rem;">опционально</span>
+          </label>
+          <input type="text" id="deal-special" class="form-input" placeholder="0">
         </div>`}
       `;
     } else if (this.requestKind === 'surcharge') {
@@ -583,6 +593,7 @@ class TransfersView {
       set('deal-player', p.player);
       set('deal-ovr', p.ovr);
       set('deal-price', p.price);
+      set('deal-special', p.special_price);
     }
 
     document.getElementById('board-respond-clear')?.addEventListener('click', () => {
@@ -615,6 +626,7 @@ class TransfersView {
       return {
         kind: 'deal', role: this.dealRole, other_club: v('deal-other-club'),
         player: v('deal-player'), ovr: v('deal-ovr'), price: v('deal-price'),
+        special_price: v('deal-special'),
       };
     }
     if (this.requestKind === 'surcharge') {
@@ -866,6 +878,8 @@ class TransfersView {
           formData.append('player', document.getElementById('deal-player').value);
           formData.append('ovr', document.getElementById('deal-ovr').value);
           formData.append('price', document.getElementById('deal-price').value);
+          const specialVal = document.getElementById('deal-special')?.value;
+          if (specialVal) formData.append('special_price', specialVal);
           if (this.respondLot && this.respondLot.role === this.dealRole) {
             formData.append('lot_id', String(this.respondLot.id));
           }
@@ -1356,6 +1370,7 @@ class TransfersView {
             <div class="req-price">
               ${it.price}
               ${it.special_price_k ? `<span class="hist-price-detail">(${it.tm_price_k ? (it.tm_price_k / 1000).toFixed(0) : ((it.price_k - it.special_price_k) / 1000).toFixed(0)} + ${(it.special_price_k / 1000).toFixed(0)} спешл)</span>` : ''}
+              ${it.discount_k ? `<span class="badge-discount" style="background: rgba(34,197,94,0.15); color: #4ade80; border: 1px solid rgba(34,197,94,0.3); border-radius: 4px; padding: 2px 6px; font-size: 0.72rem; margin-left: 6px;">🎟 Купон -${(it.discount_k / 1000).toFixed(0)} млн</span>` : ''}
             </div>
             ${it.has_photo ? `<button class="btn-withdraw btn-view-photo" data-id="${it.id}" type="button">📸 Фото</button>` : ''}
           </div>

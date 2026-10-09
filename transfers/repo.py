@@ -256,7 +256,7 @@ def get_club_budgets(window_id: int) -> list[dict]:
 
 _TRANSFER_FIELDS = (
     "from_club", "to_club", "from_user", "to_user", "price_k", "ovr", "tm_price_k",
-    "special_price_k", "sellable", "urn_item_id", "source_text", "commented_at",
+    "special_price_k", "discount_k", "sellable", "urn_item_id", "source_text", "commented_at",
     "reported_budget_k", "photo_file_id", "initiator_id",
 )
 
@@ -276,6 +276,8 @@ def insert_transfer(window_id: int, kind: str, player_name: str, status: str,
     values = {key: fields.get(key) for key in _TRANSFER_FIELDS}
     if values["price_k"] is None:
         values["price_k"] = 0
+    if values["discount_k"] is None:
+        values["discount_k"] = 0
     if values["sellable"] is not None:
         values["sellable"] = 1 if values["sellable"] else 0
     now = now_msk_str()
@@ -283,19 +285,30 @@ def insert_transfer(window_id: int, kind: str, player_name: str, status: str,
         cur = conn.execute(
             """INSERT INTO transfers (
                    window_id, kind, player_name, norm_name, from_club, to_club, from_user, to_user,
-                   price_k, ovr, tm_price_k, special_price_k, sellable, urn_item_id, source_text,
+                   price_k, ovr, tm_price_k, special_price_k, discount_k, sellable, urn_item_id, source_text,
                    commented_at, reported_budget_k, photo_file_id, initiator_id, status, warnings,
                    created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (window_id, kind, name, norm_player(name),
              values["from_club"], values["to_club"], values["from_user"], values["to_user"],
              int(values["price_k"]), values["ovr"], values["tm_price_k"], values["special_price_k"],
+             int(values["discount_k"]),
              values["sellable"], values["urn_item_id"], values["source_text"],
              values["commented_at"], values["reported_budget_k"], values["photo_file_id"],
              values["initiator_id"], status, json.dumps(list(warnings), ensure_ascii=False),
              now, now),
         )
         return int(cur.lastrowid)
+
+
+def set_transfer_discount(transfer_id: int, discount_k: int) -> bool:
+    """Установить скидку для покупателя (например, по купону на доплату)."""
+    with transaction() as conn:
+        cur = conn.execute(
+            "UPDATE transfers SET discount_k = ?, updated_at = ? WHERE id = ?",
+            (int(discount_k), now_msk_str(), int(transfer_id))
+        )
+        return cur.rowcount > 0
 
 
 # Заявка вместе с парой по обмену: `swap_partner_id` — вторая половина обмена или NULL.

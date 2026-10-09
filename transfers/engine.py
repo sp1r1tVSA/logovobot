@@ -310,9 +310,11 @@ def compute_ledger(club: str, budget_k: int | None, transfers: Iterable[Mapping]
             continue
         kind = t["kind"]
         price = int(t["price_k"] or 0)
+        discount = int(t.get("discount_k") or 0)
+        buyer_price = max(0, price - discount)
         if _same_club(t["to_club"], club):
             if kind in SPEND_KINDS:
-                spent += price
+                spent += buyer_price
             if kind in BUY_SLOT_KINDS:
                 buys += 1
         if _same_club(t["from_club"], club):
@@ -394,6 +396,7 @@ class TransferRequest:
     ovr: int | None = None
     tm_price_k: int | None = None
     special_price_k: int | None = None
+    discount_k: int = 0
     sellable: bool = True
     commented_at: str | None = None
     reported_budget_k: int | None = None
@@ -502,7 +505,8 @@ def _check_deal(req: TransferRequest, ctx: RequestContext, ev: Evaluation) -> No
         ev.block("INVALID_OVR", "Не указан OVR карты.")
         return
     _check_ovr_cap(req.ovr, ctx.settings.ovr_cap, ev)
-    _check_buyer(ctx, req.price_k, ev, slot=True)
+    buyer_price = max(0, req.price_k - req.discount_k) if req.discount_k else req.price_k
+    _check_buyer(ctx, buyer_price, ev, slot=True)
     _check_seller(req, ctx, ev)
 
 
@@ -608,4 +612,5 @@ def _check_urn_buy(req: TransferRequest, ctx: RequestContext, ev: Evaluation) ->
         ev.warn("URN_OWN_BUYBACK", "Клуб выкупает своего же игрока из урны.")
     price = int(item["tm_price_k"] or 0) + int(item["special_price_k"] or 0)
     ev.price_k = price
-    _check_buyer(ctx, price, ev, slot=True)
+    buyer_price = max(0, price - req.discount_k) if req.discount_k else price
+    _check_buyer(ctx, buyer_price, ev, slot=True)

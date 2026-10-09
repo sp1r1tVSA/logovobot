@@ -21656,6 +21656,33 @@ def consume_shop_inventory_item(user_id: int, item_id: str, club_name: str | Non
         return True
 
 
+def restore_shop_inventory_item(user_id: int, item_id: str, club_name: str | None = None) -> bool:
+    """Вернуть 1 заряд предмета в инвентарь (например, при отмене/отклонении трансфера)."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        _ensure_shop_schema(cursor)
+        if club_name:
+            cursor.execute(
+                "SELECT id, charges_left, charges_total FROM shop_inventory WHERE (user_id = ? OR club_name = ?) AND item_id = ? ORDER BY id DESC LIMIT 1",
+                (int(user_id), club_name.strip(), item_id.strip()),
+            )
+        else:
+            cursor.execute(
+                "SELECT id, charges_left, charges_total FROM shop_inventory WHERE user_id = ? AND item_id = ? ORDER BY id DESC LIMIT 1",
+                (int(user_id), item_id.strip()),
+            )
+        row = cursor.fetchone()
+        if not row:
+            return False
+        inv_id = row["id"]
+        new_charges = min(row["charges_total"], row["charges_left"] + 1)
+        cursor.execute(
+            "UPDATE shop_inventory SET charges_left = ?, status = 'active' WHERE id = ?",
+            (new_charges, inv_id),
+        )
+        return True
+
+
 def count_active_shop_item(user_id: int, item_id: str) -> int:
     """Количество доступных зарядов конкретного предмета у пользователя."""
     with transaction() as conn:

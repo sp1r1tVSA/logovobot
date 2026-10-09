@@ -94,6 +94,7 @@ def apply_schema(cursor: sqlite3.Cursor) -> None:
             ovr INTEGER,
             tm_price_k INTEGER,
             special_price_k INTEGER,
+            discount_k INTEGER NOT NULL DEFAULT 0,
             sellable INTEGER,
             urn_item_id INTEGER REFERENCES transfers(id),
             source_text TEXT,
@@ -293,6 +294,11 @@ def apply_schema(cursor: sqlite3.Cursor) -> None:
         "CREATE INDEX IF NOT EXISTS idx_transfer_player_cards_name "
         "ON transfer_player_cards(norm_name)"
     )
+
+    try:
+        cursor.execute("ALTER TABLE transfers ADD COLUMN discount_k INTEGER NOT NULL DEFAULT 0")
+    except Exception:
+        pass
 
     cursor.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
