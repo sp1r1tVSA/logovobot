@@ -26,13 +26,16 @@ MAX_TRANSFER_REWARDS_PER_WINDOW = 2
 SHOP_CATALOG: list[dict[str, Any]] = [
     {
         "id": "train_5",
-        "name": "Тренировки (+5)",
+        "name": "Тренировка",
         "category": "squad",
         "icon": "🏋️",
         "price": 4500,
-        "badge": "+5 слотов прокачки",
-        "description": "Добавляет +5 зарядов тренировок составу вашего клуба. Прокачивайте игроков сверх базового лимита.",
+        "badge": "+5 тренировок (1 раз в сезон)",
+        "description": "Дает +5 тренировок в ваш состав. Можно покупать один раз за сезон. Максимальное количество покупок за три сезона — три штуки.",
         "requires_window": False,
+        "limit_scope": "season",
+        "max_per_season": 1,
+        "max_recent_seasons": 3,
         "charges": 5,
     },
     {
@@ -41,11 +44,13 @@ SHOP_CATALOG: list[dict[str, Any]] = [
         "category": "transfers",
         "icon": "🏦",
         "price": 5500,
-        "badge": "До 15 млн в ТО",
-        "description": "Трансферный заём до 15.000.000 € на текущее трансферное окно для экстренного выкупа игроков.",
+        "badge": "До -20 млн в ТО",
+        "description": "Позволяет уйти в минус до 20 миллионов по итогам трансферного окна. Лимит — одна покупка на ТО.",
         "requires_window": True,
+        "limit_scope": "window",
+        "max_per_window": 1,
         "charges": 1,
-        "meta": {"loan_limit_k": 15000},
+        "meta": {"loan_limit_k": 20000},
     },
     {
         "id": "slot_swap",
@@ -53,22 +58,26 @@ SHOP_CATALOG: list[dict[str, Any]] = [
         "category": "transfers",
         "icon": "🤝",
         "price": 6000,
-        "badge": "+1 обмен игроками",
-        "description": "Дополнительный слот для проведения прямого обмена игроками между клубами в текущем ТО.",
+        "badge": "Обмен без траты слота",
+        "description": "При покупке обмен игроков не засчитывается за слот. Лимит — одна покупка на ТО.",
         "requires_window": True,
+        "limit_scope": "window",
+        "max_per_window": 1,
         "charges": 1,
     },
     {
         "id": "urna_boost",
-        "name": "Выгодная урна (+25%)",
+        "name": "Выгодная урна",
         "category": "transfers",
         "icon": "🗑",
         "price": 7000,
-        "badge": "+25% к выплате за карту",
-        "description": "Бонусная надбавка +25% к сумме сдачи карты в урну на следующую продажу игрока.",
+        "badge": "+1 сброс в урну",
+        "description": "Позволяет выбросить в урну еще одного игрока. Для дивизионов, где выбрасывать игроков нельзя, покупка этой награды открывает возможность утилизировать одного футболиста. Лимит — одна покупка на ТО.",
         "requires_window": True,
+        "limit_scope": "window",
+        "max_per_window": 1,
         "charges": 1,
-        "meta": {"bonus_pct": 25},
+        "meta": {"extra_urn_slots": 1, "unlock_urn": True},
     },
     {
         "id": "surcharge_coupon",
@@ -76,20 +85,25 @@ SHOP_CATALOG: list[dict[str, Any]] = [
         "category": "transfers",
         "icon": "📄",
         "price": 10000,
-        "badge": "Покрытие спец-карты",
-        "description": "Купон на проведение доплаты за повышение OVR или спешл-карту в текущем окне.",
+        "badge": "-50% на доплату спешл",
+        "description": "При покупке игрока вы платите в два раза меньше за доплату за спешл-карты (скидка 50% на доплату за спешл). Лимит — одна покупка на ТО.",
         "requires_window": True,
+        "limit_scope": "window",
+        "max_per_window": 1,
         "charges": 1,
+        "meta": {"discount_pct": 50},
     },
     {
         "id": "roulette_spin",
-        "name": "Рулетка фортуны",
+        "name": "Билет в рулетку",
         "category": "all",
         "icon": "🎰",
         "price": 25000,
-        "badge": "Колесо призов",
-        "description": "Вращай интерактивное Колесо Фортуны с шансом выиграть супер-призы, бюджет, тренировки или Секретного игрока!",
+        "badge": "1 билет за сезон",
+        "description": "Вам может выпасть абсолютно любая награда. При этом не гарантируется, что призы будут только из текущего списка. Лимит — одна покупка за сезон.",
         "requires_window": False,
+        "limit_scope": "season",
+        "max_per_season": 1,
         "charges": 1,
     },
     {
@@ -98,8 +112,8 @@ SHOP_CATALOG: list[dict[str, Any]] = [
         "category": "squad",
         "icon": "🕵️",
         "price": 50000,
-        "badge": "VIP Звездный игрок",
-        "description": "Прямая заявка на подписание секретного топ-игрока лиги. После покупки администратор подбирает и выдает звезду в состав.",
+        "badge": "Эксклюзив / Твич-пул",
+        "description": "Вы получаете одного из примерно 10 футболистов, которые заблокированы для обычной покупки. Они редкие — приобрести их на рынке нельзя, но можно выиграть здесь или в наградах на Твиче.",
         "requires_window": False,
         "charges": 1,
     },
@@ -133,9 +147,9 @@ ROULETTE_SECTORS: list[dict[str, Any]] = [
         "weight": 25.0,
         "item_id": "urna_boost",
         "reward_type": "inventory",
-        "reward_label": "Выгодная урна (+25% к выплате)",
+        "reward_label": "Выгодная урна (+1 сброс в урну)",
         "charges": 1,
-        "meta": {"bonus_pct": 25},
+        "meta": {"extra_urn_slots": 1, "unlock_urn": True},
     },
     {
         "index": 2,
@@ -160,8 +174,9 @@ ROULETTE_SECTORS: list[dict[str, Any]] = [
         "weight": 15.0,
         "item_id": "surcharge_coupon",
         "reward_type": "inventory",
-        "reward_label": "Купон на доплату (спешл-карта)",
+        "reward_label": "Купон на доплату (50% на спешл)",
         "charges": 1,
+        "meta": {"discount_pct": 50},
     },
     {
         "index": 4,
@@ -223,13 +238,20 @@ ROULETTE_SECTORS: list[dict[str, Any]] = [
 def get_shop_catalog(user_id: int) -> dict[str, Any]:
     """
     Возвращает каталог наград для пользователя с учётом баланса,
-    статуса ТО и привязки к клубу.
+    статуса ТО, текущего сезона и привязки к клубу.
     """
     club = _coach_club_or_none(user_id)
     balance = database.get_wallet_balance(int(user_id))
     active_window = transfer_repo.get_active_window()
     is_window_open = bool(active_window and active_window.get("status") == "open")
     window_id = active_window.get("id") if active_window else None
+
+    active_season = database.get_active_season()
+    current_season_id = (
+        int(active_window.get("season_id"))
+        if (active_window and active_window.get("season_id"))
+        else (int(active_season["id"]) if active_season else 1)
+    )
 
     # Подсчёт купленных трансферных наград за текущее окно (максимум 2 на окно)
     window_transfer_purchases = 0
@@ -241,6 +263,8 @@ def get_shop_catalog(user_id: int) -> dict[str, Any]:
             transfer_item_ids=TRANSFER_SHOP_ITEM_IDS,
         )
     transfer_limit_reached = (window_transfer_purchases >= MAX_TRANSFER_REWARDS_PER_WINDOW)
+
+    roulette_spins_season = database.count_season_roulette_spins(int(user_id), club or "", current_season_id)
 
     items = []
     for item in SHOP_CATALOG:
@@ -261,6 +285,34 @@ def get_shop_catalog(user_id: int) -> dict[str, Any]:
             elif item["id"] in TRANSFER_SHOP_ITEM_IDS and transfer_limit_reached:
                 available = False
                 reason = f"Лимит наград за окно исчерпан ({window_transfer_purchases} из {MAX_TRANSFER_REWARDS_PER_WINDOW})"
+            elif item.get("max_per_window") and window_id is not None:
+                bought_item_window = database.count_window_shop_item_purchases(
+                    int(user_id), club or "", item["id"], int(window_id)
+                )
+                if bought_item_window >= item["max_per_window"]:
+                    available = False
+                    reason = f"Лимит на эту награду исчерпан ({bought_item_window} из {item['max_per_window']} на ТО)"
+        elif item["id"] == "train_5":
+            if not club:
+                available = False
+                reason = "За вами не закреплён клуб лиги"
+            else:
+                train_season_count = database.count_season_shop_item_purchases(
+                    int(user_id), club or "", "train_5", current_season_id
+                )
+                train_3_seasons_count = database.count_recent_seasons_shop_item_purchases(
+                    int(user_id), club or "", "train_5", current_season_id, seasons_count=3
+                )
+                if train_season_count >= item.get("max_per_season", 1):
+                    available = False
+                    reason = "Лимит на сезон исчерпан (1 покупка за сезон)"
+                elif train_3_seasons_count >= item.get("max_recent_seasons", 3):
+                    available = False
+                    reason = "Лимит за три сезона исчерпан (максимум 3 покупки)"
+        elif item["id"] == "roulette_spin":
+            if roulette_spins_season >= item.get("max_per_season", 1):
+                available = False
+                reason = "Лимит на сезон исчерпан (1 билет за сезон)"
         elif item["id"] == "secret_player" and not club:
             available = False
             reason = "За вами не закреплён клуб лиги"
@@ -280,8 +332,11 @@ def get_shop_catalog(user_id: int) -> dict[str, Any]:
         "is_window_open": is_window_open,
         "window_title": active_window.get("title") if active_window else None,
         "window_id": window_id,
+        "season_id": current_season_id,
         "window_transfer_rewards_bought": window_transfer_purchases,
         "window_transfer_rewards_limit": MAX_TRANSFER_REWARDS_PER_WINDOW,
+        "roulette_spins_this_season": roulette_spins_season,
+        "roulette_season_limit": 1,
         "inventory": inventory,
     }
 
@@ -302,13 +357,20 @@ def buy_shop_item(user_id: int, item_id: str, notes: str | None = None) -> dict[
     active_window = transfer_repo.get_active_window()
     is_window_open = bool(active_window and active_window.get("status") == "open")
 
+    active_season = database.get_active_season()
+    current_season_id = (
+        int(active_window.get("season_id"))
+        if (active_window and active_window.get("season_id"))
+        else (int(active_season["id"]) if active_season else 1)
+    )
+
     if target.get("requires_window"):
         if not club:
             raise ValueError("За вами не закреплён клуб лиги.")
         if not is_window_open:
             raise ValueError("Трансферное окно сейчас закрыто.")
+        window_id = active_window["id"]
         if target["id"] in TRANSFER_SHOP_ITEM_IDS:
-            window_id = active_window["id"]
             current_purchases = database.count_window_shop_transfer_purchases(
                 user_id=user_id,
                 club_name=club or "",
@@ -320,6 +382,33 @@ def buy_shop_item(user_id: int, item_id: str, notes: str | None = None) -> dict[
                     f"В одно трансферное окно можно купить максимум {MAX_TRANSFER_REWARDS_PER_WINDOW} "
                     f"трансферные награды (у вас уже куплено {current_purchases})."
                 )
+        if target.get("max_per_window"):
+            bought_this_item = database.count_window_shop_item_purchases(
+                user_id=user_id,
+                club_name=club or "",
+                item_id=target["id"],
+                window_id=window_id,
+            )
+            if bought_this_item >= target["max_per_window"]:
+                raise ValueError(
+                    f"Награду «{target['name']}» можно купить максимум {target['max_per_window']} "
+                    f"раз(а) за одно трансферное окно."
+                )
+
+    if target["id"] == "train_5":
+        if not club:
+            raise ValueError("За вами не закреплён клуб лиги.")
+        train_season_count = database.count_season_shop_item_purchases(
+            user_id=user_id, club_name=club or "", item_id="train_5", season_id=current_season_id
+        )
+        if train_season_count >= target.get("max_per_season", 1):
+            raise ValueError("Тренировку можно покупать максимум один раз за сезон.")
+        train_3_seasons_count = database.count_recent_seasons_shop_item_purchases(
+            user_id=user_id, club_name=club or "", item_id="train_5",
+            current_season_id=current_season_id, seasons_count=3
+        )
+        if train_3_seasons_count >= target.get("max_recent_seasons", 3):
+            raise ValueError("Лимит на тренировки исчерпан: максимум 3 покупки за три сезона.")
 
     if target["id"] == "secret_player" and not club:
         raise ValueError("За вами не закреплён клуб лиги.")
@@ -361,6 +450,7 @@ def buy_shop_item(user_id: int, item_id: str, notes: str | None = None) -> dict[
         else:
             charges = target.get("charges", 1)
             meta = target.get("meta")
+            window_id = active_window.get("id") if active_window else None
             inv_id = database.add_shop_inventory_item(
                 user_id=user_id,
                 club_name=club or "",
@@ -368,7 +458,8 @@ def buy_shop_item(user_id: int, item_id: str, notes: str | None = None) -> dict[
                 charges=charges,
                 tx_id=tx_id,
                 meta=meta,
-                window_id=active_window.get("id") if active_window else None,
+                window_id=window_id,
+                season_id=current_season_id,
                 source="purchase",
             )
             return {
@@ -385,12 +476,24 @@ def buy_shop_item(user_id: int, item_id: str, notes: str | None = None) -> dict[
 
 def spin_roulette(user_id: int) -> dict[str, Any]:
     """
-    Прокрут Колеса Фортуны за 25 000 🪙.
+    Прокрут Колеса Фортуны за 25 000 🪙 (лимит 1 прокрут за сезон).
     Определяет выигравший сектор по весам и начисляет награду.
     """
     user_id = int(user_id)
     club = _coach_club_or_none(user_id) or ""
     price = ROULETTE_PRICE
+
+    active_season = database.get_active_season()
+    active_window = transfer_repo.get_active_window()
+    current_season_id = (
+        int(active_window.get("season_id"))
+        if (active_window and active_window.get("season_id"))
+        else (int(active_season["id"]) if active_season else 1)
+    )
+
+    season_spins = database.count_season_roulette_spins(user_id, club, current_season_id)
+    if season_spins >= 1:
+        raise ValueError("В одном сезоне можно крутить рулетку максимум 1 раз.")
 
     # Выбираем победителя по весам
     total_weight = sum(s["weight"] for s in ROULETTE_SECTORS)
@@ -402,7 +505,6 @@ def spin_roulette(user_id: int) -> dict[str, Any]:
             break
         rand_val -= sector["weight"]
 
-    active_window = transfer_repo.get_active_window()
     window_id = active_window.get("id") if active_window else None
 
     with database.transaction():
@@ -446,6 +548,7 @@ def spin_roulette(user_id: int) -> dict[str, Any]:
                 tx_id=tx_id,
                 meta=meta,
                 window_id=window_id,
+                season_id=current_season_id,
                 source="roulette",
             )
 
@@ -456,6 +559,7 @@ def spin_roulette(user_id: int) -> dict[str, Any]:
             won_item_id=item_id,
             won_label=winning_sector["reward_label"],
             tx_id=tx_id,
+            season_id=current_season_id,
             won_payload={
                 "sector_index": winning_sector["index"],
                 "sector_id": winning_sector["id"],
@@ -476,3 +580,4 @@ def spin_roulette(user_id: int) -> dict[str, Any]:
         "claim_id": claim_id,
         "inventory_id": inv_id,
     }
+

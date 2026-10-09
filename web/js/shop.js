@@ -121,8 +121,16 @@ class ShopManager {
 
     // Обновляем кнопку спина колеса
     const spinBtn = document.getElementById('wheel-spin-btn');
+    const spinsThisSeason = this.catalog?.roulette_spins_this_season ?? 0;
+    const isSeasonSpinUsed = spinsThisSeason >= 1;
     if (spinBtn) {
-      spinBtn.disabled = this.isSpinning || balance < SPIN_PRICE;
+      if (isSeasonSpinUsed) {
+        spinBtn.disabled = true;
+        spinBtn.textContent = 'Лимит сезона (1/1)';
+      } else {
+        spinBtn.disabled = this.isSpinning || balance < SPIN_PRICE;
+        spinBtn.textContent = 'Крутить за 25 000 🪙';
+      }
     }
   }
 
@@ -170,11 +178,13 @@ class ShopManager {
       const isTop = it.id === 'secret_player' || it.id === 'urna_boost';
       let windowBadge = '';
       if (it.requires_window) {
-        if (bought >= limit) {
-          windowBadge = '<span class="shop-card-badge tag-limit-reached">Лимит окна (2/2)</span>';
+        if (!it.available && it.reason && it.reason.includes('Лимит')) {
+          windowBadge = '<span class="shop-card-badge tag-limit-reached">Лимит исчерпан</span>';
         } else {
           windowBadge = '<span class="shop-card-badge tag-window">Трансферное окно</span>';
         }
+      } else if (it.limit_scope === 'season' && !it.available && it.reason && it.reason.includes('Лимит')) {
+        windowBadge = '<span class="shop-card-badge tag-limit-reached">Лимит сезона</span>';
       }
       return `
         <div class="shop-card ${isTop ? 'featured' : ''}" data-item-id="${escapeHtml(it.id)}">
@@ -233,11 +243,11 @@ class ShopManager {
     };
 
     const NAME_MAP = {
-      train_5: 'Тренировки состава (+5)',
-      credit_transfer: 'Трансферный кредит (до 15M)',
+      train_5: 'Тренировка (+5)',
+      credit_transfer: 'Трансферный кредит (до -20M)',
       slot_swap: 'Слот обмена игроками',
-      urna_boost: 'Выгодная урна (+25% к выплате)',
-      surcharge_coupon: 'Купон на доплату (спешл-карта)',
+      urna_boost: 'Выгодная урна (+1 игрок в урну)',
+      surcharge_coupon: 'Купон на доплату (50% на спешл)',
       secret_player: 'Секретный игрок',
       budget_10m: 'Трансферный бюджет (+10M)',
     };

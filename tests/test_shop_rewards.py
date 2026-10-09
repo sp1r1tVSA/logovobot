@@ -6,21 +6,51 @@ Comprehensive tests for Shop Rewards System:
 - Purchasing items (trainings, urn boost, surcharge coupon, slots, loan)
 - Wheel of Fortune roulette spins & reward payouts
 - Secret Player purchase, admin approval into squad, and decline with refund
-- Urn boost (+25%) and Surcharge coupon (100% discount) integration in transfers
+- Urn boost (+1 card, unban restricted clubs) and Surcharge coupon (50% discount) integration
+- Swap slot mechanic (swap doesn't burn regular slots)
+- Precise limits:
+  * train_5: 1 per season, max 3 across 3 seasons
+  * roulette_spin: 1 per season
+  * transfer rewards: 1 per window each, max 2 total transfer rewards per window
 """
 
+import itertools
 import pytest
 import database
 from services import shop_service
 from transfers import repo as transfer_repo
+from transfers import requests as req_mod
+
+_user_id_gen = itertools.count(8881001)
+
+
+@pytest.fixture(autouse=True)
+def clean_transfer_windows():
+    database.init_db()
+    active = transfer_repo.get_active_window()
+    if active:
+        transfer_repo.close_window(active["id"], 1)
+    yield
+    active = transfer_repo.get_active_window()
+    if active:
+        transfer_repo.close_window(active["id"], 1)
 
 
 @pytest.fixture
 def test_user():
-    database.init_db()
     user_id = 8881001
     username = "shop_tester"
-    team = "Arsenal"
+    team = "Арсенал"
+    with database.transaction() as conn:
+        conn.execute("DELETE FROM shop_inventory WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM shop_roulette_spins WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM shop_secret_player_claims WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM user_wallets WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM coin_transactions WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM squad_players WHERE player_name = 'Thierry Henry'")
+        conn.execute("DELETE FROM transfers WHERE initiator_id = ? OR to_user = ? OR from_user = ?", (user_id, user_id, user_id))
+        conn.execute("DELETE FROM transfer_slot_purchases WHERE user_id = ?", (user_id,))
+        conn.execute("DELETE FROM users WHERE telegram_id = ? OR LOWER(TRIM(team_name)) = LOWER(?)", (user_id, team))
     database.register_user(user_id, username, team_name=team)
     database.add_coins(user_id, 200000, tx_type="test_seed")
     return {"id": user_id, "username": username, "team": team}
@@ -59,6 +89,54 @@ def test_buy_train_5(test_user):
     assert charges == 5
 
 
+def test_train_5_season_limits(test_user):
+    """
+    Тренировка (4 500 🪙):
+    - Можно покупать 1 раз за сезон. Вторая покупка в том же сезоне блокируется.
+    - Максимальное количество покупок за три сезона — три штуки.
+    """
+    # 1. Первая покупка в сезоне успешна
+    res1 = shop_service.buy_shop_item(test_user["id"], "train_5")
+    assert res1["status"] == "ok"
+
+    # 2. Повторная покупка в том же сезоне блокируется
+    cat = shop_service.get_shop_catalog(test_user["id"])
+    train_item = next(it for it in cat["items"] if it["id"] == "train_5")
+    assert train_item["available"] is False
+    assert "Лимит на сезон исчерпан" in train_item["reason"]
+
+    with pytest.raises(ValueError, match="максимум один раз за сезон"):
+        shop_service.buy_shop_item(test_user["id"], "train_5")
+
+    # 3. Проверка лимита 3 сезона:
+    # В шаге 1 покупка была записана в сезон 1 (дефолтный сезон при отсутствии открытого сезона)
+    # Добавляем покупки для пользователя в сезоне 2 и сезоне 3
+    database.add_shop_inventory_item(
+        user_id=test_user["id"],
+        club_name=test_user["team"],
+        item_id="train_5",
+        charges=5,
+        tx_id=101,
+        season_id=2,
+        source="purchase",
+    )
+    database.add_shop_inventory_item(
+        user_id=test_user["id"],
+        club_name=test_user["team"],
+        item_id="train_5",
+        charges=5,
+        tx_id=102,
+        season_id=3,
+        source="purchase",
+    )
+
+    # Всего за последние 3 сезона (при текущем сезоне 3) уже 3 покупки (сезоны 1, 2, 3)
+    recent_cnt = database.count_recent_seasons_shop_item_purchases(
+        test_user["id"], test_user["team"], "train_5", current_season_id=3, seasons_count=3
+    )
+    assert recent_cnt == 3
+
+
 def test_spin_roulette(test_user):
     """Прокрут Рулетки Фортуны за 25 000 🪙: списание монет, фиксация выигрыша и начисление награды."""
     init_balance = database.get_wallet_balance(test_user["id"])
@@ -69,13 +147,30 @@ def test_spin_roulette(test_user):
     new_balance = database.get_wallet_balance(test_user["id"])
     assert new_balance == init_balance - 25000
 
-    # Проверяем историю прокрутов
     with database.transaction() as conn:
         c = conn.cursor()
         c.execute("SELECT * FROM shop_roulette_spins WHERE user_id = ?", (test_user["id"],))
         row = c.fetchone()
         assert row is not None
         assert row["cost"] == 25000
+
+
+def test_roulette_season_limit(test_user):
+    """Билет в рулетку (25 000 🪙): лимит 1 покупка (прокрут) за сезон."""
+    # Первый прокрут успешен
+    res1 = shop_service.spin_roulette(test_user["id"])
+    assert res1["status"] == "ok"
+
+    # Каталог отражает израсходованный лимит
+    cat = shop_service.get_shop_catalog(test_user["id"])
+    assert cat["roulette_spins_this_season"] == 1
+    roulette_item = next(it for it in cat["items"] if it["id"] == "roulette_spin")
+    assert roulette_item["available"] is False
+    assert "Лимит на сезон исчерпан" in roulette_item["reason"]
+
+    # Второй прокрут вызывает исключение
+    with pytest.raises(ValueError, match="сезоне можно крутить рулетку максимум 1 раз"):
+        shop_service.spin_roulette(test_user["id"])
 
 
 def test_secret_player_claim_and_admin_approval(test_user):
@@ -88,11 +183,9 @@ def test_secret_player_claim_and_admin_approval(test_user):
     new_balance = database.get_wallet_balance(test_user["id"])
     assert new_balance == init_balance - 50000
 
-    # Проверяем список заявок
     claims = database.list_secret_player_claims(status="pending")
     assert any(c["id"] == claim_id for c in claims)
 
-    # Админ утверждает
     admin_id = 999999
     star_name = "Thierry Henry"
     ok, msg = database.resolve_secret_player_claim(
@@ -104,7 +197,6 @@ def test_secret_player_claim_and_admin_approval(test_user):
     )
     assert ok is True
 
-    # Проверяем состав Арсенала
     player_record = database.find_player_in_squad(star_name, "Арсенал")
     assert player_record is not None
     assert player_record["player_name"] == star_name
@@ -117,7 +209,6 @@ def test_secret_player_claim_and_admin_decline_refund(test_user):
     claim_id = buy_res["claim_id"]
     assert database.get_wallet_balance(test_user["id"]) == init_balance - 50000
 
-    # Админ отклоняет
     admin_id = 999999
     ok, msg = database.resolve_secret_player_claim(
         claim_id=claim_id,
@@ -126,8 +217,23 @@ def test_secret_player_claim_and_admin_decline_refund(test_user):
         notes="Квота звезд исчерпана",
     )
     assert ok is True
-    # Проверяем возврат монет
     assert database.get_wallet_balance(test_user["id"]) == init_balance
+
+
+def test_transfer_item_per_window_limit(test_user):
+    """Каждый трансферный товар (5 500 - 10 000 🪙) имеет лимит: 1 покупка на ТО."""
+    wid = transfer_repo.create_window(1, 10, title="ТО Зима")
+    transfer_repo.open_window(wid, 1)
+
+    # 1. Покупка кредита
+    r1 = shop_service.buy_shop_item(test_user["id"], "credit_transfer")
+    assert r1["status"] == "ok"
+
+    # Попытка купить кредит второй раз в том же окне блокируется индивидуальным лимитом
+    with pytest.raises(ValueError, match="можно купить максимум 1 раз"):
+        shop_service.buy_shop_item(test_user["id"], "credit_transfer")
+
+    transfer_repo.close_window(wid, 1)
 
 
 def test_transfer_rewards_window_limit(test_user):
@@ -139,7 +245,6 @@ def test_transfer_rewards_window_limit(test_user):
     wid = transfer_repo.create_window(1, 10, title="ТО Зима")
     transfer_repo.open_window(wid, 1)
 
-    # В каталоге изначально 0 покупок из 2
     cat = shop_service.get_shop_catalog(test_user["id"])
     assert cat["is_window_open"] is True
     assert cat["window_transfer_rewards_bought"] == 0
@@ -167,7 +272,7 @@ def test_transfer_rewards_window_limit(test_user):
     cat2 = shop_service.get_shop_catalog(test_user["id"])
     assert cat2["window_transfer_rewards_bought"] == 2
     items2 = {it["id"]: it for it in cat2["items"]}
-    # Все 4 трансферные награды теперь заблокированы
+    # Все 4 трансферные награды теперь заблокированы по лимиту окна
     assert items2["credit_transfer"]["available"] is False
     assert items2["slot_swap"]["available"] is False
     assert items2["urna_boost"]["available"] is False
@@ -190,17 +295,12 @@ def test_transfer_rewards_new_window_resets_limit(test_user):
     """
     В новом трансферном окне лимит покупок трансферных наград считается заново.
     """
-    active = transfer_repo.get_active_window()
-    if active:
-        transfer_repo.close_window(active["id"], 1)
-
     wid1 = transfer_repo.create_window(1, 10, title="ТО Зима")
     transfer_repo.open_window(wid1, 1)
 
     shop_service.buy_shop_item(test_user["id"], "credit_transfer")
     shop_service.buy_shop_item(test_user["id"], "slot_swap")
 
-    # Закрываем 1-е окно и открываем 2-е окно
     transfer_repo.close_window(wid1, 1)
     wid2 = transfer_repo.create_window(1, 11, title="ТО Лето")
     transfer_repo.open_window(wid2, 1)
@@ -211,8 +311,62 @@ def test_transfer_rewards_new_window_resets_limit(test_user):
     assert items["credit_transfer"]["available"] is True
     assert items["urna_boost"]["available"] is True
 
-    # Успешно покупаем в новом окне
     r = shop_service.buy_shop_item(test_user["id"], "urna_boost")
     assert r["status"] == "ok"
     transfer_repo.close_window(wid2, 1)
 
+
+def test_surcharge_coupon_transfer_integration(test_user):
+    """
+    Купон на доплату (10 000 🪙):
+    Дает скидку 50% на доплату за спешл-карты и списывается при создании заявки.
+    """
+    wid = transfer_repo.create_window(1, 10, title="ТО Доплата")
+    transfer_repo.open_window(wid, 1)
+    transfer_repo.update_window_settings(wid, {"surcharge_table": {105: 30000}})
+    transfer_repo.set_club_budget(wid, "Арсенал", 50000, 1)
+
+    # Покупаем купон
+    shop_service.buy_shop_item(test_user["id"], "surcharge_coupon")
+    assert database.count_active_shop_item(test_user["id"], "surcharge_coupon") == 1
+
+    # Создаем доплату: базовая цена 30 000k, со скидкой 50% -> 15 000k
+    sc = req_mod.create_surcharge(test_user["id"], player="Special Player", ovr=105)
+    assert sc["status"] == "pending_manager"
+    assert sc["price_k"] == 15000
+
+    # Купон израсходован
+    assert database.count_active_shop_item(test_user["id"], "surcharge_coupon") == 0
+    transfer_repo.close_window(wid, 1)
+
+
+def test_urna_boost_transfer_integration(test_user):
+    """
+    Выгодная урна (7 000 🪙):
+    Позволяет выбросить в урну еще одного игрока.
+    Для клубов/дивизионов с запретом на урну снимает запрет и дает возможность утилизировать 1 игрока.
+    """
+    wid = transfer_repo.create_window(1, 10, title="ТО Урна")
+    transfer_repo.open_window(wid, 1)
+    # Запрещаем урну для Арсенала и ставим лимит 0
+    transfer_repo.update_window_settings(wid, {
+        "urn_restricted_clubs": ["Arsenal", "Арсенал"],
+        "urn_max_per_club": 0,
+    })
+
+    # Без урны заявка блокируется
+    with pytest.raises(Exception):
+        req_mod.create_urn_sale(test_user["id"], player="Old Card", tm_price="10", special_price="2", sellable=True)
+
+    # Покупаем Выгодную урну
+    shop_service.buy_shop_item(test_user["id"], "urna_boost")
+    assert database.count_active_shop_item(test_user["id"], "urna_boost") == 1
+
+    # Теперь продажа в урну разрешена!
+    sale = req_mod.create_urn_sale(test_user["id"], player="Old Card", tm_price="10", special_price="2", sellable=True)
+    assert sale["status"] == "pending_manager"
+    assert sale["price_k"] == 6000  # (10 + 2) / 2
+
+    # Заряд урны списан
+    assert database.count_active_shop_item(test_user["id"], "urna_boost") == 0
+    transfer_repo.close_window(wid, 1)

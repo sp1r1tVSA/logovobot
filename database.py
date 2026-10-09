@@ -21405,12 +21405,17 @@ def _ensure_shop_schema(cursor: sqlite3.Cursor) -> None:
     except Exception:
         pass
     try:
+        cursor.execute("ALTER TABLE shop_inventory ADD COLUMN season_id INTEGER")
+    except Exception:
+        pass
+    try:
         cursor.execute("ALTER TABLE shop_inventory ADD COLUMN source TEXT NOT NULL DEFAULT 'purchase'")
     except Exception:
         pass
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_user ON shop_inventory(user_id, status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_club ON shop_inventory(club_name, status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_window ON shop_inventory(window_id, club_name)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_inv_season ON shop_inventory(season_id, club_name)")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS shop_roulette_spins (
@@ -21422,10 +21427,16 @@ def _ensure_shop_schema(cursor: sqlite3.Cursor) -> None:
             won_label TEXT NOT NULL,
             won_payload TEXT,
             tx_id INTEGER NOT NULL,
+            season_id INTEGER,
             created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours'))
         )
     """)
+    try:
+        cursor.execute("ALTER TABLE shop_roulette_spins ADD COLUMN season_id INTEGER")
+    except Exception:
+        pass
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_roulette_user ON shop_roulette_spins(user_id)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_shop_roulette_season ON shop_roulette_spins(season_id, user_id)")
 
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS shop_secret_player_claims (
@@ -21464,20 +21475,26 @@ def get_user_shop_inventory(user_id: int) -> list[dict]:
 
 def add_shop_inventory_item(user_id: int, club_name: str, item_id: str, charges: int,
                             tx_id: int, meta: dict | None = None,
-                            window_id: int | None = None, source: str = "purchase") -> int:
+                            window_id: int | None = None, season_id: int | None = None,
+                            source: str = "purchase") -> int:
     """Добавить предмет в инвентарь пользователя."""
     import json
+    resolved_season_id = int(season_id) if season_id is not None else _resolve_season_id(None)
     meta_copy = dict(meta or {})
     if window_id is not None:
         meta_copy["window_id"] = int(window_id)
+    if resolved_season_id is not None:
+        meta_copy["season_id"] = int(resolved_season_id)
     meta_str = json.dumps(meta_copy, ensure_ascii=False) if meta_copy else None
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO shop_inventory (user_id, club_name, item_id, charges_total, charges_left, status, tx_id, window_id, source, meta_json, created_at) "
-            "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, datetime('now', '+3 hours'))",
+            "INSERT INTO shop_inventory (user_id, club_name, item_id, charges_total, charges_left, status, tx_id, window_id, season_id, source, meta_json, created_at) "
+            "VALUES (?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, datetime('now', '+3 hours'))",
             (int(user_id), club_name.strip(), item_id.strip(), int(charges), int(charges), int(tx_id),
-             int(window_id) if window_id is not None else None, str(source).strip(), meta_str),
+             int(window_id) if window_id is not None else None,
+             int(resolved_season_id) if resolved_season_id is not None else None,
+             str(source).strip(), meta_str),
         )
         return int(cursor.lastrowid)
 
@@ -21500,6 +21517,82 @@ def count_window_shop_transfer_purchases(user_id: int, club_name: str, window_id
               AND status != 'refunded'
             """,
             (int(window_id), int(window_id), int(user_id), club_name.strip(), *transfer_item_ids),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def count_window_shop_item_purchases(user_id: int, club_name: str, item_id: str, window_id: int) -> int:
+    """Подсчёт покупок конкретного товара в рамках трансферного окна."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM shop_inventory
+            WHERE (window_id = ? OR json_extract(meta_json, '$.window_id') = ?)
+              AND (user_id = ? OR club_name = ?)
+              AND item_id = ?
+              AND source = 'purchase'
+              AND status != 'refunded'
+            """,
+            (int(window_id), int(window_id), int(user_id), club_name.strip(), item_id.strip()),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def count_season_shop_item_purchases(user_id: int, club_name: str, item_id: str, season_id: int) -> int:
+    """Подсчёт покупок конкретного товара за указанный сезон."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM shop_inventory
+            WHERE (season_id = ? OR json_extract(meta_json, '$.season_id') = ?)
+              AND (user_id = ? OR club_name = ?)
+              AND item_id = ?
+              AND source = 'purchase'
+              AND status != 'refunded'
+            """,
+            (int(season_id), int(season_id), int(user_id), club_name.strip(), item_id.strip()),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def count_recent_seasons_shop_item_purchases(user_id: int, club_name: str, item_id: str,
+                                             current_season_id: int, seasons_count: int = 3) -> int:
+    """Подсчёт покупок товара за последние N сезонов (включая текущий)."""
+    min_season = max(1, int(current_season_id) - int(seasons_count) + 1)
+    max_season = int(current_season_id)
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM shop_inventory
+            WHERE ((season_id BETWEEN ? AND ?) OR (json_extract(meta_json, '$.season_id') BETWEEN ? AND ?))
+              AND (user_id = ? OR club_name = ?)
+              AND item_id = ?
+              AND source = 'purchase'
+              AND status != 'refunded'
+            """,
+            (min_season, max_season, min_season, max_season, int(user_id), club_name.strip(), item_id.strip()),
+        )
+        row = cursor.fetchone()
+        return int(row[0]) if row else 0
+
+
+def count_season_roulette_spins(user_id: int, club_name: str, season_id: int) -> int:
+    """Подсчёт прокрутов рулетки за указанный сезон."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT COUNT(*) FROM shop_roulette_spins
+            WHERE (season_id = ? OR (season_id IS NULL AND ? = 1))
+              AND (user_id = ? OR club_name = ?)
+            """,
+            (int(season_id), int(season_id), int(user_id), club_name.strip()),
         )
         row = cursor.fetchone()
         return int(row[0]) if row else 0
@@ -21546,16 +21639,19 @@ def count_active_shop_item(user_id: int, item_id: str) -> int:
 
 
 def record_shop_roulette_spin(user_id: int, club_name: str, cost: int, won_item_id: str,
-                              won_label: str, tx_id: int, won_payload: dict | None = None) -> int:
+                              won_label: str, tx_id: int, won_payload: dict | None = None,
+                              season_id: int | None = None) -> int:
     """Записать результат прокрута рулетки."""
     import json
+    resolved_season_id = int(season_id) if season_id is not None else _resolve_season_id(None)
     payload_str = json.dumps(won_payload, ensure_ascii=False) if won_payload else None
     with transaction() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO shop_roulette_spins (user_id, club_name, cost, won_item_id, won_label, won_payload, tx_id, created_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))",
-            (int(user_id), club_name.strip(), int(cost), won_item_id.strip(), won_label.strip(), payload_str, int(tx_id)),
+            "INSERT INTO shop_roulette_spins (user_id, club_name, cost, won_item_id, won_label, won_payload, tx_id, season_id, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))",
+            (int(user_id), club_name.strip(), int(cost), won_item_id.strip(), won_label.strip(), payload_str, int(tx_id),
+             int(resolved_season_id) if resolved_season_id is not None else None),
         )
         return int(cursor.lastrowid)
 
