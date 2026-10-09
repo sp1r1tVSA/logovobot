@@ -216,6 +216,15 @@ class TestPick:
         p = FakeProvider([fx(1)], odds={1: (2, 3, 4)})
         assert run(irl_jobs.run_pick(FakeBot(), p))["note"] == "disabled" and p.calls == []
 
+    def test_auto_pick_disabled_does_not_pick(self, clock, monkeypatch):
+        monkeypatch.setattr(config, "IRL_AUTO_PICK", False)
+        p = FakeProvider([fx(1)], odds={1: (2, 3, 4)})
+        bot = FakeBot()
+        rep = run(irl_jobs.run_pick(bot, p))
+        assert rep["picked"] == 0
+        assert p.calls == []
+        assert day_matches() == []
+
     def test_undelivered_preview_is_retried_on_the_next_pass(self, clock):
         p = FakeProvider([fx(1)], odds={1: (2, 3, 4)})
         run(irl_jobs.run_pick(FakeBot(fail_for={111, 222}), p))

@@ -431,3 +431,38 @@ class TestRestoreIrlMatch:
         from handlers import bot_menu
         assert "irl" in [c.command for c in bot_menu.GLOBAL_ADMIN_COMMANDS]
         assert "irl" not in [c.command for c in bot_menu.ADMIN_COMMANDS]
+
+
+class TestTomorrowNavigation:
+    def test_day_keyboard_has_tomorrow_button_on_today(self):
+        u = press(f"irl:day:{DAY}")
+        tomorrow = (NOW + timedelta(days=1)).date().isoformat()
+        yesterday = (NOW - timedelta(days=1)).date().isoformat()
+        kb = u.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert f"irl:day:{tomorrow}" in callbacks
+        assert f"irl:day:{yesterday}" in callbacks
+
+    def test_navigating_to_tomorrow_shows_tomorrow_panel(self):
+        tomorrow = (NOW + timedelta(days=1)).date().isoformat()
+        u = press(f"irl:day:{tomorrow}")
+        text = shown(u)
+        assert f"IRL-ставки на {tomorrow} (Завтра)" in text
+        kb = u.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
+        assert f"irl:day:{DAY}" in callbacks
+        assert f"irl:add:{tomorrow}" in callbacks
+
+    def test_add_candidate_on_tomorrow(self, monkeypatch):
+        tomorrow = (NOW + timedelta(days=1)).date().isoformat()
+        use_provider(monkeypatch, FakeProvider([fx(20, hours=28)], {20: (1.9, 3.5, 4.0)}))
+        u = press(f"irl:add:{tomorrow}")
+        text = shown(u)
+        assert "на завтра" in text
+        assert "Arsenal" in text
+        press(f"irl:pk:20:{tomorrow}:0")
+        matches = database.list_irl_matches(bet_day=tomorrow)
+        assert len(matches) == 1
+        assert matches[0]["provider_fixture_id"] == "20"
+        assert matches[0]["bet_day"] == tomorrow
+        assert matches[0]["status"] == "draft"

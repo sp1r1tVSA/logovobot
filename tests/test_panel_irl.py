@@ -83,6 +83,32 @@ class TestAdminPanelIrl(AioHTTPTestCase):
         self.assertEqual(data["status"], "ok")
         self.assertEqual(len(data["matches"]), 2)
         self.assertIn(today_msk_str(), data["days"])
+        self.assertIn(data["tomorrow"], data["days"])
+        self.assertEqual(data["today"], today_msk_str())
+
+    @patch("services.sports.get_sports_provider")
+    async def test_add_match_for_tomorrow(self, mock_get_provider):
+        tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
+        kickoff = now_msk() + timedelta(hours=28)
+        fx_mock = PrematchFixture(fixture_id="fix_tmrw", league_id=39, league_name="Premier League",
+                                  home="Arsenal", away="Chelsea", kickoff=kickoff)
+        mock_provider = AsyncMock()
+        mock_provider.get_prematch_fixture.return_value = fx_mock
+        mock_provider.get_match_winner_odds.return_value = MatchWinnerOdds("fix_tmrw", 4, 1.9, 3.4, 4.1)
+        mock_get_provider.return_value = mock_provider
+
+        resp = await self.client.post(
+            "/api/admin/panel/irl/matches",
+            headers=self._headers(),
+            json={"fixture_id": "fix_tmrw", "day": tomorrow}
+        )
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["status"], "ok")
+
+        m = database.get_irl_match(data["match_id"])
+        self.assertEqual(m["bet_day"], tomorrow)
+        self.assertEqual(m["status"], "draft")
 
     async def test_publish_and_publish_all(self):
         kickoff = now_msk() + timedelta(hours=4)

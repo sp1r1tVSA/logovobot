@@ -165,7 +165,8 @@ async def run_pick(bot, provider=None, now: Optional[datetime] = None) -> dict:
     report["expired"] = database.expire_irl_drafts()
     database.close_started_irl_matches()
 
-    if not database.list_irl_matches(bet_day=day) and now.hour >= config.IRL_PREVIEW_HOUR_MSK:
+    auto_pick = getattr(config, "IRL_AUTO_PICK", True)
+    if auto_pick and not database.list_irl_matches(bet_day=day) and now.hour >= config.IRL_PREVIEW_HOUR_MSK:
         await _pick_for_day(bot, provider, now, day, report)
     await _send_preview(bot, day)
 

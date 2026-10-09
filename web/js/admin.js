@@ -921,14 +921,19 @@ export class AdminPanel {
   renderIrl() {
     const body = this.body();
     if (!body || this.tab !== 'irl') return;
-    const { day, today, days, matches, autoPublish, bookmakerId, enabled } = this.irl;
+    const { day, today, tomorrow, days, matches, autoPublish, bookmakerId, enabled } = this.irl;
     const drafts = matches.filter(m => m.status === 'draft');
 
-    const dayPills = days.map(d => `
-      <button class="category-pill ${d === day ? 'active' : ''}" data-adm-irl-day="${esc(d)}">
-        ${d === today ? 'Сегодня' : esc(d)}
-      </button>
-    `).join('');
+    const dayPills = days.map(d => {
+      let label = esc(d);
+      if (d === today) label = 'Сегодня';
+      else if (d === tomorrow) label = 'Завтра';
+      return `
+        <button class="category-pill ${d === day ? 'active' : ''}" data-adm-irl-day="${esc(d)}">
+          ${label}
+        </button>
+      `;
+    }).join('');
 
     const bannerHtml = !enabled
       ? `<div class="adm-banner adm-banner-danger adm-mb">⚠️ Ставки на реальные матчи выключены (IRL_ENABLED=false).</div>`
@@ -1088,7 +1093,9 @@ export class AdminPanel {
 
   async askIrlAdd(replaceId = null) {
     const day = this.irl?.day || '';
-    this.showModal(this.modalFrame(replaceId ? `Замена матча #${replaceId}` : 'Добавить матч дня', `
+    const dayLabel = day === this.irl?.today ? 'сегодня' : (day === this.irl?.tomorrow ? 'завтра' : day);
+    const frameTitle = replaceId ? `Замена матча #${replaceId}` : `Добавить матч на ${esc(dayLabel)}`;
+    this.showModal(this.modalFrame(frameTitle, `
       <div class="adm-empty">Загрузка доступных матчей дня…</div>
     `));
 
@@ -1096,9 +1103,9 @@ export class AdminPanel {
       const res = await this.get(`${PANEL}/irl/candidates`, { day });
       const candidates = res.candidates || [];
       if (!candidates.length) {
-        this.showModal(this.modalFrame(replaceId ? `Замена матча #${replaceId}` : 'Добавить матч дня', `
+        this.showModal(this.modalFrame(frameTitle, `
           <div class="adm-empty">
-            Нет доступных матчей приоритетных лиг на ${esc(day)}.<br>
+            Нет доступных матчей приоритетных лиг на ${esc(dayLabel)}.<br>
             <small class="adm-muted">Матчи могли уже начаться или уже занесены в базу.</small>
           </div>
         `));
@@ -1117,7 +1124,7 @@ export class AdminPanel {
         </div>
       `).join('');
 
-      this.showModal(this.modalFrame(replaceId ? `Замена матча #${replaceId}` : 'Добавить матч дня', `
+      this.showModal(this.modalFrame(frameTitle, `
         <div class="adm-form-desc" style="margin-bottom:8px;">
           Выберите матч. Коэффициенты 1X2 будут автоматически запрошены у букмекера Pinnacle.
         </div>

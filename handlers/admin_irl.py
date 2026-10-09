@@ -20,6 +20,7 @@ handlers/admin_irl.py
 и публикуется отдельным нажатием (или автопубликацией).
 """
 
+from datetime import timedelta
 import html
 import logging
 import re
@@ -51,7 +52,7 @@ def _get_provider():
 # ─── Панель дня ──────────────────────────────────────────────────────────────
 
 def day_keyboard(matches: list[dict], day: str) -> InlineKeyboardMarkup:
-    """Кнопки под превью/панелью: по строке на матч + общие действия."""
+    """Кнопки под превью/панелью: по строке на матч + общие действия + навигация по дням."""
     rows: list[list[InlineKeyboardButton]] = []
     for m in matches:
         mid = m["id"]
@@ -71,13 +72,49 @@ def day_keyboard(matches: list[dict], day: str) -> InlineKeyboardMarkup:
     if any(m["status"] == "draft" for m in matches):
         common.insert(0, InlineKeyboardButton("✅ Опубликовать все", callback_data=f"irl:puball:{day}"))
     rows.append(common)
-    rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"irl:day:{day}")])
+
+    now = now_msk()
+    today = today_msk_str()
+    tomorrow_str = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    cur_d = parse_msk(day + " 00:00:00")
+    if cur_d:
+        prev_d = (cur_d - timedelta(days=1)).strftime("%Y-%m-%d")
+        next_d = (cur_d + timedelta(days=1)).strftime("%Y-%m-%d")
+        nav: list[InlineKeyboardButton] = []
+        if day == today:
+            nav.append(InlineKeyboardButton("◀️ Вчера", callback_data=f"irl:day:{prev_d}"))
+            nav.append(InlineKeyboardButton("🔄 Обновить", callback_data=f"irl:day:{day}"))
+            nav.append(InlineKeyboardButton("Завтра ▶️", callback_data=f"irl:day:{tomorrow_str}"))
+        elif day == tomorrow_str:
+            nav.append(InlineKeyboardButton("◀️ Сегодня", callback_data=f"irl:day:{today}"))
+            nav.append(InlineKeyboardButton("🔄 Обновить", callback_data=f"irl:day:{day}"))
+            nav.append(InlineKeyboardButton(f"{next_d[-5:]} ▶️", callback_data=f"irl:day:{next_d}"))
+        else:
+            nav.append(InlineKeyboardButton(f"◀️ {prev_d[-5:]}", callback_data=f"irl:day:{prev_d}"))
+            nav.append(InlineKeyboardButton("Сегодня", callback_data=f"irl:day:{today}"))
+            nav.append(InlineKeyboardButton(f"{next_d[-5:]} ▶️", callback_data=f"irl:day:{next_d}"))
+        rows.append(nav)
+    else:
+        rows.append([InlineKeyboardButton("🔄 Обновить", callback_data=f"irl:day:{day}")])
+
     return InlineKeyboardMarkup(rows)
 
 
 def day_panel(day: str, note: str | None = None) -> tuple[str, InlineKeyboardMarkup]:
     matches = database.list_irl_matches(bet_day=day)
-    lines = [f"⚽ <b>IRL-ставки на {html.escape(day)}</b>"]
+    today = today_msk_str()
+    tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
+    yesterday = (now_msk() - timedelta(days=1)).strftime("%Y-%m-%d")
+
+    day_label = day
+    if day == today:
+        day_label = f"{day} (Сегодня)"
+    elif day == tomorrow:
+        day_label = f"{day} (Завтра)"
+    elif day == yesterday:
+        day_label = f"{day} (Вчера)"
+
+    lines = [f"⚽ <b>IRL-ставки на {html.escape(day_label)}</b>"]
     if note:
         lines += ["", note]
     if not matches:
@@ -135,7 +172,10 @@ async def _show_candidates(update: Update, day: str, replace_id: int) -> None:
         await _show(update, "⚠️ Провайдер не отдал расписание. Попробуйте позже.",
                     InlineKeyboardMarkup([[back]]))
         return
-    title = f"🔁 <b>Замена матча #{replace_id}</b>" if replace_id else "➕ <b>Добавить матч</b>"
+    today = today_msk_str()
+    tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
+    day_name = "сегодня" if day == today else ("завтра" if day == tomorrow else day)
+    title = f"🔁 <b>Замена матча #{replace_id}</b>" if replace_id else f"➕ <b>Добавить матч на {day_name}</b>"
     if not fixtures:
         await _show(update, f"{title}\n\nДругих матчей из списка турниров на {html.escape(day)} нет.",
                     InlineKeyboardMarkup([[back]]))
@@ -177,7 +217,7 @@ async def _pick_fixture(update: Update, actor_id: int, fixture_id: str, day: str
     try:
         match_id, _ = database.create_irl_draft(
             fx.fixture_id, fx.league_id, fx.league_name, fx.home, fx.away, fx.kickoff,
-            odds.home, odds.draw, odds.away, bet_day=fx.kickoff.date().isoformat(), picked_by="admin")
+            odds.home, odds.draw, odds.away, bet_day=day or fx.kickoff.date().isoformat(), picked_by="admin")
     except ValueError as e:
         await query.answer(str(e), show_alert=True)
         return

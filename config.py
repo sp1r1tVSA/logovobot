@@ -218,6 +218,8 @@ IRL_PREVIEW_HOUR_MSK = _get_int_env("IRL_PREVIEW_HOUR_MSK", 9)
 IRL_AUTO_PUBLISH_HOUR_MSK = _get_int_env("IRL_AUTO_PUBLISH_HOUR_MSK", 12)
 # false = dry-run: матчи выбираются и уходят админам превью, но сами не публикуются.
 IRL_AUTO_PUBLISH = os.getenv("IRL_AUTO_PUBLISH", "true").strip().lower() in ("true", "1", "yes")
+# false = фоновый автоподбор отключён (матчи выбираются только админом вручную через кнопку).
+IRL_AUTO_PICK = os.getenv("IRL_AUTO_PICK", "true").strip().lower() in ("true", "1", "yes")
 
 # ─── Phase 6: Smart Notifications Service (В разработке - отключено) ─────────
 SMART_NOTIFICATIONS_ENABLED = os.getenv("SMART_NOTIFICATIONS_ENABLED", "0").lower() in ("1", "true", "yes")

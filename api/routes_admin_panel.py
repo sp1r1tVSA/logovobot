@@ -771,14 +771,16 @@ async def handle_panel_irl_matches(request: web.Request) -> web.Response:
 
     days = await asyncio.to_thread(database.get_irl_distinct_days, 14)
     today = today_msk_str()
-    if today not in days:
-        days.insert(0, today)
+    from datetime import timedelta
+    tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
+    days_list = [today, tomorrow] + [d for d in days if d not in (today, tomorrow)]
 
     return web.json_response({
         "status": "ok",
         "day": day,
         "today": today,
-        "days": days,
+        "tomorrow": tomorrow,
+        "days": days_list,
         "matches": matches,
         "irl_enabled": bool(config.IRL_ENABLED),
         "auto_publish": bool(config.IRL_AUTO_PUBLISH),
