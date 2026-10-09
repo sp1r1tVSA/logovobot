@@ -425,3 +425,62 @@ def test_admin_shop_reset_limits(test_user):
     spin_res2 = shop_service.spin_roulette(test_user["id"])
     assert spin_res2["status"] == "ok"
 
+
+def test_slot_swap_compensates_both_clubs(test_user):
+    """
+    «Слот обмена» (6 000 🪙):
+    Компенсирует слоты покупки и продажи ОБОИМ участникам сделки,
+    даже если у второго клуба лимит слотов был 0.
+    """
+    other_user_id = 8882002
+    with database.transaction() as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO users (telegram_id, username, team_name) VALUES (?, ?, ?)",
+            (other_user_id, "chelsea_coach", "Челси"),
+        )
+        conn.execute("INSERT OR REPLACE INTO squad_players (team_name, player_name, position) VALUES ('Арсенал', 'B. Saka', 'RW')")
+        conn.execute("INSERT OR REPLACE INTO squad_players (team_name, player_name, position) VALUES ('Челси', 'C. Palmer', 'CAM')")
+
+    wid = transfer_repo.create_window(1, 10, title="ТО Обмены")
+    transfer_repo.open_window(wid, 1)
+    # Ставим 0 базовых слотов для проверки, что Слот обмена открывает сделку обоим
+    transfer_repo.update_window_settings(wid, {
+        "max_buys": 0,
+        "max_sells": 0,
+    })
+    transfer_repo.set_club_budget(wid, "Арсенал", 50000, 1)
+    transfer_repo.set_club_budget(wid, "Челси", 50000, 1)
+
+    # Покупаем «Слот обмена» для test_user (Арсенал)
+    shop_service.buy_shop_item(test_user["id"], "slot_swap")
+    assert database.count_active_shop_item(test_user["id"], "slot_swap") == 1
+
+    # Совершаем обмен
+    t1 = req_mod.create_swap(
+        test_user["id"],
+        other_club="Челси",
+        give_player="B. Saka",
+        give_price="20",
+        give_ovr="105",
+        get_player="C. Palmer",
+        get_price="20",
+        get_ovr="105",
+    )
+    assert t1["status"] == "pending_counterparty"
+
+    # Предмет израсходован
+    assert database.count_active_shop_item(test_user["id"], "slot_swap") == 0
+
+    # Слоты компенсированы ОБОИМ клубам
+    slot_purchases = transfer_repo.list_slot_purchases(wid)
+    arsenal_slots = [p for p in slot_purchases if p["club_name"] == "Арсенал"]
+    chelsea_slots = [p for p in slot_purchases if p["club_name"] == "Челси"]
+
+    assert len(arsenal_slots) == 2  # buy + sell
+    assert len(chelsea_slots) == 2  # buy + sell
+    assert any(p["slot_type"] == "buy" for p in chelsea_slots)
+    assert any(p["slot_type"] == "sell" for p in chelsea_slots)
+
+    transfer_repo.close_window(wid, 1)
+
+

@@ -197,13 +197,13 @@ def _check(window: dict, req: TransferRequest, *, exclude_id: int | None = None,
             )
 
     if req.kind == "deal" and user_ids:
-        for uid in user_ids:
-            if database.count_active_shop_item(uid, "slot_swap") > 0:
-                u_club = _coach_club_or_none(uid)
-                if seller and u_club and _same_club(seller.club, u_club):
-                    seller.extra_sells += 1
-                if buyer and u_club and _same_club(buyer.club, u_club):
-                    buyer.extra_buys += 1
+        # Если хотя бы у одного участника обмена есть «Слот обмена» — сделка не расходует слоты ОБОИМ клубам
+        if any(database.count_active_shop_item(uid, "slot_swap") > 0 for uid in user_ids):
+            import dataclasses
+            if seller:
+                seller = dataclasses.replace(seller, extra_sells=seller.extra_sells + 1)
+            if buyer:
+                buyer = dataclasses.replace(buyer, extra_buys=buyer.extra_buys + 1)
 
     ctx = RequestContext(
         settings=settings, buyer=buyer, seller=seller, directory=repo.get_player(req.player_name),
@@ -321,9 +321,20 @@ def create_swap(user_id: int, *, other_club: str, give_player: str, give_price, 
             from_club=other, to_club=own, from_user=other_id, to_user=int(user_id),
             price_k=take_k, ovr=take_ovr_v, initiator_id=int(user_id))
         repo.link_swap(id1, id2)
-        if database.consume_shop_inventory_item(int(user_id), "slot_swap", own):
-            repo.add_slot_purchase(window["id"], own, "buy", 0, int(user_id))
-            repo.add_slot_purchase(window["id"], own, "sell", 0, int(user_id))
+        swap_slot_user = None
+        if database.count_active_shop_item(int(user_id), "slot_swap") > 0:
+            if database.consume_shop_inventory_item(int(user_id), "slot_swap", own):
+                swap_slot_user = int(user_id)
+        elif database.count_active_shop_item(other_id, "slot_swap") > 0:
+            if database.consume_shop_inventory_item(other_id, "slot_swap", other):
+                swap_slot_user = other_id
+
+        if swap_slot_user is not None:
+            # Слот обмена компенсирует слоты покупки и продажи ОБОИМ клубам
+            repo.add_slot_purchase(window["id"], own, "buy", 0, swap_slot_user)
+            repo.add_slot_purchase(window["id"], own, "sell", 0, swap_slot_user)
+            repo.add_slot_purchase(window["id"], other, "buy", 0, swap_slot_user)
+            repo.add_slot_purchase(window["id"], other, "sell", 0, swap_slot_user)
         return repo.get_transfer(id1)
 
 
