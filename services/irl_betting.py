@@ -135,6 +135,12 @@ def pick_top_matches(
     """
     priority = list(config.IRL_COMPETITION_PRIORITY if priority is None else priority)
     top_teams = list(config.IRL_TOP_TEAMS if top_teams is None else top_teams)
+    if limit is None:
+        try:
+            from services.betting_limits import BettingLimitsService
+            limit = BettingLimitsService.get_system_limits().get("irl_max_matches_per_day")
+        except Exception:
+            limit = None
     limit = max(1, int(config.IRL_MAX_MATCHES_PER_DAY if limit is None else limit))
 
     eligible = [c for c in candidates if has_complete_odds(c) and c.kickoff > now]
@@ -163,9 +169,10 @@ def normalize_outcome(value: object) -> Optional[str]:
     return aliases.get(key)
 
 
-def parse_stake(amount: object, max_bet: Optional[int] = None) -> tuple[bool, int | dict]:
+def parse_stake(amount: object, max_bet: Optional[int] = None, min_bet: Optional[int] = None) -> tuple[bool, int | dict]:
     """Сумма ставки → `(True, int)` или `(False, {"error", "message"})`."""
     max_bet = int(config.IRL_MAX_BET if max_bet is None else max_bet)
+    min_bet = int(1 if min_bet is None else min_bet)
     try:
         if isinstance(amount, bool) or (isinstance(amount, float) and not amount.is_integer()):
             raise ValueError
@@ -174,6 +181,9 @@ def parse_stake(amount: object, max_bet: Optional[int] = None) -> tuple[bool, in
         return False, {"error": "INVALID_AMOUNT", "message": "Сумма ставки должна быть целым числом."}
     if value <= 0:
         return False, {"error": "INVALID_AMOUNT", "message": "Сумма ставки должна быть больше нуля."}
+    if value < min_bet:
+        return False, {"error": "MIN_BET_NOT_REACHED", "min_bet": min_bet,
+                       "message": f"Минимальная ставка на реальный матч — {min_bet} 🪙."}
     if value > max_bet:
         return False, {"error": "MAX_BET_EXCEEDED", "max_bet": max_bet,
                        "message": f"Максимальная ставка на реальный матч — {max_bet:,} 🪙."}

@@ -131,6 +131,17 @@ const LIMIT_LABELS = {
   max_express_events: 'Событий в экспрессе',
   express_margin_pct: 'Надбавка на экспресс',
   initial_balance: 'Стартовый баланс',
+  // IRL
+  irl_min_bet: 'IRL: Мин. ставка',
+  irl_max_bet: 'IRL: Макс. ставка',
+  irl_max_payout: 'IRL: Макс. выплата',
+  irl_max_express_events: 'IRL: Событий в экспрессе',
+  irl_max_open_bets: 'IRL: Открытых купонов',
+  irl_max_daily_stake: 'IRL: Ставки за день',
+  irl_max_daily_loss: 'IRL: Проигрыш за день',
+  irl_match_exposure_limit: 'IRL: Риск на матч',
+  irl_global_exposure_limit: 'IRL: Общий риск',
+  irl_max_matches_per_day: 'IRL: Матчей в день',
 };
 
 const LIMIT_HINTS = {
@@ -147,6 +158,17 @@ const LIMIT_HINTS = {
   division_exposure_limit: 'Возможная выплата по дивизиону',
   global_exposure_limit: 'Возможная выплата по всем дивизионам вместе',
   initial_balance: 'Кошелёк нового игрока; уже созданные не меняются',
+  // IRL
+  irl_min_bet: 'Минимальная сумма ставки на реальный матч',
+  irl_max_bet: 'Максимальная сумма одной ставки на реальный матч',
+  irl_max_payout: 'Потолок выплаты выигрыша по IRL-ставке',
+  irl_max_express_events: 'Максимальное число событий в IRL-экспрессе',
+  irl_max_open_bets: 'Максимум активных IRL-купонов одновременно',
+  irl_max_daily_stake: 'Максимальный оборот ставок на реальные матчи за сутки',
+  irl_max_daily_loss: 'Сколько игрок может проиграть на реальных матчах за сутки',
+  irl_match_exposure_limit: 'Возможная выплата по одному реальному матчу',
+  irl_global_exposure_limit: 'Возможная выплата по всем реальным матчам суммарно',
+  irl_max_matches_per_day: 'Сколько реальных матчей отбирается и публикуется в день',
 };
 
 // Порядок и группы на вкладке «Лимиты». Ключ, которого нет в
@@ -156,13 +178,24 @@ const LIMIT_GROUPS = [
   { title: 'Игрок', keys: ['max_payout', 'max_daily_stake', 'max_daily_loss', 'max_open_exposure'] },
   { title: 'Риск по рынкам и дивизионам', keys: ['market_exposure_limit', 'division_exposure_limit', 'global_exposure_limit'] },
   { title: 'Экономика', keys: ['initial_balance'] },
+  {
+    title: '🌍 Ставки на реальные матчи (IRL)',
+    keys: [
+      'irl_min_bet', 'irl_max_bet', 'irl_max_payout', 'irl_max_express_events',
+      'irl_max_open_bets', 'irl_max_daily_stake', 'irl_max_daily_loss',
+      'irl_match_exposure_limit', 'irl_global_exposure_limit', 'irl_max_matches_per_day',
+    ],
+  },
 ];
 
 // Запрет вида ставки — ключ `ban_<группа>` в тех же лимитах (1 — запрещено).
 const BAN_PREFIX = 'ban_';
 
 // Сумма в монетах или просто число (события, купоны).
-const COUNT_LIMITS = new Set(['max_open_bets', 'max_express_events']);
+const COUNT_LIMITS = new Set([
+  'max_open_bets', 'max_express_events',
+  'irl_max_express_events', 'irl_max_open_bets', 'irl_max_matches_per_day',
+]);
 const PERCENT_LIMITS = new Set(['express_margin_pct']);
 const limitValue = (key, v) => (v == null || v === '' ? '—'
   : PERCENT_LIMITS.has(key) ? `${fmt(v)}%` : COUNT_LIMITS.has(key) ? fmt(v) : coins(v));

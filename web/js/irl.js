@@ -84,8 +84,16 @@ class IrlView {
     await this.loadBoard();
   }
 
+  get minBet() {
+    return Number(this.board?.min_bet) || 10;
+  }
+
   get maxBet() {
     return Number(this.board?.max_bet) || DEFAULT_MAX_BET;
+  }
+
+  get maxExpressEvents() {
+    return Number(this.board?.max_express_events) || 5;
   }
 
   totalOdd() {
@@ -156,7 +164,8 @@ class IrlView {
   renderToday() {
     const matches = this.board?.matches || [];
     const note = this.board?.note ? `<div class="ob-banner">${escapeHtml(this.board.note)}</div>` : '';
-    const limits = `<div class="ob-banner lock">Одиночные ставки и экспрессы (2–5 событий). Максимум ${coins(this.maxBet)}. Только исход 1X2.</div>`;
+    const maxEvents = this.maxExpressEvents;
+    const limits = `<div class="ob-banner lock">Одиночные ставки и экспрессы (2–${maxEvents} событий). От ${coins(this.minBet)} до ${coins(this.maxBet)}. Только исход 1X2.</div>`;
     if (!matches.length) {
       return `${note}<div class="irl-state">Сегодня подходящих матчей нет — загляните завтра.</div>`;
     }
@@ -419,8 +428,8 @@ class IrlView {
           this.picks[existingIdx] = { matchId, outcome, odd: Number(match.odds[outcome]) };
         }
       } else {
-        if (this.picks.length >= 5) {
-          this.toast('В экспрессе может быть максимум 5 событий');
+        if (this.picks.length >= this.maxExpressEvents) {
+          this.toast(`В экспрессе может быть максимум ${this.maxExpressEvents} событий`);
           return;
         }
         this.picks.push({ matchId, outcome, odd: Number(match.odds[outcome]) });
@@ -477,8 +486,8 @@ class IrlView {
     const p = this.pick;
     if (!p || this.busy) return;
     const amount = this.stakeValue();
-    if (amount < 1) {
-      this.setSlipMessage({ error: 'Введите сумму ставки.' });
+    if (amount < this.minBet) {
+      this.setSlipMessage({ error: `Минимум на матч — ${this.minBet} 🪙.` });
       return;
     }
     if (amount > this.maxBet) {
@@ -523,8 +532,8 @@ class IrlView {
   async submitExpress() {
     if (this.picks.length < 2 || this.busy) return;
     const amount = this.stakeValue();
-    if (amount < 1) {
-      this.setSlipMessage({ error: 'Введите сумму ставки.' });
+    if (amount < this.minBet) {
+      this.setSlipMessage({ error: `Минимум на экспресс — ${this.minBet} 🪙.` });
       return;
     }
     if (amount > this.maxBet) {

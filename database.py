@@ -21166,7 +21166,15 @@ def place_irl_bet(user_id: int, irl_match_id, outcome, amount,
         irl_match_id = int(irl_match_id)
     except (ValueError, TypeError):
         return False, {"error": "INVALID_SELECTION", "message": "Некорректный матч."}
-    ok, parsed = irl.parse_stake(amount, config.IRL_MAX_BET)
+    try:
+        from services.betting_limits import BettingLimitsService
+        pre_limits = BettingLimitsService.get_user_effective_limits(user_id, None)
+        lim_max = int(pre_limits.get("irl_max_bet", config.IRL_MAX_BET))
+        lim_min = int(pre_limits.get("irl_min_bet", 1))
+    except Exception:
+        lim_max = config.IRL_MAX_BET
+        lim_min = 1
+    ok, parsed = irl.parse_stake(amount, lim_max, min_bet=lim_min)
     if not ok:
         return False, parsed  # type: ignore[return-value]
     amount = int(parsed)  # type: ignore[arg-type]
@@ -21206,13 +21214,62 @@ def place_irl_bet(user_id: int, irl_match_id, outcome, amount,
                                    "message": f"Коэффициент изменился: {client} → {odd}"}
 
             try:
-                from services.betting_limits import BettingLimitsService
+                from services.betting_limits import BettingLimitsService, DEFAULT_IRL_MAX_PAYOUT
                 limits = BettingLimitsService.get_user_effective_limits(user_id, None)
-                max_payout = min(_MAX_PAYOUT, int(limits.get("max_payout") or _MAX_PAYOUT))
             except Exception:
                 logger.exception("IRL limits unavailable for user_id=%s; bet rejected", user_id)
                 return False, {"error": "RISK_CHECK_UNAVAILABLE",
                                "message": "Не удалось проверить ставку. Ставка не принята, монеты не списаны."}
+
+            irl_min = int(limits.get("irl_min_bet", 10))
+            irl_max = int(limits.get("irl_max_bet", config.IRL_MAX_BET))
+            if amount < irl_min:
+                return False, {"error": "MIN_BET_NOT_REACHED", "min_bet": irl_min,
+                               "message": f"Минимальная ставка на реальный матч — {irl_min} 🪙."}
+            if amount > irl_max:
+                return False, {"error": "MAX_BET_EXCEEDED", "max_bet": irl_max,
+                               "message": f"Максимальная ставка на реальный матч — {irl_max:,} 🪙."}
+
+            cursor.execute("""
+                SELECT 
+                    (SELECT COUNT(*) FROM irl_bets WHERE user_id = ? AND status = 'pending') +
+                    (SELECT COUNT(*) FROM irl_expresses WHERE user_id = ? AND status = 'pending')
+                AS open_count
+            """, (user_id, user_id))
+            open_count = int(cursor.fetchone()["open_count"])
+            max_open = int(limits.get("irl_max_open_bets", 10))
+            if open_count >= max_open:
+                return False, {"error": "IRL_OPEN_BETS_LIMIT",
+                               "message": f"Превышен лимит открытых ставок ({max_open}). Дождитесь расчёта текущих пари."}
+
+            cursor.execute("""
+                SELECT 
+                    (SELECT COALESCE(SUM(amount), 0) FROM irl_bets WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status != 'refunded') +
+                    (SELECT COALESCE(SUM(amount), 0) FROM irl_expresses WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status != 'refunded')
+                AS today_staked
+            """, (user_id, user_id))
+            today_staked = int(cursor.fetchone()["today_staked"])
+            max_daily_stake = int(limits.get("irl_max_daily_stake", 10_000))
+            if today_staked + amount > max_daily_stake:
+                return False, {"error": "IRL_DAILY_LIMIT",
+                               "message": f"Превышен дневной лимит ставок на реальные матчи ({max_daily_stake:,} 🪙)."}
+
+            cursor.execute("""
+                SELECT 
+                    (
+                        COALESCE((SELECT SUM(amount) FROM irl_bets WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status = 'lost'), 0) +
+                        COALESCE((SELECT SUM(amount) FROM irl_expresses WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status = 'lost'), 0)
+                    ) - (
+                        COALESCE((SELECT SUM(potential_win - amount) FROM irl_bets WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status = 'won'), 0) +
+                        COALESCE((SELECT SUM(potential_win - amount) FROM irl_expresses WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status = 'won'), 0)
+                    ) AS today_net_loss
+            """, (user_id, user_id, user_id, user_id))
+            loss_row = cursor.fetchone()
+            today_net_loss = max(0, int(loss_row["today_net_loss"] if loss_row else 0))
+            max_daily_loss = int(limits.get("irl_max_daily_loss", 5_000))
+            if today_net_loss >= max_daily_loss or today_net_loss + amount > max_daily_loss:
+                return False, {"error": "IRL_DAILY_LOSS_LIMIT",
+                               "message": f"Превышен дневной лимит потерь на реальные матчи ({max_daily_loss:,} 🪙)."}
 
             cursor.execute("SELECT id FROM irl_bets WHERE user_id = ? AND irl_match_id = ?",
                            (user_id, irl_match_id))
@@ -21229,7 +21286,31 @@ def place_irl_bet(user_id: int, irl_match_id, outcome, amount,
                 return False, {"error": IRL_ALREADY_BET_ERROR,
                                "message": "На этот матч у вас уже есть ставка в экспрессе."}
 
+            max_payout = int(limits.get("irl_max_payout") or DEFAULT_IRL_MAX_PAYOUT)
             potential = irl.potential_win(amount, odd, max_payout)
+
+            cursor.execute("""
+                SELECT COALESCE(SUM(potential_win), 0) AS match_exposure
+                FROM irl_bets
+                WHERE irl_match_id = ? AND status = 'pending'
+            """, (irl_match_id,))
+            match_exposure = int(cursor.fetchone()["match_exposure"])
+            match_exposure_limit = int(limits.get("irl_match_exposure_limit", 100_000))
+            if match_exposure + potential > match_exposure_limit:
+                return False, {"error": "IRL_MATCH_EXPOSURE_LIMIT",
+                               "message": f"Достигнут лимит ответственности на этот матч ({match_exposure_limit:,} 🪙)."}
+
+            cursor.execute("""
+                SELECT 
+                    (SELECT COALESCE(SUM(potential_win), 0) FROM irl_bets WHERE status = 'pending') +
+                    (SELECT COALESCE(SUM(potential_win), 0) FROM irl_expresses WHERE status = 'pending')
+                AS global_exposure
+            """)
+            global_exposure = int(cursor.fetchone()["global_exposure"])
+            global_exposure_limit = int(limits.get("irl_global_exposure_limit", 500_000))
+            if global_exposure + potential > global_exposure_limit:
+                return False, {"error": "IRL_GLOBAL_EXPOSURE_LIMIT",
+                               "message": f"Достигнут общий лимит ответственности по ставкам на реальные матчи ({global_exposure_limit:,} 🪙)."}
             get_or_create_wallet(user_id)
             cursor.execute("""
                 UPDATE user_wallets
@@ -21283,12 +21364,23 @@ def place_irl_express(user_id: int, items: list[dict], amount,
         logger.exception("Lockdown check failed for IRL express of user_id=%s; bet rejected", user_id)
         return False, {"error": "BETTING_UNAVAILABLE", "message": "Приём ставок временно недоступен."}
 
+    try:
+        from services.betting_limits import BettingLimitsService
+        pre_limits = BettingLimitsService.get_user_effective_limits(user_id, None)
+        lim_max = int(pre_limits.get("irl_max_bet", config.IRL_MAX_BET))
+        lim_min = int(pre_limits.get("irl_min_bet", 1))
+        max_events = int(pre_limits.get("irl_max_express_events", 5))
+    except Exception:
+        lim_max = config.IRL_MAX_BET
+        lim_min = 1
+        max_events = 5
+
     if not isinstance(items, (list, tuple)) or len(items) < 2:
         return False, {"error": IRL_INVALID_EXPRESS_LEGS_ERROR, "message": "Экспресс должен содержать минимум 2 события."}
-    if len(items) > 5:
-        return False, {"error": IRL_INVALID_EXPRESS_LEGS_ERROR, "message": "В экспрессе может быть максимум 5 событий."}
+    if len(items) > max_events:
+        return False, {"error": IRL_INVALID_EXPRESS_LEGS_ERROR, "message": f"В экспрессе может быть максимум {max_events} событий."}
 
-    ok, parsed = irl.parse_stake(amount, config.IRL_MAX_BET)
+    ok, parsed = irl.parse_stake(amount, lim_max, min_bet=lim_min)
     if not ok:
         return False, parsed  # type: ignore[return-value]
     amount = int(parsed)  # type: ignore[arg-type]
@@ -21321,13 +21413,67 @@ def place_irl_express(user_id: int, items: list[dict], amount,
                 return False, block
 
             try:
-                from services.betting_limits import BettingLimitsService
+                from services.betting_limits import BettingLimitsService, DEFAULT_IRL_MAX_PAYOUT
                 limits = BettingLimitsService.get_user_effective_limits(user_id, None)
-                max_payout = min(_MAX_PAYOUT, int(limits.get("max_payout") or _MAX_PAYOUT))
             except Exception:
                 logger.exception("IRL limits unavailable for user_id=%s; bet rejected", user_id)
                 return False, {"error": "RISK_CHECK_UNAVAILABLE",
                                "message": "Не удалось проверить ставку. Ставка не принята, монеты не списаны."}
+
+            irl_min = int(limits.get("irl_min_bet", 10))
+            irl_max = int(limits.get("irl_max_bet", config.IRL_MAX_BET))
+            if amount < irl_min:
+                return False, {"error": "MIN_BET_NOT_REACHED", "min_bet": irl_min,
+                               "message": f"Минимальная ставка на реальный матч — {irl_min} 🪙."}
+            if amount > irl_max:
+                return False, {"error": "MAX_BET_EXCEEDED", "max_bet": irl_max,
+                               "message": f"Максимальная ставка на реальный матч — {irl_max:,} 🪙."}
+
+            max_events = int(limits.get("irl_max_express_events", 5))
+            if len(items) > max_events:
+                return False, {"error": IRL_INVALID_EXPRESS_LEGS_ERROR,
+                               "message": f"В экспрессе может быть максимум {max_events} событий."}
+
+            cursor.execute("""
+                SELECT 
+                    (SELECT COUNT(*) FROM irl_bets WHERE user_id = ? AND status = 'pending') +
+                    (SELECT COUNT(*) FROM irl_expresses WHERE user_id = ? AND status = 'pending')
+                AS open_count
+            """, (user_id, user_id))
+            open_count = int(cursor.fetchone()["open_count"])
+            max_open = int(limits.get("irl_max_open_bets", 10))
+            if open_count >= max_open:
+                return False, {"error": "IRL_OPEN_BETS_LIMIT",
+                               "message": f"Превышен лимит открытых ставок ({max_open}). Дождитесь расчёта текущих пари."}
+
+            cursor.execute("""
+                SELECT 
+                    (SELECT COALESCE(SUM(amount), 0) FROM irl_bets WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status != 'refunded') +
+                    (SELECT COALESCE(SUM(amount), 0) FROM irl_expresses WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status != 'refunded')
+                AS today_staked
+            """, (user_id, user_id))
+            today_staked = int(cursor.fetchone()["today_staked"])
+            max_daily_stake = int(limits.get("irl_max_daily_stake", 10_000))
+            if today_staked + amount > max_daily_stake:
+                return False, {"error": "IRL_DAILY_LIMIT",
+                               "message": f"Превышен дневной лимит ставок на реальные матчи ({max_daily_stake:,} 🪙)."}
+
+            cursor.execute("""
+                SELECT 
+                    (
+                        COALESCE((SELECT SUM(amount) FROM irl_bets WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status = 'lost'), 0) +
+                        COALESCE((SELECT SUM(amount) FROM irl_expresses WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status = 'lost'), 0)
+                    ) - (
+                        COALESCE((SELECT SUM(potential_win - amount) FROM irl_bets WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status = 'won'), 0) +
+                        COALESCE((SELECT SUM(potential_win - amount) FROM irl_expresses WHERE user_id = ? AND date(created_at) = date('now', '+3 hours') AND status = 'won'), 0)
+                    ) AS today_net_loss
+            """, (user_id, user_id, user_id, user_id))
+            loss_row = cursor.fetchone()
+            today_net_loss = max(0, int(loss_row["today_net_loss"] if loss_row else 0))
+            max_daily_loss = int(limits.get("irl_max_daily_loss", 5_000))
+            if today_net_loss >= max_daily_loss or today_net_loss + amount > max_daily_loss:
+                return False, {"error": "IRL_DAILY_LOSS_LIMIT",
+                               "message": f"Превышен дневной лимит потерь на реальные матчи ({max_daily_loss:,} 🪙)."}
 
             validated_items = []
             now = now_msk()
@@ -21387,7 +21533,20 @@ def place_irl_express(user_id: int, items: list[dict], amount,
 
             margin_pct = get_express_margin_pct()
             total_odd = express_odd([v["odd"] for v in validated_items], margin_pct)
+            max_payout = int(limits.get("irl_max_payout") or DEFAULT_IRL_MAX_PAYOUT)
             potential = min(max_payout, int(round(amount * total_odd)))
+
+            cursor.execute("""
+                SELECT 
+                    (SELECT COALESCE(SUM(potential_win), 0) FROM irl_bets WHERE status = 'pending') +
+                    (SELECT COALESCE(SUM(potential_win), 0) FROM irl_expresses WHERE status = 'pending')
+                AS global_exposure
+            """)
+            global_exposure = int(cursor.fetchone()["global_exposure"])
+            global_exposure_limit = int(limits.get("irl_global_exposure_limit", 500_000))
+            if global_exposure + potential > global_exposure_limit:
+                return False, {"error": "IRL_GLOBAL_EXPOSURE_LIMIT",
+                               "message": f"Достигнут общий лимит ответственности по ставкам на реальные матчи ({global_exposure_limit:,} 🪙)."}
 
             get_or_create_wallet(user_id)
             cursor.execute("""

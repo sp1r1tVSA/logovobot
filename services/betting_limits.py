@@ -14,6 +14,7 @@ Zero hidden or hardcoded limits.
 
 import logging
 from typing import Any, Optional
+import config
 import database
 
 logger = logging.getLogger(__name__)
@@ -38,6 +39,31 @@ DEFAULT_MAX_EXPRESS_EVENTS: int = database.MAX_EXPRESS_EVENTS
 DEFAULT_EXPRESS_MARGIN_PCT: int = database.EXPRESS_MARGIN_PCT
 DEFAULT_INITIAL_BALANCE: int = database.INITIAL_WALLET_BALANCE
 
+# ─── IRL-лимиты (ставки на реальные матчи) ──────────────────────────────────
+DEFAULT_IRL_MIN_BET: int = 10
+DEFAULT_IRL_MAX_BET: int = 1_000
+DEFAULT_IRL_MAX_PAYOUT: int = 10_000
+DEFAULT_IRL_MAX_EXPRESS_EVENTS: int = 5
+DEFAULT_IRL_MAX_OPEN_BETS: int = 10
+DEFAULT_IRL_MAX_DAILY_STAKE: int = 10_000
+DEFAULT_IRL_MAX_DAILY_LOSS: int = 5_000
+DEFAULT_IRL_MATCH_EXPOSURE_LIMIT: int = 100_000
+DEFAULT_IRL_GLOBAL_EXPOSURE_LIMIT: int = 500_000
+DEFAULT_IRL_MAX_MATCHES_PER_DAY: int = 2
+
+IRL_LIMIT_KEYS = (
+    "irl_min_bet",
+    "irl_max_bet",
+    "irl_max_payout",
+    "irl_max_express_events",
+    "irl_max_open_bets",
+    "irl_max_daily_stake",
+    "irl_max_daily_loss",
+    "irl_match_exposure_limit",
+    "irl_global_exposure_limit",
+    "irl_max_matches_per_day",
+)
+
 # ─── Что настраивается из панели ─────────────────────────────────────────────
 # Этим проверяет значения и панель (POST /api/admin/panel/limits), и анализ
 # рынка (services/ai/market_analysis) — предложение ИИ проходит те же правила.
@@ -51,9 +77,12 @@ SETTING_KEYS = ("max_express_events", "express_margin_pct", "initial_balance")
 # Какие ключи вообще читаются на каждом уровне (см. BettingLimitsService):
 # переопределение другого ключа легло бы в таблицу и ничего бы не изменило.
 LIMIT_KEYS_BY_SCOPE = {
-    "global": LIMIT_KEYS + SETTING_KEYS,
+    "global": LIMIT_KEYS + SETTING_KEYS + IRL_LIMIT_KEYS,
     "division": ("max_bet", "max_payout", "max_open_bets", "market_exposure_limit", "division_exposure_limit"),
-    "user": ("max_bet", "max_payout", "max_daily_stake", "max_daily_loss", "max_open_exposure", "max_open_bets"),
+    "user": (
+        "max_bet", "max_payout", "max_daily_stake", "max_daily_loss", "max_open_exposure", "max_open_bets",
+        "irl_min_bet", "irl_max_bet", "irl_max_payout", "irl_max_open_bets", "irl_max_daily_stake", "irl_max_daily_loss",
+    ),
 }
 # Допустимый диапазон значения; ключа нет — 1..100 000 000.
 LIMIT_BOUNDS = {
@@ -62,6 +91,17 @@ LIMIT_BOUNDS = {
     # 0 — надбавку выключить.
     "express_margin_pct": (0, database.MAX_EXPRESS_MARGIN_PCT),
     "initial_balance": (1, 1_000_000),
+    # IRL-ставки
+    "irl_min_bet": (1, 100_000),
+    "irl_max_bet": (1, 500_000),
+    "irl_max_payout": (100, 5_000_000),
+    "irl_max_express_events": (2, 20),
+    "irl_max_open_bets": (1, 1_000),
+    "irl_max_daily_stake": (100, 10_000_000),
+    "irl_max_daily_loss": (100, 5_000_000),
+    "irl_match_exposure_limit": (1_000, 50_000_000),
+    "irl_global_exposure_limit": (5_000, 100_000_000),
+    "irl_max_matches_per_day": (1, 50),
 }
 DEFAULT_LIMIT_BOUNDS = (1, 100_000_000)
 # Запреты видов ставок (`ban_<группа>`): 1 — запрещено, сброс (null) — разрешено.
@@ -76,6 +116,8 @@ class BettingLimitsService:
     @staticmethod
     def get_default_limits() -> dict[str, int]:
         """Значения по умолчанию — то, к чему вернётся сброшенный глобальный лимит."""
+        cfg_max_bet = int(getattr(config, "IRL_MAX_BET", DEFAULT_IRL_MAX_BET) or DEFAULT_IRL_MAX_BET)
+        cfg_max_matches = int(getattr(config, "IRL_MAX_MATCHES_PER_DAY", DEFAULT_IRL_MAX_MATCHES_PER_DAY) or DEFAULT_IRL_MAX_MATCHES_PER_DAY)
         return {
             "min_bet": DEFAULT_MIN_BET,
             "max_bet": DEFAULT_MAX_BET,
@@ -90,11 +132,24 @@ class BettingLimitsService:
             "max_express_events": DEFAULT_MAX_EXPRESS_EVENTS,
             "express_margin_pct": DEFAULT_EXPRESS_MARGIN_PCT,
             "initial_balance": DEFAULT_INITIAL_BALANCE,
+            # IRL
+            "irl_min_bet": DEFAULT_IRL_MIN_BET,
+            "irl_max_bet": cfg_max_bet,
+            "irl_max_payout": DEFAULT_IRL_MAX_PAYOUT,
+            "irl_max_express_events": DEFAULT_IRL_MAX_EXPRESS_EVENTS,
+            "irl_max_open_bets": DEFAULT_IRL_MAX_OPEN_BETS,
+            "irl_max_daily_stake": DEFAULT_IRL_MAX_DAILY_STAKE,
+            "irl_max_daily_loss": DEFAULT_IRL_MAX_DAILY_LOSS,
+            "irl_match_exposure_limit": DEFAULT_IRL_MATCH_EXPOSURE_LIMIT,
+            "irl_global_exposure_limit": DEFAULT_IRL_GLOBAL_EXPOSURE_LIMIT,
+            "irl_max_matches_per_day": cfg_max_matches,
         }
 
     @classmethod
     def get_system_limits(cls) -> dict[str, int]:
         """Return canonical baseline system limits."""
+        cfg_max_bet = int(getattr(config, "IRL_MAX_BET", DEFAULT_IRL_MAX_BET) or DEFAULT_IRL_MAX_BET)
+        cfg_max_matches = int(getattr(config, "IRL_MAX_MATCHES_PER_DAY", DEFAULT_IRL_MAX_MATCHES_PER_DAY) or DEFAULT_IRL_MAX_MATCHES_PER_DAY)
         return {
             "min_bet": cls.get_limit("global", 0, "min_bet", DEFAULT_MIN_BET),
             "max_bet": cls.get_limit("global", 0, "max_bet", DEFAULT_MAX_BET),
@@ -106,6 +161,17 @@ class BettingLimitsService:
             "market_exposure_limit": cls.get_limit("global", 0, "market_exposure_limit", DEFAULT_MARKET_EXPOSURE_LIMIT),
             "division_exposure_limit": cls.get_limit("global", 0, "division_exposure_limit", DEFAULT_DIVISION_EXPOSURE_LIMIT),
             "global_exposure_limit": cls.get_limit("global", 0, "global_exposure_limit", DEFAULT_GLOBAL_EXPOSURE_LIMIT),
+            # IRL
+            "irl_min_bet": cls.get_limit("global", 0, "irl_min_bet", DEFAULT_IRL_MIN_BET),
+            "irl_max_bet": cls.get_limit("global", 0, "irl_max_bet", cfg_max_bet),
+            "irl_max_payout": cls.get_limit("global", 0, "irl_max_payout", DEFAULT_IRL_MAX_PAYOUT),
+            "irl_max_express_events": cls.get_limit("global", 0, "irl_max_express_events", DEFAULT_IRL_MAX_EXPRESS_EVENTS),
+            "irl_max_open_bets": cls.get_limit("global", 0, "irl_max_open_bets", DEFAULT_IRL_MAX_OPEN_BETS),
+            "irl_max_daily_stake": cls.get_limit("global", 0, "irl_max_daily_stake", DEFAULT_IRL_MAX_DAILY_STAKE),
+            "irl_max_daily_loss": cls.get_limit("global", 0, "irl_max_daily_loss", DEFAULT_IRL_MAX_DAILY_LOSS),
+            "irl_match_exposure_limit": cls.get_limit("global", 0, "irl_match_exposure_limit", DEFAULT_IRL_MATCH_EXPOSURE_LIMIT),
+            "irl_global_exposure_limit": cls.get_limit("global", 0, "irl_global_exposure_limit", DEFAULT_IRL_GLOBAL_EXPOSURE_LIMIT),
+            "irl_max_matches_per_day": cls.get_limit("global", 0, "irl_max_matches_per_day", cfg_max_matches),
         }
 
     @classmethod
@@ -165,6 +231,25 @@ class BettingLimitsService:
 
         user_open_bets = cls.get_limit("user", user_id, "max_open_bets", base["max_open_bets"])
         base["max_open_bets"] = min(base["max_open_bets"], user_open_bets)
+
+        # Check custom user IRL limits
+        user_irl_min_bet = cls.get_limit("user", user_id, "irl_min_bet", base["irl_min_bet"])
+        base["irl_min_bet"] = max(base["irl_min_bet"], user_irl_min_bet)
+
+        user_irl_max_bet = cls.get_limit("user", user_id, "irl_max_bet", base["irl_max_bet"])
+        base["irl_max_bet"] = min(base["irl_max_bet"], user_irl_max_bet)
+
+        user_irl_max_payout = cls.get_limit("user", user_id, "irl_max_payout", base["irl_max_payout"])
+        base["irl_max_payout"] = min(base["irl_max_payout"], user_irl_max_payout)
+
+        user_irl_open_bets = cls.get_limit("user", user_id, "irl_max_open_bets", base["irl_max_open_bets"])
+        base["irl_max_open_bets"] = min(base["irl_max_open_bets"], user_irl_open_bets)
+
+        user_irl_daily_stake = cls.get_limit("user", user_id, "irl_max_daily_stake", base["irl_max_daily_stake"])
+        base["irl_max_daily_stake"] = min(base["irl_max_daily_stake"], user_irl_daily_stake)
+
+        user_irl_daily_loss = cls.get_limit("user", user_id, "irl_max_daily_loss", base["irl_max_daily_loss"])
+        base["irl_max_daily_loss"] = min(base["irl_max_daily_loss"], user_irl_daily_loss)
 
         return base
 

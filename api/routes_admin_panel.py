@@ -52,7 +52,7 @@ from handlers.base import is_super_admin
 from services import outright_service
 from services.ai import bet_picks, market_analysis, pick_review
 from services.betting_limits import (
-    BAN_SCOPES, DEFAULT_LIMIT_BOUNDS, LIMIT_BOUNDS, LIMIT_KEYS, LIMIT_KEYS_BY_SCOPE, SETTING_KEYS,
+    BAN_SCOPES, DEFAULT_LIMIT_BOUNDS, IRL_LIMIT_KEYS, LIMIT_BOUNDS, LIMIT_KEYS, LIMIT_KEYS_BY_SCOPE, SETTING_KEYS,
     BettingLimitsService,
 )
 
@@ -429,7 +429,7 @@ async def handle_panel_limits(request: web.Request) -> web.Response:
         return {
             "system": system,
             "defaults": BettingLimitsService.get_default_limits(),
-            "bounds": {k: LIMIT_BOUNDS.get(k, DEFAULT_LIMIT_BOUNDS) for k in LIMIT_KEYS + SETTING_KEYS},
+            "bounds": {k: LIMIT_BOUNDS.get(k, DEFAULT_LIMIT_BOUNDS) for k in LIMIT_KEYS + SETTING_KEYS + IRL_LIMIT_KEYS},
             "global_overrides": database.get_risk_limit_overrides("global", 0),
             "ban_groups": [{"id": g, "label": label}
                            for g, (label, _keys) in database.BET_BAN_GROUPS.items()],
@@ -476,7 +476,7 @@ async def handle_panel_set_limit(request: web.Request) -> web.Response:
     value = None if reset else body_int(data, "value", minimum=low, maximum=high)
 
     # Мин. ставка выше макс. закрыла бы приём ставок целиком.
-    if value is not None and limit_key in ("min_bet", "max_bet"):
+    if value is not None and limit_key in ("min_bet", "max_bet", "irl_min_bet", "irl_max_bet"):
         system = await asyncio.to_thread(BettingLimitsService.get_system_limits)
         if limit_key == "min_bet" and value > system["max_bet"]:
             return _error(400, "limits_conflict",
@@ -484,6 +484,12 @@ async def handle_panel_set_limit(request: web.Request) -> web.Response:
         if limit_key == "max_bet" and value < system["min_bet"]:
             return _error(400, "limits_conflict",
                           f"Максимальная ставка не может быть меньше минимальной ({system['min_bet']}).")
+        if limit_key == "irl_min_bet" and value > system["irl_max_bet"]:
+            return _error(400, "limits_conflict",
+                          f"Минимальная IRL-ставка не может быть больше максимальной ({system['irl_max_bet']}).")
+        if limit_key == "irl_max_bet" and value < system["irl_min_bet"]:
+            return _error(400, "limits_conflict",
+                          f"Максимальная IRL-ставка не может быть меньше минимальной ({system['irl_min_bet']}).")
 
     def apply() -> dict:
         overrides = database.get_risk_limit_overrides(scope_type, scope_id)

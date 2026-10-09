@@ -45,6 +45,13 @@ _ERROR_STATUS = {
     "LOGOVO_LOCKDOWN": 403,
     "BETTING_BANNED": 403,
     "BETTING_PAUSED": 403,
+    "MIN_BET_NOT_REACHED": 400,
+    "MAX_BET_EXCEEDED": 400,
+    "IRL_OPEN_BETS_LIMIT": 400,
+    "IRL_DAILY_LIMIT": 400,
+    "IRL_DAILY_LOSS_LIMIT": 400,
+    "IRL_MATCH_EXPOSURE_LIMIT": 400,
+    "IRL_GLOBAL_EXPOSURE_LIMIT": 400,
     "INVALID_EXPRESS_LEGS": 400,
     "DUPLICATE_EXPRESS_MATCH": 400,
     "EXPRESS_INTEGRITY_ERROR": 500,
@@ -102,7 +109,17 @@ def _load_today(user_id: int) -> dict:
     now = now_msk()
     matches = database.list_irl_matches(bet_day=day, statuses=_VISIBLE_STATUSES)
     items = [_match_payload(m, database.get_user_irl_bet_for_match(user_id, m["id"]), now) for m in matches]
-    return {"bet_day": day, "matches": items, "max_bet": config.IRL_MAX_BET, "note": MAIN_TIME_NOTE}
+    from services.betting_limits import BettingLimitsService
+    limits = BettingLimitsService.get_user_effective_limits(user_id, None)
+    return {
+        "bet_day": day,
+        "matches": items,
+        "min_bet": limits.get("irl_min_bet", 10),
+        "max_bet": limits.get("irl_max_bet", config.IRL_MAX_BET),
+        "max_payout": limits.get("irl_max_payout", 10000),
+        "max_express_events": limits.get("irl_max_express_events", 5),
+        "note": MAIN_TIME_NOTE,
+    }
 
 
 async def handle_get_irl_today(request: web.Request) -> web.Response:
