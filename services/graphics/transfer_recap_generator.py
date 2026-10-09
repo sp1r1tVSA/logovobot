@@ -31,12 +31,73 @@ LIST_X0, LIST_X1 = 700, 1376           # правая колонка: топ с�
 ROW_Y0, ROW_H = 190, 116
 
 
+import os
+
 @dataclass(frozen=True)
 class RecapDeal:
-    """Строка топа: игрок, маршрут одной строкой и сумма уже текстом."""
+    """Строка топа: игрок, маршрут одной строкой, сумма текстом и путь к портрету."""
     player: str
     route: str
     price_text: str
+    portrait_path: str | None = None
+
+
+def _paste_mini_avatar(
+    img: Image.Image,
+    photo_path: str | None,
+    player_name: str,
+    size: int,
+    x: int,
+    y: int,
+    accent: tuple,
+) -> None:
+    """Круглый мини-портрет игрока или стильная монограмма, если файла нет."""
+    draw_base = ImageDraw.Draw(img)
+    p_img = None
+    resolved = photo_path
+
+    if not resolved or not os.path.isfile(resolved):
+        try:
+            from services.graphics import player_photos
+            cached = player_photos.get_cached_photo_path(player_name, None)
+            if cached and os.path.isfile(cached):
+                resolved = cached
+        except Exception:
+            pass
+
+    if resolved and os.path.isfile(resolved) and os.path.getsize(resolved) > 0:
+        try:
+            with Image.open(resolved) as raw:
+                raw_rgba = raw.convert("RGBA")
+                ratio = max(size / raw_rgba.width, size / raw_rgba.height)
+                new_w = max(size, int(raw_rgba.width * ratio))
+                new_h = max(size, int(raw_rgba.height * ratio))
+                scaled = raw_rgba.resize((new_w, new_h), Image.Resampling.LANCZOS)
+                off_x = (new_w - size) // 2
+                off_y = (new_h - size) // 2
+                cropped = scaled.crop((off_x, off_y, off_x + size, off_y + size))
+
+                mask = Image.new("L", (size, size), 0)
+                draw_m = ImageDraw.Draw(mask)
+                draw_m.ellipse((0, 0, size - 1, size - 1), fill=255)
+
+                p_img = Image.new("RGBA", (size, size), (0, 0, 0, 0))
+                p_img.paste(cropped, (0, 0), mask)
+        except Exception:
+            p_img = None
+
+    if p_img is not None:
+        img.alpha_composite(p_img, (x, y))
+        draw_base.ellipse((x, y, x + size - 1, y + size - 1), outline=WHITE + (160,), width=3)
+    else:
+        draw_base.ellipse((x, y, x + size - 1, y + size - 1), fill=(232, 228, 220))
+        draw_base.ellipse((x, y, x + size - 1, y + size - 1), outline=(206, 202, 192), width=2)
+        parts = (player_name or "").strip().split()
+        initials = (parts[0][:1] + (parts[1][:1] if len(parts) > 1 else ""))[:2].upper()
+        if not initials:
+            initials = "★"
+        f_mono = _font(int(size * 0.42))
+        draw_base.text((x + size / 2, y + size / 2), initials, fill=INK, font=f_mono, anchor="mm")
 
 
 def render_window_recap(
@@ -99,12 +160,28 @@ def render_window_recap(
         mid = top + ROW_H // 2
         if i:
             draw.line([(LIST_X0, top), (LIST_X1, top)], fill=(214, 210, 198), width=2)
-        draw.text((LIST_X0 + 8, mid), str(i + 1), fill=accent if i == 0 else MUTED, font=_font(64), anchor="lm")
-        text, font = _fit(draw, (deal.player or "—").upper(), 360, 46, 24)
-        draw.text((LIST_X0 + 78, mid - 18), text, fill=INK, font=font, anchor="lm")
-        route, route_font = _fit(draw, deal.route, 360, 24, 16)
-        draw.text((LIST_X0 + 78, mid + 26), route, fill=MUTED, font=route_font, anchor="lm")
+
+        # Порядковый номер
+        draw.text((LIST_X0 + 8, mid), str(i + 1), fill=accent if i == 0 else MUTED, font=_font(56), anchor="lm")
+
+        # Мини-аватар игрока (портрет или монограмма)
+        av_size = 72
+        av_x = LIST_X0 + 56
+        av_y = mid - av_size // 2
+        _paste_mini_avatar(img, deal.portrait_path, deal.player, av_size, av_x, av_y, accent)
+
+        # Текстовые подписи
+        text_x = av_x + av_size + 16
         sum_text, sum_font = _fit(draw, deal.price_text, 210, 44, 22)
+        sum_w = int(draw.textlength(sum_text, font=sum_font))
+        available_w = (LIST_X1 - 10) - text_x - sum_w - 20
+
+        text, font = _fit(draw, (deal.player or "—").upper(), available_w, 36, 22)
+        draw.text((text_x, mid - 16), text, fill=INK, font=font, anchor="lm")
+
+        route, route_font = _fit(draw, deal.route, available_w, 22, 16)
+        draw.text((text_x, mid + 24), route, fill=MUTED, font=route_font, anchor="lm")
+
         draw.text((LIST_X1 - 4, mid), sum_text, fill=INK, font=sum_font, anchor="rm")
 
     buf = io.BytesIO()

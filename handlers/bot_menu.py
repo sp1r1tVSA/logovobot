@@ -48,6 +48,7 @@ GLOBAL_ADMIN_COMMANDS = ADMIN_COMMANDS + [
 # Панель трансферного окна: ответственному (даже если он не админ) и админам из ADMIN_IDS.
 TRANSFER_MANAGER_COMMANDS = [
     BotCommand("to", "Трансферное окно"),
+    BotCommand("workshop", "Мастерская графики ТО"),
 ]
 
 

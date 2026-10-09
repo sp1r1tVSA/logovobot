@@ -1022,6 +1022,11 @@ def _register_admin_handlers(app: Application) -> None:
     from transfers.handlers import register_handlers as register_transfer_handlers
     register_transfer_handlers(app)
 
+    # 🎨 Мастерская графики ТО: /workshop, /studio, /cards
+    from handlers.workshop import cmd_workshop, cb_workshop
+    app.add_handler(CommandHandler(["workshop", "studio", "cards"], cmd_workshop))
+    app.add_handler(CallbackQueryHandler(cb_workshop, pattern=r"^ws:"))
+
 def register_all_handlers(application: Application) -> None:
     """Register all command, message, and callback handlers to the application."""
     # 0. Global lockdown guard at group -1 (runs before all standard handlers)

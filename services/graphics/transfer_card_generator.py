@@ -28,7 +28,9 @@ from services.graphics.table_generator import (
 
 logger = logging.getLogger(__name__)
 
-LOGOS_DIR = str(Path(__file__).resolve().parents[2] / "assets" / "logos")
+_local_logos = Path(__file__).resolve().parents[2] / "assets" / "logos"
+_main_logos = Path(__file__).resolve().parents[5] / "assets" / "logos"
+LOGOS_DIR = str(_local_logos if _local_logos.exists() and any(_local_logos.glob("*.png")) else (_main_logos if _main_logos.exists() else _local_logos))
 DISPLAY_FONT_PATH = os.path.join(os.path.dirname(__file__), "fonts", "LiberationSansNarrow-Bold.ttf")
 
 SCALE = 2

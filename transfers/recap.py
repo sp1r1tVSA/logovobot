@@ -14,7 +14,7 @@ import html
 import logging
 from dataclasses import dataclass, field
 
-from transfers import repo
+from transfers import repo, requests as req_mod
 from transfers.engine import format_k, norm_club
 
 logger = logging.getLogger(__name__)
@@ -122,7 +122,15 @@ def build_image(recap: Recap) -> bytes | None:
         return render_window_recap(
             title=recap.title or f"Окно №{recap.window_id}",
             turnover_text=format_k(recap.turnover_k),
-            deals=[RecapDeal(t["player_name"], _route(t), format_k(t["price_k"])) for t in recap.top_deals],
+            deals=[
+                RecapDeal(
+                    t["player_name"],
+                    _route(t),
+                    format_k(t["price_k"]),
+                    portrait_path=req_mod.portrait_path(t.get("player_name"), t.get("from_club"), t.get("to_club")),
+                )
+                for t in recap.top_deals
+            ],
             requests_count=recap.requests_count,
             swaps=recap.swaps,
             urn_sales=recap.urn_sales,
