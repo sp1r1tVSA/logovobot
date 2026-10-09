@@ -775,6 +775,19 @@ async def handle_panel_irl_matches(request: web.Request) -> web.Response:
     tomorrow = (now_msk() + timedelta(days=1)).strftime("%Y-%m-%d")
     days_list = [today, tomorrow] + [d for d in days if d not in (today, tomorrow)]
 
+    from services.irl_betting import group_matches_into_batches
+    batches = [
+        {
+            "slot_time": b.slot_time,
+            "time_label": b.time_label,
+            "is_simultaneous": b.is_simultaneous,
+            "count": b.count,
+            "fixture_ids": b.fixture_ids,
+            "match_ids": [x["id"] for x in b.matches],
+        }
+        for b in group_matches_into_batches(matches)
+    ]
+
     return web.json_response({
         "status": "ok",
         "day": day,
@@ -782,6 +795,7 @@ async def handle_panel_irl_matches(request: web.Request) -> web.Response:
         "tomorrow": tomorrow,
         "days": days_list,
         "matches": matches,
+        "batches": batches,
         "irl_enabled": bool(config.IRL_ENABLED),
         "auto_publish": bool(config.IRL_AUTO_PUBLISH),
         "bookmaker_id": config.IRL_BOOKMAKER_ID,
@@ -928,6 +942,54 @@ async def handle_panel_irl_publish_all(request: web.Request) -> web.Response:
             published += 1
             await admin_journal.record(scope.actor_id, "irl_match_published", "irl_match", d["id"])
     return web.json_response({"status": "ok", "published": published})
+
+
+async def handle_panel_irl_sync_scores(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/matches/sync-scores  {day?}
+    
+    Синхронизирует счета всех активных IRL-матчей дня батчевым запросом к провайдеру
+    (все одновременные матчи запрашиваются за 1 обращение к сети).
+    """
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    data = await _json_body(request)
+    if isinstance(data, web.Response):
+        day = today_msk_str()
+    else:
+        day = str(data.get("day") or today_msk_str()).strip()
+
+    matches = await asyncio.to_thread(database.list_irl_matches, bet_day=day, limit=100)
+    active = [m for m in matches if m["status"] in ("open", "closed")]
+    if not active:
+        return web.json_response({"status": "ok", "updated": 0, "message": "Нет активных матчей для синхронизации."})
+
+    fids = [m["provider_fixture_id"] for m in active if m.get("provider_fixture_id")]
+    from services.sports import get_sports_provider
+    provider = get_sports_provider()
+    batch_fn = getattr(provider, "get_prematch_fixtures_batch", None)
+    if callable(batch_fn):
+        fixtures_map = await batch_fn(fids)
+    else:
+        fixtures_map = {}
+        for fid in fids:
+            fixtures_map[str(fid)] = await provider.get_prematch_fixture(fid)
+
+    updated_count = 0
+    for m in active:
+        fid = str(m.get("provider_fixture_id"))
+        fx = fixtures_map.get(fid)
+        if fx is not None and (fx.home_goals is not None or fx.away_goals is not None):
+            await asyncio.to_thread(database.update_irl_live_score, m["id"], fx.home_goals, fx.away_goals)
+            updated_count += 1
+
+    await admin_journal.record(scope.actor_id, "irl_scores_synced", "irl_day", 0,
+                               new=f"день: {day}, обновлено матчей: {updated_count}")
+    return web.json_response({"status": "ok", "updated": updated_count, "day": day})
 
 
 async def handle_panel_irl_cancel(request: web.Request) -> web.Response:
@@ -1323,6 +1385,7 @@ def register_admin_panel_routes(app: web.Application) -> None:
     r.add_get("/api/admin/panel/irl/candidates", handle_panel_irl_candidates)
     r.add_post("/api/admin/panel/irl/matches", handle_panel_irl_add_match)
     r.add_post("/api/admin/panel/irl/matches/publish-all", handle_panel_irl_publish_all)
+    r.add_post("/api/admin/panel/irl/matches/sync-scores", handle_panel_irl_sync_scores)
     r.add_post("/api/admin/panel/irl/broadcast", handle_panel_irl_broadcast)
     r.add_post("/api/admin/panel/irl/matches/{id}/publish", handle_panel_irl_publish)
     r.add_post("/api/admin/panel/irl/matches/{id}/cancel", handle_panel_irl_cancel)

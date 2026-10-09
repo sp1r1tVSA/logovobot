@@ -518,6 +518,34 @@ class APISportsProvider(SportsDataProvider):
             return None
         return self._normalize_prematch_fixture(resp[0])
 
+    async def get_prematch_fixtures_batch(
+        self, fixture_ids: list[int | str]
+    ) -> dict[str, Optional[PrematchFixture]]:
+        """Fetch multiple fixtures with scores/status using batch /fixtures?ids=id1-id2-... requests.
+
+        API-Football accepts up to 20 IDs separated by hyphens in the `ids` parameter.
+        Matches occurring simultaneously are retrieved in a single API network call.
+        """
+        if not fixture_ids:
+            return {}
+        clean_ids = [str(fid).strip() for fid in fixture_ids if str(fid).strip()]
+        unique_ids = list(dict.fromkeys(clean_ids))
+        results: dict[str, Optional[PrematchFixture]] = {fid: None for fid in unique_ids}
+
+        CHUNK_SIZE = 20
+        for i in range(0, len(unique_ids), CHUNK_SIZE):
+            chunk = unique_ids[i:i + CHUNK_SIZE]
+            ids_param = "-".join(chunk)
+            resp = await self._fetch_checked(
+                "fixtures", {"ids": ids_param, "timezone": "Europe/Moscow"}, cache_ttl=20
+            )
+            if resp:
+                for item in resp:
+                    fx = self._normalize_prematch_fixture(item)
+                    if fx is not None:
+                        results[str(fx.fixture_id)] = fx
+        return results
+
     async def get_match_winner_odds(
         self, fixture_id: int | str, bookmaker_id: int
     ) -> Optional[MatchWinnerOdds]:

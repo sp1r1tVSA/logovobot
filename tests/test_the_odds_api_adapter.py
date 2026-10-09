@@ -411,3 +411,26 @@ class TestTheOddsApiMultiKey:
         assert secret1 not in status_json
         assert secret2 not in status_json
         assert "api_key" not in status
+
+
+class TestBatchFixtures:
+    def test_batch_fixtures_same_sport_single_scores_call(self):
+        f1 = make_score_item("evt1", "soccer_epl", "Arsenal", "Chelsea", True, 2, 1)
+        f2 = make_score_item("evt2", "soccer_epl", "Man Utd", "Tottenham", True, 1, 1)
+        prov = FakeOddsApi([f1, f2])
+        # Mark sport_key for these fixtures
+        prov._fixture_sport_map["evt1"] = "soccer_epl"
+        prov._fixture_sport_map["evt2"] = "soccer_epl"
+
+        res = run(prov.get_prematch_fixtures_batch(["evt1", "evt2"]))
+        assert len(prov.calls) == 1
+        assert prov.calls[0][0] == "sports/soccer_epl/scores"
+        assert res["evt1"].home_goals == 2 and res["evt1"].away_goals == 1
+        assert res["evt2"].home_goals == 1 and res["evt2"].away_goals == 1
+
+    def test_batch_fixtures_empty_list(self):
+        prov = FakeOddsApi([])
+        res = run(prov.get_prematch_fixtures_batch([]))
+        assert res == {}
+        assert len(prov.calls) == 0
+

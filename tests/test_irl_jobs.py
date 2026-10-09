@@ -100,6 +100,10 @@ class FakeProvider:
         self.calls.append(("fixture", int(fixture_id)))
         return self.results.get(int(fixture_id))
 
+    async def get_prematch_fixtures_batch(self, fixture_ids):
+        self.calls.append(("batch_fixtures", [int(fid) for fid in fixture_ids]))
+        return {str(fid): self.results.get(int(fid)) for fid in fixture_ids}
+
 
 def day_matches(statuses=None):
     return database.list_irl_matches(bet_day=DAY, statuses=statuses)
@@ -394,6 +398,18 @@ class TestSettle:
         # Second call does not re-alert (notify_once)
         run(irl_jobs.run_settle(bot, p))
         assert len(bot.texts()) == initial_sent
+
+    def test_simultaneous_matches_settle_in_single_batch_call(self, clock):
+        mid1 = _open_and_bet(32, hours_ago=2, uid=930032)
+        mid2 = _open_and_bet(33, hours_ago=2, uid=930033)
+        p = FakeProvider(results={32: result(32, "FT", (2, 0)), 33: result(33, "FT", (1, 1))})
+        bot = FakeBot()
+        rep = run(irl_jobs.run_settle(bot, p))
+        assert rep["settled"] == 2
+        batch_calls = [c for c in p.calls if c[0] == "batch_fixtures"]
+        assert len(batch_calls) == 1
+        assert set(batch_calls[0][1]) == {32, 33}
+
 
 
 # ─── Wiring ──────────────────────────────────────────────────────────────────

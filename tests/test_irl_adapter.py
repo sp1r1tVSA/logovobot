@@ -123,6 +123,22 @@ class TestResult:
         assert run(Fake(ok([])).get_prematch_fixture(9)) is None
         assert run(Fake(boom=True).get_prematch_fixture(9)) is None
 
+    def test_batch_fixtures_single_network_call(self):
+        f1 = make_fixture(11, short="FT", ft=(2, 1))
+        f2 = make_fixture(13, short="FT", ft=(3, 0))
+        p = Fake(ok([f1, f2]))
+        res = run(p.get_prematch_fixtures_batch([11, 13]))
+        assert len(p.calls) == 1
+        assert p.calls[0] == ("fixtures", {"ids": "11-13", "timezone": "Europe/Moscow"})
+        assert res["11"].status_short == "FT" and res["11"].home_goals == 2
+        assert res["13"].status_short == "FT" and res["13"].home_goals == 3
+
+    def test_batch_fixtures_empty_list(self):
+        p = Fake(ok([]))
+        res = run(p.get_prematch_fixtures_batch([]))
+        assert res == {}
+        assert len(p.calls) == 0
+
 
 class TestOdds:
     def test_bookmaker_1x2(self):

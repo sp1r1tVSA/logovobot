@@ -424,3 +424,28 @@ class TestAdminPanelIrl(AioHTTPTestCase):
         resp = await self.client.get("/api/admin/panel/irl/bets", headers=self._headers(REGULAR_USER))
         self.assertEqual(resp.status, 403)
 
+    async def test_matches_response_contains_batches(self):
+        t1 = now_msk() + timedelta(hours=3)
+        mid1, _ = database.create_irl_draft("fx_b1", 39, "EPL", "A", "B", t1, 2.0, 3.0, 4.0, bet_day=today_msk_str())
+        mid2, _ = database.create_irl_draft("fx_b2", 140, "La Liga", "C", "D", t1, 1.5, 4.0, 6.0, bet_day=today_msk_str())
+        resp = await self.client.get("/api/admin/panel/irl/matches", headers=self._headers())
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertIn("batches", data)
+        sim_batches = [b for b in data["batches"] if b["is_simultaneous"]]
+        self.assertTrue(len(sim_batches) >= 1)
+        self.assertIn(mid1, sim_batches[0]["match_ids"])
+        self.assertIn(mid2, sim_batches[0]["match_ids"])
+
+    async def test_sync_scores_batch_endpoint(self):
+        resp = await self.client.post(
+            "/api/admin/panel/irl/matches/sync-scores",
+            headers=self._headers(),
+            json={"day": today_msk_str()}
+        )
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertIn("updated", data)
+
+

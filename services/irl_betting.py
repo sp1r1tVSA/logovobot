@@ -247,3 +247,87 @@ def settle_decision(
 def needs_manual_settlement(kickoff: datetime, now: datetime) -> bool:
     """Матч давно идёт к концу, а расчёта нет — пора звать админа."""
     return now - kickoff >= timedelta(hours=MANUAL_SETTLE_AFTER_HOURS)
+
+
+# ─── Батчи одновременных матчей ──────────────────────────────────────────────
+
+@dataclass(frozen=True)
+class MatchBatch:
+    """Группа матчей, проходящих одновременно (в один тайм-слот)."""
+    slot_time: str                        # e.g. "2026-10-10 19:30"
+    time_label: str                       # e.g. "19:30 МСК"
+    kickoff: datetime                     # naive MSK
+    matches: list[dict]                   # список матчей
+    fixture_ids: list[str]                # ID матчей у провайдера для батч-запроса
+
+    @property
+    def is_simultaneous(self) -> bool:
+        """True, если в батче 2 или более параллельных матчей."""
+        return len(self.matches) > 1
+
+    @property
+    def count(self) -> int:
+        return len(self.matches)
+
+
+def group_matches_into_batches(
+    matches: Iterable[dict],
+    tolerance_minutes: int = 0,
+) -> list[MatchBatch]:
+    """Группирует матчи по времени начала в одновременные батчи.
+
+    Матчи сортируются по kickoff_at. При `tolerance_minutes == 0` матчи объединяются
+    по точному времени начала (например, 19:30 МСК).
+    """
+    from time_utils import parse_msk
+
+    parsed: list[tuple[datetime, dict]] = []
+    for m in matches:
+        raw_ko = m.get("kickoff_at")
+        ko = raw_ko if isinstance(raw_ko, datetime) else parse_msk(raw_ko)
+        if ko is not None:
+            parsed.append((ko, m))
+
+    parsed.sort(key=lambda item: (item[0], item[1].get("id", 0)))
+    if not parsed:
+        return []
+
+    batches: list[MatchBatch] = []
+    cur_kickoff: Optional[datetime] = None
+    cur_matches: list[dict] = []
+
+    for ko, m in parsed:
+        if cur_kickoff is None:
+            cur_kickoff = ko
+            cur_matches = [m]
+        elif tolerance_minutes > 0 and (ko - cur_kickoff).total_seconds() <= tolerance_minutes * 60:
+            cur_matches.append(m)
+        elif tolerance_minutes == 0 and ko == cur_kickoff:
+            cur_matches.append(m)
+        else:
+            slot_str = cur_kickoff.strftime("%Y-%m-%d %H:%M")
+            label_str = cur_kickoff.strftime("%H:%M МСК")
+            fids = [str(x["provider_fixture_id"]) for x in cur_matches if x.get("provider_fixture_id")]
+            batches.append(MatchBatch(
+                slot_time=slot_str,
+                time_label=label_str,
+                kickoff=cur_kickoff,
+                matches=cur_matches,
+                fixture_ids=fids,
+            ))
+            cur_kickoff = ko
+            cur_matches = [m]
+
+    if cur_kickoff is not None and cur_matches:
+        slot_str = cur_kickoff.strftime("%Y-%m-%d %H:%M")
+        label_str = cur_kickoff.strftime("%H:%M МСК")
+        fids = [str(x["provider_fixture_id"]) for x in cur_matches if x.get("provider_fixture_id")]
+        batches.append(MatchBatch(
+            slot_time=slot_str,
+            time_label=label_str,
+            kickoff=cur_kickoff,
+            matches=cur_matches,
+            fixture_ids=fids,
+        ))
+
+    return batches

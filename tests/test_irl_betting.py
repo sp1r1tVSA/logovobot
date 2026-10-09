@@ -655,3 +655,50 @@ class TestIrlExpress:
         all_bets = database.get_all_irl_bets()
         assert "bets" in all_bets and "total" in all_bets
 
+
+class TestMatchBatches:
+    def test_group_simultaneous_matches_into_batches(self):
+        from services.irl_betting import group_matches_into_batches
+
+        matches = [
+            {"id": 10, "provider_fixture_id": 501, "kickoff_at": "2026-10-10 14:30:00", "home": "Arsenal", "away": "Leeds"},
+            {"id": 12, "provider_fixture_id": 502, "kickoff_at": "2026-10-10 17:00:00", "home": "Chelsea", "away": "Bournemouth"},
+            {"id": 11, "provider_fixture_id": 503, "kickoff_at": "2026-10-10 19:30:00", "home": "Man Utd", "away": "Tottenham"},
+            {"id": 13, "provider_fixture_id": 504, "kickoff_at": "2026-10-10 19:30:00", "home": "Barcelona", "away": "Getafe"},
+            {"id": 14, "provider_fixture_id": 505, "kickoff_at": "2026-10-10 22:00:00", "home": "Real Madrid", "away": "Villarreal"},
+        ]
+
+        batches = group_matches_into_batches(matches)
+        assert len(batches) == 4
+
+        # 14:30 batch
+        assert batches[0].slot_time == "2026-10-10 14:30"
+        assert batches[0].count == 1
+        assert not batches[0].is_simultaneous
+        assert batches[0].fixture_ids == ["501"]
+
+        # 17:00 batch
+        assert batches[1].slot_time == "2026-10-10 17:00"
+        assert batches[1].count == 1
+        assert not batches[1].is_simultaneous
+        assert batches[1].fixture_ids == ["502"]
+
+        # 19:30 simultaneous batch
+        assert batches[2].slot_time == "2026-10-10 19:30"
+        assert batches[2].time_label == "19:30 МСК"
+        assert batches[2].count == 2
+        assert batches[2].is_simultaneous
+        assert batches[2].fixture_ids == ["503", "504"]
+        assert [m["id"] for m in batches[2].matches] == [11, 13]
+
+        # 22:00 batch
+        assert batches[3].slot_time == "2026-10-10 22:00"
+        assert batches[3].count == 1
+        assert not batches[3].is_simultaneous
+        assert batches[3].fixture_ids == ["505"]
+
+    def test_empty_matches_returns_empty_batches(self):
+        from services.irl_betting import group_matches_into_batches
+        assert group_matches_into_batches([]) == []
+
+

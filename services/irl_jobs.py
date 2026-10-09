@@ -356,13 +356,32 @@ async def run_settle(bot, provider=None, now: Optional[datetime] = None) -> dict
             report["manual"] += 1
         return report
 
+    due_matches: list[tuple[dict, datetime]] = []
     for m in database.list_irl_matches(statuses=("open", "closed"), limit=200):
         kickoff = parse_msk(m["kickoff_at"])
         if kickoff is None or kickoff > now:
             continue
         if not _should_poll_match(m["id"], kickoff, now):
             continue
-        fx = await provider.get_prematch_fixture(m["provider_fixture_id"])
+        due_matches.append((m, kickoff))
+
+    if not due_matches:
+        return report
+
+    # Батч-запрос к провайдеру для всех матчей, требующих опроса
+    # (одновременно идущие матчи опрашиваются за 1 обращение к API)
+    fids = [m["provider_fixture_id"] for m, _ in due_matches if m.get("provider_fixture_id")]
+    batch_fn = getattr(provider, "get_prematch_fixtures_batch", None)
+    if callable(batch_fn):
+        fixtures_map = await batch_fn(fids)
+    else:
+        fixtures_map = {}
+        for fid in fids:
+            fixtures_map[str(fid)] = await provider.get_prematch_fixture(fid)
+
+    for m, kickoff in due_matches:
+        fid = str(m.get("provider_fixture_id"))
+        fx = fixtures_map.get(fid)
         if fx is not None:
             # Обновляем live-счёт во время игры, если провайдер отдал голы
             if fx.home_goals is not None or fx.away_goals is not None:

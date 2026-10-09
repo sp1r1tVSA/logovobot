@@ -513,6 +513,76 @@ class TheOddsApiProvider(SportsDataProvider):
 
         return None
 
+    async def get_prematch_fixtures_batch(
+        self, fixture_ids: list[int | str]
+    ) -> dict[str, Optional[PrematchFixture]]:
+        """Fetch multiple fixtures with scores/status in batch.
+
+        In The Odds API, /sports/{sport}/scores?daysFrom=2 returns scores for all matches
+        in a league/sport in one request. We group fixture IDs by their known sport_key,
+        and query each sport once, caching and extracting all requested matches simultaneously.
+        """
+        if not fixture_ids:
+            return {}
+        clean_ids = [str(fid).strip() for fid in fixture_ids if str(fid).strip()]
+        unique_ids = list(dict.fromkeys(clean_ids))
+        results: dict[str, Optional[PrematchFixture]] = {fid: None for fid in unique_ids}
+
+        remaining_ids: set[str] = set()
+        for fid in unique_ids:
+            if fid in self._fixtures_cache:
+                cached_fx = self._fixtures_cache[fid]
+                if cached_fx.kickoff > now_msk():
+                    results[fid] = cached_fx
+                    continue
+            remaining_ids.add(fid)
+
+        if not remaining_ids:
+            return results
+
+        sports_to_query: set[str] = set()
+        for fid in remaining_ids:
+            sk = self._fixture_sport_map.get(fid)
+            if sk:
+                sports_to_query.add(sk)
+            else:
+                for dsk in DEFAULT_ODDS_SPORT_TO_API_SPORTS.keys():
+                    sports_to_query.add(dsk)
+
+        for sk in sports_to_query:
+            if not sk:
+                continue
+            endpoint = f"sports/{sk}/scores"
+            params = {
+                "daysFrom": "2",
+                "dateFormat": "iso",
+            }
+            try:
+                data = await self._fetch_json(endpoint, params=params, cache_ttl=60)
+            except Exception as e:
+                logger.warning("TheOddsApi %s failed in batch: %s", endpoint, e)
+                data = None
+
+            if not isinstance(data, list):
+                continue
+
+            lid = DEFAULT_ODDS_SPORT_TO_API_SPORTS.get(sk, 0)
+            for item in data:
+                item_id = str(item.get("id"))
+                if item_id in remaining_ids:
+                    self._fixture_sport_map[item_id] = sk
+                    fx = self._normalize_fixture(item, lid, sk)
+                    if fx:
+                        self._fixtures_cache[item_id] = fx
+                        results[item_id] = fx
+
+        # For any remaining IDs not found in /scores, fallback to get_prematch_fixture
+        for fid in remaining_ids:
+            if results[fid] is None:
+                results[fid] = await self.get_prematch_fixture(fid)
+
+        return results
+
     async def get_match_winner_odds(
         self, fixture_id: int | str, bookmaker_id: int | str
     ) -> Optional[MatchWinnerOdds]:

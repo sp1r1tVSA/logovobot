@@ -145,6 +145,20 @@ class SportsDataProvider(ABC):
         """One fixture with its status and main-time score. None = unavailable or unknown."""
         return None
 
+    async def get_prematch_fixtures_batch(
+        self, fixture_ids: list[int | str]
+    ) -> dict[str, Optional[PrematchFixture]]:
+        """Multiple fixtures with their status and main-time score in batch.
+
+        Default implementation falls back to iterating get_prematch_fixture.
+        Batch-capable providers override this to combine multiple fixture checks into
+        a single network call.
+        """
+        results: dict[str, Optional[PrematchFixture]] = {}
+        for fid in fixture_ids:
+            results[str(fid)] = await self.get_prematch_fixture(fid)
+        return results
+
     async def get_match_winner_odds(
         self, fixture_id: int | str, bookmaker_id: int
     ) -> Optional[MatchWinnerOdds]:
