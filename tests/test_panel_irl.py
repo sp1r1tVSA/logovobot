@@ -34,6 +34,15 @@ def _init_data(user_id: int) -> str:
     return urllib.parse.urlencode(data)
 
 
+def _make_user(uid: int, username: str, balance: int = 5000):
+    with database.transaction() as conn:
+        conn.execute("INSERT OR REPLACE INTO users (telegram_id, username, role) VALUES (?, ?, 'user')",
+                     (uid, username))
+    database.get_or_create_wallet(uid)
+    with database.transaction() as conn:
+        conn.execute("UPDATE user_wallets SET balance = ? WHERE user_id = ?", (balance, uid))
+
+
 class TestAdminPanelIrl(AioHTTPTestCase):
     async def get_application(self):
         return create_app()
@@ -50,6 +59,8 @@ class TestAdminPanelIrl(AioHTTPTestCase):
         config.IRL_BOOKMAKER_ID = 4
 
         with database.transaction() as conn:
+            conn.execute("DELETE FROM irl_express_items")
+            conn.execute("DELETE FROM irl_expresses")
             conn.execute("DELETE FROM irl_bets")
             conn.execute("DELETE FROM irl_matches")
             conn.execute("DELETE FROM admin_audit_log")
@@ -293,3 +304,123 @@ class TestAdminPanelIrl(AioHTTPTestCase):
         self.assertEqual(resp.status, 400)
         data = await resp.json()
         self.assertEqual(data["error"], "no_active_matches")
+
+    async def test_get_all_irl_bets_and_filters(self):
+        _make_user(98001, "bettor1", 5000)
+        _make_user(98002, "bettor2", 5000)
+
+        kickoff = now_msk() + timedelta(hours=3)
+        mid1, _ = database.create_irl_draft("fx_b1", 39, "EPL", "Arsenal", "Chelsea", kickoff, 2.0, 3.0, 4.0, bet_day=today_msk_str())
+        mid2, _ = database.create_irl_draft("fx_b2", 39, "EPL", "Liverpool", "Man City", kickoff, 2.5, 3.2, 2.8, bet_day=today_msk_str())
+        database.publish_irl_match(mid1)
+        database.publish_irl_match(mid2)
+
+        # 1 single bet
+        ok1, res1 = database.place_irl_bet(98001, mid1, "home", 200)
+        self.assertTrue(ok1)
+
+        # 1 express bet
+        ok2, res2 = database.place_irl_express(98002, [
+            {"match_id": mid1, "outcome": "draw"},
+            {"match_id": mid2, "outcome": "away"},
+        ], 300)
+        self.assertTrue(ok2)
+
+        # Request all bets
+        resp = await self.client.get("/api/admin/panel/irl/bets", headers=self._headers())
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["total"], 2)
+        self.assertEqual(len(data["bets"]), 2)
+        summary = data["summary"]
+        self.assertEqual(summary["turnover"], 500)
+        self.assertEqual(summary["active_count"], 2)
+
+        # Filter by type=single
+        resp_s = await self.client.get("/api/admin/panel/irl/bets?type=single", headers=self._headers())
+        self.assertEqual(resp_s.status, 200)
+        data_s = await resp_s.json()
+        self.assertEqual(data_s["total"], 1)
+        self.assertEqual(data_s["bets"][0]["bet_type"], "single")
+
+        # Filter by type=express
+        resp_e = await self.client.get("/api/admin/panel/irl/bets?type=express", headers=self._headers())
+        self.assertEqual(resp_e.status, 200)
+        data_e = await resp_e.json()
+        self.assertEqual(data_e["total"], 1)
+        self.assertEqual(data_e["bets"][0]["bet_type"], "express")
+        self.assertEqual(len(data_e["bets"][0]["items"]), 2)
+
+        # Filter by search
+        resp_q = await self.client.get("/api/admin/panel/irl/bets?search=bettor1", headers=self._headers())
+        self.assertEqual(resp_q.status, 200)
+        data_q = await resp_q.json()
+        self.assertEqual(data_q["total"], 1)
+        self.assertEqual(data_q["bets"][0]["user_id"], 98001)
+
+    async def test_admin_void_bet(self):
+        _make_user(98003, "voiduser", 5000)
+        kickoff = now_msk() + timedelta(hours=3)
+        mid, _ = database.create_irl_draft("fx_v1", 39, "EPL", "Arsenal", "Chelsea", kickoff, 2.0, 3.0, 4.0, bet_day=today_msk_str())
+        database.publish_irl_match(mid)
+
+        ok, res = database.place_irl_bet(98003, mid, "home", 400)
+        self.assertTrue(ok)
+        self.assertEqual(database.get_or_create_wallet(98003)["balance"], 4600)
+        bet_id = res["bet_id"]
+
+        # Reject without confirm
+        resp_bad = await self.client.post(
+            f"/api/admin/panel/irl/bets/single/{bet_id}/void",
+            headers=self._headers(),
+            json={"reason": "test"}
+        )
+        self.assertEqual(resp_bad.status, 400)
+
+        # Confirm void
+        resp = await self.client.post(
+            f"/api/admin/panel/irl/bets/single/{bet_id}/void",
+            headers=self._headers(),
+            json={"confirm": True, "reason": "admin canceled"}
+        )
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(database.get_or_create_wallet(98003)["balance"], 5000)
+
+    async def test_admin_settle_override(self):
+        _make_user(98004, "settleuser", 5000)
+        kickoff = now_msk() + timedelta(hours=3)
+        mid, _ = database.create_irl_draft("fx_s1", 39, "EPL", "Arsenal", "Chelsea", kickoff, 2.0, 3.0, 4.0, bet_day=today_msk_str())
+        database.publish_irl_match(mid)
+
+        ok, res = database.place_irl_bet(98004, mid, "home", 500)
+        self.assertTrue(ok)
+        bet_id = res["bet_id"]
+
+        # Override to won
+        resp = await self.client.post(
+            f"/api/admin/panel/irl/bets/single/{bet_id}/settle",
+            headers=self._headers(),
+            json={"status": "won"}
+        )
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["new_status"], "won")
+        self.assertEqual(database.get_or_create_wallet(98004)["balance"], 4500 + 1000)
+
+        # Override to lost
+        resp_lost = await self.client.post(
+            f"/api/admin/panel/irl/bets/single/{bet_id}/settle",
+            headers=self._headers(),
+            json={"status": "lost"}
+        )
+        self.assertEqual(resp_lost.status, 200)
+        self.assertEqual(database.get_or_create_wallet(98004)["balance"], 4500)
+
+    async def test_bets_non_admin_forbidden(self):
+        resp = await self.client.get("/api/admin/panel/irl/bets", headers=self._headers(REGULAR_USER))
+        self.assertEqual(resp.status, 403)
+

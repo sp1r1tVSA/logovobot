@@ -20787,20 +20787,26 @@ def get_user_chat_profile_data(user_id: int) -> dict:
 # рынка» сюда не входят; из BettingLimitsService берётся только потолок выплаты.
 
 MIGRATION_035_IRL_BETTING = "035_irl_betting"
+MIGRATION_039_IRL_EXPRESS_BETS = "039_irl_express_bets"
 IRL_TX_BET = "irl_bet_placed"
 IRL_TX_WIN = "irl_bet_won"
 IRL_TX_REFUND = "irl_bet_refund"
+IRL_TX_EXPRESS_BET = "irl_express_placed"
+IRL_TX_EXPRESS_WIN = "irl_express_won"
+IRL_TX_EXPRESS_REFUND = "irl_express_refund"
 IRL_BET_KEY_PREFIX = "ibet"
+IRL_EXPRESS_KEY_PREFIX = "iexp"
 IRL_ALREADY_BET_ERROR = "IRL_ALREADY_BET"
 IRL_BETTING_CLOSED_ERROR = "IRL_BETTING_CLOSED"
+IRL_INVALID_EXPRESS_LEGS_ERROR = "INVALID_EXPRESS_LEGS"
+IRL_DUPLICATE_EXPRESS_MATCH_ERROR = "DUPLICATE_EXPRESS_MATCH"
 
 
 def _ensure_irl_betting(cursor: sqlite3.Cursor) -> None:
-    """Миграция 035: `irl_matches` и `irl_bets`.
+    """Миграции 035 и 039: `irl_matches`, `irl_bets`, `irl_expresses`, `irl_express_items`.
 
     Имена команд и лиги хранятся как их отдал провайдер и не проходят через
-    `resolve_team_name`. `irl_bets` без FK на users: как и у остальных ставок,
-    история не должна пропадать вместе с игроком.
+    `resolve_team_name`. Ставки без FK на users: история не пропадает вместе с игроком.
     """
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS irl_matches (
@@ -20845,6 +20851,32 @@ def _ensure_irl_betting(cursor: sqlite3.Cursor) -> None:
             UNIQUE(user_id, irl_match_id)
         )
     """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS irl_expresses (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id INTEGER NOT NULL,
+            amount INTEGER NOT NULL CHECK(amount BETWEEN 1 AND 1000),
+            total_odd REAL NOT NULL,
+            potential_win INTEGER NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'won', 'lost', 'refunded')),
+            actual_payout INTEGER DEFAULT 0,
+            created_at TIMESTAMP NOT NULL DEFAULT (datetime('now', '+3 hours')),
+            settled_at TIMESTAMP
+        )
+    """)
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS irl_express_items (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            express_id INTEGER NOT NULL REFERENCES irl_expresses(id) ON DELETE CASCADE,
+            irl_match_id INTEGER NOT NULL REFERENCES irl_matches(id),
+            outcome TEXT NOT NULL CHECK(outcome IN ('home', 'draw', 'away')),
+            odd REAL NOT NULL,
+            status TEXT NOT NULL DEFAULT 'pending'
+                CHECK(status IN ('pending', 'won', 'lost', 'refunded')),
+            UNIQUE(express_id, irl_match_id)
+        )
+    """)
     # Одноразовые уведомления джобов (превью дня, «матчей нет», ручной расчёт): ключ → когда доставлено.
     cursor.execute("""
         CREATE TABLE IF NOT EXISTS irl_notices (
@@ -20856,9 +20888,16 @@ def _ensure_irl_betting(cursor: sqlite3.Cursor) -> None:
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_irl_matches_kickoff ON irl_matches(status, kickoff_at)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_irl_bets_match ON irl_bets(irl_match_id, status)")
     cursor.execute("CREATE INDEX IF NOT EXISTS idx_irl_bets_user ON irl_bets(user_id, id DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_irl_expresses_user ON irl_expresses(user_id, id DESC)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_irl_express_items_match ON irl_express_items(irl_match_id, status)")
+    cursor.execute("CREATE INDEX IF NOT EXISTS idx_irl_express_items_express ON irl_express_items(express_id)")
     cursor.execute(
         "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
         (MIGRATION_035_IRL_BETTING, "irl_matches / irl_bets: 1X2 bets on real football matches"),
+    )
+    cursor.execute(
+        "INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (?, ?)",
+        (MIGRATION_039_IRL_EXPRESS_BETS, "irl_expresses / irl_express_items: expresses on real matches"),
     )
 
 
@@ -21055,24 +21094,40 @@ def expire_irl_drafts() -> int:
 def get_irl_match_bet_stats(irl_match_id: int) -> dict:
     """Сколько ставок и на какую сумму лежит на матче (для сообщений админам)."""
     with transaction() as conn:
-        row = conn.execute(
-            "SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total FROM irl_bets "
-            "WHERE irl_match_id = ? AND status = 'pending'", (irl_match_id,)
-        ).fetchone()
+        row = conn.execute("""
+            SELECT
+                (SELECT COUNT(*) FROM irl_bets WHERE irl_match_id = ? AND status = 'pending') +
+                (SELECT COUNT(*) FROM irl_express_items ei JOIN irl_expresses e ON e.id = ei.express_id
+                 WHERE ei.irl_match_id = ? AND ei.status = 'pending' AND e.status = 'pending') AS n,
+                (SELECT COALESCE(SUM(amount), 0) FROM irl_bets WHERE irl_match_id = ? AND status = 'pending') +
+                (SELECT COALESCE(SUM(e.amount), 0) FROM irl_express_items ei JOIN irl_expresses e ON e.id = ei.express_id
+                 WHERE ei.irl_match_id = ? AND ei.status = 'pending' AND e.status = 'pending') AS total
+        """, (irl_match_id, irl_match_id, irl_match_id, irl_match_id)).fetchone()
         return {"count": int(row["n"]), "total": int(row["total"])}
 
 
 def get_irl_match_bets(irl_match_id: int, limit: int = 100) -> list[dict]:
-    """Ставки игроков на конкретный IRL-матч с именами пользователей."""
+    """Ставки игроков на конкретный IRL-матч с именами пользователей (ординары и экспрессы)."""
     with transaction() as conn:
         rows = conn.execute("""
-            SELECT b.*, u.username, u.team_name
+            SELECT 'single' AS bet_type, b.id, b.user_id, b.outcome, b.amount, b.odd, b.potential_win,
+                   b.status, b.actual_payout, b.created_at, u.username, u.team_name
             FROM irl_bets b
             LEFT JOIN users u ON u.telegram_id = b.user_id
             WHERE b.irl_match_id = ?
-            ORDER BY b.id DESC
+
+            UNION ALL
+
+            SELECT 'express' AS bet_type, e.id, e.user_id, ei.outcome, e.amount, ei.odd, e.potential_win,
+                   ei.status, e.actual_payout, e.created_at, u.username, u.team_name
+            FROM irl_express_items ei
+            JOIN irl_expresses e ON e.id = ei.express_id
+            LEFT JOIN users u ON u.telegram_id = e.user_id
+            WHERE ei.irl_match_id = ?
+
+            ORDER BY id DESC
             LIMIT ?
-        """, (int(irl_match_id), int(limit))).fetchall()
+        """, (int(irl_match_id), int(irl_match_id), int(limit))).fetchall()
         return [dict(r) for r in rows]
 
 
@@ -21165,6 +21220,15 @@ def place_irl_bet(user_id: int, irl_match_id, outcome, amount,
                 return False, {"error": IRL_ALREADY_BET_ERROR,
                                "message": "На этот матч у вас уже есть ставка."}
 
+            cursor.execute("""
+                SELECT ei.id FROM irl_express_items ei
+                JOIN irl_expresses e ON e.id = ei.express_id
+                WHERE e.user_id = ? AND ei.irl_match_id = ? AND e.status = 'pending'
+            """, (user_id, irl_match_id))
+            if cursor.fetchone():
+                return False, {"error": IRL_ALREADY_BET_ERROR,
+                               "message": "На этот матч у вас уже есть ставка в экспрессе."}
+
             potential = irl.potential_win(amount, odd, max_payout)
             get_or_create_wallet(user_id)
             cursor.execute("""
@@ -21196,26 +21260,236 @@ def place_irl_bet(user_id: int, irl_match_id, outcome, amount,
         # Страховка UNIQUE(user_id, irl_match_id): транзакция уже откатила списание.
         return False, {"error": IRL_ALREADY_BET_ERROR, "message": "На этот матч у вас уже есть ставка."}
 
-    return True, {"bet_id": bet_id, "odd": odd, "amount": amount, "potential_win": potential,
+    return True, {"bet_id": bet_id, "bet_type": "single", "odd": odd, "amount": amount, "potential_win": potential,
                   "payout_capped": potential < int(round(amount * odd)), "balance": balance}
+
+
+def place_irl_express(user_id: int, items: list[dict], amount,
+                      client_total_odd: float | None = None) -> tuple[bool, dict]:
+    """Экспресс на исходы 2–5 IRL-матчей. Сумма ставки ≤ IRL_MAX_BET.
+
+    Порядок: блокировка → формат исходов (2..5 разных матчей) → матчи открыты и не начались
+    → бан/пауза → лимиты выигрыша → проверка повторов → списание с баланса → запись купона.
+    """
+    import config
+    from services import irl_betting as irl
+
+    try:
+        if config.is_global_lockdown_enabled():
+            from handlers.base import is_global_admin
+            if not is_global_admin(user_id):
+                return False, {"error": "LOGOVO_LOCKDOWN", "message": "Logovo.bet временно закрыт для пользователей"}
+    except Exception:
+        logger.exception("Lockdown check failed for IRL express of user_id=%s; bet rejected", user_id)
+        return False, {"error": "BETTING_UNAVAILABLE", "message": "Приём ставок временно недоступен."}
+
+    if not isinstance(items, (list, tuple)) or len(items) < 2:
+        return False, {"error": IRL_INVALID_EXPRESS_LEGS_ERROR, "message": "Экспресс должен содержать минимум 2 события."}
+    if len(items) > 5:
+        return False, {"error": IRL_INVALID_EXPRESS_LEGS_ERROR, "message": "В экспрессе может быть максимум 5 событий."}
+
+    ok, parsed = irl.parse_stake(amount, config.IRL_MAX_BET)
+    if not ok:
+        return False, parsed  # type: ignore[return-value]
+    amount = int(parsed)  # type: ignore[arg-type]
+
+    match_ids = []
+    for it in items:
+        if not isinstance(it, dict) or "match_id" not in it or "outcome" not in it:
+            return False, {"error": "INVALID_SELECTION", "message": "Некорректный формат события в экспрессе."}
+        try:
+            m_id = int(it["match_id"])
+        except (ValueError, TypeError):
+            return False, {"error": "INVALID_SELECTION", "message": "Некорректный ID матча."}
+        match_ids.append(m_id)
+
+    if len(match_ids) != len(set(match_ids)):
+        return False, {"error": IRL_DUPLICATE_EXPRESS_MATCH_ERROR,
+                       "message": "Нельзя выбирать несколько исходов одного матча в экспресс."}
+
+    try:
+        with _bet_placement_lock, transaction() as conn:
+            cursor = conn.cursor()
+
+            try:
+                block = _betting_block_reason(cursor, user_id, [])
+            except Exception:
+                logger.exception("IRL block check failed for user_id=%s; bet rejected", user_id)
+                block = {"error": "BETTING_UNAVAILABLE",
+                         "message": "Приём ставок временно недоступен. Попробуйте позже."}
+            if block is not None:
+                return False, block
+
+            try:
+                from services.betting_limits import BettingLimitsService
+                limits = BettingLimitsService.get_user_effective_limits(user_id, None)
+                max_payout = min(_MAX_PAYOUT, int(limits.get("max_payout") or _MAX_PAYOUT))
+            except Exception:
+                logger.exception("IRL limits unavailable for user_id=%s; bet rejected", user_id)
+                return False, {"error": "RISK_CHECK_UNAVAILABLE",
+                               "message": "Не удалось проверить ставку. Ставка не принята, монеты не списаны."}
+
+            validated_items = []
+            now = now_msk()
+            for it in items:
+                m_id = int(it["match_id"])
+                key = irl.normalize_outcome(it["outcome"])
+                if key is None:
+                    return False, {"error": "INVALID_SELECTION", "message": f"Некорректный исход для матча #{m_id}."}
+
+                cursor.execute("SELECT * FROM irl_matches WHERE id = ?", (m_id,))
+                match = cursor.fetchone()
+                if not match:
+                    return False, {"error": "INVALID_SELECTION", "message": f"Матч #{m_id} не найден."}
+
+                if not irl.betting_open(match["status"], match["kickoff_at"], now):
+                    return False, {"error": IRL_BETTING_CLOSED_ERROR,
+                                   "message": f"Приём ставок на матч {match['home']} — {match['away']} закрыт."}
+
+                cursor.execute("SELECT id FROM irl_bets WHERE user_id = ? AND irl_match_id = ?",
+                               (user_id, m_id))
+                if cursor.fetchone():
+                    return False, {"error": IRL_ALREADY_BET_ERROR,
+                                   "message": f"На матч {match['home']} — {match['away']} у вас уже есть ставка."}
+
+                cursor.execute("""
+                    SELECT ei.id FROM irl_express_items ei
+                    JOIN irl_expresses e ON e.id = ei.express_id
+                    WHERE e.user_id = ? AND ei.irl_match_id = ? AND e.status = 'pending'
+                """, (user_id, m_id))
+                if cursor.fetchone():
+                    return False, {"error": IRL_ALREADY_BET_ERROR,
+                                   "message": f"На матч {match['home']} — {match['away']} у вас уже есть ставка в экспрессе."}
+
+                odd = irl.odd_for(dict(match), key)
+                if odd is None:
+                    return False, {"error": "MARKET_SUSPENDED",
+                                   "message": f"Коэффициенты на матч {match['home']} — {match['away']} недоступны."}
+
+                client_odd = it.get("odd")
+                if client_odd is not None:
+                    try:
+                        client = round(float(client_odd), 2)
+                    except (ValueError, TypeError):
+                        client = None
+                    if client is None or abs(client - odd) > 0.001:
+                        return False, {"error": "ODDS_CHANGED", "match_id": m_id, "outcome": key,
+                                       "old_odd": client, "new_odd": odd,
+                                       "message": f"Коэффициент на матч {match['home']} — {match['away']} изменился: {client} → {odd}"}
+
+                validated_items.append({
+                    "match_id": m_id,
+                    "outcome": key,
+                    "odd": odd,
+                    "home": match["home"],
+                    "away": match["away"],
+                })
+
+            margin_pct = get_express_margin_pct()
+            total_odd = express_odd([v["odd"] for v in validated_items], margin_pct)
+            potential = min(max_payout, int(round(amount * total_odd)))
+
+            get_or_create_wallet(user_id)
+            cursor.execute("""
+                UPDATE user_wallets
+                SET balance = balance - ?, total_wagered = total_wagered + ?, bets_count = bets_count + 1,
+                    updated_at = datetime('now', '+3 hours')
+                WHERE user_id = ? AND balance >= ?
+            """, (amount, amount, user_id, amount))
+            if cursor.rowcount == 0:
+                cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+                bal = cursor.fetchone()
+                return False, {"error": "INSUFFICIENT_BALANCE",
+                               "message": f"Недостаточно монет на балансе (Баланс: {bal['balance'] if bal else 0} 🪙)."}
+
+            cursor.execute("""
+                INSERT INTO irl_expresses
+                    (user_id, amount, total_odd, potential_win, status, created_at)
+                VALUES (?, ?, ?, ?, 'pending', datetime('now', '+3 hours'))
+            """, (user_id, amount, total_odd, potential))
+            express_id = cursor.lastrowid
+
+            for v in validated_items:
+                cursor.execute("""
+                    INSERT INTO irl_express_items
+                        (express_id, irl_match_id, outcome, odd, status)
+                    VALUES (?, ?, ?, ?, 'pending')
+                """, (express_id, v["match_id"], v["outcome"], v["odd"]))
+
+            cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+            balance = cursor.fetchone()["balance"]
+
+            cursor.execute("""
+                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
+                                               balance_after, created_at)
+                VALUES (?, ?, ?, ?, 'irl_express', ?, datetime('now', '+3 hours'))
+            """, (user_id, -amount, IRL_TX_EXPRESS_BET, express_id, balance))
+    except sqlite3.IntegrityError:
+        return False, {"error": "EXPRESS_INTEGRITY_ERROR", "message": "Ошибка сохранения экспресса."}
+
+    return True, {"bet_id": express_id, "express_id": express_id, "bet_type": "express",
+                  "odd": total_odd, "total_odd": total_odd, "amount": amount,
+                  "potential_win": potential, "legs_count": len(validated_items), "balance": balance}
 
 
 def get_user_irl_bets(user_id: int, limit: int = 100) -> list[dict]:
     with transaction() as conn:
-        rows = conn.execute("""
+        cursor = conn.cursor()
+        s_rows = cursor.execute("""
             SELECT b.*, m.home, m.away, m.league_name, m.kickoff_at, m.status AS match_status,
-                   m.result, m.home_goals, m.away_goals
+                   m.result, m.home_goals, m.away_goals, 'single' AS bet_type
             FROM irl_bets b JOIN irl_matches m ON m.id = b.irl_match_id
             WHERE b.user_id = ? ORDER BY b.id DESC LIMIT ?
         """, (user_id, int(limit))).fetchall()
-        return [dict(r) for r in rows]
+        singles = [dict(r) for r in s_rows]
+
+        e_rows = cursor.execute("""
+            SELECT e.*, 'express' AS bet_type
+            FROM irl_expresses e
+            WHERE e.user_id = ? ORDER BY e.id DESC LIMIT ?
+        """, (user_id, int(limit))).fetchall()
+        expresses = [dict(r) for r in e_rows]
+        if expresses:
+            exp_ids = [e["id"] for e in expresses]
+            placeholders = ",".join("?" for _ in exp_ids)
+            item_rows = cursor.execute(f"""
+                SELECT ei.*, m.home, m.away, m.league_name, m.kickoff_at, m.status AS match_status,
+                       m.result, m.home_goals, m.away_goals
+                FROM irl_express_items ei
+                JOIN irl_matches m ON m.id = ei.irl_match_id
+                WHERE ei.express_id IN ({placeholders})
+                ORDER BY ei.id ASC
+            """, exp_ids).fetchall()
+            items_by_exp = {}
+            for ir in item_rows:
+                items_by_exp.setdefault(ir["express_id"], []).append(dict(ir))
+            for e in expresses:
+                e["items"] = items_by_exp.get(e["id"], [])
+                e["odd"] = e.get("total_odd")
+
+        combined = singles + expresses
+        combined.sort(key=lambda x: str(x.get("created_at") or ""), reverse=True)
+        return combined[:int(limit)]
 
 
 def get_user_irl_bet_for_match(user_id: int, irl_match_id: int) -> dict | None:
     with transaction() as conn:
         row = conn.execute("SELECT * FROM irl_bets WHERE user_id = ? AND irl_match_id = ?",
                            (user_id, irl_match_id)).fetchone()
-        return dict(row) if row else None
+        if row:
+            return dict(row)
+        exp_row = conn.execute("""
+            SELECT ei.*, e.amount, e.potential_win, e.total_odd, e.status AS express_status
+            FROM irl_express_items ei
+            JOIN irl_expresses e ON e.id = ei.express_id
+            WHERE e.user_id = ? AND ei.irl_match_id = ? AND e.status = 'pending'
+            ORDER BY ei.id DESC LIMIT 1
+        """, (user_id, irl_match_id)).fetchone()
+        if exp_row:
+            d = dict(exp_row)
+            d["is_express"] = True
+            return d
+        return None
 
 
 def _credit_irl(cursor, user_id: int, amount: int, tx_type: str, bet_id: int, won: bool) -> None:
@@ -21235,11 +21509,12 @@ def _credit_irl(cursor, user_id: int, amount: int, tx_type: str, bet_id: int, wo
         """, (amount, user_id))
     cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
     row = cursor.fetchone()
+    ref_type = "irl_express" if tx_type in (IRL_TX_EXPRESS_BET, IRL_TX_EXPRESS_WIN, IRL_TX_EXPRESS_REFUND) else "irl_bet"
     cursor.execute("""
         INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
                                        balance_after, created_at)
-        VALUES (?, ?, ?, ?, 'irl_bet', ?, datetime('now', '+3 hours'))
-    """, (user_id, amount, tx_type, bet_id, row["balance"] if row else None))
+        VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
+    """, (user_id, amount, tx_type, bet_id, ref_type, row["balance"] if row else None))
 
 
 def _notify_irl(cursor, match, bet, status: str, payout: int) -> None:
@@ -21255,14 +21530,30 @@ def _notify_irl(cursor, match, bet, status: str, payout: int) -> None:
                                key_prefix=IRL_BET_KEY_PREFIX)
 
 
+def _notify_irl_express(cursor, express: dict, status: str, payout: int) -> None:
+    odd_str = f"{float(express.get('total_odd') or 0):.2f}"
+    legs = express.get("legs_count", "")
+    legs_lbl = f" ({legs} соб.)" if legs else ""
+    if status == "won":
+        title = f"✅ Экспресс на реальные матчи выиграл: +{payout} 🪙"
+        body = f"Экспресс{legs_lbl} @ {odd_str}\nВыигрыш: {payout} 🪙"
+    elif status == "refunded":
+        title = f"↩️ Экспресс на реальные матчи возвращён: {payout} 🪙"
+        body = f"Экспресс{legs_lbl} @ {odd_str}\nВсе события отменены или аннулированы."
+    else:
+        title = f"❌ Экспресс на реальные матчи не сыграл: −{int(express['amount'])} 🪙"
+        body = f"Экспресс{legs_lbl} @ {odd_str}"
+    enqueue_bet_settled_notice(cursor, express["user_id"], express["id"], title, body,
+                               key_prefix=IRL_EXPRESS_KEY_PREFIX)
+
+
 def settle_irl_match(irl_match_id: int, result: str, home_goals: int | None = None,
                      away_goals: int | None = None,
                      actor_id: int | None = None) -> tuple[bool, dict | str]:
     """Рассчитать матч по исходу основного времени (`home|draw|away`).
 
-    Платит выигравшим `potential_win`, остальные проигрывают. Повтор безопасен:
-    матч принимает расчёт только из open/closed, а ставка меняет статус только из
-    `pending`.
+    Платит выигравшим `potential_win`, остальные проигрывают. Рассчитывает одиночные
+    ставки и ноги экспрессов (с автоматическим закрытием сыгравших экспрессов).
     """
     if result not in ("home", "draw", "away"):
         return False, "Некорректный исход матча."
@@ -21274,6 +21565,8 @@ def settle_irl_match(irl_match_id: int, result: str, home_goals: int | None = No
             return False, "Матч не найден."
         if match["status"] not in ("open", "closed"):
             return False, "Матч уже рассчитан, аннулирован или не опубликован."
+
+        # 1. Расчёт ординаров
         cursor.execute(
             "SELECT * FROM irl_bets WHERE irl_match_id = ? AND status = 'pending'", (irl_match_id,)
         )
@@ -21298,6 +21591,83 @@ def settle_irl_match(irl_match_id: int, result: str, home_goals: int | None = No
                 )
                 _notify_irl(cursor, match, bet, "lost", 0)
                 lost += 1
+
+        # 2. Расчёт ног экспрессов
+        cursor.execute("""
+            SELECT ei.id, ei.express_id, ei.outcome, ei.odd, e.user_id, e.amount, e.potential_win, e.total_odd
+            FROM irl_express_items ei
+            JOIN irl_expresses e ON e.id = ei.express_id
+            WHERE ei.irl_match_id = ? AND ei.status = 'pending' AND e.status = 'pending'
+        """, (irl_match_id,))
+        pending_legs = cursor.fetchall()
+
+        affected_express_ids = set()
+        for leg in pending_legs:
+            affected_express_ids.add(leg["express_id"])
+            if leg["outcome"] == result:
+                cursor.execute("UPDATE irl_express_items SET status = 'won' WHERE id = ?", (leg["id"],))
+            else:
+                cursor.execute("UPDATE irl_express_items SET status = 'lost' WHERE id = ?", (leg["id"],))
+                # Экспресс с проигранной ногой сразу проигрывает
+                cursor.execute("""
+                    UPDATE irl_expresses
+                    SET status = 'lost', actual_payout = 0, settled_at = datetime('now', '+3 hours')
+                    WHERE id = ? AND status = 'pending'
+                """, (leg["express_id"],))
+                if cursor.rowcount > 0:
+                    cursor.execute("SELECT COUNT(*) AS c FROM irl_express_items WHERE express_id = ?", (leg["express_id"],))
+                    cnt = cursor.fetchone()["c"]
+                    _notify_irl_express(cursor, {"id": leg["express_id"], "user_id": leg["user_id"],
+                                                 "amount": leg["amount"], "total_odd": leg["total_odd"],
+                                                 "legs_count": cnt}, "lost", 0)
+
+        # 3. Закрытие завершившихся экспрессов (все ноги которых сыграли)
+        for exp_id in affected_express_ids:
+            cursor.execute("SELECT * FROM irl_expresses WHERE id = ? AND status = 'pending'", (exp_id,))
+            exp = cursor.fetchone()
+            if not exp:
+                continue
+            cursor.execute("SELECT * FROM irl_express_items WHERE express_id = ?", (exp_id,))
+            items = cursor.fetchall()
+            if any(it["status"] == "pending" for it in items):
+                continue
+            if any(it["status"] == "lost" for it in items):
+                cursor.execute("""
+                    UPDATE irl_expresses SET status = 'lost', actual_payout = 0, settled_at = datetime('now', '+3 hours')
+                    WHERE id = ? AND status = 'pending'
+                """, (exp_id,))
+                _notify_irl_express(cursor, {**dict(exp), "legs_count": len(items)}, "lost", 0)
+                continue
+
+            won_items = [it for it in items if it["status"] == "won"]
+            if not won_items:
+                # Все ноги отменены/возвращены -> возврат ставки
+                stake = int(exp["amount"])
+                cursor.execute("""
+                    UPDATE irl_expresses SET status = 'refunded', actual_payout = ?, settled_at = datetime('now', '+3 hours')
+                    WHERE id = ? AND status = 'pending'
+                """, (stake, exp_id))
+                if cursor.rowcount > 0:
+                    _credit_irl(cursor, exp["user_id"], stake, IRL_TX_EXPRESS_REFUND, exp_id, won=False)
+                    _notify_irl_express(cursor, {**dict(exp), "legs_count": len(items)}, "refunded", stake)
+            else:
+                margin_pct = get_express_margin_pct()
+                effective_odd = express_odd([w["odd"] for w in won_items], margin_pct)
+                try:
+                    from services.betting_limits import BettingLimitsService
+                    limits = BettingLimitsService.get_user_effective_limits(exp["user_id"], None)
+                    max_payout = min(_MAX_PAYOUT, int(limits.get("max_payout") or _MAX_PAYOUT))
+                except Exception:
+                    max_payout = _MAX_PAYOUT
+                payout = min(max_payout, int(round(int(exp["amount"]) * effective_odd)))
+                cursor.execute("""
+                    UPDATE irl_expresses SET status = 'won', actual_payout = ?, settled_at = datetime('now', '+3 hours')
+                    WHERE id = ? AND status = 'pending'
+                """, (payout, exp_id))
+                if cursor.rowcount > 0:
+                    _credit_irl(cursor, exp["user_id"], payout, IRL_TX_EXPRESS_WIN, exp_id, won=True)
+                    _notify_irl_express(cursor, {**dict(exp), "legs_count": len(items)}, "won", payout)
+
         cursor.execute("""
             UPDATE irl_matches SET status = 'settled', result = ?, home_goals = ?, away_goals = ?,
                 settled_by = ?, settled_at = datetime('now', '+3 hours')
@@ -21318,6 +21688,8 @@ def void_irl_match(irl_match_id: int, reason: str | None = None,
             return False, "Матч не найден."
         if match["status"] in ("settled", "void"):
             return False, "Матч уже рассчитан или аннулирован."
+
+        # 1. Возврат ординаров
         cursor.execute(
             "SELECT * FROM irl_bets WHERE irl_match_id = ? AND status = 'pending'", (irl_match_id,)
         )
@@ -21331,6 +21703,64 @@ def void_irl_match(irl_match_id: int, reason: str | None = None,
             _credit_irl(cursor, bet["user_id"], int(bet["amount"]), IRL_TX_REFUND, bet["id"], won=False)
             _notify_irl(cursor, match, bet, "refunded", int(bet["amount"]))
             refunded += 1
+
+        # 2. Возврат ног экспрессов
+        cursor.execute("""
+            SELECT ei.id, ei.express_id, e.user_id, e.amount, e.potential_win, e.total_odd
+            FROM irl_express_items ei
+            JOIN irl_expresses e ON e.id = ei.express_id
+            WHERE ei.irl_match_id = ? AND ei.status = 'pending' AND e.status = 'pending'
+        """, (irl_match_id,))
+        legs = cursor.fetchall()
+        affected_exp_ids = set()
+        for leg in legs:
+            affected_exp_ids.add(leg["express_id"])
+            cursor.execute("UPDATE irl_express_items SET status = 'refunded' WHERE id = ?", (leg["id"],))
+
+        for exp_id in affected_exp_ids:
+            cursor.execute("SELECT * FROM irl_expresses WHERE id = ? AND status = 'pending'", (exp_id,))
+            exp = cursor.fetchone()
+            if not exp:
+                continue
+            cursor.execute("SELECT * FROM irl_express_items WHERE express_id = ?", (exp_id,))
+            items = cursor.fetchall()
+            if any(it["status"] == "pending" for it in items):
+                continue
+            if any(it["status"] == "lost" for it in items):
+                cursor.execute("""
+                    UPDATE irl_expresses SET status = 'lost', actual_payout = 0, settled_at = datetime('now', '+3 hours')
+                    WHERE id = ? AND status = 'pending'
+                """, (exp_id,))
+                _notify_irl_express(cursor, {**dict(exp), "legs_count": len(items)}, "lost", 0)
+                continue
+            won_items = [it for it in items if it["status"] == "won"]
+            if not won_items:
+                stake = int(exp["amount"])
+                cursor.execute("""
+                    UPDATE irl_expresses SET status = 'refunded', actual_payout = ?, settled_at = datetime('now', '+3 hours')
+                    WHERE id = ? AND status = 'pending'
+                """, (stake, exp_id))
+                if cursor.rowcount > 0:
+                    _credit_irl(cursor, exp["user_id"], stake, IRL_TX_EXPRESS_REFUND, exp_id, won=False)
+                    _notify_irl_express(cursor, {**dict(exp), "legs_count": len(items)}, "refunded", stake)
+            else:
+                margin_pct = get_express_margin_pct()
+                effective_odd = express_odd([w["odd"] for w in won_items], margin_pct)
+                try:
+                    from services.betting_limits import BettingLimitsService
+                    limits = BettingLimitsService.get_user_effective_limits(exp["user_id"], None)
+                    max_payout = min(_MAX_PAYOUT, int(limits.get("max_payout") or _MAX_PAYOUT))
+                except Exception:
+                    max_payout = _MAX_PAYOUT
+                payout = min(max_payout, int(round(int(exp["amount"]) * effective_odd)))
+                cursor.execute("""
+                    UPDATE irl_expresses SET status = 'won', actual_payout = ?, settled_at = datetime('now', '+3 hours')
+                    WHERE id = ? AND status = 'pending'
+                """, (payout, exp_id))
+                if cursor.rowcount > 0:
+                    _credit_irl(cursor, exp["user_id"], payout, IRL_TX_EXPRESS_WIN, exp_id, won=True)
+                    _notify_irl_express(cursor, {**dict(exp), "legs_count": len(items)}, "won", payout)
+
         cursor.execute("""
             UPDATE irl_matches SET status = 'void', void_reason = ?, settled_by = ?,
                 settled_at = datetime('now', '+3 hours')
@@ -21364,8 +21794,313 @@ def restore_irl_match(irl_match_id: int, actor_id: int | None = None) -> tuple[b
         if cursor.rowcount == 0:
             return False, "Не удалось восстановить матч."
         cursor.execute("DELETE FROM irl_bets WHERE irl_match_id = ? AND status = 'refunded'", (irl_match_id,))
+        cursor.execute("DELETE FROM irl_express_items WHERE irl_match_id = ? AND status = 'refunded'", (irl_match_id,))
+        cursor.execute("DELETE FROM irl_expresses WHERE id NOT IN (SELECT DISTINCT express_id FROM irl_express_items)")
     logger.info("IRL match #%s restored to draft by actor=%s", irl_match_id, actor_id)
     return True, {"status": "draft"}
+
+
+def get_irl_betting_summary_stats() -> dict:
+    """Сводные финансовые KPI по всем ставкам на реальные матчи (ординары + экспрессы)."""
+    with transaction() as conn:
+        cursor = conn.cursor()
+        s_row = cursor.execute("""
+            SELECT
+                COALESCE(SUM(amount), 0) AS staked,
+                COALESCE(SUM(CASE WHEN status = 'won' THEN actual_payout ELSE 0 END), 0) AS payout,
+                COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+                COALESCE(SUM(CASE WHEN status = 'pending' THEN potential_win ELSE 0 END), 0) AS pending_liability,
+                COALESCE(SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END), 0) AS pending_stake,
+                COUNT(*) AS total_count,
+                COALESCE(SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END), 0) AS won_count,
+                COALESCE(SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END), 0) AS lost_count,
+                COALESCE(SUM(CASE WHEN status = 'refunded' THEN 1 ELSE 0 END), 0) AS refunded_count
+            FROM irl_bets
+        """).fetchone()
+
+        e_row = cursor.execute("""
+            SELECT
+                COALESCE(SUM(amount), 0) AS staked,
+                COALESCE(SUM(CASE WHEN status = 'won' THEN actual_payout ELSE 0 END), 0) AS payout,
+                COALESCE(SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END), 0) AS pending_count,
+                COALESCE(SUM(CASE WHEN status = 'pending' THEN potential_win ELSE 0 END), 0) AS pending_liability,
+                COALESCE(SUM(CASE WHEN status = 'pending' THEN amount ELSE 0 END), 0) AS pending_stake,
+                COUNT(*) AS total_count,
+                COALESCE(SUM(CASE WHEN status = 'won' THEN 1 ELSE 0 END), 0) AS won_count,
+                COALESCE(SUM(CASE WHEN status = 'lost' THEN 1 ELSE 0 END), 0) AS lost_count,
+                COALESCE(SUM(CASE WHEN status = 'refunded' THEN 1 ELSE 0 END), 0) AS refunded_count
+            FROM irl_expresses
+        """).fetchone()
+
+        turnover = int(s_row["staked"]) + int(e_row["staked"])
+        payouts = int(s_row["payout"]) + int(e_row["payout"])
+        ggr = turnover - payouts
+        active_count = int(s_row["pending_count"]) + int(e_row["pending_count"])
+        active_liability = int(s_row["pending_liability"]) + int(e_row["pending_liability"])
+        active_staked = int(s_row["pending_stake"]) + int(e_row["pending_stake"])
+        total_bets = int(s_row["total_count"]) + int(e_row["total_count"])
+        won_bets = int(s_row["won_count"]) + int(e_row["won_count"])
+        lost_bets = int(s_row["lost_count"]) + int(e_row["lost_count"])
+        refunded_bets = int(s_row["refunded_count"]) + int(e_row["refunded_count"])
+
+        return {
+            "turnover": turnover,
+            "payouts": payouts,
+            "ggr": ggr,
+            "active_bets_count": active_count,
+            "active_count": active_count,
+            "active_liability": active_liability,
+            "liability": active_liability,
+            "active_staked": active_staked,
+            "active_turnover": active_staked,
+            "total_bets_count": total_bets,
+            "won_count": won_bets,
+            "lost_count": lost_bets,
+            "refunded_count": refunded_bets,
+            "singles_count": int(s_row["total_count"]),
+            "expresses_count": int(e_row["total_count"]),
+        }
+
+
+def get_all_irl_bets(status: str | None = None, bet_type: str | None = None,
+                     search: str | None = None, limit: int = 50, offset: int = 0) -> dict:
+    """Список всех IRL-ставок (ординаров и экспрессов) с пагинацией и фильтрами для админ-панели."""
+    limit = max(1, min(100, int(limit)))
+    offset = max(0, int(offset))
+    with transaction() as conn:
+        cursor = conn.cursor()
+
+        parts = []
+        if not bet_type or bet_type in ("all", "single"):
+            parts.append("""
+                SELECT 'single' AS bet_type, b.id, b.user_id, b.amount, b.odd, b.potential_win, b.status,
+                       b.actual_payout, b.created_at, b.settled_at,
+                       u.username, u.team_name,
+                       m.home, m.away, m.league_name, m.kickoff_at, m.status AS match_status, m.result, b.outcome,
+                       b.irl_match_id
+                FROM irl_bets b
+                LEFT JOIN users u ON u.telegram_id = b.user_id
+                LEFT JOIN irl_matches m ON m.id = b.irl_match_id
+            """)
+        if not bet_type or bet_type in ("all", "express"):
+            parts.append("""
+                SELECT 'express' AS bet_type, e.id, e.user_id, e.amount, e.total_odd AS odd, e.potential_win, e.status,
+                       e.actual_payout, e.created_at, e.settled_at,
+                       u.username, u.team_name,
+                       NULL AS home, NULL AS away, NULL AS league_name, NULL AS kickoff_at, NULL AS match_status, NULL AS result, NULL AS outcome,
+                       NULL AS irl_match_id
+                FROM irl_expresses e
+                LEFT JOIN users u ON u.telegram_id = e.user_id
+            """)
+
+        union_sql = " UNION ALL ".join(parts)
+        where_clauses = []
+        where_params = []
+
+        if status and status != "all":
+            where_clauses.append("t.status = ?")
+            where_params.append(status)
+
+        if search:
+            s = f"%{search.strip()}%"
+            where_clauses.append("(t.username LIKE ? OR CAST(t.user_id AS TEXT) LIKE ? OR t.team_name LIKE ?)")
+            where_params.extend([s, s, s])
+
+        where_str = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+        count_sql = f"SELECT COUNT(*) AS total FROM ({union_sql}) t {where_str}"
+        total = cursor.execute(count_sql, where_params).fetchone()["total"]
+
+        data_sql = f"""
+            SELECT * FROM ({union_sql}) t
+            {where_str}
+            ORDER BY t.created_at DESC, t.id DESC
+            LIMIT ? OFFSET ?
+        """
+        rows = [dict(r) for r in cursor.execute(data_sql, where_params + [limit, offset]).fetchall()]
+
+        express_ids = [r["id"] for r in rows if r["bet_type"] == "express"]
+        if express_ids:
+            placeholders = ",".join("?" for _ in express_ids)
+            item_rows = cursor.execute(f"""
+                SELECT ei.*, m.home, m.away, m.league_name, m.kickoff_at, m.status AS match_status,
+                       m.result, m.home_goals, m.away_goals
+                FROM irl_express_items ei
+                JOIN irl_matches m ON m.id = ei.irl_match_id
+                WHERE ei.express_id IN ({placeholders})
+                ORDER BY ei.id ASC
+            """, express_ids).fetchall()
+            items_by_exp = {}
+            for ir in item_rows:
+                items_by_exp.setdefault(ir["express_id"], []).append(dict(ir))
+            for r in rows:
+                if r["bet_type"] == "express":
+                    r["items"] = items_by_exp.get(r["id"], [])
+
+        return {"bets": rows, "total": total}
+
+
+def void_user_irl_bet(bet_type: str, bet_id: int, actor_id: int | None = None,
+                      reason: str = "Отменена администратором") -> tuple[bool, dict | str]:
+    """Аннулировать ставку игрока (ординар или экспресс) с полным возвратом стейка на баланс."""
+    if bet_type not in ("single", "express"):
+        return False, "Некорректный тип ставки (ожидается single или express)."
+    bet_id = int(bet_id)
+    with _bet_placement_lock, transaction() as conn:
+        cursor = conn.cursor()
+        if bet_type == "single":
+            cursor.execute("SELECT * FROM irl_bets WHERE id = ?", (bet_id,))
+            bet = cursor.fetchone()
+            if not bet:
+                return False, f"Ставка #{bet_id} не найдена."
+            if bet["status"] == "refunded":
+                return False, f"Ставка #{bet_id} уже возвращена."
+            stake = int(bet["amount"])
+            user_id = bet["user_id"]
+            old_status = bet["status"]
+            old_payout = int(bet["actual_payout"] or 0)
+
+            cursor.execute("""
+                UPDATE irl_bets SET status = 'refunded', actual_payout = ?, settled_at = datetime('now', '+3 hours')
+                WHERE id = ?
+            """, (stake, bet_id))
+
+            get_or_create_wallet(user_id)
+            if old_status == "won":
+                cursor.execute("""
+                    UPDATE user_wallets
+                    SET balance = balance - ? + ?, total_won = total_won - ?, bets_won = MAX(0, bets_won - 1),
+                        updated_at = datetime('now', '+3 hours')
+                    WHERE user_id = ?
+                """, (old_payout, stake, old_payout, user_id))
+            else:
+                cursor.execute("""
+                    UPDATE user_wallets
+                    SET balance = balance + ?, updated_at = datetime('now', '+3 hours')
+                    WHERE user_id = ?
+                """, (stake, user_id))
+
+            cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+            bal_after = cursor.fetchone()["balance"]
+            cursor.execute("""
+                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
+                                               balance_after, created_at)
+                VALUES (?, ?, ?, ?, 'irl_bet_void', ?, datetime('now', '+3 hours'))
+            """, (user_id, stake if old_status != "won" else (stake - old_payout), IRL_TX_REFUND, bet_id, bal_after))
+
+            return True, {"bet_id": bet_id, "bet_type": "single", "refunded": stake, "user_id": user_id}
+        else:
+            cursor.execute("SELECT * FROM irl_expresses WHERE id = ?", (bet_id,))
+            exp = cursor.fetchone()
+            if not exp:
+                return False, f"Экспресс #{bet_id} не найден."
+            if exp["status"] == "refunded":
+                return False, f"Экспресс #{bet_id} уже возвращён."
+            stake = int(exp["amount"])
+            user_id = exp["user_id"]
+            old_status = exp["status"]
+            old_payout = int(exp["actual_payout"] or 0)
+
+            cursor.execute("""
+                UPDATE irl_expresses SET status = 'refunded', actual_payout = ?, settled_at = datetime('now', '+3 hours')
+                WHERE id = ?
+            """, (stake, bet_id))
+            cursor.execute("UPDATE irl_express_items SET status = 'refunded' WHERE express_id = ?", (bet_id,))
+
+            get_or_create_wallet(user_id)
+            if old_status == "won":
+                cursor.execute("""
+                    UPDATE user_wallets
+                    SET balance = balance - ? + ?, total_won = total_won - ?, bets_won = MAX(0, bets_won - 1),
+                        updated_at = datetime('now', '+3 hours')
+                    WHERE user_id = ?
+                """, (old_payout, stake, old_payout, user_id))
+            else:
+                cursor.execute("""
+                    UPDATE user_wallets
+                    SET balance = balance + ?, updated_at = datetime('now', '+3 hours')
+                    WHERE user_id = ?
+                """, (stake, user_id))
+
+            cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+            bal_after = cursor.fetchone()["balance"]
+            cursor.execute("""
+                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
+                                               balance_after, created_at)
+                VALUES (?, ?, ?, ?, 'irl_express_void', ?, datetime('now', '+3 hours'))
+            """, (user_id, stake if old_status != "won" else (stake - old_payout), IRL_TX_EXPRESS_REFUND, bet_id, bal_after))
+
+            return True, {"bet_id": bet_id, "bet_type": "express", "refunded": stake, "user_id": user_id}
+
+
+def settle_user_irl_bet(bet_type: str, bet_id: int, new_status: str,
+                        actor_id: int | None = None) -> tuple[bool, dict | str]:
+    """Ручной расчёт или перерасчёт IRL-ставки администратором (won, lost, refunded)."""
+    if bet_type not in ("single", "express"):
+        return False, "Некорректный тип ставки (ожидается single или express)."
+    if new_status not in ("won", "lost", "refunded"):
+        return False, "Некорректный статус (ожидается won, lost или refunded)."
+    if new_status == "refunded":
+        return void_user_irl_bet(bet_type, bet_id, actor_id=actor_id)
+    bet_id = int(bet_id)
+    with _bet_placement_lock, transaction() as conn:
+        cursor = conn.cursor()
+        table = "irl_bets" if bet_type == "single" else "irl_expresses"
+        cursor.execute(f"SELECT * FROM {table} WHERE id = ?", (bet_id,))
+        bet = cursor.fetchone()
+        if not bet:
+            return False, f"Ставка #{bet_id} не найдена."
+        user_id = bet["user_id"]
+        old_status = bet["status"]
+        old_payout = int(bet["actual_payout"] or 0)
+        potential = int(bet["potential_win"])
+
+        get_or_create_wallet(user_id)
+
+        # 1. Откат предыдущей выплаты, если ставка была won или refunded
+        if old_status == "won" and old_payout > 0:
+            cursor.execute("""
+                UPDATE user_wallets
+                SET balance = balance - ?, total_won = total_won - ?, bets_won = MAX(0, bets_won - 1),
+                    updated_at = datetime('now', '+3 hours')
+                WHERE user_id = ?
+            """, (old_payout, old_payout, user_id))
+        elif old_status == "refunded" and old_payout > 0:
+            cursor.execute("""
+                UPDATE user_wallets
+                SET balance = balance - ?, updated_at = datetime('now', '+3 hours')
+                WHERE user_id = ?
+            """, (old_payout, user_id))
+
+        # 2. Установка нового статуса
+        payout = potential if new_status == "won" else 0
+        cursor.execute(f"""
+            UPDATE {table} SET status = ?, actual_payout = ?, settled_at = datetime('now', '+3 hours')
+            WHERE id = ?
+        """, (new_status, payout, bet_id))
+
+        if bet_type == "express":
+            cursor.execute(f"UPDATE irl_express_items SET status = ? WHERE express_id = ?",
+                           ("won" if new_status == "won" else "lost", bet_id))
+
+        # 3. Начисление выигрыша, если won
+        if new_status == "won":
+            cursor.execute("""
+                UPDATE user_wallets
+                SET balance = balance + ?, total_won = total_won + ?, bets_won = bets_won + 1,
+                    updated_at = datetime('now', '+3 hours')
+                WHERE user_id = ?
+            """, (payout, payout, user_id))
+            cursor.execute("SELECT balance FROM user_wallets WHERE user_id = ?", (user_id,))
+            bal_after = cursor.fetchone()["balance"]
+            cursor.execute("""
+                INSERT INTO coin_transactions (user_id, amount, transaction_type, reference_id, reference_type,
+                                               balance_after, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, datetime('now', '+3 hours'))
+            """, (user_id, payout, IRL_TX_WIN if bet_type == "single" else IRL_TX_EXPRESS_WIN,
+                  bet_id, "irl_bet" if bet_type == "single" else "irl_express", bal_after))
+
+        return True, {"bet_id": bet_id, "bet_type": bet_type, "status": new_status, "payout": payout}
 
 
 def get_broadcast_user_ids(only_with_team: bool = False) -> list[int]:

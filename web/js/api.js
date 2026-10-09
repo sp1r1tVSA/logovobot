@@ -159,10 +159,10 @@ class ApiClient {
     return this.request('/api/irl/today');
   }
 
-  placeIrlBet({ match_id, outcome, amount, odd }) {
+  placeIrlBet(payload) {
     return this.request('/api/irl/bets', {
       method: 'POST',
-      body: JSON.stringify({ match_id, outcome, amount, odd })
+      body: JSON.stringify(payload)
     });
   }
 

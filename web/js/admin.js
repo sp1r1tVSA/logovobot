@@ -281,7 +281,23 @@ export class AdminPanel {
     this.builder = { mode: 'express', count: 3, strategy: 'safe', items: [] };
     // Анализ рынка: период в днях и последний ответ сервера.
     this.analysis = { days: 14, res: null };
-    this.irl = { day: '', today: '', days: [], matches: [], autoPublish: false, bookmakerId: null, enabled: true };
+    this.irl = {
+      subtab: 'matches',
+      day: '',
+      today: '',
+      days: [],
+      matches: [],
+      autoPublish: false,
+      bookmakerId: null,
+      enabled: true,
+      bets: [],
+      betsTotal: 0,
+      betsPage: 1,
+      betsLimit: 20,
+      betsFilter: { status: 'all', type: 'all', search: '' },
+      summary: null,
+      betsLoading: false,
+    };
     this.shop = { section: 'claims', data: null };
 
     this._searchTimer = null;
@@ -903,10 +919,14 @@ export class AdminPanel {
   // ─── IRL (Реальные матчи) ────────────────────────────────────────────────
 
   async loadIrl(day = null) {
+    if (this.irl?.subtab === 'bets') {
+      return this.loadIrlBets();
+    }
     const params = day ? { day } : (this.irl?.day ? { day: this.irl.day } : {});
     const res = await this.get(`${PANEL}/irl/matches`, params);
     if (this.tab !== 'irl') return;
     this.irl = {
+      ...this.irl,
       day: res.day,
       today: res.today,
       days: res.days || [res.day],
@@ -918,9 +938,53 @@ export class AdminPanel {
     this.renderIrl();
   }
 
+  async loadIrlBets() {
+    this.irl.betsLoading = true;
+    this.renderIrl();
+    const filter = this.irl.betsFilter || { status: 'all', type: 'all', search: '' };
+    const limit = this.irl.betsLimit || 20;
+    const offset = ((this.irl.betsPage || 1) - 1) * limit;
+    try {
+      const res = await this.get(`${PANEL}/irl/bets`, {
+        status: filter.status,
+        type: filter.type,
+        search: filter.search,
+        limit,
+        offset,
+      });
+      if (this.tab !== 'irl') return;
+      this.irl.bets = res.bets || [];
+      this.irl.betsTotal = res.total || 0;
+      this.irl.summary = res.summary || null;
+    } catch (e) {
+      this.toast(e.message || 'Ошибка загрузки ставок IRL', true);
+    } finally {
+      this.irl.betsLoading = false;
+      this.renderIrl();
+    }
+  }
+
   renderIrl() {
     const body = this.body();
     if (!body || this.tab !== 'irl') return;
+    const subtab = this.irl.subtab || 'matches';
+
+    const subtabsHtml = `
+      <div class="category-pills" style="margin-bottom:12px; overflow-x:auto;">
+        <button class="category-pill ${subtab === 'matches' ? 'active' : ''}" data-adm-irl-subtab="matches">
+          ⚽ Матчи дня
+        </button>
+        <button class="category-pill ${subtab === 'bets' ? 'active' : ''}" data-adm-irl-subtab="bets">
+          🎫 Все ставки IRL
+        </button>
+      </div>
+    `;
+
+    if (subtab === 'bets') {
+      body.innerHTML = subtabsHtml + this.renderIrlBets();
+      return;
+    }
+
     const { day, today, tomorrow, days, matches, autoPublish, bookmakerId, enabled } = this.irl;
     const drafts = matches.filter(m => m.status === 'draft');
 
@@ -946,7 +1010,7 @@ export class AdminPanel {
         <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
           <div>
             <div class="adm-card-title" style="margin-bottom:2px;">🌍 Ставки на реальные матчи (IRL)</div>
-            <div class="adm-muted">Букмекер: <b>Pinnacle</b> (ID ${bookmakerId || '4'}) · Одиночные ставки 1X2</div>
+            <div class="adm-muted">Букмекер: <b>Pinnacle</b> (ID ${bookmakerId || '4'}) · Одиночные и экспресс-ставки 1X2</div>
           </div>
           <div style="display:flex; gap:6px; flex-wrap:wrap;">
             <button class="adm-btn primary sm" data-adm-irl-add>➕ Добавить матч</button>
@@ -967,6 +1031,7 @@ export class AdminPanel {
 
     if (!matches.length) {
       body.innerHTML = `
+        ${subtabsHtml}
         ${headHtml}
         <div class="adm-empty">
           На ${esc(day)} матчей нет.<br>
@@ -977,7 +1042,203 @@ export class AdminPanel {
     }
 
     const matchesHtml = matches.map(m => this.renderIrlMatchCard(m)).join('');
-    body.innerHTML = headHtml + `<div class="irl-admin-list" style="display:flex; flex-direction:column; gap:12px;">${matchesHtml}</div>`;
+    body.innerHTML = subtabsHtml + headHtml + `<div class="irl-admin-list" style="display:flex; flex-direction:column; gap:12px;">${matchesHtml}</div>`;
+  }
+
+  renderIrlBets() {
+    const sm = this.irl.summary || {};
+    const filter = this.irl.betsFilter || { status: 'all', type: 'all', search: '' };
+    const page = this.irl.betsPage || 1;
+    const limit = this.irl.betsLimit || 20;
+    const total = this.irl.betsTotal || 0;
+    const totalPages = Math.ceil(total / limit) || 1;
+    const bets = this.irl.bets || [];
+    const loading = this.irl.betsLoading;
+
+    const ggrVal = sm.ggr || 0;
+    const kpiHtml = `
+      <div class="kpi-grid adm-mb">
+        ${this.kpi('💰 Оборот IRL', coins(sm.turnover || 0), 'gold', 'все купоны')}
+        ${this.kpi('🎁 Выплачено', coins(sm.payouts || 0), '', `выигрышей: ${fmt(sm.won_count || 0)}`)}
+        ${this.kpi('📈 GGR (Доход)', coins(ggrVal), ggrVal >= 0 ? 'green' : 'red', `возвратов: ${fmt(sm.refunded_count || 0)}`)}
+        ${this.kpi('⚡ В игре', coins(sm.active_turnover || 0), 'gold', `${fmt(sm.active_count || 0)} купонов · риск ${coins(sm.liability || 0)}`)}
+      </div>
+    `;
+
+    const statusOptions = [
+      { id: 'all', label: 'Все статусы' },
+      { id: 'pending', label: '⏳ В игре' },
+      { id: 'won', label: '✅ Выигрыш' },
+      { id: 'lost', label: '❌ Проигрыш' },
+      { id: 'refunded', label: '↩️ Возврат' },
+    ];
+    const typeOptions = [
+      { id: 'all', label: 'Все типы' },
+      { id: 'single', label: 'Ординары' },
+      { id: 'express', label: '⚡ Экспрессы' },
+    ];
+
+    const isFiltered = filter.status !== 'all' || filter.type !== 'all' || Boolean(filter.search);
+
+    const filterHtml = `
+      <div class="adm-card adm-mb" style="padding: 12px 16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:10px;">
+          <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <div class="category-pills" style="margin:0;">
+              ${statusOptions.map(s => `
+                <button class="category-pill ${filter.status === s.id ? 'active' : ''}" data-adm-irl-bets-status="${s.id}">
+                  ${s.label}
+                </button>
+              `).join('')}
+            </div>
+            <div class="category-pills" style="margin:0;">
+              ${typeOptions.map(t => `
+                <button class="category-pill ${filter.type === t.id ? 'active' : ''}" data-adm-irl-bets-type="${t.id}">
+                  ${t.label}
+                </button>
+              `).join('')}
+            </div>
+          </div>
+          <div style="display:flex; align-items:center; gap:6px;">
+            <input type="search" class="adm-input" placeholder="Поиск (ID / @username)"
+                   value="${esc(filter.search || '')}" data-adm-irl-bets-search
+                   style="width:190px; height:32px; font-size:0.8rem; padding:4px 8px;">
+            ${isFiltered ? `<button class="adm-btn sm secondary" data-adm-irl-bets-reset title="Сбросить фильтры">✕ Сброс</button>` : ''}
+          </div>
+        </div>
+      </div>
+    `;
+
+    if (loading) {
+      return kpiHtml + filterHtml + '<div class="adm-empty">Загрузка ставок…</div>';
+    }
+
+    if (!bets.length) {
+      return kpiHtml + filterHtml + `
+        <div class="adm-empty">
+          Ставок не найдено.${isFiltered ? '<br><button class="adm-btn sm secondary adm-mt" data-adm-irl-bets-reset>Сбросить фильтры</button>' : ''}
+        </div>
+      `;
+    }
+
+    const betsListHtml = bets.map(b => this.renderIrlBetCouponCard(b)).join('');
+
+    const fromIdx = total > 0 ? (page - 1) * limit + 1 : 0;
+    const toIdx = Math.min(total, page * limit);
+    const paginationHtml = `
+      <div style="display:flex; justify-content:space-between; align-items:center; margin-top:16px; padding:10px 0; border-top:1px solid var(--border-subtle);">
+        <div class="adm-muted" style="font-size:0.82rem;">
+          Показаны ${fromIdx}–${toIdx} из ${fmt(total)}
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="adm-btn sm secondary" data-adm-irl-bets-prev ${page <= 1 ? 'disabled' : ''}>← Назад</button>
+          <span style="display:flex; align-items:center; font-size:0.82rem; font-weight:700; padding:0 4px;">
+            ${page} / ${totalPages}
+          </span>
+          <button class="adm-btn sm secondary" data-adm-irl-bets-next ${page >= totalPages ? 'disabled' : ''}>Вперёд →</button>
+        </div>
+      </div>
+    `;
+
+    return kpiHtml + filterHtml + `<div style="display:flex; flex-direction:column; gap:12px;">${betsListHtml}</div>` + paginationHtml;
+  }
+
+  renderIrlBetCouponCard(b) {
+    const isExpress = b.bet_type === 'express';
+    const stBadge = statusBadge(b.status);
+    const typeLabel = isExpress
+      ? `<span class="adm-badge" style="background:rgba(245,158,11,0.15); color:#f59e0b; border:1px solid rgba(245,158,11,0.3);">⚡ Экспресс (${b.items?.length || 0})</span>`
+      : `<span class="adm-badge" style="background:rgba(59,130,246,0.15); color:#3b82f6; border:1px solid rgba(59,130,246,0.3);">Ординар</span>`;
+
+    const userLabel = b.username ? `@${esc(b.username)}` : `ID ${b.user_id}`;
+    const teamSub = b.team_name ? ` · <span class="adm-muted">${esc(b.team_name)}</span>` : '';
+
+    const outcomeLabels = { home: 'П1 (Хозяева)', draw: 'Ничья (X)', away: 'П2 (Гости)' };
+
+    let detailsHtml = '';
+    if (isExpress) {
+      const items = b.items || [];
+      const itemsRows = items.map(it => {
+        const outName = it.outcome === 'home' ? `П1 (${it.home})` : it.outcome === 'away' ? `П2 (${it.away})` : 'Ничья (X)';
+        const legBadge = it.status === 'won'
+          ? '<span style="color:var(--color-success); font-weight:700;">✅ Выиграл</span>'
+          : it.status === 'lost'
+            ? '<span style="color:var(--color-danger); font-weight:700;">❌ Проиграл</span>'
+            : it.status === 'refunded'
+              ? '<span class="adm-muted">↩️ Возврат</span>'
+              : '<span class="adm-muted">⏳ В игре</span>';
+
+        return `
+          <div style="display:flex; justify-content:space-between; align-items:center; padding:5px 0; border-bottom:1px solid rgba(255,255,255,0.06);">
+            <div>
+              <div style="font-weight:700; font-size:0.86rem; color:var(--text-primary);">${esc(it.home)} — ${esc(it.away)}</div>
+              <div class="adm-muted" style="font-size:0.75rem;">${esc(it.league_name || '')} · 🕒 ${esc(shortTime(it.kickoff_at))}</div>
+            </div>
+            <div style="text-align:right;">
+              <div style="font-size:0.86rem;"><b>${esc(outName)}</b> @ ${odd(it.odd)}</div>
+              <div style="font-size:0.75rem;">${legBadge}</div>
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      detailsHtml = `
+        <div style="background:var(--bg-secondary); border-radius:8px; padding:8px 12px; margin:8px 0;">
+          ${itemsRows}
+        </div>
+      `;
+    } else {
+      const outName = b.outcome === 'home' ? `П1 (${b.home})` : b.outcome === 'away' ? `П2 (${b.away})` : (outcomeLabels[b.outcome] || b.outcome);
+      detailsHtml = `
+        <div style="background:var(--bg-secondary); border-radius:8px; padding:10px 12px; margin:8px 0; display:flex; justify-content:space-between; align-items:center;">
+          <div>
+            <div style="font-weight:700; font-size:0.92rem; color:var(--text-primary);">${esc(b.home || 'Матч')} — ${esc(b.away || '')}</div>
+            <div class="adm-muted" style="font-size:0.78rem;">${esc(b.league_name || '')} · 🕒 ${esc(shortTime(b.kickoff_at))} МСК</div>
+          </div>
+          <div style="text-align:right;">
+            <div style="font-weight:700; font-size:0.95rem; color:var(--color-primary);">${esc(outName)}</div>
+            <div class="adm-muted" style="font-size:0.8rem;">кэф <b>${odd(b.odd)}</b></div>
+          </div>
+        </div>
+      `;
+    }
+
+    let payoutLine = '';
+    if (b.status === 'won') {
+      payoutLine = `<span style="color:var(--color-success); font-weight:700; margin-left:8px;">Выплачено: +${coins(b.actual_payout || b.potential_win)}</span>`;
+    } else if (b.status === 'refunded') {
+      payoutLine = `<span class="adm-muted" style="font-weight:700; margin-left:8px;">Возвращено: ${coins(b.actual_payout || b.amount)}</span>`;
+    }
+
+    return `
+      <div class="adm-card" style="padding: 14px 16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="adm-muted" style="font-size:0.82rem;">#${b.id}</span>
+            ${typeLabel}
+            <span style="font-weight:700; font-size:0.88rem; color:var(--text-primary);">${userLabel}</span>
+            ${teamSub}
+          </div>
+          <div style="display:flex; align-items:center; gap:8px;">
+            <span class="adm-muted" style="font-size:0.75rem;">${esc(shortTime(b.created_at))}</span>
+            ${stBadge}
+          </div>
+        </div>
+
+        ${detailsHtml}
+
+        <div style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px; padding-top:8px; border-top:1px solid var(--border-subtle);">
+          <div style="font-size:0.85rem;">
+            Ставка: <b>${coins(b.amount)}</b> · Кэф: <b>${odd(b.odd)}</b> · Потенц.: <b>${coins(b.potential_win)}</b>
+            ${payoutLine}
+          </div>
+          <div style="display:flex; gap:6px;">
+            <button class="adm-btn sm danger" data-adm-irl-bet-void="${b.bet_type}:${b.id}">↩️ Возврат</button>
+            <button class="adm-btn sm secondary" data-adm-irl-bet-settle="${b.bet_type}:${b.id}">⚙️ Расчёт</button>
+          </div>
+        </div>
+      </div>
+    `;
   }
 
   renderIrlMatchCard(m) {
@@ -1361,6 +1622,74 @@ export class AdminPanel {
         <div class="adm-empty red">${esc(e.message || 'Не удалось загрузить ставки')}</div>
       `));
     }
+  }
+
+  async askIrlBetVoid(type, id) {
+    const bet = (this.irl?.bets || []).find(b => b.bet_type === type && b.id === id);
+    if (!bet) return;
+    const isExpress = type === 'express';
+    const label = isExpress ? `экспресс #${id}` : `ординар #${id}`;
+    const userLabel = bet.username ? `@${bet.username}` : `ID ${bet.user_id}`;
+    this.openForm({
+      title: `Аннулировать ${label}`,
+      desc: `Ставка игрока ${userLabel} на сумму ${coins(bet.amount)} будет аннулирована. Сумма ставки вернётся на баланс игрока (а если ставка была выиграна, выигрыш будет списан).`,
+      fields: [
+        { name: 'reason', label: 'Причина аннулирования', type: 'text', value: 'Отменена администратором' }
+      ],
+      submitLabel: 'Аннулировать и вернуть ставку',
+      danger: true,
+      onSubmit: async (values) => {
+        const res = await this.post(`${PANEL}/irl/bets/${type}/${id}/void`, {
+          confirm: true,
+          reason: values.reason || 'Отменена администратором'
+        });
+        const ref = res.result?.refunded || 0;
+        this.toast(`Купон #${id} аннулирован. Возвращено: ${coins(ref)}`);
+        await this.loadIrlBets();
+      }
+    });
+  }
+
+  async askIrlBetSettle(type, id) {
+    const bet = (this.irl?.bets || []).find(b => b.bet_type === type && b.id === id);
+    if (!bet) return;
+    const isExpress = type === 'express';
+    const label = isExpress ? `экспресс #${id}` : `ординар #${id}`;
+    const userLabel = bet.username ? `@${esc(bet.username)}` : `ID ${bet.user_id}`;
+    const body = `
+      <form class="adm-form" data-adm-form>
+        <div class="adm-form-desc">
+          <b>${label}</b> · Игрок: ${userLabel}<br>
+          Сумма: <b>${coins(bet.amount)}</b> · Кэф: <b>${odd(bet.odd)}</b> · Потенц. выигрыш: <b>${coins(bet.potential_win)}</b><br>
+          <small class="adm-muted">Выберите статус для принудительного расчёта купона администратором.</small>
+        </div>
+        <div class="adm-field" style="margin-bottom:12px;">
+          <span>Статус купона</span>
+          <div style="display:flex; flex-direction:column; gap:8px; margin-top:6px;">
+            <label style="display:flex; align-items:center; gap:8px; background:var(--bg-secondary); padding:8px 10px; border-radius:8px; cursor:pointer;">
+              <input type="radio" name="status" value="won" required ${bet.status === 'won' ? 'checked' : ''}>
+              <span>🟢 <b>Выигрыш (won)</b> — начислить ${coins(bet.potential_win)}</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; background:var(--bg-secondary); padding:8px 10px; border-radius:8px; cursor:pointer;">
+              <input type="radio" name="status" value="lost" ${bet.status === 'lost' ? 'checked' : ''}>
+              <span>🔴 <b>Проигрыш (lost)</b> — 0 🪙</span>
+            </label>
+            <label style="display:flex; align-items:center; gap:8px; background:var(--bg-secondary); padding:8px 10px; border-radius:8px; cursor:pointer;">
+              <input type="radio" name="status" value="refunded" ${bet.status === 'refunded' ? 'checked' : ''}>
+              <span>↩️ <b>Возврат (refunded)</b> — вернуть ${coins(bet.amount)}</span>
+            </label>
+          </div>
+        </div>
+        <div class="adm-form-error"></div>
+        <button type="submit" class="adm-btn wide primary">Применить расчёт</button>
+      </form>
+    `;
+    this.showModal(this.modalFrame(`Расчёт купона #${id}`, body));
+    this._modalSubmit = async (values) => {
+      const res = await this.post(`${PANEL}/irl/bets/${type}/${id}/settle`, { status: values.status });
+      this.toast(`Купон #${id} рассчитан со статусом: ${res.new_status || values.status}`);
+      await this.loadIrlBets();
+    };
   }
 
   async publishIrlMatch(matchId) {
@@ -3081,6 +3410,12 @@ export class AdminPanel {
         }
         this.picks.draft[key] = e.target.value.trim().replace(',', '.');
         this.syncPicksApply();
+      } else if (e.target.dataset && 'admIrlBetsSearch' in e.target.dataset) {
+        this.debounce(() => {
+          this.irl.betsFilter.search = e.target.value.trim();
+          this.irl.betsPage = 1;
+          this.loadIrlBets();
+        });
       }
     });
   }
@@ -3182,6 +3517,41 @@ export class AdminPanel {
           })
           .catch(e => this.toast(e.message || 'Ошибка', true));
       }
+    } else if ((el = t('[data-adm-irl-subtab]'))) {
+      const sub = el.dataset.admIrlSubtab;
+      if (this.irl.subtab !== sub) {
+        this.irl.subtab = sub;
+        this.loadIrl();
+      }
+    } else if ((el = t('[data-adm-irl-bets-status]'))) {
+      this.irl.betsFilter.status = el.dataset.admIrlBetsStatus;
+      this.irl.betsPage = 1;
+      this.loadIrlBets();
+    } else if ((el = t('[data-adm-irl-bets-type]'))) {
+      this.irl.betsFilter.type = el.dataset.admIrlBetsType;
+      this.irl.betsPage = 1;
+      this.loadIrlBets();
+    } else if (t('[data-adm-irl-bets-reset]')) {
+      this.irl.betsFilter = { status: 'all', type: 'all', search: '' };
+      this.irl.betsPage = 1;
+      this.loadIrlBets();
+    } else if (t('[data-adm-irl-bets-prev]')) {
+      if (this.irl.betsPage > 1) {
+        this.irl.betsPage--;
+        this.loadIrlBets();
+      }
+    } else if (t('[data-adm-irl-bets-next]')) {
+      const totalPages = Math.ceil((this.irl.betsTotal || 0) / (this.irl.betsLimit || 20)) || 1;
+      if (this.irl.betsPage < totalPages) {
+        this.irl.betsPage++;
+        this.loadIrlBets();
+      }
+    } else if ((el = t('[data-adm-irl-bet-void]'))) {
+      const [bType, bId] = el.dataset.admIrlBetVoid.split(':');
+      this.askIrlBetVoid(bType, Number(bId));
+    } else if ((el = t('[data-adm-irl-bet-settle]'))) {
+      const [bType, bId] = el.dataset.admIrlBetSettle.split(':');
+      this.askIrlBetSettle(bType, Number(bId));
     } else if ((el = t('[data-adm-irl-day]'))) {
       this.loadIrl(el.dataset.admIrlDay);
     } else if (t('[data-adm-irl-add]')) {

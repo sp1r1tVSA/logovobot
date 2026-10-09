@@ -1202,6 +1202,121 @@ async def handle_panel_irl_broadcast(request: web.Request) -> web.Response:
     })
 
 
+async def handle_panel_irl_all_bets(request: web.Request) -> web.Response:
+    """GET /api/admin/panel/irl/bets?status=&type=&search=&limit=&offset="""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    status = request.query.get("status")
+    bet_type = request.query.get("type")
+    search = request.query.get("search")
+    limit = query_int(request, "limit", 50, minimum=1, maximum=100)
+    offset = query_int(request, "offset", 0, minimum=0)
+
+    summary = await asyncio.to_thread(database.get_irl_betting_summary_stats)
+    res = await asyncio.to_thread(
+        database.get_all_irl_bets,
+        status=status, bet_type=bet_type, search=search, limit=limit, offset=offset,
+    )
+    return web.json_response({
+        "status": "ok",
+        "summary": summary,
+        "bets": res["bets"],
+        "total": res["total"],
+        "limit": limit,
+        "offset": offset,
+    })
+
+
+async def handle_panel_irl_bet_void(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/bets/{type}/{id}/void  {reason?, confirm}"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    bet_type = request.match_info.get("type", "").lower()
+    if bet_type not in ("single", "express"):
+        return _error(400, "invalid_type", "Тип ставки должен быть single или express.")
+
+    try:
+        bet_id = int(request.match_info.get("id", 0))
+    except (ValueError, TypeError):
+        return _error(400, "invalid_id", "Некорректный ID ставки.")
+
+    data = await _json_body(request)
+    if isinstance(data, web.Response):
+        return data
+
+    if data.get("confirm") is not True:
+        return _error(400, "confirmation_required", "Аннулирование нужно подтвердить.")
+
+    reason = _text(data, "reason") or "Отменена администратором"
+    ok, result = await asyncio.to_thread(
+        database.void_user_irl_bet, bet_type, bet_id, actor_id=scope.actor_id, reason=reason
+    )
+    if not ok:
+        return _error(400, "void_failed", str(result))
+
+    refund_amt = result.get("refunded", 0) if isinstance(result, dict) else 0
+    await admin_journal.record(
+        scope.actor_id,
+        "irl_bet_voided",
+        "irl_bet",
+        bet_id,
+        new=f"тип: {bet_type}, причина: {reason}, возвращено: {refund_amt} 🪙"
+    )
+    return web.json_response({"status": "ok", "result": result})
+
+
+async def handle_panel_irl_bet_settle(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/bets/{type}/{id}/settle  {status: 'won'|'lost'|'refunded'}"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    bet_type = request.match_info.get("type", "").lower()
+    if bet_type not in ("single", "express"):
+        return _error(400, "invalid_type", "Тип ставки должен быть single или express.")
+
+    try:
+        bet_id = int(request.match_info.get("id", 0))
+    except (ValueError, TypeError):
+        return _error(400, "invalid_id", "Некорректный ID ставки.")
+
+    data = await _json_body(request)
+    if isinstance(data, web.Response):
+        return data
+
+    new_status = (data.get("status") or "").lower()
+    if new_status not in ("won", "lost", "refunded"):
+        return _error(400, "invalid_status", "Статус должен быть won, lost или refunded.")
+
+    ok, result = await asyncio.to_thread(
+        database.settle_user_irl_bet, bet_type, bet_id, new_status, actor_id=scope.actor_id
+    )
+    if not ok:
+        return _error(400, "settle_failed", str(result))
+
+    await admin_journal.record(
+        scope.actor_id,
+        "irl_bet_settled",
+        "irl_bet",
+        bet_id,
+        new=f"тип: {bet_type}, статус: {new_status}"
+    )
+    return web.json_response({"status": "ok", "result": result, "new_status": new_status})
+
+
 def register_admin_panel_routes(app: web.Application) -> None:
     r = app.router
     r.add_get("/api/admin/panel/irl/matches", handle_panel_irl_matches)
@@ -1216,6 +1331,9 @@ def register_admin_panel_routes(app: web.Application) -> None:
     r.add_post("/api/admin/panel/irl/matches/{id}/refresh-odds", handle_panel_irl_refresh_odds)
     r.add_post("/api/admin/panel/irl/matches/{id}/score", handle_panel_irl_update_score)
     r.add_get("/api/admin/panel/irl/matches/{id}/bets", handle_panel_irl_match_bets)
+    r.add_get("/api/admin/panel/irl/bets", handle_panel_irl_all_bets)
+    r.add_post("/api/admin/panel/irl/bets/{type}/{id}/void", handle_panel_irl_bet_void)
+    r.add_post("/api/admin/panel/irl/bets/{type}/{id}/settle", handle_panel_irl_bet_settle)
     r.add_post("/api/admin/panel/irl/run-pick", handle_panel_irl_run_pick)
     r.add_get("/api/admin/panel/me", handle_panel_me)
     r.add_get("/api/admin/panel/dashboard", handle_panel_dashboard)

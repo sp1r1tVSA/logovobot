@@ -52,13 +52,22 @@ class IrlView {
     this.tab = 'today'; // today | my
     this.my = null;
     this.myLoading = false;
-    this.pick = null;   // {matchId, outcome, odd, busy, notice, error}
+    this.picks = [];    // [{matchId, outcome, odd}]
     this.stake = '';
+    this.busy = false;
+    this.notice = '';
+    this.slipError = '';
     this._bound = false;
   }
 
+  get pick() {
+    return this.picks.length === 1 ? this.picks[0] : null;
+  }
+
   mount() {
-    this.container = document.getElementById('irl-view-container');
+    if (!this.container) {
+      this.container = document.getElementById('irl-view-container');
+    }
     if (!this.container || this._bound) return;
     this._bound = true;
     this.container.addEventListener('click', (e) => this.onClick(e));
@@ -79,6 +88,16 @@ class IrlView {
     return Number(this.board?.max_bet) || DEFAULT_MAX_BET;
   }
 
+  totalOdd() {
+    if (!this.picks.length) return 0;
+    if (this.picks.length === 1) return Number(this.picks[0].odd || 0);
+    let raw = 1.0;
+    for (const p of this.picks) {
+      raw *= Number(p.odd || 1);
+    }
+    return Math.round(raw * 100) / 100;
+  }
+
   // ─── Данные ─────────────────────────────────────────────────────────────
 
   async loadBoard() {
@@ -92,8 +111,9 @@ class IrlView {
     } finally {
       this.loading = false;
     }
-    // Матч могли закрыть или поставить на него с другого устройства.
-    if (this.pick && !this.pickedMatch()?.betting_open) this.pick = null;
+    // Отсеять матчи, где закрылся приём ставок
+    const openIds = new Set((this.board?.matches || []).filter(m => m.betting_open).map(m => m.id));
+    this.picks = this.picks.filter(p => openIds.has(p.matchId));
     this.render();
   }
 
@@ -108,11 +128,6 @@ class IrlView {
       this.myLoading = false;
     }
     if (this.tab === 'my') this.render();
-  }
-
-  pickedMatch() {
-    if (!this.pick) return null;
-    return (this.board?.matches || []).find(m => m.id === this.pick.matchId) || null;
   }
 
   // ─── Отрисовка ─────────────────────────────────────────────────────────
@@ -141,17 +156,20 @@ class IrlView {
   renderToday() {
     const matches = this.board?.matches || [];
     const note = this.board?.note ? `<div class="ob-banner">${escapeHtml(this.board.note)}</div>` : '';
-    const limits = `<div class="ob-banner lock">Одна ставка на матч, не больше ${coins(this.maxBet)}. Только исход 1X2.</div>`;
+    const limits = `<div class="ob-banner lock">Одиночные ставки и экспрессы (2–5 событий). Максимум ${coins(this.maxBet)}. Только исход 1X2.</div>`;
     if (!matches.length) {
       return `${note}<div class="irl-state">Сегодня подходящих матчей нет — загляните завтра.</div>`;
     }
-    return `${note}${limits}${matches.map(m => this.renderMatch(m)).join('')}`;
+    const matchesHtml = matches.map(m => this.renderMatch(m)).join('');
+    const expressSlipHtml = this.picks.length >= 2 ? this.renderExpressSlip() : '';
+    return `${note}${limits}${matchesHtml}${expressSlipHtml}`;
   }
 
   renderMatch(m) {
     const bet = m.my_bet;
-    const pickedHere = this.pick && this.pick.matchId === m.id;
+    const currentPick = this.picks.find(p => p.matchId === m.id);
     const canBet = m.betting_open && !bet && hasOdds(m);
+    const isSingleSelected = this.picks.length === 1 && currentPick;
 
     let score = '';
     if (m.status === 'settled' && m.home_goals != null && m.away_goals != null) {
@@ -175,7 +193,7 @@ class IrlView {
       <div class="irl-odds">
         ${OUTCOMES.map(o => {
           const mine = bet && bet.outcome === o.key;
-          const sel = pickedHere && this.pick.outcome === o.key;
+          const sel = currentPick && currentPick.outcome === o.key;
           const cls = ['irl-odd', canBet ? '' : 'locked', sel ? 'selected' : '', mine ? 'mine' : '',
             m.result === o.key ? 'winner' : ''].filter(Boolean).join(' ');
           const attrs = canBet ? `data-irl-pick="${m.id}" data-outcome="${o.key}"` : '';
@@ -197,7 +215,7 @@ class IrlView {
         ${state}
         ${odds}
         ${bet ? this.renderMyBetLine(bet, m) : ''}
-        ${pickedHere && canBet ? this.renderSlip(m) : ''}
+        ${isSingleSelected && canBet ? this.renderSlip(m) : ''}
       </div>`;
   }
 
@@ -205,9 +223,10 @@ class IrlView {
     const [label, cls] = BET_STATUS[bet.status] || [bet.status, 'pending'];
     const payout = bet.status === 'won' || bet.status === 'refunded'
       ? ` · ${coins(bet.actual_payout)}` : ` · выигрыш ${coins(bet.potential_win)}`;
+    const expBadge = bet.is_express ? '⚡ В экспрессе · ' : '';
     return `
       <div class="irl-mybet ${cls}">
-        <b>Моя ставка:</b> ${escapeHtml(outcomeName(m, bet.outcome))} @ ${fmtOdd(bet.odd)} · ${coins(bet.amount)}
+        <b>Моя ставка:</b> ${expBadge}${escapeHtml(outcomeName(m, bet.outcome))} @ ${fmtOdd(bet.odd)} · ${coins(bet.amount)}
         <span class="irl-mybet-status">${escapeHtml(label)}${bet.status === 'lost' ? '' : escapeHtml(payout)}</span>
       </div>`;
   }
@@ -215,13 +234,14 @@ class IrlView {
   renderSlip(m) {
     const p = this.pick;
     const max = this.maxBet;
+    if (!p) return '';
     return `
       <div class="irl-slip">
         <div class="irl-slip-pick">
-          <span>${escapeHtml(outcomeName(m, p.outcome))}</span>
+          <span>Ординар: ${escapeHtml(outcomeName(m, p.outcome))}</span>
           <span class="irl-slip-odd">${fmtOdd(p.odd)}</span>
         </div>
-        <div class="ob-sheet-notice irl-slip-notice" ${p.notice ? '' : 'hidden'}>${escapeHtml(p.notice || '')}</div>
+        <div class="ob-sheet-notice irl-slip-notice" ${this.notice ? '' : 'hidden'}>${escapeHtml(this.notice || '')}</div>
         <label class="ob-stake">Сумма ставки (до ${coins(max)})
           <input class="ob-stake-input irl-stake-input" type="text" inputmode="numeric" autocomplete="off"
                  placeholder="Например, 100" value="${escapeHtml(this.stake)}">
@@ -232,30 +252,109 @@ class IrlView {
         <div class="ob-sheet-totals">
           <span>Возможный выигрыш: <b class="ob-sheet-win irl-win">${coins(this.potentialWin())}</b></span>
         </div>
-        <div class="irl-slip-error" ${p.error ? '' : 'hidden'}>${escapeHtml(p.error || '')}</div>
+        <div class="irl-slip-error" ${this.slipError ? '' : 'hidden'}>${escapeHtml(this.slipError || '')}</div>
         <div class="irl-slip-actions">
           <button class="ob-chip" data-irl-cancel="1">Отмена</button>
-          <button class="irl-confirm" data-irl-confirm="1" ${p.busy ? 'disabled' : ''}>${p.busy ? 'Отправляем…' : 'Поставить'}</button>
+          <button class="irl-confirm" data-irl-confirm="1" ${this.busy ? 'disabled' : ''}>${this.busy ? 'Отправляем…' : 'Поставить ординар'}</button>
+        </div>
+      </div>`;
+  }
+
+  renderExpressSlip() {
+    const max = this.maxBet;
+    return `
+      <div class="irl-card irl-express-card" style="border: 2px solid var(--accent-gold); box-shadow: 0 4px 16px rgba(0,0,0,0.25); margin-top: 16px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px;">
+          <div style="font-family:'Outfit', sans-serif; font-size:1.1rem; font-weight:800; color:var(--text-primary); display:flex; align-items:center; gap:6px;">
+            <span>⚡</span> Экспресс (${this.picks.length} события)
+          </div>
+          <div style="font-family:'Outfit', sans-serif; font-size:1.3rem; font-weight:800; color:var(--accent-gold);">
+            @ ${fmtOdd(this.totalOdd())}
+          </div>
+        </div>
+        <div class="irl-express-legs" style="display:flex; flex-direction:column; gap:8px; margin-bottom:12px;">
+          ${this.picks.map(p => {
+            const m = (this.board?.matches || []).find(match => match.id === p.matchId);
+            const matchTitle = m ? `${m.home} — ${m.away}` : `Матч #${p.matchId}`;
+            const pickTitle = m ? outcomeName(m, p.outcome) : p.outcome;
+            return `
+              <div style="display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.04); padding:8px 12px; border-radius:8px; font-size:0.85rem;">
+                <div style="flex:1; min-width:0; padding-right:8px;">
+                  <div style="color:var(--text-muted); font-size:0.75rem;">${escapeHtml(matchTitle)}</div>
+                  <div style="font-weight:700; color:var(--text-primary);">${escapeHtml(pickTitle)} <span style="color:var(--accent-gold);">@ ${fmtOdd(p.odd)}</span></div>
+                </div>
+                <button class="ob-chip" data-irl-remove-leg="${p.matchId}" style="padding:4px 8px; font-size:0.75rem; border-radius:6px; cursor:pointer;" title="Убрать из экспресса">✕</button>
+              </div>
+            `;
+          }).join('')}
+        </div>
+        <div class="ob-sheet-notice irl-slip-notice" ${this.notice ? '' : 'hidden'}>${escapeHtml(this.notice || '')}</div>
+        <label class="ob-stake">Сумма ставки (до ${coins(max)})
+          <input class="ob-stake-input irl-stake-input" type="text" inputmode="numeric" autocomplete="off"
+                 placeholder="Например, 100" value="${escapeHtml(this.stake)}">
+        </label>
+        <div class="ob-quick">
+          ${QUICK_STAKES.filter(v => v <= max).map(v => `<button class="ob-chip" data-irl-quick="${v}">${v}</button>`).join('')}
+        </div>
+        <div class="ob-sheet-totals">
+          <span>Возможный выигрыш: <b class="ob-sheet-win irl-win">${coins(this.potentialWin())}</b></span>
+        </div>
+        <div class="irl-slip-error" ${this.slipError ? '' : 'hidden'}>${escapeHtml(this.slipError || '')}</div>
+        <div class="irl-slip-actions">
+          <button class="ob-chip" data-irl-clear-express="1">Сбросить</button>
+          <button class="irl-confirm" data-irl-confirm-express="1" ${this.busy ? 'disabled' : ''}>${this.busy ? 'Отправляем…' : 'Поставить экспресс'}</button>
         </div>
       </div>`;
   }
 
   renderMy() {
     if (!this.my && !this.myLoading) {
-      // Первый вход на вкладку — тянем историю.
       queueMicrotask(() => this.loadMy());
     }
     if (this.myLoading && !this.my) return '<div class="irl-state">Загружаем ставки…</div>';
     if (this.my?.error) return `<div class="irl-state">${escapeHtml(this.my.error)}</div>`;
     const bets = this.my?.bets || [];
     if (!bets.length) return '<div class="irl-state">Ставок на реальные матчи пока нет.</div>';
+
     return bets.map(b => {
       const [label, cls] = BET_STATUS[b.status] || [b.status, 'pending'];
-      const score = b.match_status === 'settled' && b.home_goals != null && b.away_goals != null
-        ? ` · ${Number(b.home_goals)}:${Number(b.away_goals)}` : '';
       const result = b.status === 'won' || b.status === 'refunded'
         ? `${escapeHtml(label)} · ${coins(b.actual_payout)}`
         : b.status === 'lost' ? escapeHtml(label) : `${escapeHtml(label)} · выигрыш ${coins(b.potential_win)}`;
+
+      if (b.bet_type === 'express') {
+        const items = b.items || [];
+        return `
+          <div class="irl-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <div class="irl-league">⚡ Экспресс (${items.length} соб.) · ${escapeHtml(kickoff(b.created_at))}</div>
+              <span class="irl-mybet-status" style="font-size:0.75rem;">${escapeHtml(label)}</span>
+            </div>
+            <div class="irl-express-my-legs" style="display:flex; flex-direction:column; gap:6px; margin-bottom:10px;">
+              ${items.map(it => {
+                const [itLabel, itCls] = BET_STATUS[it.status] || [it.status, 'pending'];
+                const score = it.match_status === 'settled' && it.home_goals != null && it.away_goals != null
+                  ? ` (${it.home_goals}:${it.away_goals})` : '';
+                return `
+                  <div style="display:flex; justify-content:space-between; align-items:center; background:rgba(255,255,255,0.03); padding:6px 10px; border-radius:6px; font-size:0.8rem;">
+                    <div style="flex:1; min-width:0; padding-right:8px;">
+                      <div style="color:var(--text-muted); font-size:0.72rem;">${escapeHtml(it.home)} — ${escapeHtml(it.away)}${score}</div>
+                      <div style="font-weight:700; color:var(--text-primary);">${escapeHtml(outcomeName(it, it.outcome))} <span style="color:var(--accent-gold);">@ ${fmtOdd(it.odd)}</span></div>
+                    </div>
+                    <span class="irl-mybet-status ${itCls}" style="font-size:0.75rem; font-weight:700;">${escapeHtml(itLabel)}</span>
+                  </div>
+                `;
+              }).join('')}
+            </div>
+            <div class="irl-mybet ${cls}">
+              <b>Экспресс:</b> ${coins(b.amount)} @ ${fmtOdd(b.odd)}
+              <span class="irl-mybet-status">${result}</span>
+            </div>
+          </div>`;
+      }
+
+      const score = b.match_status === 'settled' && b.home_goals != null && b.away_goals != null
+        ? ` · ${Number(b.home_goals)}:${Number(b.away_goals)}` : '';
       return `
         <div class="irl-card">
           <div class="irl-league">${escapeHtml(b.league_name || 'Футбол')} · ${escapeHtml(kickoff(b.kickoff_at))}</div>
@@ -280,8 +379,8 @@ class IrlView {
   }
 
   potentialWin() {
-    if (!this.pick) return 0;
-    return Math.floor(this.stakeValue() * Number(this.pick.odd || 0));
+    if (!this.picks.length) return 0;
+    return Math.floor(this.stakeValue() * this.totalOdd());
   }
 
   updateTotals() {
@@ -309,12 +408,32 @@ class IrlView {
       const match = (this.board?.matches || []).find(m => m.id === matchId);
       if (!match) return;
       tgBridge.hapticImpact('light');
-      if (this.pick && this.pick.matchId === matchId && this.pick.outcome === outcome) {
-        this.pick = null; // повторный тап снимает выбор
+
+      const existingIdx = this.picks.findIndex(p => p.matchId === matchId);
+      if (existingIdx >= 0) {
+        if (this.picks[existingIdx].outcome === outcome) {
+          // Повторный тап по тому же исходу снимает выбор
+          this.picks.splice(existingIdx, 1);
+        } else {
+          // Тап по другому исходу того же матча меняет исход
+          this.picks[existingIdx] = { matchId, outcome, odd: Number(match.odds[outcome]) };
+        }
       } else {
-        if (!this.pick || this.pick.matchId !== matchId) this.stake = '';
-        this.pick = { matchId, outcome, odd: Number(match.odds[outcome]), busy: false, notice: '', error: '' };
+        if (this.picks.length >= 5) {
+          this.toast('В экспрессе может быть максимум 5 событий');
+          return;
+        }
+        this.picks.push({ matchId, outcome, odd: Number(match.odds[outcome]) });
       }
+      this.notice = '';
+      this.slipError = '';
+      this.render();
+      return;
+    }
+    const removeLegBtn = e.target.closest('[data-irl-remove-leg]');
+    if (removeLegBtn) {
+      const matchId = parseInt(removeLegBtn.dataset.irlRemoveLeg, 10);
+      this.picks = this.picks.filter(p => p.matchId !== matchId);
       this.render();
       return;
     }
@@ -326,32 +445,37 @@ class IrlView {
       this.updateTotals();
       return;
     }
-    if (e.target.closest('[data-irl-cancel]')) {
-      this.pick = null;
+    if (e.target.closest('[data-irl-cancel]') || e.target.closest('[data-irl-clear-express]')) {
+      this.picks = [];
+      this.stake = '';
+      this.notice = '';
+      this.slipError = '';
       this.render();
       return;
     }
     if (e.target.closest('[data-irl-confirm]')) {
-      this.submit();
+      this.submitSingle();
+      return;
+    }
+    if (e.target.closest('[data-irl-confirm-express]')) {
+      this.submitExpress();
+      return;
     }
   }
 
   setSlipMessage({ notice, error }) {
-    if (!this.pick) return;
-    if (notice !== undefined) this.pick.notice = notice;
-    if (error !== undefined) this.pick.error = error;
+    if (notice !== undefined) this.notice = notice;
+    if (error !== undefined) this.slipError = error;
     const n = this.container.querySelector('.irl-slip-notice');
-    if (n) { n.hidden = !this.pick.notice; n.textContent = this.pick.notice; }
+    if (n) { n.hidden = !this.notice; n.textContent = this.notice; }
     const er = this.container.querySelector('.irl-slip-error');
-    if (er) { er.hidden = !this.pick.error; er.textContent = this.pick.error; }
-    const odd = this.container.querySelector('.irl-slip-odd');
-    if (odd) odd.textContent = fmtOdd(this.pick.odd);
+    if (er) { er.hidden = !this.slipError; er.textContent = this.slipError; }
     this.updateTotals();
   }
 
-  async submit() {
-    const pick = this.pick;
-    if (!pick || pick.busy) return;
+  async submitSingle() {
+    const p = this.pick;
+    if (!p || this.busy) return;
     const amount = this.stakeValue();
     if (amount < 1) {
       this.setSlipMessage({ error: 'Введите сумму ставки.' });
@@ -362,50 +486,84 @@ class IrlView {
       return;
     }
     const button = this.container.querySelector('[data-irl-confirm]');
-    pick.busy = true;
+    this.busy = true;
     this.setSlipMessage({ error: '' });
     if (button) { button.disabled = true; button.textContent = 'Отправляем…'; }
     try {
-      const res = await api.placeIrlBet({ match_id: pick.matchId, outcome: pick.outcome, amount, odd: pick.odd });
+      const res = await api.placeIrlBet({ match_id: p.matchId, outcome: p.outcome, amount, odd: p.odd });
       if (store.state.user && res.balance != null) store.setUser({ ...store.state.user, balance: res.balance });
       tgBridge.hapticNotification('success');
       this.toast(`Ставка #${res.bet_id} принята · выигрыш ${coins(res.potential_win)}`);
-      this.pick = null;
+      this.picks = [];
       this.stake = '';
       this.my = null;
       await this.loadBoard();
-      return;
     } catch (err) {
       const code = err.data?.error || err.code;
       tgBridge.hapticNotification(code === 'ODDS_CHANGED' ? 'warning' : 'error');
       if (code === 'ODDS_CHANGED' && err.data?.new_odd) {
-        // Ставка не принята — можно подтвердить новую цену.
-        const old = pick.odd;
-        pick.odd = Number(err.data.new_odd);
-        this.setSlipMessage({ notice: `Коэффициент изменился: ${fmtOdd(old)} → ${fmtOdd(pick.odd)}. Подтвердите ставку ещё раз.` });
+        const old = p.odd;
+        p.odd = Number(err.data.new_odd);
+        this.setSlipMessage({ notice: `Коэффициент изменился: ${fmtOdd(old)} → ${fmtOdd(p.odd)}. Подтвердите ставку ещё раз.` });
         this.refreshOddsQuietly();
       } else {
         this.setSlipMessage({ error: err.message || 'Ставка не принята.' });
         if (['IRL_ALREADY_BET', 'IRL_BETTING_CLOSED', 'MARKET_SUSPENDED'].includes(code)) {
-          this.pick = null;
+          this.picks = [];
           await this.loadBoard();
         }
       }
     } finally {
-      if (this.pick === pick) {
-        pick.busy = false;
-        const btn = this.container.querySelector('[data-irl-confirm]');
-        if (btn) { btn.disabled = false; btn.textContent = 'Поставить'; }
-      }
+      this.busy = false;
+      const btn = this.container.querySelector('[data-irl-confirm]');
+      if (btn) { btn.disabled = false; btn.textContent = 'Поставить ординар'; }
     }
   }
 
-  // Обновляем кнопки коэффициентов, не сбрасывая введённую сумму и выбор.
+  async submitExpress() {
+    if (this.picks.length < 2 || this.busy) return;
+    const amount = this.stakeValue();
+    if (amount < 1) {
+      this.setSlipMessage({ error: 'Введите сумму ставки.' });
+      return;
+    }
+    if (amount > this.maxBet) {
+      this.setSlipMessage({ error: `Максимум на экспресс — ${this.maxBet} 🪙.` });
+      return;
+    }
+    const button = this.container.querySelector('[data-irl-confirm-express]');
+    this.busy = true;
+    this.setSlipMessage({ error: '' });
+    if (button) { button.disabled = true; button.textContent = 'Отправляем…'; }
+    try {
+      const items = this.picks.map(p => ({ match_id: p.matchId, outcome: p.outcome, odd: p.odd }));
+      const res = await api.placeIrlBet({ items, amount });
+      if (store.state.user && res.balance != null) store.setUser({ ...store.state.user, balance: res.balance });
+      tgBridge.hapticNotification('success');
+      this.toast(`⚡ Экспресс #${res.bet_id} принят · выигрыш ${coins(res.potential_win)}`);
+      this.picks = [];
+      this.stake = '';
+      this.my = null;
+      await this.loadBoard();
+    } catch (err) {
+      const code = err.data?.error || err.code;
+      tgBridge.hapticNotification(code === 'ODDS_CHANGED' ? 'warning' : 'error');
+      this.setSlipMessage({ error: err.message || 'Экспресс не принят.' });
+      if (['IRL_ALREADY_BET', 'IRL_BETTING_CLOSED', 'MARKET_SUSPENDED'].includes(code)) {
+        await this.loadBoard();
+      }
+    } finally {
+      this.busy = false;
+      const btn = this.container.querySelector('[data-irl-confirm-express]');
+      if (btn) { btn.disabled = false; btn.textContent = 'Поставить экспресс'; }
+    }
+  }
+
   async refreshOddsQuietly() {
     try {
       this.board = await api.getIrlToday();
       this.render();
-    } catch (_) { /* кэфы обновятся при следующем открытии */ }
+    } catch (_) { }
   }
 
   toast(message) {

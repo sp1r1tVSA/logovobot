@@ -501,3 +501,157 @@ class TestQueries:
 def test_config_defaults_are_sane():
     assert config.IRL_MAX_BET == 1000 or config.IRL_MAX_BET > 0
     assert config.IRL_MAX_MATCHES_PER_DAY >= 1
+
+
+class TestIrlExpress:
+    def test_place_express_valid_and_wallet_debit(self):
+        make_user(850001)
+        m1 = open_match(odds=(2.0, 3.0, 4.0))
+        m2 = open_match(odds=(2.5, 3.2, 2.8))
+        m3 = open_match(odds=(1.8, 3.5, 5.0))
+        items = [
+            {"match_id": m1, "outcome": "home"},
+            {"match_id": m2, "outcome": "draw"},
+            {"match_id": m3, "outcome": "away"},
+        ]
+        ok, res = database.place_irl_express(850001, items, 300)
+        assert ok, res
+        assert res["total_odd"] > 1.0
+        assert res["potential_win"] > 300
+        assert balance_of(850001) == 4700
+
+        bets = database.get_user_irl_bets(850001)
+        assert len(bets) == 1
+        assert bets[0]["bet_type"] == "express"
+        assert len(bets[0]["items"]) == 3
+
+    def test_express_invalid_legs_count(self):
+        make_user(850002)
+        m1 = open_match()
+        # 1 leg
+        ok, res = database.place_irl_express(850002, [{"match_id": m1, "outcome": "home"}], 100)
+        assert not ok and res["error"] == database.IRL_INVALID_EXPRESS_LEGS_ERROR
+
+        # 6 legs
+        matches = [open_match() for _ in range(6)]
+        items = [{"match_id": m, "outcome": "home"} for m in matches]
+        ok, res = database.place_irl_express(850002, items, 100)
+        assert not ok and res["error"] == database.IRL_INVALID_EXPRESS_LEGS_ERROR
+
+    def test_express_duplicate_match(self):
+        make_user(850003)
+        m1 = open_match()
+        items = [
+            {"match_id": m1, "outcome": "home"},
+            {"match_id": m1, "outcome": "draw"},
+        ]
+        ok, res = database.place_irl_express(850003, items, 100)
+        assert not ok and res["error"] == database.IRL_DUPLICATE_EXPRESS_MATCH_ERROR
+
+    def test_express_already_bet_on_match(self):
+        make_user(850004)
+        m1 = open_match()
+        m2 = open_match()
+        database.place_irl_bet(850004, m1, "home", 100)
+        ok, res = database.place_irl_express(850004, [
+            {"match_id": m1, "outcome": "draw"},
+            {"match_id": m2, "outcome": "away"},
+        ], 100)
+        assert not ok and res["error"] == database.IRL_ALREADY_BET_ERROR
+
+    def test_express_settle_all_win(self):
+        make_user(850005)
+        m1 = open_match(odds=(2.0, 3.0, 4.0))
+        m2 = open_match(odds=(2.0, 3.0, 4.0))
+        ok, res = database.place_irl_express(850005, [
+            {"match_id": m1, "outcome": "home"},
+            {"match_id": m2, "outcome": "home"},
+        ], 200)
+        assert ok
+        pot_win = res["potential_win"]
+
+        # Settle first match -> still pending
+        database.settle_irl_match(m1, "home")
+        exp = database.get_user_irl_bets(850005)[0]
+        assert exp["status"] == "pending"
+
+        # Settle second match -> won
+        database.settle_irl_match(m2, "home")
+        exp = database.get_user_irl_bets(850005)[0]
+        assert exp["status"] == "won"
+        assert balance_of(850005) == 4800 + pot_win
+
+    def test_express_settle_one_lost(self):
+        make_user(850006)
+        m1 = open_match(odds=(2.0, 3.0, 4.0))
+        m2 = open_match(odds=(2.0, 3.0, 4.0))
+        ok, res = database.place_irl_express(850006, [
+            {"match_id": m1, "outcome": "home"},
+            {"match_id": m2, "outcome": "home"},
+        ], 200)
+        assert ok
+
+        # Settle first match as lost
+        database.settle_irl_match(m1, "away")
+        exp = database.get_user_irl_bets(850006)[0]
+        assert exp["status"] == "lost"
+        assert exp["actual_payout"] == 0
+
+    def test_express_void_leg_recalculates(self):
+        make_user(850007)
+        m1 = open_match(odds=(2.0, 3.0, 4.0))
+        m2 = open_match(odds=(3.0, 3.0, 3.0))
+        ok, res = database.place_irl_express(850007, [
+            {"match_id": m1, "outcome": "home"},
+            {"match_id": m2, "outcome": "home"},
+        ], 200)
+        assert ok
+
+        # Void match 1
+        database.void_irl_match(m1, reason="postponed")
+        # Settle match 2 as win
+        database.settle_irl_match(m2, "home")
+
+        exp = database.get_user_irl_bets(850007)[0]
+        assert exp["status"] == "won"
+        assert exp["actual_payout"] > 200
+
+    def test_express_all_legs_void_refunds_stake(self):
+        make_user(850008)
+        m1 = open_match()
+        m2 = open_match()
+        ok, res = database.place_irl_express(850008, [
+            {"match_id": m1, "outcome": "home"},
+            {"match_id": m2, "outcome": "home"},
+        ], 300)
+        assert ok
+        assert balance_of(850008) == 4700
+
+        database.void_irl_match(m1, reason="canceled")
+        database.void_irl_match(m2, reason="canceled")
+
+        exp = database.get_user_irl_bets(850008)[0]
+        assert exp["status"] == "refunded"
+        assert balance_of(850008) == 5000
+
+    def test_admin_void_user_express_bet(self):
+        make_user(850009)
+        m1 = open_match()
+        m2 = open_match()
+        ok, res = database.place_irl_express(850009, [
+            {"match_id": m1, "outcome": "home"},
+            {"match_id": m2, "outcome": "home"},
+        ], 250)
+        assert ok
+        assert balance_of(850009) == 4750
+
+        ok_void, res_void = database.void_user_irl_bet("express", res["express_id"])
+        assert ok_void
+        assert balance_of(850009) == 5000
+
+    def test_summary_and_all_bets_query(self):
+        stats = database.get_irl_betting_summary_stats()
+        assert "turnover" in stats and "payouts" in stats and "ggr" in stats
+        all_bets = database.get_all_irl_bets()
+        assert "bets" in all_bets and "total" in all_bets
+

@@ -45,6 +45,9 @@ _ERROR_STATUS = {
     "LOGOVO_LOCKDOWN": 403,
     "BETTING_BANNED": 403,
     "BETTING_PAUSED": 403,
+    "INVALID_EXPRESS_LEGS": 400,
+    "DUPLICATE_EXPRESS_MATCH": 400,
+    "EXPRESS_INTEGRITY_ERROR": 500,
     "BETTING_UNAVAILABLE": 503,
     "RISK_CHECK_UNAVAILABLE": 503,
 }
@@ -73,7 +76,7 @@ def _bet_payload(bet: dict | None) -> dict | None:
     if not bet:
         return None
     return {k: bet.get(k) for k in ("id", "outcome", "amount", "odd", "potential_win", "status",
-                                    "actual_payout", "created_at", "settled_at")}
+                                    "actual_payout", "created_at", "settled_at", "is_express")}
 
 
 def _match_payload(match: dict, bet: dict | None, now) -> dict:
@@ -112,7 +115,10 @@ async def handle_get_irl_today(request: web.Request) -> web.Response:
 
 
 async def handle_place_irl_bet(request: web.Request) -> web.Response:
-    """POST /api/irl/bets  {match_id, outcome: home|draw|away|1|X|2, amount, odd?}"""
+    """POST /api/irl/bets
+    Single:  {match_id, outcome: home|draw|away|1|X|2, amount, odd?}
+    Express: {items: [{match_id, outcome, odd?}, ...], amount}
+    """
     user_id, denied = _user(request)
     if denied is not None:
         return denied
@@ -123,10 +129,15 @@ async def handle_place_irl_bet(request: web.Request) -> web.Response:
     if not isinstance(data, dict):
         return web.json_response({"status": "error", "message": "Ожидается JSON-объект."}, status=400)
 
-    ok, result = await asyncio.to_thread(
-        database.place_irl_bet, user_id, data.get("match_id"), data.get("outcome"),
-        data.get("amount"), data.get("odd"),
-    )
+    if "items" in data and isinstance(data["items"], list):
+        ok, result = await asyncio.to_thread(
+            database.place_irl_express, user_id, data.get("items"), data.get("amount")
+        )
+    else:
+        ok, result = await asyncio.to_thread(
+            database.place_irl_bet, user_id, data.get("match_id"), data.get("outcome"),
+            data.get("amount"), data.get("odd"),
+        )
     if ok:
         return web.json_response({"status": "ok", **result})
     code = result.get("error", "")
@@ -134,10 +145,30 @@ async def handle_place_irl_bet(request: web.Request) -> web.Response:
 
 
 def _load_mine(user_id: int) -> list[dict]:
-    fields = ("id", "irl_match_id", "outcome", "amount", "odd", "potential_win", "status", "actual_payout",
-              "created_at", "settled_at", "home", "away", "league_name", "kickoff_at", "match_status",
-              "result", "home_goals", "away_goals")
-    return [{k: b.get(k) for k in fields} for b in database.get_user_irl_bets(user_id, MINE_LIMIT)]
+    bets = database.get_user_irl_bets(user_id, MINE_LIMIT)
+    result = []
+    for b in bets:
+        if b.get("bet_type") == "express":
+            result.append({
+                "id": b["id"],
+                "bet_type": "express",
+                "amount": b["amount"],
+                "odd": b.get("total_odd") or b.get("odd"),
+                "potential_win": b["potential_win"],
+                "status": b["status"],
+                "actual_payout": b.get("actual_payout"),
+                "created_at": b["created_at"],
+                "settled_at": b.get("settled_at"),
+                "items": b.get("items", []),
+            })
+        else:
+            fields = ("id", "irl_match_id", "outcome", "amount", "odd", "potential_win", "status", "actual_payout",
+                      "created_at", "settled_at", "home", "away", "league_name", "kickoff_at", "match_status",
+                      "result", "home_goals", "away_goals")
+            d = {k: b.get(k) for k in fields}
+            d["bet_type"] = "single"
+            result.append(d)
+    return result
 
 
 async def handle_get_my_irl_bets(request: web.Request) -> web.Response:
