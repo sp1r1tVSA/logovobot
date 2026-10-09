@@ -20,9 +20,10 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import ContextTypes
 
 from handlers.base import is_admin, is_global_admin
+from services.graphics import player_photos
 from services.graphics import transfer_card_generator as card_gen
 from services.graphics import transfer_recap_generator as recap_gen
-from transfers import card, recap, repo, service
+from transfers import card, recap, repo, requests as req_mod, service
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,90 @@ SAMPLE_URNS = [
 ]
 
 
+def _resolve_sample_portrait(player_name: str, *clubs: str | None) -> str | None:
+    """Ищет портрет игрока в кэше/Renderz, а если нет — подгружает через player_photos."""
+    try:
+        path = req_mod.portrait_path(player_name, *clubs)
+        if path:
+            return path
+        for c in clubs:
+            if c:
+                cached = player_photos.get_photo_path(player_name, c) or player_photos.get_photo_path(player_name)
+                if cached:
+                    return cached
+        target = next((c for c in clubs if c), None)
+        return player_photos.get_player_photo(player_name, target) or player_photos.get_player_photo(player_name)
+    except Exception:
+        logger.debug("Failed to resolve sample portrait for %s", player_name, exc_info=True)
+        return None
+
+
+def _render_sample_deal(sample: dict) -> bytes:
+    portrait = sample.get("portrait") or _resolve_sample_portrait(
+        sample["player"], sample.get("to_club"), sample.get("from_club")
+    )
+    return card_gen.render_transfer_card(
+        kind="deal",
+        player_name=sample["player"],
+        price_text=sample["price"],
+        ovr=sample["ovr"],
+        from_club=sample["from_club"],
+        to_club=sample["to_club"],
+        portrait_path=portrait,
+        transfer_id=sample["id"],
+    )
+
+
+def _render_sample_surcharge(sample: dict) -> bytes:
+    portrait = sample.get("portrait") or _resolve_sample_portrait(
+        sample["player"], sample.get("from_club")
+    )
+    return card_gen.render_transfer_card(
+        kind="surcharge",
+        player_name=sample["player"],
+        price_text=sample["price"],
+        ovr=sample["ovr"],
+        from_club=sample["from_club"],
+        portrait_path=portrait,
+        transfer_id=sample["id"],
+    )
+
+
+def _render_sample_urn(sample: dict) -> bytes:
+    portrait = sample.get("portrait") or _resolve_sample_portrait(
+        sample["player"], sample.get("from_club")
+    )
+    return card_gen.render_transfer_card(
+        kind="urn_sale",
+        player_name=sample["player"],
+        price_text=sample["price"],
+        ovr=sample["ovr"],
+        from_club=sample["from_club"],
+        portrait_path=portrait,
+        transfer_id=sample["id"],
+    )
+
+
+def _render_demo_recap() -> bytes:
+    deals = [
+        recap_gen.RecapDeal("Lamine Yamal", "Барселона → ПСЖ", "140 млн", portrait_path=_resolve_sample_portrait("Lamine Yamal", "Барселона")),
+        recap_gen.RecapDeal("Kylian Mbappé", "ПСЖ → Реал Мадрид", "125 млн", portrait_path=_resolve_sample_portrait("Kylian Mbappé", "Реал Мадрид")),
+        recap_gen.RecapDeal("Florian Wirtz", "Байер → Манчестер Сити", "115 млн", portrait_path=_resolve_sample_portrait("Florian Wirtz", "Байер")),
+        recap_gen.RecapDeal("Bukayo Saka", "Арсенал → Бавария", "95 млн", portrait_path=_resolve_sample_portrait("Bukayo Saka", "Арсенал")),
+        recap_gen.RecapDeal("Vinícius Júnior", "Реал Мадрид → Ливерпуль", "85 млн", portrait_path=_resolve_sample_portrait("Vinícius Júnior", "Реал Мадрид")),
+    ]
+    return recap_gen.render_window_recap(
+        title="ТО 1-ГО КРУГА 2026",
+        turnover_text="1.15 млрд",
+        deals=deals,
+        requests_count=46,
+        swaps=9,
+        urn_sales=14,
+        top_club="Реал Мадрид",
+        top_club_count=7,
+    )
+
+
 def is_workshop_allowed(user_id: int | None) -> bool:
     """Доступ для админов лиги и ответственного за трансферное окно."""
     if not user_id:
@@ -223,17 +308,7 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data in ("ws:deal", "ws:deal_next"):
         await query.answer("🎨 Генерирую карточку HERE WE GO...")
         sample = random.choice(SAMPLE_DEALS)
-        png = await asyncio.to_thread(
-            card_gen.render_transfer_card,
-            kind="deal",
-            player_name=sample["player"],
-            price_text=sample["price"],
-            ovr=sample["ovr"],
-            from_club=sample["from_club"],
-            to_club=sample["to_club"],
-            portrait_path=sample.get("portrait"),
-            transfer_id=sample["id"],
-        )
+        png = await asyncio.to_thread(_render_sample_deal, sample)
         caption = (
             f"🔁 <b>HERE WE GO — {sample['player']}</b>\n"
             f"Маршрут: {sample['from_club']} → {sample['to_club']}\n"
@@ -250,15 +325,7 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data in ("ws:surcharge", "ws:surcharge_next"):
         await query.answer("🎨 Генерирую карточку спецкарты...")
         sample = random.choice(SAMPLE_SURCHARGES)
-        png = await asyncio.to_thread(
-            card_gen.render_transfer_card,
-            kind="surcharge",
-            player_name=sample["player"],
-            price_text=sample["price"],
-            ovr=sample["ovr"],
-            from_club=sample["from_club"],
-            transfer_id=sample["id"],
-        )
+        png = await asyncio.to_thread(_render_sample_surcharge, sample)
         caption = (
             f"🌟 <b>СПЕЦКАРТА — {sample['player']}</b>\n"
             f"Клуб: {sample['from_club']}\n"
@@ -275,15 +342,7 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if data in ("ws:urn", "ws:urn_next"):
         await query.answer("🎨 Генерирую карточку сдачи в урну...")
         sample = random.choice(SAMPLE_URNS)
-        png = await asyncio.to_thread(
-            card_gen.render_transfer_card,
-            kind="urn_sale",
-            player_name=sample["player"],
-            price_text=sample["price"],
-            ovr=sample["ovr"],
-            from_club=sample["from_club"],
-            transfer_id=sample["id"],
-        )
+        png = await asyncio.to_thread(_render_sample_urn, sample)
         caption = (
             f"🗑 <b>В УРНУ — {sample['player']}</b>\n"
             f"Клуб: {sample['from_club']} → Урна\n"
@@ -308,24 +367,7 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             caption = recap.caption(rc, win.get("title") or "ТО")
         else:
             # Демонстрационный постер с топ-5 сделками и аватарами
-            deals = [
-                recap_gen.RecapDeal("Lamine Yamal", "Барселона → ПСЖ", "140 млн"),
-                recap_gen.RecapDeal("Kylian Mbappé", "ПСЖ → Реал Мадрид", "125 млн"),
-                recap_gen.RecapDeal("Florian Wirtz", "Байер → Манчестер Сити", "115 млн"),
-                recap_gen.RecapDeal("Bukayo Saka", "Арсенал → Бавария", "95 млн", portrait_path="assets/players/b_saka_арсенал.png"),
-                recap_gen.RecapDeal("Vinícius Júnior", "Реал Мадрид → Ливерпуль", "85 млн"),
-            ]
-            png = await asyncio.to_thread(
-                recap_gen.render_window_recap,
-                title="ТО 1-ГО КРУГА 2026",
-                turnover_text="1.15 млрд",
-                deals=deals,
-                requests_count=46,
-                swaps=9,
-                urn_sales=14,
-                top_club="Реал Мадрид",
-                top_club_count=7,
-            )
+            png = await asyncio.to_thread(_render_demo_recap)
             caption = (
                 "🏁 <b>Демо-итоги трансферного окна</b>\n\n"
                 "Оборот: <b>1.15 млрд</b>\n"
