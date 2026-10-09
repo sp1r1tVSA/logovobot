@@ -16,8 +16,9 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Optional
 
 import config
@@ -86,13 +87,38 @@ class TheOddsApiProvider(SportsDataProvider):
     def __init__(
         self,
         api_key: Optional[str] = None,
+        api_keys: Optional[list[str]] = None,
         base_url: Optional[str] = None,
         rate_limit_rpm: Optional[int] = None,
         timeout_seconds: Optional[float] = None,
         bookmaker: Optional[str] = None,
         regions: Optional[str] = None,
     ) -> None:
-        self.api_key = (api_key or getattr(config, "ODDS_API_KEY", "")).strip()
+        configured_keys: list[str] = []
+        if api_keys:
+            configured_keys = [k.strip() for k in api_keys if k and k.strip()]
+        elif api_key:
+            single = api_key.strip()
+            configured_keys = [k.strip() for k in single.split(",") if k.strip()] if single else []
+        elif api_keys is not None:
+            configured_keys = []
+        elif api_key is not None:
+            configured_keys = []
+        else:
+            cfg_keys = getattr(config, "ODDS_API_KEYS", None)
+            if cfg_keys:
+                configured_keys = [k.strip() for k in cfg_keys if k and k.strip()]
+            else:
+                single = (getattr(config, "ODDS_API_KEY", "") or getattr(config, "THE_ODDS_API_KEY", "")).strip()
+                configured_keys = [k.strip() for k in single.split(",") if k.strip()] if single else []
+
+        seen = set()
+        self.api_keys: list[str] = []
+        for k in configured_keys:
+            if k not in seen:
+                seen.add(k)
+                self.api_keys.append(k)
+
         self.base_url = (base_url or getattr(config, "ODDS_API_BASE_URL", self.BASE_URL)).rstrip("/")
         self.timeout_sec = timeout_seconds or getattr(config, "ODDS_API_TIMEOUT_SECONDS", 10.0)
         self.preferred_bookmaker = (
@@ -109,12 +135,38 @@ class TheOddsApiProvider(SportsDataProvider):
         self._requests_remaining: Optional[int] = None
         self._requests_used: Optional[int] = None
         self._quota_exhausted: bool = False
+        self._quota_exhausted_until: Optional[datetime] = None
         self._quota_error_msg: Optional[str] = None
+
+        self._key_index = 0
+        self._key_lock = threading.Lock()
+        self._key_exhausted_until: dict[str, datetime] = {}
+        self._key_error_msg: dict[str, str] = {}
+        self._key_requests_remaining: dict[str, int] = {}
+        self._key_requests_used: dict[str, int] = {}
 
         # In-memory mapping of fixture_id -> MatchWinnerOdds & fixture_id -> sport_key
         self._odds_cache: dict[str, MatchWinnerOdds] = {}
         self._fixture_sport_map: dict[str, str] = {}
         self._fixtures_cache: dict[str, PrematchFixture] = {}
+
+    @property
+    def api_key(self) -> str:
+        k = self.get_active_api_key(advance=False)
+        if k:
+            return k
+        return self.api_keys[0] if self.api_keys else ""
+
+    @api_key.setter
+    def api_key(self, val: str) -> None:
+        val = (val or "").strip()
+        if val:
+            self.api_keys = [k.strip() for k in val.split(",") if k.strip()]
+            for k in self.api_keys:
+                self._key_exhausted_until.pop(k, None)
+                self._key_error_msg.pop(k, None)
+        else:
+            self.api_keys = []
 
     @property
     def provider_name(self) -> str:
@@ -126,10 +178,72 @@ class TheOddsApiProvider(SportsDataProvider):
 
     @property
     def is_connected(self) -> bool:
-        return bool(self.api_key and not self.circuit_open and not self._quota_exhausted)
+        return bool(self.api_keys and not self.circuit_open and not self.is_quota_exhausted())
+
+    def is_key_exhausted(self, key: str) -> bool:
+        until = self._key_exhausted_until.get(key)
+        if until is None:
+            return False
+        if now_msk() < until:
+            return True
+        self._key_exhausted_until.pop(key, None)
+        self._key_error_msg.pop(key, None)
+        return False
 
     def is_quota_exhausted(self) -> bool:
-        return self._quota_exhausted
+        if self._quota_exhausted:
+            return True
+        if not self.api_keys:
+            return False
+        return all(self.is_key_exhausted(k) for k in self.api_keys)
+
+    def get_active_api_key(self, advance: bool = True, exclude: Optional[set[str]] = None) -> Optional[str]:
+        if not self.api_keys:
+            return None
+        excluded = exclude or set()
+        available = [k for k in self.api_keys if k not in excluded and not self.is_key_exhausted(k)]
+        if not available:
+            return None
+        with self._key_lock:
+            idx = self._key_index % len(available)
+            if advance:
+                self._key_index += 1
+            return available[idx]
+
+    def _record_key_exhausted(self, key: str, msg: str, is_transient: bool = False) -> None:
+        now = now_msk()
+        if is_transient:
+            reset_msk = now + timedelta(seconds=60)
+        else:
+            year = now.year + (1 if now.month == 12 else 0)
+            month = 1 if now.month == 12 else now.month + 1
+            reset_msk = now.replace(year=year, month=month, day=1, hour=3, minute=0, second=10, microsecond=0)
+
+        self._key_exhausted_until[key] = reset_msk
+        self._key_error_msg[key] = msg
+        masked = key[:4] + "..." + key[-4:] if len(key) > 8 else "***"
+        logger.warning(
+            f"TheOddsApi key {masked} quota/rate limit reached. Pausing key until {reset_msk.strftime('%Y-%m-%d %H:%M:%S')} MSK. Reason: {msg}"
+        )
+        if self.is_quota_exhausted():
+            self._quota_exhausted = True
+            self._quota_exhausted_until = reset_msk
+            self._quota_error_msg = f"All {len(self.api_keys)} TheOddsApi keys exhausted: {msg}"
+            logger.error(
+                f"ALL {len(self.api_keys)} TheOddsApi keys are exhausted! Pausing provider until {reset_msk.strftime('%Y-%m-%d %H:%M:%S')} MSK."
+            )
+
+    def _record_key_invalid(self, key: str, msg: str = "Invalid apiKey (401)") -> None:
+        now = now_msk()
+        reset_msk = now + timedelta(days=30)
+        self._key_exhausted_until[key] = reset_msk
+        self._key_error_msg[key] = msg
+        masked = key[:4] + "..." + key[-4:] if len(key) > 8 else "***"
+        logger.error(f"TheOddsApi key {masked} is invalid (401). Disabling key.")
+        if self.is_quota_exhausted():
+            self._quota_exhausted = True
+            self._quota_exhausted_until = reset_msk
+            self._quota_error_msg = f"All {len(self.api_keys)} TheOddsApi keys are invalid or exhausted."
 
     # ── HTTP transport ────────────────────────────────────────────────────────
 
@@ -139,13 +253,13 @@ class TheOddsApiProvider(SportsDataProvider):
         params: Optional[dict[str, Any]] = None,
         cache_ttl: Optional[float] = None,
     ) -> Optional[Any]:
-        """Dispatches an authenticated GET request with rate limiting and circuit breaker."""
-        if not self.api_key:
+        """Dispatches an authenticated GET request with rate limiting, multi-key rotation, and circuit breaker."""
+        if not self.api_keys and not self.api_key:
             logger.warning("TheOddsApi call skipped: ODDS_API_KEY is not configured.")
             return None
 
-        if self._quota_exhausted:
-            logger.warning("TheOddsApi call skipped: quota exhausted.")
+        if self.is_quota_exhausted():
+            logger.warning("TheOddsApi call skipped: quota exhausted for all keys.")
             return None
 
         clean_ep = endpoint.strip().lstrip("/")
@@ -161,9 +275,6 @@ class TheOddsApiProvider(SportsDataProvider):
 
         import aiohttp
 
-        query_params = dict(params or {})
-        query_params["apiKey"] = self.api_key
-
         url = f"{self.base_url}/{clean_ep}"
         start_time = time.monotonic()
         status_code = 0
@@ -173,73 +284,87 @@ class TheOddsApiProvider(SportsDataProvider):
             "User-Agent": "Logovobot/8.0 (TheOddsApiAdapter)",
         }
 
-        try:
-            timeout = aiohttp.ClientTimeout(total=self.timeout_sec)
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, headers=headers, params=query_params) as resp:
-                    status_code = resp.status
-                    latency_ms = (time.monotonic() - start_time) * 1000.0
+        tried_keys: set[str] = set()
 
-                    # Parse remaining quota headers
-                    rem = resp.headers.get("x-requests-remaining")
-                    if rem is not None and rem.isdigit():
-                        self._requests_remaining = int(rem)
-                        if self._requests_remaining <= 0:
-                            self._quota_exhausted = True
-                            self._quota_error_msg = "Monthly request limit reached (0 remaining)."
-                            logger.warning("TheOddsApi monthly quota exhausted (0 remaining).")
+        while True:
+            active_key = self.get_active_api_key(advance=True, exclude=tried_keys)
+            if not active_key:
+                break
+            tried_keys.add(active_key)
 
-                    used = resp.headers.get("x-requests-used")
-                    if used is not None and used.isdigit():
-                        self._requests_used = int(used)
+            query_params = dict(params or {})
+            query_params["apiKey"] = active_key
 
-                    if status_code == 401:
-                        self.circuit_breaker.record_failure()
-                        logger.error("TheOddsApi authentication failed (invalid apiKey).")
-                        return None
+            try:
+                timeout = aiohttp.ClientTimeout(total=self.timeout_sec)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.get(url, headers=headers, params=query_params) as resp:
+                        status_code = resp.status
+                        latency_ms = (time.monotonic() - start_time) * 1000.0
 
-                    if status_code == 429:
-                        self._quota_exhausted = True
-                        self._quota_error_msg = "Rate limit / Quota 429 received from The Odds API."
-                        self.circuit_breaker.record_failure()
-                        logger.warning("TheOddsApi 429 quota exhausted.")
-                        return None
+                        # Parse remaining quota headers
+                        rem = resp.headers.get("x-requests-remaining")
+                        if rem is not None and rem.isdigit():
+                            rem_int = int(rem)
+                            self._key_requests_remaining[active_key] = rem_int
+                            self._requests_remaining = rem_int
+                            if rem_int <= 0:
+                                self._record_key_exhausted(active_key, "Monthly request limit reached (0 remaining).")
 
-                    if status_code == 404:
-                        text = await resp.text()
-                        logger.info("TheOddsApi sport %s currently unavailable (HTTP 404): %s", clean_ep, text[:200])
-                        return None
+                        used = resp.headers.get("x-requests-used")
+                        if used is not None and used.isdigit():
+                            used_int = int(used)
+                            self._key_requests_used[active_key] = used_int
+                            self._requests_used = used_int
 
-                    if status_code != 200:
-                        self.circuit_breaker.record_failure()
-                        text = await resp.text()
-                        logger.warning("TheOddsApi HTTP %s from %s: %s", status_code, clean_ep, text[:200])
-                        return None
+                        if status_code == 401:
+                            self._record_key_invalid(active_key)
+                            continue
 
-                    data = await resp.json()
-                    self.circuit_breaker.record_success()
-                    records = len(data) if isinstance(data, list) else 1
-                    self.health_monitor.record_request(
-                        provider=self.provider_name,
-                        endpoint=clean_ep,
-                        latency_ms=latency_ms,
-                        status_code=status_code,
-                        records_count=records,
-                    )
-                    self.cache.set(self.provider_name, cache_key, data, ttl_seconds=cache_ttl)
-                    return data
-        except Exception as e:
-            self.circuit_breaker.record_failure(e)
-            latency_ms = (time.monotonic() - start_time) * 1000.0
-            self.health_monitor.record_request(
-                provider=self.provider_name,
-                endpoint=clean_ep,
-                latency_ms=latency_ms,
-                status_code=status_code or 500,
-                error_message=str(e),
-            )
-            logger.warning("TheOddsApi request %s failed: %s", clean_ep, e)
-            return None
+                        if status_code == 429:
+                            text = await resp.text()
+                            is_rpm = any(w in text.lower() for w in ("rate limit", "per second", "per minute"))
+                            self._record_key_exhausted(active_key, f"HTTP 429: {text[:200]}", is_transient=is_rpm)
+                            continue
+
+                        if status_code == 404:
+                            text = await resp.text()
+                            logger.info("TheOddsApi sport %s currently unavailable (HTTP 404): %s", clean_ep, text[:200])
+                            return None
+
+                        if status_code != 200:
+                            self.circuit_breaker.record_failure()
+                            text = await resp.text()
+                            logger.warning("TheOddsApi HTTP %s from %s: %s", status_code, clean_ep, text[:200])
+                            return None
+
+                        data = await resp.json()
+                        self.circuit_breaker.record_success()
+                        records = len(data) if isinstance(data, list) else 1
+                        self.health_monitor.record_request(
+                            provider=self.provider_name,
+                            endpoint=clean_ep,
+                            latency_ms=latency_ms,
+                            status_code=status_code,
+                            records_count=records,
+                        )
+                        self.cache.set(self.provider_name, cache_key, data, ttl_seconds=cache_ttl)
+                        return data
+            except Exception as e:
+                self.circuit_breaker.record_failure(e)
+                latency_ms = (time.monotonic() - start_time) * 1000.0
+                self.health_monitor.record_request(
+                    provider=self.provider_name,
+                    endpoint=clean_ep,
+                    latency_ms=latency_ms,
+                    status_code=status_code or 500,
+                    error_message=str(e),
+                )
+                logger.warning("TheOddsApi request exception on key: %s", e)
+                return None
+
+        self.circuit_breaker.record_failure()
+        return None
 
     # ── IRL Pre-Match Contracts ───────────────────────────────────────────────
 
@@ -576,14 +701,25 @@ class TheOddsApiProvider(SportsDataProvider):
     # ── Default / Legacy Inactive Contracts ──────────────────────────────────
 
     def get_provider_status(self) -> dict[str, Any]:
-        return {
+        available = [k for k in self.api_keys if not self.is_key_exhausted(k)]
+        status = {
             "provider": self.provider_name,
             "connected": self.is_connected,
-            "quota_exhausted": self._quota_exhausted,
+            "quota_exhausted": self.is_quota_exhausted(),
             "requests_remaining": self._requests_remaining,
             "requests_used": self._requests_used,
             "circuit_state": self.circuit_breaker.state,
+            "pool_size": len(self.api_keys),
+            "pool_available": len(available),
+            "pool_exhausted": len(self.api_keys) - len(available),
         }
+        if self._quota_exhausted_until:
+            status["quota_exhausted_until"] = self._quota_exhausted_until.strftime("%Y-%m-%d %H:%M:%S")
+        if self.is_quota_exhausted():
+            status["status"] = "QUOTA_EXHAUSTED"
+        else:
+            status["status"] = "CONNECTED" if self.is_connected else "NOT_CONFIGURED"
+        return status
 
     async def get_matches(self, division_id: Optional[int] = None, season_id: Optional[int] = None) -> list[LiveMatchState]:
         return []

@@ -208,3 +208,206 @@ class TestTheOddsApiProviderFactory:
         assert isinstance(p, TheOddsApiProvider)
         assert p.api_key == "test-key-123"
         set_sports_provider(None)
+
+
+class TestTheOddsApiConfig:
+    def test_comma_separated_keys(self, monkeypatch):
+        monkeypatch.setenv("ODDS_API_KEYS", "keyA, keyB , keyC")
+        keys = config._get_odds_api_keys()
+        assert keys == ["keyA", "keyB", "keyC"]
+
+    def test_separate_indexed_env_vars(self, monkeypatch):
+        monkeypatch.delenv("ODDS_API_KEYS", raising=False)
+        monkeypatch.delenv("ODDS_API_KEY", raising=False)
+        monkeypatch.setenv("ODDS_API_KEY_1", "key_idx_1")
+        monkeypatch.setenv("ODDS_API_KEY_2", "key_idx_2")
+        keys = config._get_odds_api_keys()
+        assert keys == ["key_idx_1", "key_idx_2"]
+
+    def test_fallback_and_deduplication(self, monkeypatch):
+        monkeypatch.delenv("ODDS_API_KEYS", raising=False)
+        monkeypatch.setenv("THE_ODDS_API_KEY", "legacy_key")
+        monkeypatch.setenv("ODDS_API_KEY_2", "legacy_key")
+        keys = config._get_odds_api_keys()
+        assert keys == ["legacy_key"]
+
+
+class TestTheOddsApiMultiKey:
+    def test_init_with_key_list(self):
+        prov = TheOddsApiProvider(api_keys=["key1", "key2"])
+        assert prov.api_keys == ["key1", "key2"]
+        assert prov.is_connected is True
+        assert prov.is_quota_exhausted() is False
+
+    def test_round_robin_rotation(self):
+        prov = TheOddsApiProvider(api_keys=["k1", "k2", "k3"])
+        out = [prov.get_active_api_key(advance=True) for _ in range(4)]
+        assert out == ["k1", "k2", "k3", "k1"]
+
+    def test_api_key_property_and_setter(self):
+        prov = TheOddsApiProvider(api_keys=["k1", "k2"])
+        assert prov.api_key == "k1"
+        prov.api_key = ""
+        assert prov.api_keys == []
+        assert prov.api_key == ""
+        assert prov.is_connected is False
+        prov.api_key = "k_new"
+        assert prov.api_keys == ["k_new"]
+        assert prov.api_key == "k_new"
+        assert prov.is_connected is True
+
+    def test_failover_when_primary_key_returns_429(self):
+        import aiohttp
+        from unittest.mock import patch
+
+        prov = TheOddsApiProvider(api_keys=["key_limited", "key_working"])
+        calls = []
+
+        class MockResp:
+            def __init__(self, key):
+                self.key = key
+                self.status = 429 if key == "key_limited" else 200
+                self.headers = {"x-requests-remaining": "50"}
+
+            async def text(self):
+                return "Too Many Requests" if self.status == 429 else "[]"
+
+            async def json(self):
+                return [{"id": "evt1", "sport_key": "soccer_epl"}]
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        class MockSession:
+            def __init__(self, *a, **k):
+                pass
+
+            def get(self, url, headers=None, params=None):
+                key = params.get("apiKey")
+                calls.append(key)
+                return MockResp(key)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with patch.object(aiohttp, "ClientSession", MockSession):
+            data = run(prov._fetch_json("sports/soccer_epl/odds", {}))
+            assert calls == ["key_limited", "key_working"]
+            assert data == [{"id": "evt1", "sport_key": "soccer_epl"}]
+            assert prov.is_key_exhausted("key_limited") is True
+            assert prov.is_key_exhausted("key_working") is False
+            assert prov.is_quota_exhausted() is False
+
+            # Next request immediately uses key_working without key_limited
+            calls.clear()
+            run(prov._fetch_json("sports/soccer_epl/scores", {}))
+            assert calls == ["key_working"]
+
+    def test_failover_when_primary_key_returns_401(self):
+        import aiohttp
+        from unittest.mock import patch
+
+        prov = TheOddsApiProvider(api_keys=["key_bad", "key_good"])
+        calls = []
+
+        class MockResp:
+            def __init__(self, key):
+                self.key = key
+                self.status = 401 if key == "key_bad" else 200
+                self.headers = {}
+
+            async def text(self):
+                return "Unauthorized" if self.status == 401 else "[]"
+
+            async def json(self):
+                return [{"id": "evt2"}]
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        class MockSession:
+            def __init__(self, *a, **k):
+                pass
+
+            def get(self, url, headers=None, params=None):
+                key = params.get("apiKey")
+                calls.append(key)
+                return MockResp(key)
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with patch.object(aiohttp, "ClientSession", MockSession):
+            data = run(prov._fetch_json("sports", {}))
+            assert calls == ["key_bad", "key_good"]
+            assert data == [{"id": "evt2"}]
+            assert prov.is_key_exhausted("key_bad") is True
+
+    def test_all_keys_exhausted_pauses_provider(self):
+        import aiohttp
+        from unittest.mock import patch
+
+        prov = TheOddsApiProvider(api_keys=["k1", "k2"])
+        calls = []
+
+        class MockResp:
+            def __init__(self, key):
+                self.status = 429
+                self.headers = {}
+
+            async def text(self):
+                return "Quota exceeded"
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        class MockSession:
+            def __init__(self, *a, **k):
+                pass
+
+            def get(self, url, headers=None, params=None):
+                calls.append(params.get("apiKey"))
+                return MockResp(params.get("apiKey"))
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+        with patch.object(aiohttp, "ClientSession", MockSession):
+            data = run(prov._fetch_json("sports", {}))
+            assert calls == ["k1", "k2"]
+            assert data is None
+            assert prov.is_quota_exhausted() is True
+            status = prov.get_provider_status()
+            assert status["status"] == "QUOTA_EXHAUSTED"
+            assert status["pool_size"] == 2
+            assert status["pool_available"] == 0
+            assert status["pool_exhausted"] == 2
+
+    def test_zero_credential_disclosure_in_status(self):
+        secret1 = "THE_ODDS_API_SECRET_ALPHA_123"
+        secret2 = "THE_ODDS_API_SECRET_BETA_456"
+        prov = TheOddsApiProvider(api_keys=[secret1, secret2])
+        status = prov.get_provider_status()
+        import json
+        status_json = json.dumps(status)
+        assert secret1 not in status_json
+        assert secret2 not in status_json
+        assert "api_key" not in status

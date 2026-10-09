@@ -136,7 +136,28 @@ SPORTS_MAX_RETRIES = int(os.getenv("SPORTS_MAX_RETRIES", "3"))
 SPORTS_RATE_LIMIT_RPM = int(os.getenv("SPORTS_RATE_LIMIT_RPM", "60"))
 
 # The Odds API (the-odds-api.com) configuration for IRL betting
-ODDS_API_KEY = os.getenv("ODDS_API_KEY", "").strip() or os.getenv("THE_ODDS_API_KEY", "").strip()
+def _get_odds_api_keys() -> list[str]:
+    raw = (
+        os.getenv("ODDS_API_KEYS", "")
+        or os.getenv("ODDS_API_KEY", "")
+        or os.getenv("THE_ODDS_API_KEYS", "")
+        or os.getenv("THE_ODDS_API_KEY", "")
+    ).strip()
+    keys = [k.strip() for k in raw.split(",") if k.strip()]
+    k1 = (os.getenv("ODDS_API_KEY_1", "") or os.getenv("THE_ODDS_API_KEY_1", "")).strip()
+    if k1 and k1 not in keys:
+        keys.append(k1)
+    k2 = (os.getenv("ODDS_API_KEY_2", "") or os.getenv("THE_ODDS_API_KEY_2", "")).strip()
+    if k2 and k2 not in keys:
+        keys.append(k2)
+    for i in range(3, 10):
+        ki = (os.getenv(f"ODDS_API_KEY_{i}", "") or os.getenv(f"THE_ODDS_API_KEY_{i}", "")).strip()
+        if ki and ki not in keys:
+            keys.append(ki)
+    return keys
+
+ODDS_API_KEYS = _get_odds_api_keys()
+ODDS_API_KEY = ODDS_API_KEYS[0] if ODDS_API_KEYS else ""
 ODDS_API_BASE_URL = os.getenv("ODDS_API_BASE_URL", "https://api.the-odds-api.com/v4").strip()
 ODDS_API_BOOKMAKER = os.getenv("ODDS_API_BOOKMAKER", "pinnacle").strip().lower()
 ODDS_API_REGIONS = os.getenv("ODDS_API_REGIONS", "eu").strip().lower()
@@ -175,10 +196,10 @@ def _get_int_env(name: str, default: int) -> int:
 
 IRL_ENABLED = os.getenv(
     "IRL_ENABLED",
-    "true" if (os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")) else "false"
+    "true" if bool(ODDS_API_KEYS) else "false"
 ).strip().lower() in ("true", "1", "yes")
 IRL_BOOKMAKER_ID = _get_int_env(
-    "IRL_BOOKMAKER_ID", 1 if (os.getenv("ODDS_API_KEY") or os.getenv("THE_ODDS_API_KEY")) else 0
+    "IRL_BOOKMAKER_ID", 1 if bool(ODDS_API_KEYS) else 0
 )
 # ЧМ, Евро, Кубок Америки, ЛЧ, Лига наций, АПЛ, Ла Лига, Серия А, Бундеслига, Лига 1,
 # Лига Европы, отбор ЧМ (Европа), отбор Евро. Товарищеские (10) не включены.

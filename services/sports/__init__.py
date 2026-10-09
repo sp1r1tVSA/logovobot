@@ -68,9 +68,10 @@ def get_sports_provider() -> SportsDataProvider:
         return _GLOBAL_PROVIDER
 
     if provider_setting in ("odds_api", "the_odds_api", "theoddsapi"):
+        odds_api_keys = getattr(config, "ODDS_API_KEYS", None)
         odds_api_key = getattr(config, "ODDS_API_KEY", "").strip() or os.getenv("ODDS_API_KEY", "").strip()
-        if odds_api_key:
-            _GLOBAL_PROVIDER = TheOddsApiProvider(api_key=odds_api_key)
+        if odds_api_keys or odds_api_key:
+            _GLOBAL_PROVIDER = TheOddsApiProvider(api_key=odds_api_key, api_keys=odds_api_keys or None)
         else:
             _GLOBAL_PROVIDER = NullSportsDataProvider(reason="LIVE DATA UNAVAILABLE: ODDS_API_KEY not configured.")
         return _GLOBAL_PROVIDER
@@ -78,11 +79,12 @@ def get_sports_provider() -> SportsDataProvider:
     api_keys = getattr(config, "SPORTS_API_KEYS", None)
     api_key = getattr(config, "SPORTS_API_KEY", "").strip() or getattr(config, "APISPORTS_KEY", "").strip()
     if api_keys or api_key:
-        _GLOBAL_PROVIDER = APISportsProvider(api_key=api_key, api_keys=api_keys)
+        _GLOBAL_PROVIDER = APISportsProvider(api_key=api_key, api_keys=api_keys or None)
     else:
+        odds_api_keys = getattr(config, "ODDS_API_KEYS", None)
         odds_api_key = getattr(config, "ODDS_API_KEY", "").strip() or os.getenv("ODDS_API_KEY", "").strip()
-        if odds_api_key:
-            _GLOBAL_PROVIDER = TheOddsApiProvider(api_key=odds_api_key)
+        if odds_api_keys or odds_api_key:
+            _GLOBAL_PROVIDER = TheOddsApiProvider(api_key=odds_api_key, api_keys=odds_api_keys or None)
         else:
             _GLOBAL_PROVIDER = NullSportsDataProvider(reason="LIVE DATA UNAVAILABLE: No live provider configured.")
 
