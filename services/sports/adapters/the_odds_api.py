@@ -327,10 +327,12 @@ class TheOddsApiProvider(SportsDataProvider):
                             self._record_key_exhausted(active_key, f"HTTP 429: {text[:200]}", is_transient=is_rpm)
                             continue
 
-                        if status_code == 404:
+                        if status_code in (404, 422):
                             text = await resp.text()
-                            logger.info("TheOddsApi sport %s currently unavailable (HTTP 404): %s", clean_ep, text[:200])
-                            return None
+                            logger.info("TheOddsApi sport %s currently unavailable (HTTP %s): %s", clean_ep, status_code, text[:200])
+                            self.circuit_breaker.record_success()
+                            self.cache.set(self.provider_name, cache_key, [], ttl_seconds=cache_ttl)
+                            return []
 
                         if status_code != 200:
                             self.circuit_breaker.record_failure()
