@@ -184,8 +184,15 @@ def _draw_portrait(img: Image.Image, path: str | None, name: str, accent) -> Non
     """Вырезанный портрет стоит на низу карточки; фото с фоном — кадрируется в круг; нет фото — монограмма."""
     photo = None
     if path:
+        resolved_path = path
+        if not os.path.isabs(resolved_path) and not os.path.exists(resolved_path):
+            for _p in _resolved.parents:
+                cand = _p / resolved_path
+                if cand.is_file():
+                    resolved_path = str(cand)
+                    break
         try:
-            with Image.open(path) as raw:
+            with Image.open(resolved_path) as raw:
                 photo = raw.convert("RGBA")
         except Exception:
             logger.debug("transfer card: portrait %s unreadable", path, exc_info=True)

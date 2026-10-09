@@ -36,7 +36,6 @@ SAMPLE_DEALS = [
         "from_club": "ПСЖ",
         "to_club": "Реал Мадрид",
         "id": 101,
-        "portrait": None,
     },
     {
         "player": "Jude Bellingham",
@@ -45,7 +44,6 @@ SAMPLE_DEALS = [
         "from_club": "Боруссия Д",
         "to_club": "Манчестер Сити",
         "id": 102,
-        "portrait": None,
     },
     {
         "player": "Vinícius Júnior",
@@ -54,7 +52,6 @@ SAMPLE_DEALS = [
         "from_club": "Реал Мадрид",
         "to_club": "Ливерпуль",
         "id": 103,
-        "portrait": None,
     },
     {
         "player": "Bukayo Saka",
@@ -63,7 +60,6 @@ SAMPLE_DEALS = [
         "from_club": "Арсенал",
         "to_club": "Бавария",
         "id": 104,
-        "portrait": "assets/players/b_saka_арсенал.png",
     },
     {
         "player": "Lamine Yamal",
@@ -72,7 +68,6 @@ SAMPLE_DEALS = [
         "from_club": "Барселона",
         "to_club": "ПСЖ",
         "id": 105,
-        "portrait": None,
     },
 ]
 
@@ -126,16 +121,47 @@ SAMPLE_URNS = [
 
 
 def _resolve_sample_portrait(player_name: str, *clubs: str | None) -> str | None:
-    """Ищет портрет игрока в кэше/Renderz, а если нет — подгружает через player_photos."""
+    """Ищет портрет игрока в кэше/Renderz во всех вариантах написания (полное имя, фамилия, инициалы), а если нет — подгружает."""
     try:
+        # 1. Штатный поиск по заявкам (assets/players/ и assets/renderz_portraits/)
         path = req_mod.portrait_path(player_name, *clubs)
-        if path:
+        if path and os.path.isfile(path) and os.path.getsize(path) > 0:
             return path
-        for c in clubs:
-            if c:
-                cached = player_photos.get_photo_path(player_name, c) or player_photos.get_photo_path(player_name)
-                if cached:
-                    return cached
+
+        parts = player_name.strip().split()
+        surname = parts[-1] if len(parts) > 1 else player_name
+        first_initial = parts[0][0] if len(parts) > 1 else ""
+
+        # 2. Поиск по фамилии (на сервере многие файлы сохранены как saka_арсенал.png)
+        if surname != player_name:
+            path = req_mod.portrait_path(surname, *clubs)
+            if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+                return path
+
+        # 3. Прямая проверка файлов во всех возможных вариантах написания
+        name_slugs = [player_photos._slugify(player_name)]
+        if surname != player_name:
+            name_slugs.append(player_photos._slugify(surname))
+            if first_initial:
+                name_slugs.append(f"{player_photos._slugify(first_initial)}_{player_photos._slugify(surname)}")
+
+        club_slugs = [player_photos._slugify(c) for c in clubs if c]
+
+        for c_slug in club_slugs:
+            for n_slug in name_slugs:
+                cand = player_photos.PROJECT_ROOT / "assets" / "players" / f"{n_slug}_{c_slug}.png"
+                if cand.is_file() and cand.stat().st_size > 0:
+                    return str(cand)
+
+        for n_slug in name_slugs:
+            cand = player_photos.PROJECT_ROOT / "assets" / "players" / f"{n_slug}.png"
+            if cand.is_file() and cand.stat().st_size > 0:
+                return str(cand)
+            cand_rz = player_photos.PROJECT_ROOT / "assets" / "renderz_portraits" / f"{n_slug}.png"
+            if cand_rz.is_file() and cand_rz.stat().st_size > 0:
+                return str(cand_rz)
+
+        # 4. Фоновая выкачка, если файла ещё нет
         target = next((c for c in clubs if c), None)
         return player_photos.get_player_photo(player_name, target) or player_photos.get_player_photo(player_name)
     except Exception:
@@ -145,7 +171,7 @@ def _resolve_sample_portrait(player_name: str, *clubs: str | None) -> str | None
 
 def _render_sample_deal(sample: dict) -> bytes:
     portrait = sample.get("portrait") or _resolve_sample_portrait(
-        sample["player"], sample.get("to_club"), sample.get("from_club")
+        sample["player"], sample.get("from_club"), sample.get("to_club")
     )
     return card_gen.render_transfer_card(
         kind="deal",
