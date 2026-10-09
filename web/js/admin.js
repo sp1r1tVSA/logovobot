@@ -1029,6 +1029,13 @@ export class AdminPanel {
         ${m.status === 'open' ? `<button class="adm-btn sm secondary" data-adm-irl-ref="${m.id}" title="Обновить кэфы у букмекера">🔄 Кэфы</button>` : ''}
         <button class="adm-btn sm danger" data-adm-irl-can="${m.id}">🗑 Отменить (возврат)</button>
       `;
+    } else if (m.status === 'void') {
+      const isPast = new Date(m.kickoff_at.replace(' ', 'T')).getTime() <= Date.now();
+      if (!isPast) {
+        actions = `
+          <button class="adm-btn sm secondary" data-adm-irl-restore="${m.id}" title="Вернуть аннулированный матч в черновики">♻️ Вернуть в черновик</button>
+        `;
+      }
     }
 
     const stats = m.bet_stats || { count: 0, total: 0 };
@@ -1282,6 +1289,16 @@ export class AdminPanel {
         await this.loadIrl();
       },
     });
+  }
+
+  async restoreIrlMatch(matchId) {
+    try {
+      await this.post(`${PANEL}/irl/matches/${matchId}/restore`, {});
+      this.toast(`Матч #${matchId} возвращён в черновики`);
+      await this.loadIrl();
+    } catch (e) {
+      this.toast(e.message || 'Ошибка восстановления матча', true);
+    }
   }
 
   async askIrlBets(matchId) {
@@ -3135,6 +3152,8 @@ export class AdminPanel {
       this.publishAllIrl();
     } else if ((el = t('[data-adm-irl-can]'))) {
       this.askIrlCancel(Number(el.dataset.admIrlCan));
+    } else if ((el = t('[data-adm-irl-restore]'))) {
+      this.restoreIrlMatch(Number(el.dataset.admIrlRestore));
     } else if ((el = t('[data-adm-irl-settle]'))) {
       this.askIrlSettle(Number(el.dataset.admIrlSettle));
     } else if ((el = t('[data-adm-irl-score]'))) {

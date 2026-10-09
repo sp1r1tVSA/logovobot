@@ -20934,6 +20934,25 @@ def create_irl_draft(provider_fixture_id, league_id: int | None, league_name: st
                     "odds_updated_at = datetime('now', '+3 hours') WHERE id = ?",
                     (*odds, row["id"]),
                 )
+                return int(row["id"]), False
+            if row["status"] == "void":
+                cursor.execute("""
+                    UPDATE irl_matches
+                    SET status = 'draft',
+                        void_reason = NULL,
+                        settled_by = NULL,
+                        settled_at = NULL,
+                        odd_home = ?,
+                        odd_draw = ?,
+                        odd_away = ?,
+                        odds_updated_at = datetime('now', '+3 hours'),
+                        kickoff_at = ?,
+                        bet_day = ?,
+                        picked_by = ?
+                    WHERE id = ?
+                """, (*odds, start.strftime("%Y-%m-%d %H:%M:%S"), day, picked_by, row["id"]))
+                cursor.execute("DELETE FROM irl_bets WHERE irl_match_id = ? AND status = 'refunded'", (row["id"],))
+                return int(row["id"]), True
             return int(row["id"]), False
         cursor.execute("""
             INSERT INTO irl_matches
@@ -21319,6 +21338,34 @@ def void_irl_match(irl_match_id: int, reason: str | None = None,
         """, ((reason or "").strip()[:300] or None, actor_id, irl_match_id))
     logger.info("IRL match #%s voided: refunded=%s", irl_match_id, refunded)
     return True, {"refunded": refunded}
+
+
+def restore_irl_match(irl_match_id: int, actor_id: int | None = None) -> tuple[bool, dict | str]:
+    """Восстановить аннулированный (void) матч обратно в статус draft."""
+    with _bet_placement_lock, transaction() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT * FROM irl_matches WHERE id = ?", (irl_match_id,))
+        match = cursor.fetchone()
+        if not match:
+            return False, "Матч не найден."
+        if match["status"] != "void":
+            return False, "Матч не аннулирован."
+        start = parse_msk(match["kickoff_at"])
+        if start is None or start <= now_msk():
+            return False, "Матч уже начался или завершился."
+        cursor.execute("""
+            UPDATE irl_matches
+            SET status = 'draft',
+                void_reason = NULL,
+                settled_by = NULL,
+                settled_at = NULL
+            WHERE id = ? AND status = 'void'
+        """, (irl_match_id,))
+        if cursor.rowcount == 0:
+            return False, "Не удалось восстановить матч."
+        cursor.execute("DELETE FROM irl_bets WHERE irl_match_id = ? AND status = 'refunded'", (irl_match_id,))
+    logger.info("IRL match #%s restored to draft by actor=%s", irl_match_id, actor_id)
+    return True, {"status": "draft"}
 
 
 def get_broadcast_user_ids(only_with_team: bool = False) -> list[int]:

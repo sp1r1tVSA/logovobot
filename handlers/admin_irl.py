@@ -13,6 +13,7 @@ handlers/admin_irl.py
   irl:add:<день>               добавить матч — тот же список
   irl:pk:<fixture>:<день>:<id> выбрать матч из списка (id ≠ 0 — заменить им черновик)
   irl:can:<id> / irl:canok:<id>      отмена с подтверждением (ставки возвращаются)
+  irl:rest:<id>                вернуть аннулированный матч в черновики
 
 Заменить можно только черновик: у него нет ставок. Опубликованный матч только
 отменяется — с возвратом ставок. Новый матч из списка всегда создаётся черновиком
@@ -62,6 +63,10 @@ def day_keyboard(matches: list[dict], day: str) -> InlineKeyboardMarkup:
             ])
         elif m["status"] in ("open", "closed"):
             rows.append([InlineKeyboardButton(f"🗑 Отменить #{mid}", callback_data=f"irl:can:{mid}")])
+        elif m["status"] == "void":
+            start = parse_msk(m["kickoff_at"])
+            if start and start > now_msk():
+                rows.append([InlineKeyboardButton(f"♻️ Вернуть #{mid}", callback_data=f"irl:rest:{mid}")])
     common = [InlineKeyboardButton("➕ Добавить матч", callback_data=f"irl:add:{day}")]
     if any(m["status"] == "draft" for m in matches):
         common.insert(0, InlineKeyboardButton("✅ Опубликовать все", callback_data=f"irl:puball:{day}"))
@@ -105,14 +110,19 @@ async def cmd_irl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 # ─── Добавить / заменить ─────────────────────────────────────────────────────
 
 async def _candidates(day: str):
-    """Другие матчи дня из списка турниров, ещё не занесённые в базу. None — провайдер недоступен."""
+    """Другие матчи дня из списка турниров, ещё не занесённые в базу (или аннулированные). None — провайдер недоступен."""
     priority = list(config.IRL_COMPETITION_PRIORITY)
     fixtures = await _get_provider().get_prematch_fixtures(day, priority)
     if fixtures is None:
         return None
     now = now_msk()
-    fresh = [f for f in fixtures
-             if f.kickoff > now and not database.get_irl_match_by_fixture(f.fixture_id)]
+    fresh = []
+    for f in fixtures:
+        if f.kickoff <= now:
+            continue
+        existing = database.get_irl_match_by_fixture(f.fixture_id)
+        if existing is None or existing["status"] == "void":
+            fresh.append(f)
     rank = {league: i for i, league in enumerate(priority)}
     fresh.sort(key=lambda f: (rank.get(f.league_id, len(rank)), f.kickoff))
     return fresh[:CANDIDATES_LIMIT]
@@ -148,8 +158,9 @@ async def _pick_fixture(update: Update, actor_id: int, fixture_id: str, day: str
     if not config.IRL_BOOKMAKER_ID:
         await query.answer("Не задан IRL_BOOKMAKER_ID", show_alert=True)
         return
-    if database.get_irl_match_by_fixture(fixture_id):
-        await query.answer("Этот матч уже есть в списке", show_alert=True)
+    existing = database.get_irl_match_by_fixture(fixture_id)
+    if existing and existing["status"] not in ("draft", "void"):
+        await query.answer("Этот матч уже опубликован или завершён", show_alert=True)
         return
     provider = _get_provider()
     fx = await provider.get_prematch_fixture(fixture_id)
@@ -172,7 +183,9 @@ async def _pick_fixture(update: Update, actor_id: int, fixture_id: str, day: str
         return
     await _answer(update)
     label = f"{fx.home} — {fx.away}"
-    note = f"➕ Добавлен черновик #{match_id}: {html.escape(label)}"
+    was_void = existing and existing["status"] == "void"
+    action_word = "♻️ Черновик восстановлен" if was_void else "➕ Добавлен черновик"
+    note = f"{action_word} #{match_id}: {html.escape(label)}"
     if replace_id:
         old = database.get_irl_match(replace_id)
         if old and old["status"] == "draft":
@@ -183,8 +196,9 @@ async def _pick_fixture(update: Update, actor_id: int, fixture_id: str, day: str
                 note = f"🔁 Черновик #{replace_id} заменён на #{match_id}: {html.escape(label)}"
         else:
             note += f"\n⚠️ #{replace_id} уже не черновик — оставлен как есть."
-    if note.startswith("➕"):
-        await admin_journal.record(actor_id, "irl_match_added", "irl_match", match_id, new=label)
+    if not replace_id:
+        event_name = "irl_match_restored" if was_void else "irl_match_added"
+        await admin_journal.record(actor_id, event_name, "irl_match", match_id, new=label)
     await _show_day(update, day, note)
 
 
@@ -207,9 +221,12 @@ async def _confirm_cancel(update: Update, match_id: int) -> None:
         await update.callback_query.answer("Матч уже рассчитан или аннулирован", show_alert=True)
         return
     await _answer(update)
-    stats = database.get_irl_match_bet_stats(match_id)
-    text = (f"🗑 <b>Отменить матч #{match_id}?</b>\n\n{irl_jobs._match_line(m)}\n\n"
-            f"Ставок: {stats['count']} на {stats['total']:,} 🪙 — они вернутся игрокам целиком.")
+    if m["status"] == "draft":
+        text = (f"🗑 <b>Отменить матч #{match_id}?</b> (черновик)\n\n{irl_jobs._match_line(m)}\n\n"
+                f"Матч будет аннулирован (его можно вернуть кнопкой ♻️ или через «Добавить матч»).")
+    else:
+        text = (f"🗑 <b>Отменить матч #{match_id}?</b>\n\n{irl_jobs._match_line(m)}\n\n"
+                f"Ставок: {stats['count']} на {stats['total']:,} 🪙 — они вернутся игрокам целиком.")
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("🗑 Да, отменить", callback_data=f"irl:canok:{match_id}"),
         InlineKeyboardButton("◀️ Назад", callback_data=f"irl:day:{m['bet_day']}"),
@@ -231,6 +248,37 @@ async def _cancel(update: Update, actor_id: int, match_id: int) -> None:
     await _show_day(update, day, note)
 
 
+async def _restore(update: Update, actor_id: int, match_id: int) -> None:
+    m = database.get_irl_match(match_id)
+    if not m:
+        await update.callback_query.answer("Матч не найден", show_alert=True)
+        return
+    if m["status"] != "void":
+        await update.callback_query.answer("Матч не аннулирован", show_alert=True)
+        return
+    start = parse_msk(m["kickoff_at"])
+    if start is None or start <= now_msk():
+        await update.callback_query.answer("Матч уже начался или завершился", show_alert=True)
+        return
+    try:
+        provider = _get_provider()
+        if config.IRL_BOOKMAKER_ID:
+            odds = await provider.get_match_winner_odds(m["provider_fixture_id"], int(config.IRL_BOOKMAKER_ID))
+            if odds:
+                database.update_irl_odds(match_id, odds.home, odds.draw, odds.away)
+    except Exception as e:
+        logger.warning("Could not refresh odds on restore for match #%s: %s", match_id, e)
+
+    ok, info = database.restore_irl_match(match_id, actor_id=actor_id)
+    label = f"{m['home']} — {m['away']}"
+    if ok:
+        await admin_journal.record(actor_id, "irl_match_restored", "irl_match", match_id, new=label)
+        note = f"♻️ Матч #{match_id} возвращён в черновики: {html.escape(label)}."
+    else:
+        note = f"⚠️ #{match_id}: {html.escape(str(info))}"
+    await _show_day(update, m["bet_day"] or today_msk_str(), note)
+
+
 # ─── Диспетчер кнопок ────────────────────────────────────────────────────────
 
 async def cb_irl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -242,7 +290,7 @@ async def cb_irl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     actor_id = update.effective_user.id
     day_arg = arg if _DAY_RE.match(arg) else today_msk_str()
 
-    if action in ("pub", "rep", "can", "canok") and not arg.isdigit():
+    if action in ("pub", "rep", "can", "canok", "rest") and not arg.isdigit():
         await update.callback_query.answer("Некорректная кнопка", show_alert=True)
         return
 
@@ -278,6 +326,9 @@ async def cb_irl(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     elif action == "canok":
         await _answer(update)
         await _cancel(update, actor_id, int(arg))
+    elif action == "rest":
+        await _answer(update)
+        await _restore(update, actor_id, int(arg))
     else:
         await update.callback_query.answer("Некорректная кнопка", show_alert=True)
 

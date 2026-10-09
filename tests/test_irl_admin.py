@@ -374,8 +374,58 @@ class TestSettleCommand:
 class TestWiring:
     def test_actions_are_catalogued(self):
         for action in ("irl_match_added", "irl_match_replaced", "irl_match_published",
-                       "irl_match_cancelled", "irl_match_settled"):
+                       "irl_match_cancelled", "irl_match_settled", "irl_match_restored"):
             assert action in admin_journal.ACTIONS
+
+
+class TestRestoreIrlMatch:
+    def test_voided_match_appears_in_candidates(self, monkeypatch):
+        old = draft(1)
+        database.void_irl_match(old, "Отменён")
+        use_provider(monkeypatch, FakeProvider([fx(1)], {1: (2.1, 3.2, 3.5)}))
+        u = press(f"irl:add:{DAY}")
+        text = shown(u)
+        assert "Arsenal" in text
+        buttons = [b.callback_data for row in u.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+                   .inline_keyboard for b in row]
+        assert f"irl:pk:1:{DAY}:0" in buttons
+
+    def test_pick_voided_match_resurrects_draft(self, monkeypatch, _setup):
+        old = draft(1)
+        database.void_irl_match(old, "Отменён")
+        use_provider(monkeypatch, FakeProvider([fx(1)], {1: (2.5, 3.4, 3.1)}))
+        press(f"irl:pk:1:{DAY}:0")
+        m = database.get_irl_match(old)
+        assert m["status"] == "draft"
+        assert m["odd_home"] == 2.5
+        assert m["void_reason"] is None
+        assert _setup.await_args.args[1] == "irl_match_restored"
+
+    def test_restore_button_in_day_keyboard_for_voided_match(self):
+        mid = draft(1)
+        database.void_irl_match(mid, "Отменён")
+        u = press(f"irl:day:{DAY}")
+        buttons = [b.callback_data for row in u.callback_query.edit_message_text.await_args.kwargs["reply_markup"]
+                   .inline_keyboard for b in row]
+        assert f"irl:rest:{mid}" in buttons
+
+    def test_restore_button_restores_draft(self, monkeypatch, _setup):
+        mid = draft(1)
+        database.void_irl_match(mid, "Отменён")
+        use_provider(monkeypatch, FakeProvider([fx(1)], {1: (2.2, 3.3, 3.4)}))
+        u = press(f"irl:rest:{mid}")
+        m = database.get_irl_match(mid)
+        assert m["status"] == "draft"
+        assert m["void_reason"] is None
+        assert _setup.await_args.args[1] == "irl_match_restored"
+        assert "возвращён в черновики" in shown(u)
+
+    def test_restore_refused_if_match_started(self, monkeypatch):
+        mid = draft(1, hours=-1)
+        database.void_irl_match(mid, "Отменён")
+        u = press(f"irl:rest:{mid}")
+        assert "уже начался или завершился" in u.callback_query.answer.await_args.args[0]
+        assert database.get_irl_match(mid)["status"] == "void"
 
     def test_menu_has_irl(self):
         from handlers import bot_menu

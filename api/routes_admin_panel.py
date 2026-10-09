@@ -809,7 +809,7 @@ async def handle_panel_irl_candidates(request: web.Request) -> web.Response:
         return _error(503, "provider_unavailable", "Провайдер не вернул расписание матчей.")
 
     existing_matches = await asyncio.to_thread(database.list_irl_matches, bet_day=day, limit=100)
-    existing_fids = {str(m["provider_fixture_id"]) for m in existing_matches}
+    existing_fids = {str(m["provider_fixture_id"]) for m in existing_matches if m["status"] != "void"}
 
     fresh = [f for f in fixtures if str(f.fixture_id) not in existing_fids and f.kickoff > now_msk()]
     rank = {league: i for i, league in enumerate(priority)}
@@ -954,6 +954,41 @@ async def handle_panel_irl_cancel(request: web.Request) -> web.Response:
     await admin_journal.record(scope.actor_id, "irl_match_cancelled", "irl_match", match_id,
                                old=m["status"], new=f"возвращено ставок: {refunded}")
     return web.json_response({"status": "ok", "refunded": refunded})
+
+
+async def handle_panel_irl_restore(request: web.Request) -> web.Response:
+    """POST /api/admin/panel/irl/matches/{id}/restore"""
+    scope = _resolve_scope(request)
+    if isinstance(scope, web.Response):
+        return scope
+    denied = _global_only(scope)
+    if denied is not None:
+        return denied
+
+    match_id = path_int(request, "id")
+    m = await asyncio.to_thread(database.get_irl_match, match_id)
+    if not m:
+        return _error(404, "not_found", "Матч не найден.")
+    if m["status"] != "void":
+        return _error(400, "not_void", "Матч не аннулирован.")
+
+    try:
+        from services.sports import get_sports_provider
+        provider = get_sports_provider()
+        if config.IRL_BOOKMAKER_ID:
+            odds = await provider.get_match_winner_odds(m["provider_fixture_id"], int(config.IRL_BOOKMAKER_ID))
+            if odds:
+                await asyncio.to_thread(database.update_irl_odds, match_id, odds.home, odds.draw, odds.away)
+    except Exception as e:
+        logger.warning("Could not refresh odds on restore for match #%s: %s", match_id, e)
+
+    ok, info = await asyncio.to_thread(database.restore_irl_match, match_id, actor_id=scope.actor_id)
+    if not ok:
+        return _error(400, "restore_failed", str(info))
+
+    await admin_journal.record(scope.actor_id, "irl_match_restored", "irl_match", match_id,
+                               new=f"{m['home']} — {m['away']}")
+    return web.json_response({"status": "ok", "match_id": match_id})
 
 
 async def handle_panel_irl_settle(request: web.Request) -> web.Response:
@@ -1115,6 +1150,7 @@ def register_admin_panel_routes(app: web.Application) -> None:
     r.add_post("/api/admin/panel/irl/matches/publish-all", handle_panel_irl_publish_all)
     r.add_post("/api/admin/panel/irl/matches/{id}/publish", handle_panel_irl_publish)
     r.add_post("/api/admin/panel/irl/matches/{id}/cancel", handle_panel_irl_cancel)
+    r.add_post("/api/admin/panel/irl/matches/{id}/restore", handle_panel_irl_restore)
     r.add_post("/api/admin/panel/irl/matches/{id}/settle", handle_panel_irl_settle)
     r.add_post("/api/admin/panel/irl/matches/{id}/refresh-odds", handle_panel_irl_refresh_odds)
     r.add_post("/api/admin/panel/irl/matches/{id}/score", handle_panel_irl_update_score)

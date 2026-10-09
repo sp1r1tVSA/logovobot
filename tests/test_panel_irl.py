@@ -206,3 +206,33 @@ class TestAdminPanelIrl(AioHTTPTestCase):
     async def test_non_admin_forbidden(self):
         resp = await self.client.get("/api/admin/panel/irl/matches", headers=self._headers(REGULAR_USER))
         self.assertEqual(resp.status, 403)
+
+    async def test_restore_voided_match(self):
+        kickoff = now_msk() + timedelta(hours=3)
+        mid, _ = database.create_irl_draft(
+            "fix_restore", 39, "Premier League", "Arsenal", "Chelsea", kickoff, 2.0, 3.2, 3.8,
+            bet_day=today_msk_str()
+        )
+        database.void_irl_match(mid, "Отменён админом")
+        self.assertEqual(database.get_irl_match(mid)["status"], "void")
+
+        resp = await self.client.post(f"/api/admin/panel/irl/matches/{mid}/restore", headers=self._headers())
+        self.assertEqual(resp.status, 200)
+        data = await resp.json()
+        self.assertEqual(data["status"], "ok")
+        self.assertEqual(data["match_id"], mid)
+
+        m = database.get_irl_match(mid)
+        self.assertEqual(m["status"], "draft")
+        self.assertIsNone(m["void_reason"])
+
+    async def test_restore_non_void_rejected(self):
+        kickoff = now_msk() + timedelta(hours=3)
+        mid, _ = database.create_irl_draft(
+            "fix_novoid", 39, "Premier League", "Arsenal", "Chelsea", kickoff, 2.0, 3.2, 3.8,
+            bet_day=today_msk_str()
+        )
+        resp = await self.client.post(f"/api/admin/panel/irl/matches/{mid}/restore", headers=self._headers())
+        self.assertEqual(resp.status, 400)
+        data = await resp.json()
+        self.assertEqual(data["error"], "not_void")
