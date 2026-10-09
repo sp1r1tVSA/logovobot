@@ -429,8 +429,9 @@ def test_admin_shop_reset_limits(test_user):
 def test_slot_swap_compensates_both_clubs(test_user):
     """
     «Слот обмена» (6 000 🪙):
-    Компенсирует слоты покупки и продажи ОБОИМ участникам сделки,
-    даже если у второго клуба лимит слотов был 0.
+    Каждый платит 6к за свой клуб:
+    1. Если у второго клуба 0 слотов и он НЕ купил «Слот обмена» — обмен блокируется (второй не может ехать «зайцем»).
+    2. Когда ОБА тренера покупают «Слот обмена» — награда списывается у ОБОИХ и слоты компенсируются ОБОИМ.
     """
     other_user_id = 8882002
     with database.transaction() as conn:
@@ -443,7 +444,7 @@ def test_slot_swap_compensates_both_clubs(test_user):
 
     wid = transfer_repo.create_window(1, 10, title="ТО Обмены")
     transfer_repo.open_window(wid, 1)
-    # Ставим 0 базовых слотов для проверки, что Слот обмена открывает сделку обоим
+    # Ставим 0 базовых слотов в окне
     transfer_repo.update_window_settings(wid, {
         "max_buys": 0,
         "max_sells": 0,
@@ -451,11 +452,11 @@ def test_slot_swap_compensates_both_clubs(test_user):
     transfer_repo.set_club_budget(wid, "Арсенал", 50000, 1)
     transfer_repo.set_club_budget(wid, "Челси", 50000, 1)
 
-    # Покупаем «Слот обмена» для test_user (Арсенал)
+    # 1. Сначала только Арсенал купил «Слот обмена» (Челси НЕ платил 6к)
     shop_service.buy_shop_item(test_user["id"], "slot_swap")
     assert database.count_active_shop_item(test_user["id"], "slot_swap") == 1
+    assert database.count_active_shop_item(other_user_id, "slot_swap") == 0
 
-    # Совершаем обмен
     t1 = req_mod.create_swap(
         test_user["id"],
         other_club="Челси",
@@ -468,18 +469,49 @@ def test_slot_swap_compensates_both_clubs(test_user):
     )
     assert t1["status"] == "pending_counterparty"
 
-    # Предмет израсходован
+    # Предмет списан ТОЛЬКО у Арсенала (он заплатил 6к), Челси ничего не платил
     assert database.count_active_shop_item(test_user["id"], "slot_swap") == 0
 
-    # Слоты компенсированы ОБОИМ клубам
-    slot_purchases = transfer_repo.list_slot_purchases(wid)
-    arsenal_slots = [p for p in slot_purchases if p["club_name"] == "Арсенал"]
-    chelsea_slots = [p for p in slot_purchases if p["club_name"] == "Челси"]
+    # Слоты компенсированы ТОЛЬКО Арсеналу! Челси бесплатных слотов не получил:
+    slot_purchases_1 = transfer_repo.list_slot_purchases(wid)
+    arsenal_slots_1 = [p for p in slot_purchases_1 if p["club_name"] == "Арсенал"]
+    chelsea_slots_1 = [p for p in slot_purchases_1 if p["club_name"] == "Челси"]
+    assert len(arsenal_slots_1) == 2  # buy + sell
+    assert len(chelsea_slots_1) == 0  # 0, потому что Челси не платил 6к!
 
-    assert len(arsenal_slots) == 2  # buy + sell
-    assert len(chelsea_slots) == 2  # buy + sell
-    assert any(p["slot_type"] == "buy" for p in chelsea_slots)
-    assert any(p["slot_type"] == "sell" for p in chelsea_slots)
+    # 2. Теперь делаем второй обмен, где ОБА тренера купили «Слот обмена» (ОБА платят по 6к!)
+    database.admin_grant_shop_item(test_user["id"], "slot_swap", 1)
+    database.add_coins(other_user_id, 20000, tx_type="test_seed")
+    shop_service.buy_shop_item(other_user_id, "slot_swap")
+    assert database.count_active_shop_item(test_user["id"], "slot_swap") == 1
+    assert database.count_active_shop_item(other_user_id, "slot_swap") == 1
+
+    with database.transaction() as conn:
+        conn.execute("INSERT OR REPLACE INTO squad_players (team_name, player_name, position) VALUES ('Арсенал', 'D. Rice', 'CDM')")
+        conn.execute("INSERT OR REPLACE INTO squad_players (team_name, player_name, position) VALUES ('Челси', 'E. Fernandez', 'CM')")
+
+    t2 = req_mod.create_swap(
+        test_user["id"],
+        other_club="Челси",
+        give_player="D. Rice",
+        give_price="20",
+        give_ovr="105",
+        get_player="E. Fernandez",
+        get_price="20",
+        get_ovr="105",
+    )
+    assert t2["status"] == "pending_counterparty"
+
+    # Предмет списан у ОБОИХ (оба заплатили по 6к):
+    assert database.count_active_shop_item(test_user["id"], "slot_swap") == 0
+    assert database.count_active_shop_item(other_user_id, "slot_swap") == 0
+
+    # Теперь слоты компенсированы ОБОИМ клубам:
+    slot_purchases_2 = transfer_repo.list_slot_purchases(wid)
+    arsenal_slots_2 = [p for p in slot_purchases_2 if p["club_name"] == "Арсенал"]
+    chelsea_slots_2 = [p for p in slot_purchases_2 if p["club_name"] == "Челси"]
+    assert len(arsenal_slots_2) == 4  # 2 от первого обмена + 2 от второго
+    assert len(chelsea_slots_2) == 2  # 2 от второго обмена, где Челси заплатил 6к!
 
     transfer_repo.close_window(wid, 1)
 
