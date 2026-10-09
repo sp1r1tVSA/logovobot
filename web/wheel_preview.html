@@ -380,6 +380,61 @@
       font-size: 15px;
       cursor: pointer;
     }
+
+    .confirm-details {
+      background: rgba(255, 255, 255, 0.05);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      border-radius: 16px;
+      padding: 14px 16px;
+      margin-bottom: 20px;
+      text-align: left;
+    }
+
+    .confirm-price-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding-bottom: 8px;
+      margin-bottom: 8px;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    }
+
+    .confirm-price-row .val {
+      color: var(--accent-gold);
+      font-weight: 800;
+      font-size: 16px;
+    }
+
+    .confirm-rules {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+      font-size: 12.5px;
+      color: #d1d5db;
+    }
+
+    .confirm-rules .warn {
+      color: #ff9e00;
+      font-weight: 700;
+    }
+
+    .btn-cancel {
+      width: 100%;
+      padding: 11px;
+      background: transparent;
+      color: var(--text-muted);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 12px;
+      font-weight: 700;
+      font-size: 14px;
+      cursor: pointer;
+      margin-top: 10px;
+    }
+
+    .btn-cancel:hover {
+      background: rgba(255, 255, 255, 0.05);
+      color: #fff;
+    }
   </style>
 </head>
 <body>
@@ -435,6 +490,28 @@
       <div class="history-list" id="history-list">
         <span style="color: var(--text-muted); font-size: 12px;">Пока нет наград...</span>
       </div>
+    </div>
+  </div>
+
+  <!-- Confirmation Modal -->
+  <div class="modal-overlay" id="confirm-modal">
+    <div class="winner-card">
+      <div class="winner-subtitle">🎰 Подтверждение покупки</div>
+      <div class="winner-icon" style="font-size: 54px; animation: none;">🎟️</div>
+      <div class="winner-title" style="margin-bottom: 12px;">Купить билет в рулетку?</div>
+      <div class="confirm-details">
+        <div class="confirm-price-row">
+          <span style="color: var(--text-muted); font-size: 13px;">Стоимость:</span>
+          <span class="val">25 000 🪙</span>
+        </div>
+        <div class="confirm-rules">
+          <div class="warn">⚠️ Лимит: строго 1 билет за сезон!</div>
+          <div>🎲 Призы: любая награда из списка или секретная.</div>
+          <div>🔒 Повторный прокрут в сезоне недоступен.</div>
+        </div>
+      </div>
+      <button class="btn-claim" id="btn-confirm-spin">Купить и крутить</button>
+      <button class="btn-cancel" id="btn-cancel-spin">Отмена</button>
     </div>
   </div>
 
@@ -745,9 +822,34 @@
       anim();
     }
 
+    const confirmModalEl = document.getElementById('confirm-modal');
+    const btnConfirmSpin = document.getElementById('btn-confirm-spin');
+    const btnCancelSpin = document.getElementById('btn-cancel-spin');
+
+    function openConfirmSpin() {
+      if (isSpinning) return;
+      if (balance < SPIN_PRICE) {
+        alert('Недостаточно монет для покупки билета!');
+        return;
+      }
+      confirmModalEl.classList.add('active');
+    }
+
+    function closeConfirmSpin() {
+      confirmModalEl.classList.remove('active');
+    }
+
     // Listeners
-    spinBtn.addEventListener('click', spinWheel);
-    centerHub.addEventListener('click', spinWheel);
+    spinBtn.addEventListener('click', openConfirmSpin);
+    centerHub.addEventListener('click', openConfirmSpin);
+    btnConfirmSpin.addEventListener('click', () => {
+      closeConfirmSpin();
+      spinWheel();
+    });
+    btnCancelSpin.addEventListener('click', closeConfirmSpin);
+    confirmModalEl.addEventListener('click', (e) => {
+      if (e.target === confirmModalEl) closeConfirmSpin();
+    });
     modalClaimBtn.addEventListener('click', () => modalEl.classList.remove('active'));
     resetBalanceBtn.addEventListener('click', () => {
       balance = 100000;

@@ -576,3 +576,76 @@
   cursor: pointer;
   box-shadow: 0 6px 20px rgba(251, 133, 0, 0.4);
 }
+
+/* Модальное окно подтверждения покупки билета в рулетку */
+.wheel-confirm-details {
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 14px 16px;
+  margin-bottom: 20px;
+  width: 100%;
+  text-align: left;
+}
+
+.wheel-confirm-price {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding-bottom: 10px;
+  margin-bottom: 10px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.wheel-confirm-price .price-label {
+  font-size: 13px;
+  color: var(--shop-muted);
+}
+
+.wheel-confirm-price .price-val {
+  font-size: 17px;
+  font-weight: 800;
+  color: var(--shop-gold);
+}
+
+.wheel-confirm-rules {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.wheel-confirm-rules .rule-item {
+  font-size: 12.5px;
+  line-height: 1.4;
+  color: #d1d5db;
+}
+
+.wheel-confirm-rules .rule-item.warning {
+  color: #ff9e00;
+  font-weight: 600;
+}
+
+.wheel-confirm-actions {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 100%;
+}
+
+.wheel-cancel-btn {
+  width: 100%;
+  background: transparent;
+  color: var(--shop-muted);
+  font-weight: 600;
+  font-size: 14px;
+  padding: 10px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.wheel-cancel-btn:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: #fff;
+}

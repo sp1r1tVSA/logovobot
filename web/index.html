@@ -444,6 +444,29 @@
         </div>
       </div>
 
+      <!-- Предупредительное модальное окно подтверждения покупки билета в Рулетку -->
+      <div class="wheel-modal-overlay" id="wheel-confirm-modal">
+        <div class="wheel-modal-content">
+          <div class="wheel-modal-icon">🎰</div>
+          <div class="wheel-modal-title">Купить билет в рулетку?</div>
+          <div class="wheel-confirm-details">
+            <div class="wheel-confirm-price">
+              <span class="price-label">Списание монет:</span>
+              <span class="price-val">25 000 🪙</span>
+            </div>
+            <div class="wheel-confirm-rules">
+              <div class="rule-item warning">⚠️ <b>Лимит:</b> строго 1 покупка за сезон!</div>
+              <div class="rule-item">🎁 <b>Призы:</b> любая награда из списка или секретный приз.</div>
+              <div class="rule-item">🔒 Повторно крутить колесо в этом сезоне будет нельзя.</div>
+            </div>
+          </div>
+          <div class="wheel-confirm-actions">
+            <button class="wheel-modal-btn" id="wheel-confirm-spin-btn">Купить и крутить</button>
+            <button class="wheel-cancel-btn" id="wheel-confirm-cancel-btn">Отмена</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Модальное окно выигрыша в Рулетке -->
       <div class="wheel-modal-overlay" id="wheel-modal">
         <div class="wheel-modal-content">

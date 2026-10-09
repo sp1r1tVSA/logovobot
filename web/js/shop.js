@@ -56,8 +56,20 @@ class ShopManager {
     }
 
     // Слушатели событий Колеса
-    document.getElementById('wheel-spin-btn')?.addEventListener('click', () => this.spinWheel());
-    document.getElementById('center-hub')?.addEventListener('click', () => this.spinWheel());
+    document.getElementById('wheel-spin-btn')?.addEventListener('click', () => this.confirmSpinRoulette());
+    document.getElementById('center-hub')?.addEventListener('click', () => this.confirmSpinRoulette());
+    document.getElementById('wheel-confirm-spin-btn')?.addEventListener('click', () => {
+      this.closeConfirmModal();
+      this.spinWheel();
+    });
+    document.getElementById('wheel-confirm-cancel-btn')?.addEventListener('click', () => {
+      this.closeConfirmModal();
+    });
+    document.getElementById('wheel-confirm-modal')?.addEventListener('click', (e) => {
+      if (e.target.id === 'wheel-confirm-modal') {
+        this.closeConfirmModal();
+      }
+    });
     document.getElementById('wheel-modal-claim-btn')?.addEventListener('click', () => {
       document.getElementById('wheel-modal')?.classList.remove('active');
     });
@@ -271,6 +283,10 @@ class ShopManager {
   }
 
   async buyItem(itemId) {
+    if (itemId === 'roulette_spin') {
+      this.confirmSpinRoulette();
+      return;
+    }
     const target = (this.catalog?.items || []).find(it => it.id === itemId);
     if (!target) return;
 
@@ -506,6 +522,36 @@ class ShopManager {
       this.isSpinning = false;
       if (spinBtn) spinBtn.disabled = false;
     }
+  }
+
+  confirmSpinRoulette() {
+    if (this.isSpinning) return;
+    const spinsThisSeason = this.catalog?.roulette_spins_this_season ?? 0;
+    if (spinsThisSeason >= 1) {
+      alert('Лимит на этот сезон уже исчерпан (максимум 1 билет за сезон).');
+      return;
+    }
+    const balance = store.state.user?.balance ?? 0;
+    if (balance < SPIN_PRICE) {
+      alert(`Для прокрута рулетки нужно ${UIRenderer.formatNumber(SPIN_PRICE)} 🪙`);
+      return;
+    }
+
+    const modal = document.getElementById('wheel-confirm-modal');
+    if (modal) {
+      modal.classList.add('active');
+      return;
+    }
+
+    // Резервный нативный диалог
+    const msg = `Купить «Билет в рулетку» за ${UIRenderer.formatNumber(SPIN_PRICE)} 🪙?\n\n⚠️ Внимание: билет можно покупать только 1 раз за сезон! Вы уверены?`;
+    tgBridge.showConfirm(msg, (ok) => {
+      if (ok) this.spinWheel();
+    });
+  }
+
+  closeConfirmModal() {
+    document.getElementById('wheel-confirm-modal')?.classList.remove('active');
   }
 
   showWinnerModal(sector, label) {
