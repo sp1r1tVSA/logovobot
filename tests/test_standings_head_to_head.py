@@ -2,8 +2,8 @@
 
 Порядок таблицы: очки → личные встречи клубов, набравших поровну (мини-турнир:
 очки, разница, забитые) → общая разница → забитые → победы. Личные встречи
-учитываются только когда сыграны все матчи этих клубов между собой, иначе
-середина сезона наказывает клуб, ещё не успевший сыграть с соперником.
+учитываются сразу при наличии сыгранных матчей, даже если в сезоне запланированы
+последующие встречи (чтобы корректно определять места в еврокубках по итогам 1-го круга).
 """
 import unittest
 import uuid
@@ -44,10 +44,10 @@ class TestSortStandings(unittest.TestCase):
         h2h = _h2h(("A", 1, "B", 0))
         self.assertEqual(_names(database.sort_standings(rows, h2h)), ["B", "A"])
 
-    def test_unplayed_meeting_falls_back_to_goal_difference(self):
+    def test_unplayed_return_leg_does_not_block_played_head_to_head(self):
         rows = [_row("A", 6, 4, 3), _row("B", 6, 10, 2)]
         h2h = _h2h(("A", 1, "B", 0), unplayed={("A", "B"): 1})
-        self.assertEqual(_names(database.sort_standings(rows, h2h)), ["B", "A"])
+        self.assertEqual(_names(database.sort_standings(rows, h2h)), ["A", "B"])
 
     def test_clubs_that_never_met_use_goal_difference(self):
         rows = [_row("A", 6, 4, 3), _row("B", 6, 10, 2)]
@@ -138,9 +138,9 @@ class TestGetStandingsHeadToHead(unittest.TestCase):
     def test_winner_of_the_meeting_goes_above(self):
         self.assertEqual(self._order(), [self.x, self.y, self.z])
 
-    def test_pending_return_leg_suspends_head_to_head(self):
+    def test_pending_return_leg_does_not_suspend_head_to_head(self):
         self._add(3, self.y, self.x, status="pending")
-        self.assertEqual(self._order(), [self.y, self.x, self.z])
+        self.assertEqual(self._order(), [self.x, self.y, self.z])
 
     def test_return_leg_beyond_the_snapshot_round_is_ignored(self):
         self._add(3, self.y, self.x, status="pending")

@@ -3150,11 +3150,11 @@ def _new_standings_row(telegram_id, team_name: str, username: str) -> dict:
 
 
 def _h2h_complete(names: list[str], h2h: dict) -> bool:
-    """Every pair in `names` has met, and none of their scheduled meetings is still unplayed."""
+    """Every pair in `names` has met at least once."""
     for i, a in enumerate(names):
         for b in names[i + 1:]:
             pair = h2h.get(frozenset((a, b)))
-            if not pair or not pair["results"] or pair["unplayed"]:
+            if not pair or not pair["results"]:
                 return False
     return True
 
@@ -3163,9 +3163,9 @@ def _rank_tied_on_points(group: list[dict], h2h: dict) -> list[dict]:
     """Order clubs level on points: head-to-head first, then the overall table.
 
     Head-to-head is a mini-league of the matches between the tied clubs only —
-    points, then goal difference, then goals scored. It counts only once all their
-    meetings with each other are played: mid-season a club that has not met its
-    rival yet would otherwise lose the tie to one that already has. When the
+    points, then goal difference, then goals scored. It applies whenever all pairs
+    in the tied group have met at least once (even if subsequent meetings in the season
+    are unplayed, e.g. after round 1 when European Cup spots are determined). When the
     mini-league splits the group, it is re-applied to every sub-group still level
     (UEFA style), since the matches against the clubs just separated no longer
     matter. When it separates nobody, overall goal difference, goals scored and
