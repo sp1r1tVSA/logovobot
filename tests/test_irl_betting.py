@@ -13,6 +13,7 @@ import pytest
 import config
 import database
 from services import irl_betting as irl
+from services.betting_limits import BettingLimitsService, DEFAULT_IRL_MAX_PAYOUT
 from services.irl_betting import Candidate
 from time_utils import now_msk
 
@@ -516,14 +517,31 @@ class TestIrlExpress:
         ]
         ok, res = database.place_irl_express(850001, items, 300)
         assert ok, res
-        assert res["total_odd"] > 1.0
-        assert res["potential_win"] > 300
+        assert res["total_odd"] == 32.0  # Clean product: 2.0 * 3.2 * 5.0
+        assert res["potential_win"] == min(DEFAULT_IRL_MAX_PAYOUT, int(round(300 * 32.0)))
         assert balance_of(850001) == 4700
 
         bets = database.get_user_irl_bets(850001)
         assert len(bets) == 1
         assert bets[0]["bet_type"] == "express"
         assert len(bets[0]["items"]) == 3
+        assert bets[0]["total_odd"] == 32.0
+
+    def test_express_ignores_fifa_margin(self):
+        """IRL-экспрессы не облагаются маржой экспресса лиги, кэфы перемножаются начисто."""
+        make_user(850099)
+        m1 = open_match(odds=(2.0, 3.0, 4.0))
+        m2 = open_match(odds=(1.5, 3.5, 5.0))
+        items = [
+            {"match_id": m1, "outcome": "home"},  # 2.0
+            {"match_id": m2, "outcome": "draw"},  # 3.5
+        ]
+        # Устанавливаем маржу экспресса 15% (как для виртуальных матчей)
+        BettingLimitsService.set_limit("global", 0, "express_margin_pct", 15)
+        ok, res = database.place_irl_express(850099, items, 100)
+        assert ok, res
+        # Должно быть строго 2.0 * 3.5 = 7.0, а не 7.0 * 0.85 = 5.95
+        assert res["total_odd"] == 7.0
 
     def test_express_invalid_legs_count(self):
         make_user(850002)

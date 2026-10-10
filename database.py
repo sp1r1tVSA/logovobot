@@ -21531,8 +21531,8 @@ def place_irl_express(user_id: int, items: list[dict], amount,
                     "away": match["away"],
                 })
 
-            margin_pct = get_express_margin_pct()
-            total_odd = express_odd([v["odd"] for v in validated_items], margin_pct)
+            # IRL-экспрессы не облагаются маржой экспресса (кэфы берутся у букмекера)
+            total_odd = express_odd([v["odd"] for v in validated_items], 0)
             max_payout = int(limits.get("irl_max_payout") or DEFAULT_IRL_MAX_PAYOUT)
             potential = min(max_payout, int(round(amount * total_odd)))
 
@@ -21810,14 +21810,13 @@ def settle_irl_match(irl_match_id: int, result: str, home_goals: int | None = No
                     _credit_irl(cursor, exp["user_id"], stake, IRL_TX_EXPRESS_REFUND, exp_id, won=False)
                     _notify_irl_express(cursor, {**dict(exp), "legs_count": len(items)}, "refunded", stake)
             else:
-                margin_pct = get_express_margin_pct()
-                effective_odd = express_odd([w["odd"] for w in won_items], margin_pct)
+                effective_odd = express_odd([w["odd"] for w in won_items], 0)
                 try:
-                    from services.betting_limits import BettingLimitsService
+                    from services.betting_limits import BettingLimitsService, DEFAULT_IRL_MAX_PAYOUT
                     limits = BettingLimitsService.get_user_effective_limits(exp["user_id"], None)
-                    max_payout = min(_MAX_PAYOUT, int(limits.get("max_payout") or _MAX_PAYOUT))
+                    max_payout = int(limits.get("irl_max_payout") or DEFAULT_IRL_MAX_PAYOUT)
                 except Exception:
-                    max_payout = _MAX_PAYOUT
+                    max_payout = DEFAULT_IRL_MAX_PAYOUT
                 payout = min(max_payout, int(round(int(exp["amount"]) * effective_odd)))
                 cursor.execute("""
                     UPDATE irl_expresses SET status = 'won', actual_payout = ?, settled_at = datetime('now', '+3 hours')
@@ -21903,14 +21902,13 @@ def void_irl_match(irl_match_id: int, reason: str | None = None,
                     _credit_irl(cursor, exp["user_id"], stake, IRL_TX_EXPRESS_REFUND, exp_id, won=False)
                     _notify_irl_express(cursor, {**dict(exp), "legs_count": len(items)}, "refunded", stake)
             else:
-                margin_pct = get_express_margin_pct()
-                effective_odd = express_odd([w["odd"] for w in won_items], margin_pct)
+                effective_odd = express_odd([w["odd"] for w in won_items], 0)
                 try:
-                    from services.betting_limits import BettingLimitsService
+                    from services.betting_limits import BettingLimitsService, DEFAULT_IRL_MAX_PAYOUT
                     limits = BettingLimitsService.get_user_effective_limits(exp["user_id"], None)
-                    max_payout = min(_MAX_PAYOUT, int(limits.get("max_payout") or _MAX_PAYOUT))
+                    max_payout = int(limits.get("irl_max_payout") or DEFAULT_IRL_MAX_PAYOUT)
                 except Exception:
-                    max_payout = _MAX_PAYOUT
+                    max_payout = DEFAULT_IRL_MAX_PAYOUT
                 payout = min(max_payout, int(round(int(exp["amount"]) * effective_odd)))
                 cursor.execute("""
                     UPDATE irl_expresses SET status = 'won', actual_payout = ?, settled_at = datetime('now', '+3 hours')
