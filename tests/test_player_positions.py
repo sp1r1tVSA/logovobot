@@ -3,6 +3,7 @@ import database
 from services.player_positions import (
     normalize_position,
     detect_player_position,
+    known_position,
     KNOWN_PLAYER_POSITIONS,
     VALID_POSITIONS
 )
@@ -55,6 +56,11 @@ class TestPlayerPositions(unittest.TestCase):
         self.assertEqual(detect_player_position("Jude Bellingham"), "CAM")
         self.assertEqual(detect_player_position("Rodri"), "CDM")
         self.assertEqual(detect_player_position("Roony Bardghji"), "RW")
+        self.assertEqual(detect_player_position("Amoura"), "ST")
+        self.assertEqual(detect_player_position("Mohamed Amoura"), "ST")
+        self.assertEqual(detect_player_position("Francisco Moura"), "LB")
+        self.assertEqual(known_position("Amoura"), "ST")
+        self.assertEqual(known_position("Moura"), "LB")
 
     def test_database_squad_positions(self):
         club = "Тестовый Клуб Позиций"

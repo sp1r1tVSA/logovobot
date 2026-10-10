@@ -96,6 +96,7 @@ KNOWN_PLAYER_POSITIONS: dict[str, str] = {
     "jonathan david": "ST", "david": "ST", "джонатан дэвид": "ST",
     "benjamin sesko": "ST", "sesko": "ST", "беньямин шешко": "ST", "шешко": "ST",
     "samu omorodion": "ST", "omorodion": "ST", "саму омородион": "ST",
+    "mohamed amoura": "ST", "amoura": "ST", "амура": "ST", "мохамед амура": "ST",
 
     # Left Wingers / Attackers (LW / LM)
     "vinicius jr": "LW", "vinicius junior": "LW", "vini jr": "LW", "винисиус": "LW", "винисиус жуниор": "LW",
@@ -283,8 +284,12 @@ def known_position(player_name: str | None) -> str | None:
     p_norm = _normalize_name_key(player_name)
     if p_norm in KNOWN_PLAYER_POSITIONS:
         return KNOWN_PLAYER_POSITIONS[p_norm]
+    tokens = set(p_norm.split())
+    for token in tokens:
+        if token in KNOWN_PLAYER_POSITIONS:
+            return KNOWN_PLAYER_POSITIONS[token]
     for k, v in KNOWN_PLAYER_POSITIONS.items():
-        if len(k) >= 5 and k in p_norm:
+        if len(k) >= 4 and re.search(r"\b" + re.escape(k) + r"\b", p_norm):
             return v
     return None
 
@@ -398,8 +403,12 @@ def detect_player_position(player_name: str, team_name: str | None = None, fallb
         return KNOWN_PLAYER_POSITIONS[p_norm]
         
     # 2. Token match (e.g. "Vinicius" or "Gyokeres" in full name)
+    tokens = set(p_norm.split())
+    for token in tokens:
+        if token in KNOWN_PLAYER_POSITIONS:
+            return KNOWN_PLAYER_POSITIONS[token]
     for k, v in KNOWN_PLAYER_POSITIONS.items():
-        if len(k) > 3 and (k == p_norm or (k in p_norm and len(k) >= 5)):
+        if len(k) >= 4 and re.search(r"\b" + re.escape(k) + r"\b", p_norm):
             return v
             
     # 3. Online metadata discovery (TheSportsDB -> Wikipedia -> FotMob)
