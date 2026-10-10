@@ -718,15 +718,29 @@ def generate_mid_season_image(
 
     margin = _s(PITCH_MARGIN)
 
+    is_league = bool(payload.get("is_league_wide"))
+
     # ─── Шапка ───
     draw.rectangle([0, 0, width, _s(8)], fill=GOLD)
-    draw.text((margin, _s(34)), "СБОРНАЯ 1-ГО КРУГА", fill=GOLD, font=fonts["title"])
+    title_text = "СБОРНАЯ 1-ГО КРУГА ЛИГИ" if is_league else "СБОРНАЯ 1-ГО КРУГА"
+    draw.text((margin, _s(34)), title_text, fill=GOLD, font=fonts["title"])
     season = str(payload.get("season_name") or "").strip()
-    subtitle = f"ТУРЫ {start_round} — {end_round} • ЭКВАТОР СЕЗОНА" + (f" • {season.upper()}" if season else "")
+    if is_league:
+        subtitle = "ВСЕ ДИВИЗИОНЫ • ЭКВАТОР СЕЗОНА" + (f" • {season.upper()}" if season else "")
+        meta = "15 ЛУЧШИХ ИГРОКОВ ЧЕМПИОНАТА • 4-3-3 • MID-SEASON ALL-STARS"
+    else:
+        subtitle = f"ТУРЫ {start_round} — {end_round} • ЭКВАТОР СЕЗОНА" + (f" • {season.upper()}" if season else "")
+        meta = f"{payload.get('division_name') or ''} • {payload.get('formation') or '4-3-3'} • MID-SEASON BEST XI"
     draw.text((margin, _s(92)), subtitle, fill=TEXT_PRIMARY, font=fonts["subtitle"])
-    meta = f"{payload.get('division_name') or ''} • {payload.get('formation') or '4-3-3'} • MID-SEASON BEST XI"
     draw.text((margin, _s(126)), meta.strip(" •"), fill=TEXT_HEADER, font=fonts["meta"])
-    draw_division_badge(draw, theme, width - margin, _s(40), fonts["badge"], scale=SCALE)
+
+    if not is_league:
+        draw_division_badge(draw, theme, width - margin, _s(40), fonts["badge"], scale=SCALE)
+    else:
+        badge_w, badge_h = _s(90), _s(24)
+        bx0, by0 = width - margin - badge_w, _s(40)
+        draw.rounded_rectangle([bx0, by0, bx0 + badge_w, by0 + badge_h], radius=_s(6), fill=GOLD)
+        draw.text((bx0 + badge_w // 2, by0 + badge_h // 2), "ВСЯ ЛИГА", font=fonts["badge"], fill=INK, anchor="mm")
 
     # ─── Поле ───
     _draw_pitch(img, theme.accent)
@@ -765,7 +779,8 @@ def generate_mid_season_image(
     # ─── Подвал ───
     draw = ImageDraw.Draw(img)
     total_goals = payload.get("total_goals") or 0
-    footer_text = f"Логово Фифарей • ИИ «Темшик» • Всего голов в 1-м круге: {total_goals}"
+    prefix = "Всего голов в лиге:" if is_league else "Всего голов в 1-м круге:"
+    footer_text = f"Логово Фифарей • ИИ «Темшик» • {prefix} {total_goals}"
     draw.text((width // 2, height - _s(9)), footer_text, fill=TEXT_HEADER, font=fonts["footer"], anchor="mm")
 
     out = io.BytesIO()

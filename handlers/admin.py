@@ -296,6 +296,7 @@ def _build_super_admin_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("🏆 Дивизионы", callback_data="admin_divs_hub"),
             InlineKeyboardButton("📡 Обзор лиги", callback_data="ovw_home"),
         ],
+        [InlineKeyboardButton("👑 Сборная 1-го круга Лиги", callback_data="admin_league_first_half_view")],
         [InlineKeyboardButton("📢 Рассылка сообщений", callback_data="admin_broadcast_hub")],
         [InlineKeyboardButton("👔 Админы дивизионов", callback_data="admin_div_admins_hub")],
         [InlineKeyboardButton("👥 Управление игроками", callback_data="admin_manage_players")],
@@ -7651,6 +7652,22 @@ async def cb_totw_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.warning("Could not report TOTW publish result", exc_info=True)
 
 
+async def _resolve_analytics_topic(division_id: int) -> tuple[int, int] | None:
+    """(group_chat_id, message_thread_id) топика АНАЛИТИКА, иначе ТАБЛИЦЫ, иначе None."""
+    from services.topic_cache import topic_cache
+
+    topics_map = None
+    for topic_type in ("analytics", "tables"):
+        div_topic = topic_cache.get_by_division(division_id, topic_type)
+        if not div_topic:
+            if topics_map is None:
+                topics_map = await asyncio.to_thread(database.get_division_topics_map, division_id)
+            div_topic = topics_map.get(topic_type)
+        if div_topic and div_topic.get("group_chat_id") and div_topic.get("message_thread_id"):
+            return int(div_topic["group_chat_id"]), int(div_topic["message_thread_id"])
+    return None
+
+
 async def post_first_half_team(
     context: ContextTypes.DEFAULT_TYPE,
     division_id: int,
@@ -7672,7 +7689,7 @@ async def post_first_half_team(
         logger.info(f"First half team skipped: division {division_id} 1st half is not complete.")
         return False
 
-    topic = await _resolve_totw_topic(division_id)
+    topic = await _resolve_analytics_topic(division_id)
     if not topic:
         logger.info(f"First half team skipped: division {division_id} has no target topic.")
         return False
@@ -7748,6 +7765,185 @@ async def cb_first_half_team_publish(update: Update, context: ContextTypes.DEFAU
         )
     except (BadRequest, TelegramError):
         logger.warning("Could not report first half publish result", exc_info=True)
+
+
+async def post_league_first_half_team(
+    context: ContextTypes.DEFAULT_TYPE,
+) -> int:
+    """Опубликовать символическую сборную 1-го круга всех дивизионов во все топики АНАЛИТИКА."""
+    from services import mid_season_team_service
+    from services.graphics.mid_season_generator import generate_mid_season_image
+
+    payload = await asyncio.to_thread(mid_season_team_service.build_all_divisions_mid_season_payload)
+    if not payload.get("xi"):
+        logger.info("League first half team skipped: no candidates.")
+        return 0
+
+    img_buf = await asyncio.to_thread(
+        generate_mid_season_image, payload, None, 1, 15, False
+    )
+    caption = await asyncio.to_thread(
+        mid_season_team_service.generate_mid_season_caption,
+        payload,
+        "ВСЕ ДИВИЗИОНЫ",
+        1,
+        15,
+        True,
+    )
+
+    divisions = await asyncio.to_thread(database.get_divisions)
+    published_count = 0
+    posted_targets = set()
+
+    for d in divisions or []:
+        div_id = d["id"]
+        topic = await _resolve_analytics_topic(div_id)
+        if not topic:
+            continue
+        group_id, topic_id = topic
+        target_key = (group_id, topic_id)
+        if target_key in posted_targets:
+            continue
+        posted_targets.add(target_key)
+
+        img_buf.seek(0)
+        try:
+            msg = await context.bot.send_photo(
+                chat_id=group_id,
+                photo=img_buf,
+                caption=caption,
+                parse_mode="HTML",
+                message_thread_id=topic_id,
+            )
+            published_count += 1
+            bounds = await asyncio.to_thread(database.get_division_first_half_bounds, div_id)
+            end_round = bounds[1] if bounds else 15
+            await asyncio.to_thread(
+                database.record_round_content_post,
+                div_id,
+                end_round,
+                "league_first_half_team",
+                msg.message_id,
+            )
+        except (BadRequest, TelegramError) as e:
+            logger.warning(f"Could not post league first half team to division {div_id}: {e}")
+
+    return published_count
+
+
+async def cb_admin_league_first_half_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Предпросмотр сборной 1-го круга всех дивизионов Лиги (строго для супер-админа)."""
+    query = update.callback_query
+    user = update.effective_user
+    if not user or not is_global_admin(user.id):
+        if query:
+            try:
+                await query.answer("⛔ Доступно только супер-администратору.", show_alert=True)
+            except Exception:
+                pass
+        return
+
+    if query:
+        try:
+            await query.answer("Формирую сборную 1-го круга Лиги…")
+        except Exception:
+            pass
+
+    from services import mid_season_team_service
+    from services.graphics.mid_season_generator import generate_mid_season_image
+
+    payload = await asyncio.to_thread(
+        mid_season_team_service.build_all_divisions_mid_season_payload
+    )
+    if not payload.get("xi"):
+        if query:
+            try:
+                await query.answer("⚠️ Нет данных по кандидатам 1-го круга в дивизионах.", show_alert=True)
+            except Exception:
+                pass
+        return
+
+    img_buf = await asyncio.to_thread(
+        generate_mid_season_image, payload, None, 1, 15, False
+    )
+    caption = await asyncio.to_thread(
+        mid_season_team_service.generate_mid_season_caption,
+        payload,
+        "ВСЕ ДИВИЗИОНЫ",
+        1,
+        15,
+        False,
+    )
+
+    rows = [
+        [
+            InlineKeyboardButton(
+                "📢 Опубликовать во все топики АНАЛИТИКА",
+                callback_data="admin_league_first_half_publish",
+            )
+        ],
+        [
+            InlineKeyboardButton("« Назад в админ-панель", callback_data="super_admin_panel")
+        ],
+    ]
+
+    target_chat_id = query.message.chat_id if query and query.message else user.id
+    thread_id = query.message.message_thread_id if query and query.message and query.message.is_topic_message else None
+
+    if query and query.message:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    await context.bot.send_photo(
+        chat_id=target_chat_id,
+        photo=img_buf,
+        caption=caption,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows),
+        message_thread_id=thread_id,
+    )
+
+
+async def cb_admin_league_first_half_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка публикации сборной 1-го круга всех дивизионов во все топики АНАЛИТИКА (строго супер-админ)."""
+    query = update.callback_query
+    user = update.effective_user
+    if not user or not is_global_admin(user.id):
+        if query:
+            await query.answer("❌ Доступно только супер-администратору.", show_alert=True)
+        return
+
+    if query:
+        await query.answer("Публикую сборную Лиги во все топики…")
+
+    try:
+        count = await post_league_first_half_team(context)
+    except Exception:
+        logger.exception("League first half publish failed")
+        count = 0
+
+    text = (
+        f"✅ <b>Главная сборная 1-го круга Лиги опубликована в {count} топиках АНАЛИТИКА!</b>"
+        if count > 0 else
+        "⚠️ Не удалось опубликовать: не найдены топики АНАЛИТИКА или нет данных по игрокам."
+    )
+    target_chat_id = query.message.chat_id if query and query.message else user.id
+    thread_id = query.message.message_thread_id if query and query.message and query.message.is_topic_message else None
+    try:
+        await context.bot.send_message(
+            chat_id=target_chat_id,
+            message_thread_id=thread_id,
+            text=text,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("« В админ-панель", callback_data="super_admin_panel")]
+            ]),
+        )
+    except (BadRequest, TelegramError):
+        logger.warning("Could not report league first half publish result", exc_info=True)
+
 
 
 async def job_check_first_half_completion(context: ContextTypes.DEFAULT_TYPE) -> None:

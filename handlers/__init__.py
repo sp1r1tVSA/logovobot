@@ -259,6 +259,8 @@ admin_round_matches,
     admin_totw_post_command,
     cb_totw_publish,
     cb_first_half_team_publish,
+    cb_admin_league_first_half_view,
+    cb_admin_league_first_half_publish,
     admin_squads_status_command,
     admin_squads_view_cb,
     admin_squads_all_cb,
@@ -964,6 +966,8 @@ def _register_admin_handlers(app: Application) -> None:
     app.add_handler(CommandHandler("totw_post", admin_totw_post_command))
     app.add_handler(CallbackQueryHandler(cb_totw_publish, pattern=r"^totw_publish:\d+:\d+:\d+$"))
     app.add_handler(CallbackQueryHandler(cb_first_half_team_publish, pattern=r"^first_half_team_publish:\d+:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_league_first_half_view, pattern=r"^admin_league_first_half_view$"))
+    app.add_handler(CallbackQueryHandler(cb_admin_league_first_half_publish, pattern=r"^admin_league_first_half_publish$"))
 
     # Squads status
     app.add_handler(CommandHandler(["squads_status", "squads", "sostavy"], admin_squads_status_command))

@@ -279,6 +279,43 @@ def build_mid_season_payload(
     }
 
 
+def build_all_divisions_mid_season_payload(
+    season_id: int | None = None,
+    max_per_club: int | None = None,
+) -> dict:
+    """Собрать данные для инфографики и текста главной сборной 1-го круга всех дивизионов."""
+    season = None
+    try:
+        if season_id is not None:
+            season = database.get_season(season_id)
+        else:
+            season = database.get_active_season()
+    except Exception:
+        logger.exception("Mid-Season All-Divisions: could not load season %s", season_id)
+
+    candidates = database.get_all_divisions_mid_season_stats(season_id)
+    lineup = build_mid_season_lineup(candidates, max_per_club=max_per_club)
+
+    total_goals = sum(_int(c, "goals") for c in candidates)
+    potr_leaders = [c for c in candidates if _int(c, "potr_count") > 0]
+    potr_leaders.sort(key=lambda c: (-_int(c, "potr_count"), c.get("player_name") or ""))
+
+    return {
+        "is_league_wide": True,
+        "division_id": None,
+        "division_name": "ВСЕ ДИВИЗИОНЫ",
+        "division_code": "ALL",
+        "season_id": (season or {}).get("id", season_id),
+        "season_name": (season or {}).get("name") or "",
+        "start_round": 1,
+        "end_round": None,
+        "candidates_count": len(candidates),
+        "total_goals": total_goals,
+        "potr_leaders": potr_leaders[:5],
+        **lineup,
+    }
+
+
 def _stat_line(p: dict) -> str:
     """Короткая строка цифр игрока: «⭐ 2x POTR · 14+8 · 3 MVP · 4 сух.»."""
     parts = []
@@ -295,16 +332,18 @@ def _stat_line(p: dict) -> str:
     return " · ".join(parts)
 
 
-def _instruction() -> str:
+def _instruction(is_league: bool = False) -> str:
     from services.round_preview import CAPTION_MAX_CHARS, _COMMON_RULES
 
+    title = "«СБОРНАЯ 1-ГО КРУГА ЛИГИ» (главная сборная чемпионата всех дивизионов)" if is_league else "«СБОРНАЯ 1-ГО КРУГА» (итоги экватора сезона)"
+    heading = "1. Эпичный заголовок (👑 СБОРНАЯ 1-ГО КРУГА ЛИГИ, все дивизионы).\n" if is_league else "1. Эпичный заголовок (🏆 СБОРНАЯ 1-ГО КРУГА, дивизион, туры 1–N).\n"
     return (
         "Ты — Темшик, аналитик и голос лиги «Логово Фифарей»: душевный 30+ мужик, батейный юмор, "
         "но по цифрам — строгий и авторитетный футбольный эксперт.\n\n"
-        "ЗАДАЧА: написать ПОДПИСЬ к картинке «СБОРНАЯ 1-ГО КРУГА» (итоги экватора сезона) по переданному JSON.\n"
+        f"ЗАДАЧА: написать ПОДПИСЬ к картинке {title} по переданному JSON.\n"
         "На картинке уже видна вся расстановка 4-3-3 с карточками игроков — не перечисляй всех списком.\n"
         "СТРУКТУРА:\n"
-        "1. Эпичный заголовок (🏆 СБОРНАЯ 1-ГО КРУГА, дивизион, туры 1–N).\n"
+        f"{heading}"
         "2. Главный герой / Капитан 1-го круга (его голы, ассисты, титулы «Игрок тура»).\n"
         "3. 2–3 ярких акцента экватора: кто стал непробиваемой стеной, главные бомбардиры и обладатели «Игрока тура».\n"
         "4. Короткая интрига перед стартом 2-го круга.\n\n"
@@ -327,11 +366,12 @@ def _mid_season_for_model(payload: dict, division_name: str, start_round: int, e
             "сухари": _int(p, "clean_sheets") if p.get("line") in (GK, DEF, MID) else None,
         }
 
+    is_league = bool(payload.get("is_league_wide"))
     captain = payload.get("captain")
     return {
-        "событие": "Сборная 1-го круга",
-        "дивизион": division_name,
-        "туры": f"{start_round}–{end_round}",
+        "событие": "Сборная 1-го круга Лиги (все дивизионы)" if is_league else "Сборная 1-го круга",
+        "дивизион": "Все дивизионы" if is_league else division_name,
+        "туры": "1-й круг" if is_league else f"{start_round}–{end_round}",
         "капитан": slim(captain) if captain else None,
         "сборная_11": [slim(p) for p in payload.get("xi", [])],
         "запас_4": [slim(p) for p in payload.get("bench", [])],
@@ -342,10 +382,16 @@ def _fallback_caption(payload: dict, division_name: str, start_round: int, end_r
     from services.round_preview import CAPTION_MAX_CHARS, _fit_html
 
     esc = html.escape
-    lines = [
-        f"🏆 <b>СБОРНАЯ 1-ГО КРУГА · ТУРЫ {start_round}–{end_round}</b>",
-        f"<i>{esc(str(division_name))} • Экватор сезона</i>",
-    ]
+    if payload.get("is_league_wide"):
+        lines = [
+            "👑 <b>СБОРНАЯ 1-ГО КРУГА ЛИГИ · ВСЕ ДИВИЗИОНЫ</b>",
+            "<i>15 лучших футболистов чемпионата • Экватор сезона</i>",
+        ]
+    else:
+        lines = [
+            f"🏆 <b>СБОРНАЯ 1-ГО КРУГА · ТУРЫ {start_round}–{end_round}</b>",
+            f"<i>{esc(str(division_name))} • Экватор сезона</i>",
+        ]
     xi = payload.get("xi") or []
     if not xi:
         lines.append("")
@@ -401,10 +447,11 @@ def generate_mid_season_caption(
     use_ai: bool = True,
 ) -> str:
     """Подпись к картинке сборной 1-го круга: Gemini в голосе Темшика, при сбое — шаблон."""
+    is_league = bool(payload.get("is_league_wide"))
     if use_ai and payload.get("xi"):
         from services.round_preview import CAPTION_MAX_CHARS, _call_gemini, _fit_html
 
-        text = _call_gemini(_instruction(), _mid_season_for_model(payload, division_name, start_round, end_round), max_output_tokens=600)
+        text = _call_gemini(_instruction(is_league), _mid_season_for_model(payload, division_name, start_round, end_round), max_output_tokens=600)
         if text:
             return _fit_html(text, CAPTION_MAX_CHARS)
     return _fallback_caption(payload, division_name, start_round, end_round)

@@ -8993,6 +8993,34 @@ def get_mid_season_stats(
         return candidates
 
 
+def get_all_divisions_mid_season_stats(season_id: int | None = None) -> list[dict]:
+    """Gather candidate statistics across all divisions for their respective 1st half rounds.
+
+    Pools players from every division into a single candidate list for the League-wide
+    Mid-Season Best XI selection.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        target_season_id = season_id
+        if target_season_id is None:
+            act = get_active_season()
+            target_season_id = act["id"] if act else 1
+
+        divisions = get_divisions()
+        all_candidates: list[dict] = []
+        for d in divisions or []:
+            div_id = d["id"]
+            bounds = get_division_first_half_bounds(div_id, target_season_id)
+            if not bounds:
+                continue
+            start_r, end_r = bounds
+            cands = get_mid_season_stats(div_id, start_r, end_r, target_season_id)
+            all_candidates.extend(cands)
+
+        all_candidates.sort(key=lambda r: (-(r["goals"] + r["assists"] + r["mvp"] + (r.get("potr_count") or 0) * 2), r["team_name"], r["player_name"]))
+        return all_candidates
+
+
 def get_recent_confirmed_matches(
     limit: int = 15,
     division_id: int | None = None,

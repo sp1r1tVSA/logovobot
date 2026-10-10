@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import database
 from services.mid_season_team_service import (
     POTR_POINTS,
+    build_all_divisions_mid_season_payload,
     build_mid_season_lineup,
     calculate_mid_season_player_score,
     generate_mid_season_caption,
@@ -107,10 +108,12 @@ class TestMidSeasonScoring(unittest.TestCase):
 class TestMidSeasonDatabase(unittest.TestCase):
     def setUp(self):
         self.div_id = 991
+        self.div_id_2 = 992
         with database.transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("INSERT OR IGNORE INTO divisions (id, name, code) VALUES (?, 'Тест Дивизион', 'TEST')", (self.div_id,))
-            # Создаем 4 тура
+            cursor.execute("INSERT OR IGNORE INTO divisions (id, name, code) VALUES (?, 'Тест Дивизион 1', 'TEST1')", (self.div_id,))
+            cursor.execute("INSERT OR IGNORE INTO divisions (id, name, code) VALUES (?, 'Тест Дивизион 2', 'TEST2')", (self.div_id_2,))
+            # Создаем 4 тура в дивизионе 1
             for r in range(1, 5):
                 cursor.execute("""
                     INSERT INTO matches (division_id, season_id, round_number, player1_team, player2_team,
@@ -118,7 +121,6 @@ class TestMidSeasonDatabase(unittest.TestCase):
                     VALUES (?, 1, ?, 'Реал', 'Барселона', 2, 1, 'confirmed', 0)
                 """, (self.div_id, r))
                 mid = cursor.lastrowid
-                # Игрок матча и голы
                 cursor.execute("""
                     INSERT INTO match_events (match_id, team_name, player_name, event_type, count)
                     VALUES (?, 'Реал', 'Винисиус', 'goal', 2)
@@ -127,14 +129,26 @@ class TestMidSeasonDatabase(unittest.TestCase):
                     INSERT INTO match_events (match_id, team_name, player_name, event_type, count)
                     VALUES (?, 'Барселона', 'Левандовски', 'goal', 1)
                 """, (mid,))
+            # Создаем 4 тура в дивизионе 2
+            for r in range(1, 5):
+                cursor.execute("""
+                    INSERT INTO matches (division_id, season_id, round_number, player1_team, player2_team,
+                                         player1_score, player2_score, status, is_technical)
+                    VALUES (?, 1, ?, 'Сити', 'Арсенал', 3, 0, 'confirmed', 0)
+                """, (self.div_id_2, r))
+                mid2 = cursor.lastrowid
+                cursor.execute("""
+                    INSERT INTO match_events (match_id, team_name, player_name, event_type, count)
+                    VALUES (?, 'Сити', 'Холанд', 'goal', 3)
+                """, (mid2,))
 
     def tearDown(self):
         with database.transaction() as conn:
             cursor = conn.cursor()
-            cursor.execute("DELETE FROM match_events WHERE match_id IN (SELECT id FROM matches WHERE division_id = ?)", (self.div_id,))
-            cursor.execute("DELETE FROM matches WHERE division_id = ?", (self.div_id,))
-            cursor.execute("DELETE FROM divisions WHERE id = ?", (self.div_id,))
-            cursor.execute("DELETE FROM round_content_posts WHERE division_id = ?", (self.div_id,))
+            cursor.execute("DELETE FROM match_events WHERE match_id IN (SELECT id FROM matches WHERE division_id IN (?, ?))", (self.div_id, self.div_id_2))
+            cursor.execute("DELETE FROM matches WHERE division_id IN (?, ?)", (self.div_id, self.div_id_2))
+            cursor.execute("DELETE FROM divisions WHERE id IN (?, ?)", (self.div_id, self.div_id_2))
+            cursor.execute("DELETE FROM round_content_posts WHERE division_id IN (?, ?)", (self.div_id, self.div_id_2))
 
     def test_first_half_bounds_and_completion(self):
         bounds = database.get_division_first_half_bounds(self.div_id, 1)
@@ -153,6 +167,19 @@ class TestMidSeasonDatabase(unittest.TestCase):
         self.assertIsNotNone(vini)
         # В обоих турах 1 и 2 Винисиус забил по 2 гола, став игроком тура
         self.assertEqual(vini["potr_count"], 2)
+
+    def test_get_all_divisions_mid_season_stats(self):
+        stats = database.get_all_divisions_mid_season_stats(1)
+        self.assertGreater(len(stats), 0)
+        names = [s["player_name"] for s in stats]
+        self.assertIn("Винисиус", names)
+        self.assertIn("Холанд", names)
+
+    def test_build_all_divisions_payload(self):
+        payload = build_all_divisions_mid_season_payload(1)
+        self.assertTrue(payload.get("is_league_wide"))
+        self.assertEqual(payload.get("division_name"), "ВСЕ ДИВИЗИОНЫ")
+        self.assertGreater(len(payload.get("xi", [])), 0)
 
 
 class TestMidSeasonGraphics(unittest.TestCase):
@@ -187,6 +214,71 @@ class TestMidSeasonGraphics(unittest.TestCase):
         self.assertIn("Форвард", caption)
         self.assertIn("Запас:", caption)
 
+    def test_generate_league_poster_image(self):
+        pool = _full_pool()
+        lineup = build_mid_season_lineup(pool)
+        payload = {
+            "is_league_wide": True,
+            "division_id": None,
+            "division_name": "ВСЕ ДИВИЗИОНЫ",
+            "start_round": 1,
+            "end_round": None,
+            "total_goals": 250,
+            **lineup,
+        }
+        with patch("services.graphics.mid_season_generator._load_photo", return_value=None):
+            buf = generate_mid_season_image(payload, fetch_photos=False)
+            self.assertIsInstance(buf, io.BytesIO)
+            self.assertGreater(len(buf.getvalue()), 1000)
+
+    def test_generate_league_caption(self):
+        pool = _full_pool()
+        lineup = build_mid_season_lineup(pool)
+        payload = {
+            "is_league_wide": True,
+            "division_id": None,
+            "division_name": "ВСЕ ДИВИЗИОНЫ",
+            "start_round": 1,
+            "end_round": None,
+            **lineup,
+        }
+        caption = generate_mid_season_caption(payload, "ВСЕ ДИВИЗИОНЫ", 1, 15, use_ai=False)
+        self.assertIn("СБОРНАЯ 1-ГО КРУГА ЛИГИ", caption)
+        self.assertIn("ВСЕ ДИВИЗИОНЫ", caption)
+
+
+class TestMidSeasonAdminHandlers(unittest.IsolatedAsyncioTestCase):
+    async def test_league_view_denies_non_admin(self):
+        from handlers.admin import cb_admin_league_first_half_view
+
+        update = MagicMock()
+        update.effective_user.id = 123456789
+        update.callback_query = AsyncMock()
+        context = MagicMock()
+
+        with patch("handlers.admin.is_global_admin", return_value=False):
+            await cb_admin_league_first_half_view(update, context)
+            update.callback_query.answer.assert_called_once()
+            args, kwargs = update.callback_query.answer.call_args
+            text = args[0] if args else kwargs.get("text", "")
+            self.assertIn("супер-администратору", text)
+
+    async def test_league_publish_denies_non_admin(self):
+        from handlers.admin import cb_admin_league_first_half_publish
+
+        update = MagicMock()
+        update.effective_user.id = 123456789
+        update.callback_query = AsyncMock()
+        context = MagicMock()
+
+        with patch("handlers.admin.is_global_admin", return_value=False):
+            await cb_admin_league_first_half_publish(update, context)
+            update.callback_query.answer.assert_called_once()
+            args, kwargs = update.callback_query.answer.call_args
+            text = args[0] if args else kwargs.get("text", "")
+            self.assertIn("супер-администратору", text)
+
 
 if __name__ == "__main__":
     unittest.main()
+
