@@ -8698,11 +8698,12 @@ def _club_squad_positions(cursor: sqlite3.Cursor, canon: str) -> list[tuple[str,
 def _offline_squad_positions(squad: list[tuple[str, str]]) -> dict[str, str]:
     """{player_key: position} for a squad, resolved without any network call.
 
-    The stored position is overridden by the built-in registry. A lineup
-    screenshot lists the goalkeeper last of the XI, and a goalkeeper the
-    detector never recognised is stored under its default 'ST' — so when a
+    The stored position is preserved if it is a specific recognized position
+    (e.g. LM, CB, LB, CM, etc.). When a player is stored under the detector's
+    default 'ST' or has no position, the built-in registry is checked to see if
+    he is actually a goalkeeper, defender, or midfielder. Furthermore, if a
     club has no goalkeeper among its starters and the 11th starter sits on
-    that default, he is taken as the goalkeeper.
+    that default 'ST', he is taken as the goalkeeper.
     """
     from services.player_positions import known_position, normalize_position
 
@@ -8711,7 +8712,11 @@ def _offline_squad_positions(squad: list[tuple[str, str]]) -> dict[str, str]:
         key = normalize_player_name_key(name) or name.lower()
         if key in positions:
             continue
-        pos = known_position(name) or (normalize_position(stored) if stored else "ST")
+        stored_norm = normalize_position(stored) if stored else None
+        if stored_norm and stored_norm != "ST":
+            pos = stored_norm
+        else:
+            pos = known_position(name) or stored_norm or "ST"
         positions[key] = pos
 
     starters = squad[:TOTW_STARTERS]
