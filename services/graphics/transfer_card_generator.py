@@ -217,6 +217,61 @@ def _draw_portrait(img: Image.Image, path: str | None, name: str, accent) -> Non
         img.alpha_composite(photo.crop((left, 0, right, height)), (max(x, 0), y))
 
 
+def _draw_card(img: Image.Image, path: str | None, name: str, accent: tuple[int, int, int]) -> None:
+    """Оригинальная карточка FC Mobile/Renderz по центру круга со стильной тенью."""
+    card = None
+    if path:
+        resolved_path = path
+        if not os.path.isabs(resolved_path) and not os.path.exists(resolved_path):
+            for _p in _resolved.parents:
+                cand = _p / resolved_path
+                if cand.is_file():
+                    resolved_path = str(cand)
+                    break
+        try:
+            with Image.open(resolved_path) as raw:
+                card = raw.convert("RGBA")
+        except Exception:
+            logger.debug("transfer card: FC card %s unreadable", path, exc_info=True)
+
+    if card is None:
+        _draw_portrait(img, None, name, accent)
+        return
+
+    # Если у карточки непрозрачный темный фон скриншота (17, 17, 34), очищаем его по углам
+    try:
+        ImageDraw.floodfill(card, (0, 0), (0, 0, 0, 0), thresh=22)
+        ImageDraw.floodfill(card, (card.width - 1, 0), (0, 0, 0, 0), thresh=22)
+        ImageDraw.floodfill(card, (0, card.height - 1), (0, 0, 0, 0), thresh=22)
+        ImageDraw.floodfill(card, (card.width - 1, card.height - 1), (0, 0, 0, 0), thresh=22)
+    except Exception:
+        pass
+
+    bbox = card.getbbox()
+    if bbox:
+        card = card.crop(bbox)
+
+    target_h = 670
+    target_w = max(1, int(card.width * (target_h / card.height)))
+    card = card.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+    card_x = CIRCLE_CX - target_w // 2
+    card_y = CIRCLE_CY - target_h // 2 - 10
+
+    # Мягкая реалистичная тень под карточкой
+    try:
+        from PIL import ImageFilter
+        shadow_mask = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
+        shadow_layer = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 130))
+        shadow_mask.paste(shadow_layer, (card_x + 10, card_y + 18), mask=card.getchannel("A"))
+        shadow_blurred = shadow_mask.filter(ImageFilter.GaussianBlur(16))
+        img.paste(shadow_blurred, (0, 0), shadow_blurred)
+    except Exception:
+        pass
+
+    img.alpha_composite(card, (card_x, card_y))
+
+
 def render_transfer_card(
     *,
     kind: str | None,
@@ -226,9 +281,10 @@ def render_transfer_card(
     from_club: str | None = None,
     to_club: str | None = None,
     portrait_path: str | None = None,
+    card_path: str | None = None,
     transfer_id: int | None = None,
 ) -> bytes:
-    """PNG-карточка трансфера. Ничего из окружения не требует: без файлов рисует заглушки."""
+    """PNG-карточка трансфера. Если передан `card_path` — рисует полную карточку FC Mobile вместо портрета."""
     accent = accent_color(kind, from_club, to_club)
     img = Image.new("RGBA", (WIDTH, HEIGHT), PAPER + (255,))
     draw = ImageDraw.Draw(img)
@@ -237,7 +293,12 @@ def render_transfer_card(
     cx, cy, r = CIRCLE_CX, CIRCLE_CY, CIRCLE_R
     draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=accent)
     draw.ellipse((cx - r + 26, cy - r + 26, cx + r - 26, cy + r - 26), outline=WHITE + (90,), width=4)
-    _draw_portrait(img, portrait_path, player_name or "", accent)
+
+    has_card = bool(card_path and (os.path.isfile(card_path) or not os.path.isabs(card_path)))
+    if has_card:
+        _draw_card(img, card_path, player_name or "", accent)
+    else:
+        _draw_portrait(img, portrait_path, player_name or "", accent)
     draw = ImageDraw.Draw(img)
 
     # Шапка.
@@ -259,8 +320,8 @@ def render_transfer_card(
     price_w = int(draw.textlength(price, font=font_price))
     draw.rectangle((64, 624, 64 + max(price_w, 200), 634), fill=accent)
 
-    # OVR.
-    if ovr:
+    # OVR (в портретном режиме выносим в правый угол; на карточке OVR уже нарисован крупно).
+    if ovr and not has_card:
         draw.ellipse((1260, 70, 1380, 190), fill=INK)
         draw.text((1320, 118), str(ovr), fill=WHITE, font=_font(62), anchor="mm")
         draw.text((1320, 164), "OVR", fill=(190, 190, 200), font=_font(22), anchor="mm")

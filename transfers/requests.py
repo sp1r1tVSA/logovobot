@@ -20,6 +20,7 @@ import os
 import re
 import urllib.parse
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 
 import database
 from club_registry import resolve_team_name
@@ -585,6 +586,107 @@ def _loads(raw) -> list:
 
 RENDERZ_PORTRAITS_DIR = str(player_photos.PROJECT_ROOT / "assets" / "renderz_portraits")
 RENDERZ_PORTRAITS_URL = "/assets/renderz_portraits/"
+CARDS_DIR = str(player_photos.PROJECT_ROOT / "assets" / "cards")
+
+
+def resolve_card_id(player_name: str | None, ovr: int | None = None) -> int | None:
+    """Ищет renderz_id карточки игрока в БД или дампе ovr_db.json под заданный OVR (или ближайший)."""
+    if not player_name:
+        return None
+    key = repo.norm_player(player_name)
+    if not key:
+        return None
+
+    # 1. Запрос в БД transfer_player_cards
+    try:
+        from database import transaction
+        with transaction() as conn:
+            has_table = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='transfer_player_cards'"
+            ).fetchone()
+            if has_table:
+                if ovr:
+                    r = conn.execute(
+                        "SELECT renderz_id FROM transfer_player_cards "
+                        "WHERE norm_name = ? AND ovr = ? "
+                        "ORDER BY selected DESC, tradable DESC LIMIT 1",
+                        (key, ovr),
+                    ).fetchone()
+                    if r:
+                        return r["renderz_id"]
+                    r = conn.execute(
+                        "SELECT renderz_id FROM transfer_player_cards "
+                        "WHERE norm_name = ? "
+                        "ORDER BY ABS(ovr - ?) ASC, selected DESC, tradable DESC LIMIT 1",
+                        (key, ovr),
+                    ).fetchone()
+                    if r:
+                        return r["renderz_id"]
+                else:
+                    r = conn.execute(
+                        "SELECT renderz_id FROM transfer_player_cards "
+                        "WHERE norm_name = ? "
+                        "ORDER BY selected DESC, ovr DESC LIMIT 1",
+                        (key,),
+                    ).fetchone()
+                    if r:
+                        return r["renderz_id"]
+    except Exception:
+        pass
+
+    # 2. Поиск по JSON файлам (локально или в рабочей директории)
+    for pth in (
+        player_photos.PROJECT_ROOT / "renderz_sync" / "ovr_db.json",
+        player_photos.PROJECT_ROOT / "ovr_db.json",
+        Path("C:/Users/Ислам/Desktop/Projects/log/renderz_sync/ovr_db.json"),
+    ):
+        if pth.is_file():
+            try:
+                with open(pth, encoding="utf-8") as fh:
+                    data = json.load(fh)
+                for p in data.get("players", []):
+                    p_key = repo.norm_player(p.get("player", ""))
+                    if p_key == key or key in p_key or p_key in key:
+                        versions = p.get("versions", [])
+                        if not versions:
+                            continue
+                        if ovr:
+                            exact = [v for v in versions if v.get("ovr") == ovr and v.get("selected", True)]
+                            if exact:
+                                return exact[0]["renderz_id"]
+                            sorted_v = sorted(
+                                versions,
+                                key=lambda v: (abs((v.get("ovr") or 0) - ovr), not v.get("selected", True)),
+                            )
+                            return sorted_v[0]["renderz_id"]
+                        return versions[0]["renderz_id"]
+            except Exception:
+                pass
+    return None
+
+
+def card_path(player_name: str | None, ovr: int | None = None, *clubs: str | None) -> str | None:
+    """Путь к PNG карточке игрока FC Mobile/Renderz (`assets/cards/<renderz_id>.png`)."""
+    if not player_name:
+        return None
+    cid = resolve_card_id(player_name, ovr)
+    if not cid:
+        parts = player_name.split()
+        if len(parts) > 1:
+            cid = resolve_card_id(parts[-1], ovr)
+    if not cid:
+        return None
+
+    filename = f"{cid}.png"
+    for folder in (
+        Path(CARDS_DIR),
+        player_photos.PROJECT_ROOT / "renderz_sync" / "cards",
+        Path("C:/Users/Ислам/Desktop/Projects/log/renderz_sync/cards"),
+    ):
+        cand = folder / filename
+        if cand.is_file() and cand.stat().st_size > 0:
+            return str(cand)
+    return None
 
 
 def _renderz_file(full_name: str) -> str | None:

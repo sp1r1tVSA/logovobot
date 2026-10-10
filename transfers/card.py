@@ -16,20 +16,28 @@ from transfers.engine import format_k
 logger = logging.getLogger(__name__)
 
 
-def build_card(transfer: dict) -> bytes | None:
+def build_card(transfer: dict, style: str = "portrait") -> bytes | None:
     """PNG-карточка заявки или `None`, если нарисовать не удалось. Блокирует — зовите в потоке."""
     try:
         from services.graphics.transfer_card_generator import render_transfer_card
 
         name = transfer.get("player_name") or ""
+        ovr = transfer.get("ovr")
+        from_club = transfer.get("from_club")
+        to_club = transfer.get("to_club")
+
+        c_path = req_mod.card_path(name, ovr, from_club, to_club) if style == "card" else None
+        p_path = req_mod.portrait_path(name, from_club, to_club)
+
         return render_transfer_card(
             kind=transfer.get("kind"),
             player_name=name,
             price_text=format_k(transfer.get("price_k")),
-            ovr=transfer.get("ovr"),
-            from_club=transfer.get("from_club"),
-            to_club=transfer.get("to_club"),
-            portrait_path=req_mod.portrait_path(name, transfer.get("from_club"), transfer.get("to_club")),
+            ovr=ovr,
+            from_club=from_club,
+            to_club=to_club,
+            portrait_path=p_path,
+            card_path=c_path,
             transfer_id=transfer.get("id"),
         )
     except Exception:
@@ -37,5 +45,6 @@ def build_card(transfer: dict) -> bytes | None:
         return None
 
 
-async def build_card_async(transfer: dict) -> bytes | None:
-    return await asyncio.to_thread(build_card, transfer)
+async def build_card_async(transfer: dict, style: str = "portrait") -> bytes | None:
+    return await asyncio.to_thread(build_card, transfer, style=style)
+

@@ -14,10 +14,11 @@ import asyncio
 import io
 import logging
 import os
+from pathlib import Path
 import random
 from typing import Any
 
-from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, InputMediaPhoto, Update
 from telegram.ext import ContextTypes
 
 from handlers.base import is_admin, is_global_admin
@@ -170,10 +171,37 @@ def _resolve_sample_portrait(player_name: str, *clubs: str | None) -> str | None
         return None
 
 
-def _render_sample_deal(sample: dict) -> bytes:
+def _resolve_sample_card(player_name: str, ovr: int | None = None, *clubs: str | None) -> str | None:
+    """Ищет карточку игрока FC Mobile/Renderz под нужный OVR (или ближайший)."""
+    try:
+        path = req_mod.card_path(player_name, ovr, *clubs)
+        if path and os.path.isfile(path) and os.path.getsize(path) > 0:
+            return path
+        cid = req_mod.resolve_card_id(player_name, ovr)
+        if cid:
+            filename = f"{cid}.png"
+            for folder in (
+                player_photos.PROJECT_ROOT / "assets" / "cards",
+                player_photos.PROJECT_ROOT / "renderz_sync" / "cards",
+                Path("C:/Users/Ислам/Desktop/Projects/log/renderz_sync/cards"),
+            ):
+                cand = folder / filename
+                if cand.is_file() and cand.stat().st_size > 0:
+                    return str(cand)
+        return None
+    except Exception:
+        logger.debug("Failed to resolve sample card for %s (OVR %s)", player_name, ovr, exc_info=True)
+        return None
+
+
+def _render_sample_deal(sample: dict, style: str = "portrait") -> bytes:
     portrait = sample.get("portrait") or _resolve_sample_portrait(
         sample["player"], sample.get("from_club"), sample.get("to_club")
     )
+    card_path = _resolve_sample_card(
+        sample["player"], sample.get("ovr"), sample.get("from_club"), sample.get("to_club")
+    ) if style == "card" else None
+
     return card_gen.render_transfer_card(
         kind="deal",
         player_name=sample["player"],
@@ -182,14 +210,19 @@ def _render_sample_deal(sample: dict) -> bytes:
         from_club=sample["from_club"],
         to_club=sample["to_club"],
         portrait_path=portrait,
+        card_path=card_path,
         transfer_id=sample["id"],
     )
 
 
-def _render_sample_surcharge(sample: dict) -> bytes:
+def _render_sample_surcharge(sample: dict, style: str = "portrait") -> bytes:
     portrait = sample.get("portrait") or _resolve_sample_portrait(
         sample["player"], sample.get("from_club")
     )
+    card_path = _resolve_sample_card(
+        sample["player"], sample.get("ovr"), sample.get("from_club")
+    ) if style == "card" else None
+
     return card_gen.render_transfer_card(
         kind="surcharge",
         player_name=sample["player"],
@@ -197,14 +230,19 @@ def _render_sample_surcharge(sample: dict) -> bytes:
         ovr=sample["ovr"],
         from_club=sample["from_club"],
         portrait_path=portrait,
+        card_path=card_path,
         transfer_id=sample["id"],
     )
 
 
-def _render_sample_urn(sample: dict) -> bytes:
+def _render_sample_urn(sample: dict, style: str = "portrait") -> bytes:
     portrait = sample.get("portrait") or _resolve_sample_portrait(
         sample["player"], sample.get("from_club")
     )
+    card_path = _resolve_sample_card(
+        sample["player"], sample.get("ovr"), sample.get("from_club")
+    ) if style == "card" else None
+
     return card_gen.render_transfer_card(
         kind="urn_sale",
         player_name=sample["player"],
@@ -212,6 +250,7 @@ def _render_sample_urn(sample: dict) -> bytes:
         ovr=sample["ovr"],
         from_club=sample["from_club"],
         portrait_path=portrait,
+        card_path=card_path,
         transfer_id=sample["id"],
     )
 
@@ -250,11 +289,12 @@ def _hub_text() -> str:
         "🎨 <b>Мастерская графики ТО</b>\n\n"
         "Интерактивная панель для генерации промо-карточек и инфографики трансферного окна "
         "в высоком разрешении (1440×810 Retina 2x):\n\n"
-        "• <b>HERE WE GO</b> — карточка перехода игрока\n"
-        "• <b>СПЕЦКАРТА</b> — карточка доплаты за повышение OVR\n"
+        "• <b>HERE WE GO (Фото)</b> — вариант с крупным портретом игрока\n"
+        "• <b>HERE WE GO (Карта)</b> — вариант с оригинальной карточкой FC Mobile под OVR покупки\n"
+        "• <b>СПЕЦКАРТА</b> — карточка доплаты (портрет или карточка FC)\n"
         "• <b>В УРНУ</b> — карточка сдачи игрока в урну\n"
         "• <b>ИТОГИ ОКНА</b> — итоговый постер с топом сделок и портретами\n"
-        "• <b>ИЗ БАЗЫ ТО</b> — карточка последней реальной одобренной заявки\n\n"
+        "• <b>ИЗ БАЗЫ ТО</b> — реальная карточка заявки из текущего турнира\n\n"
         "<i>Выберите шаблон для генерации:</i>"
     )
 
@@ -262,15 +302,19 @@ def _hub_text() -> str:
 def _hub_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [
-            InlineKeyboardButton("🔁 HERE WE GO", callback_data="ws:deal"),
-            InlineKeyboardButton("🌟 Спецкарта", callback_data="ws:surcharge"),
+            InlineKeyboardButton("🔁 HERE WE GO (Фото)", callback_data="ws:deal:portrait"),
+            InlineKeyboardButton("🃏 HERE WE GO (Карта)", callback_data="ws:deal:card"),
+        ],
+        [
+            InlineKeyboardButton("🌟 Спецкарта (Фото)", callback_data="ws:surcharge:portrait"),
+            InlineKeyboardButton("🌟 Спецкарта (Карта)", callback_data="ws:surcharge:card"),
         ],
         [
             InlineKeyboardButton("🗑 В Урну", callback_data="ws:urn"),
             InlineKeyboardButton("🏁 Итоги ТО (Recap)", callback_data="ws:recap"),
         ],
         [
-            InlineKeyboardButton("🎲 Сделка из базы ТО", callback_data="ws:from_db"),
+            InlineKeyboardButton("🎲 Сделка из базы ТО", callback_data="ws:from_db:card"),
         ],
         [
             InlineKeyboardButton("❌ Закрыть", callback_data="ws:close"),
@@ -332,60 +376,150 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
         return
 
-    if data in ("ws:deal", "ws:deal_next"):
-        await query.answer("🎨 Генерирую карточку HERE WE GO...")
-        sample = random.choice(SAMPLE_DEALS)
-        png = await asyncio.to_thread(_render_sample_deal, sample)
+    if data.startswith("ws:deal"):
+        is_toggle = "toggle" in data
+        style = "card" if ":card" in data else "portrait"
+
+        if is_toggle:
+            # ws:deal_toggle:{id}:{target_style}
+            parts = data.split(":")
+            sample_id = parts[2] if len(parts) > 2 else ""
+            style = parts[3] if len(parts) > 3 else "portrait"
+            sample = next((s for s in SAMPLE_DEALS if str(s["id"]) == sample_id), SAMPLE_DEALS[0])
+            await query.answer("🔄 Переключаю стиль оформления...")
+        else:
+            sample = random.choice(SAMPLE_DEALS)
+            await query.answer(f"🎨 Генерирую HERE WE GO ({'карточка FC' if style == 'card' else 'портрет'})...")
+
+        png = await asyncio.to_thread(_render_sample_deal, sample, style)
+
+        mode_desc = "вариант с карточкой FC Mobile" if style == "card" else "вариант с портретом"
         caption = (
-            f"🔁 <b>HERE WE GO — {sample['player']}</b>\n"
+            f"🔁 <b>HERE WE GO — {sample['player']}</b> ({mode_desc})\n"
             f"Маршрут: {sample['from_club']} → {sample['to_club']}\n"
             f"Сумма: <b>{sample['price']}</b> | Рейтинг: <b>{sample['ovr']} OVR</b>\n\n"
-            f"<i>Разрешение: 1440×810 (Retina). Готово к публикации.</i>"
+            f"<i>Разрешение: 1440×810 (Retina 2x). Готово к публикации.</i>"
         )
+
+        other_style = "portrait" if style == "card" else "card"
+        toggle_label = "👤 Показать с портретом" if style == "card" else "🃏 Показать карточку FC"
+
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎲 Другой пример", callback_data="ws:deal_next")],
+            [
+                InlineKeyboardButton(toggle_label, callback_data=f"ws:deal_toggle:{sample['id']}:{other_style}"),
+                InlineKeyboardButton("🎲 Другой пример", callback_data=f"ws:deal_next:{style}"),
+            ],
             [InlineKeyboardButton("🔙 В мастерскую", callback_data="ws:menu")],
         ])
+
+        if is_toggle:
+            try:
+                await query.edit_message_media(
+                    media=InputMediaPhoto(media=io.BytesIO(png), caption=caption, parse_mode="HTML"),
+                    reply_markup=kb,
+                )
+                return
+            except Exception:
+                pass
+
         await query.message.reply_photo(photo=io.BytesIO(png), caption=caption, parse_mode="HTML", reply_markup=kb)
         return
 
-    if data in ("ws:surcharge", "ws:surcharge_next"):
-        await query.answer("🎨 Генерирую карточку спецкарты...")
-        sample = random.choice(SAMPLE_SURCHARGES)
-        png = await asyncio.to_thread(_render_sample_surcharge, sample)
+    if data.startswith("ws:surcharge"):
+        is_toggle = "toggle" in data
+        style = "card" if ":card" in data else "portrait"
+
+        if is_toggle:
+            parts = data.split(":")
+            sample_id = parts[2] if len(parts) > 2 else ""
+            style = parts[3] if len(parts) > 3 else "portrait"
+            sample = next((s for s in SAMPLE_SURCHARGES if str(s["id"]) == sample_id), SAMPLE_SURCHARGES[0])
+            await query.answer("🔄 Переключаю стиль оформления...")
+        else:
+            sample = random.choice(SAMPLE_SURCHARGES)
+            await query.answer(f"🎨 Генерирую спецкарту ({'карточка FC' if style == 'card' else 'портрет'})...")
+
+        png = await asyncio.to_thread(_render_sample_surcharge, sample, style)
+        mode_desc = "карточка FC Mobile" if style == "card" else "портрет"
         caption = (
-            f"🌟 <b>СПЕЦКАРТА — {sample['player']}</b>\n"
+            f"🌟 <b>СПЕЦКАРТА — {sample['player']}</b> ({mode_desc})\n"
             f"Клуб: {sample['from_club']}\n"
             f"Доплата: <b>{sample['price']}</b> | Новый рейтинг: <b>{sample['ovr']} OVR</b>\n\n"
             f"<i>Разрешение: 1440×810 (Retina).</i>"
         )
+
+        other_style = "portrait" if style == "card" else "card"
+        toggle_label = "👤 Показать с портретом" if style == "card" else "🃏 Показать карточку FC"
+
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎲 Другой пример", callback_data="ws:surcharge_next")],
+            [
+                InlineKeyboardButton(toggle_label, callback_data=f"ws:surcharge_toggle:{sample['id']}:{other_style}"),
+                InlineKeyboardButton("🎲 Другой пример", callback_data=f"ws:surcharge_next:{style}"),
+            ],
             [InlineKeyboardButton("🔙 В мастерскую", callback_data="ws:menu")],
         ])
+
+        if is_toggle:
+            try:
+                await query.edit_message_media(
+                    media=InputMediaPhoto(media=io.BytesIO(png), caption=caption, parse_mode="HTML"),
+                    reply_markup=kb,
+                )
+                return
+            except Exception:
+                pass
+
         await query.message.reply_photo(photo=io.BytesIO(png), caption=caption, parse_mode="HTML", reply_markup=kb)
         return
 
-    if data in ("ws:urn", "ws:urn_next"):
-        await query.answer("🎨 Генерирую карточку сдачи в урну...")
-        sample = random.choice(SAMPLE_URNS)
-        png = await asyncio.to_thread(_render_sample_urn, sample)
+    if data.startswith("ws:urn"):
+        is_toggle = "toggle" in data
+        style = "card" if ":card" in data else "portrait"
+
+        if is_toggle:
+            parts = data.split(":")
+            sample_id = parts[2] if len(parts) > 2 else ""
+            style = parts[3] if len(parts) > 3 else "portrait"
+            sample = next((s for s in SAMPLE_URNS if str(s["id"]) == sample_id), SAMPLE_URNS[0])
+            await query.answer("🔄 Переключаю стиль оформления...")
+        else:
+            sample = random.choice(SAMPLE_URNS)
+            await query.answer("🎨 Генерирую карточку сдачи в урну...")
+
+        png = await asyncio.to_thread(_render_sample_urn, sample, style)
         caption = (
             f"🗑 <b>В УРНУ — {sample['player']}</b>\n"
             f"Клуб: {sample['from_club']} → Урна\n"
-            f"Выплата клубу: <b>{sample['price']}</b>\n\n"
+            f"Выплата клубу: <b>{sample['price']}</b> | Рейтинг: <b>{sample['ovr']} OVR</b>\n\n"
             f"<i>Разрешение: 1440×810 (Retina).</i>"
         )
+
+        other_style = "portrait" if style == "card" else "card"
+        toggle_label = "👤 Показать с портретом" if style == "card" else "🃏 Показать карточку FC"
+
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🎲 Другой пример", callback_data="ws:urn_next")],
+            [
+                InlineKeyboardButton(toggle_label, callback_data=f"ws:urn_toggle:{sample['id']}:{other_style}"),
+                InlineKeyboardButton("🎲 Другой пример", callback_data=f"ws:urn_next:{style}"),
+            ],
             [InlineKeyboardButton("🔙 В мастерскую", callback_data="ws:menu")],
         ])
+
+        if is_toggle:
+            try:
+                await query.edit_message_media(
+                    media=InputMediaPhoto(media=io.BytesIO(png), caption=caption, parse_mode="HTML"),
+                    reply_markup=kb,
+                )
+                return
+            except Exception:
+                pass
+
         await query.message.reply_photo(photo=io.BytesIO(png), caption=caption, parse_mode="HTML", reply_markup=kb)
         return
 
     if data == "ws:recap":
         await query.answer("📊 Генерирую итоговый постер окна...")
-        # Проверим, есть ли окно с реальными одобренными сделками
         win = repo.get_active_window()
         rc = recap.build(win["id"]) if win else None
 
@@ -393,7 +527,6 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             png = await recap.build_image_async(rc)
             caption = recap.caption(rc, win.get("title") or "ТО")
         else:
-            # Демонстрационный постер с топ-5 сделками и аватарами
             png = await asyncio.to_thread(_render_demo_recap)
             caption = (
                 "🏁 <b>Демо-итоги трансферного окна</b>\n\n"
@@ -410,19 +543,20 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         await query.message.reply_photo(photo=io.BytesIO(png), caption=caption, parse_mode="HTML", reply_markup=kb)
         return
 
-    if data == "ws:from_db":
-        await query.answer("🔍 Ищу последнюю сделку в базе...")
-        # Ищем одобренные заявки из текущего или любого окна
+    if data.startswith("ws:from_db"):
+        is_toggle = "toggle" in data
+        style = "portrait" if ":portrait" in data else "card"
+
         win = repo.get_active_window()
         transfers = repo.list_transfers(win["id"], statuses=("approved",)) if win else []
         if not transfers:
-            # Попробуем найти вообще любую одобренную сделку
             for w in repo.list_windows()[:5]:
                 transfers = repo.list_transfers(w["id"], statuses=("approved",))
                 if transfers:
                     break
 
         if not transfers:
+            await query.answer()
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В мастерскую", callback_data="ws:menu")]])
             await query.message.reply_text(
                 "ℹ️ В базе пока нет одобренных заявок ТО.\n\n"
@@ -431,19 +565,49 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             )
             return
 
-        latest = transfers[0]
-        png = await card.build_card_async(latest)
+        if is_toggle:
+            parts = data.split(":")
+            tr_id = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else transfers[0]["id"]
+            latest = next((t for t in transfers if t["id"] == tr_id), transfers[0])
+            await query.answer("🔄 Переключаю стиль оформления...")
+        else:
+            latest = transfers[0]
+            await query.answer(f"🔍 Рендерю заявку #{latest.get('id')} ({style})...")
+
+        png = await card.build_card_async(latest, style=style)
         if not png:
             kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В мастерскую", callback_data="ws:menu")]])
             await query.message.reply_text("⚠️ Не удалось сгенерировать карточку для заявки.", reply_markup=kb)
             return
 
+        mode_desc = "карточка FC Mobile" if style == "card" else "портрет"
         caption = (
-            f"📦 <b>Заявка #{latest.get('id')} из базы данных</b>\n"
-            f"Игрок: <b>{latest.get('player_name')}</b>\n"
+            f"📦 <b>Заявка #{latest.get('id')} из базы данных</b> ({mode_desc})\n"
+            f"Игрок: <b>{latest.get('player_name')}</b> | Рейтинг: <b>{latest.get('ovr', '—')} OVR</b>\n"
             f"Маршрут: {latest.get('from_club') or '—'} → {latest.get('to_club') or '—'}\n"
             f"Сумма: <b>{latest.get('price_k', 0) // 1000} млн</b>"
         )
-        kb = InlineKeyboardMarkup([[InlineKeyboardButton("🔙 В мастерскую", callback_data="ws:menu")]])
+
+        other_style = "portrait" if style == "card" else "card"
+        toggle_label = "👤 Показать с портретом" if style == "card" else "🃏 Показать карточку FC"
+
+        kb = InlineKeyboardMarkup([
+            [
+                InlineKeyboardButton(toggle_label, callback_data=f"ws:from_db_toggle:{latest['id']}:{other_style}"),
+            ],
+            [InlineKeyboardButton("🔙 В мастерскую", callback_data="ws:menu")],
+        ])
+
+        if is_toggle:
+            try:
+                await query.edit_message_media(
+                    media=InputMediaPhoto(media=io.BytesIO(png), caption=caption, parse_mode="HTML"),
+                    reply_markup=kb,
+                )
+                return
+            except Exception:
+                pass
+
         await query.message.reply_photo(photo=io.BytesIO(png), caption=caption, parse_mode="HTML", reply_markup=kb)
         return
+

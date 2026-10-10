@@ -160,3 +160,43 @@ class TestImporter:
         assert [c["renderz_id"] for c in cards] == [1, 2, 3]
         assert [c["selected"] for c in cards] == [True, False, True]
         assert [name for _, name in portraits] == [_slugify("Bukayo Saka") + ".png"]
+
+
+class TestFCCardStyle:
+    def test_card_path_finds_by_exact_and_closest_ovr(self, tmp_path, monkeypatch):
+        cards_dir = tmp_path / "cards"
+        cards_dir.mkdir()
+        (cards_dir / "101.png").write_bytes(b"png_card_101")
+        (cards_dir / "102.png").write_bytes(b"png_card_102")
+        monkeypatch.setattr(req_mod, "CARDS_DIR", str(cards_dir))
+
+        repo.replace_player_cards([
+            _card(101, "Vinícius Júnior", "Реал Мадрид", 111),
+            _card(102, "Vinícius Júnior", "Реал Мадрид", 108),
+        ])
+
+        assert req_mod.card_path("Vinícius Júnior", 111) == str(cards_dir / "101.png")
+        assert req_mod.card_path("Vinícius Júnior", 110) == str(cards_dir / "101.png") # closest to 110 is 111
+        assert req_mod.card_path("Vinícius Júnior", 107) == str(cards_dir / "102.png") # closest to 107 is 108
+
+    def test_render_with_card_path_produces_png(self, tmp_path):
+        from PIL import Image
+        from services.graphics.transfer_card_generator import render_transfer_card
+
+        card_file = tmp_path / "test_card.png"
+        im = Image.new("RGBA", (100, 120), (255, 215, 0, 255))
+        im.save(card_file)
+
+        png = render_transfer_card(
+            kind="deal",
+            player_name="Vinícius Júnior",
+            price_text="95 млн",
+            ovr=111,
+            from_club="Реал Мадрид",
+            to_club="Ливерпуль",
+            card_path=str(card_file),
+            transfer_id=103,
+        )
+        assert isinstance(png, bytes)
+        assert png.startswith(b"\x89PNG")
+
