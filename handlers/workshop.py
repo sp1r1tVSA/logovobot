@@ -32,68 +32,233 @@ logger = logging.getLogger(__name__)
 # Примеры для демонстрации в мастерской
 SAMPLE_DEALS = [
     {
-        "player": "Kylian Mbappé",
-        "price": "125 млн",
-        "ovr": 113,
-        "from_club": "ПСЖ",
-        "to_club": "Реал Мадрид",
+        "player": "Lionel Messi",
+        "price": "160 млн",
+        "ovr": 114,
+        "event": "TOTY 26 Live",
+        "from_club": "Интер Майами",
+        "to_club": "Манчестер Сити",
         "id": 101,
     },
     {
-        "player": "Jude Bellingham",
-        "price": "110 млн",
-        "ovr": 112,
-        "from_club": "Боруссия Д",
-        "to_club": "Манчестер Сити",
+        "player": "Erling Haaland",
+        "price": "175 млн",
+        "ovr": 114,
+        "event": "TOTY 26 Live",
+        "from_club": "Манчестер Сити",
+        "to_club": "Реал Мадрид",
         "id": 102,
     },
     {
-        "player": "Vinícius Júnior",
-        "price": "95 млн",
-        "ovr": 111,
-        "from_club": "Реал Мадрид",
-        "to_club": "Ливерпуль",
+        "player": "Kylian Mbappé",
+        "price": "150 млн",
+        "ovr": 113,
+        "event": "Anniversary 26 Live",
+        "from_club": "ПСЖ",
+        "to_club": "Реал Мадрид",
         "id": 103,
     },
     {
-        "player": "Bukayo Saka",
-        "price": "80 млн",
-        "ovr": 109,
-        "from_club": "Арсенал",
-        "to_club": "Бавария",
+        "player": "Jude Bellingham",
+        "price": "135 млн",
+        "ovr": 114,
+        "event": "TOTY 26 Live",
+        "from_club": "Боруссия Дортмунд",
+        "to_club": "Реал Мадрид",
         "id": 104,
     },
     {
-        "player": "Lamine Yamal",
+        "player": "Vinicius Junior",
         "price": "140 млн",
-        "ovr": 110,
+        "ovr": 114,
+        "event": "Golden Era 26 Live",
+        "from_club": "Реал Мадрид",
+        "to_club": "Ливерпуль",
+        "id": 105,
+    },
+    {
+        "player": "Lamine Yamal",
+        "price": "145 млн",
+        "ovr": 114,
+        "event": "Patch 4 Special",
         "from_club": "Барселона",
         "to_club": "ПСЖ",
-        "id": 105,
+        "id": 106,
+    },
+    {
+        "player": "Jamal Musiala",
+        "price": "130 млн",
+        "ovr": 114,
+        "event": "TOTY 26 Live",
+        "from_club": "Бавария",
+        "to_club": "Манчестер Сити",
+        "id": 107,
+    },
+    {
+        "player": "Mohamed Salah",
+        "price": "120 млн",
+        "ovr": 114,
+        "event": "TOTY 26 Live",
+        "from_club": "Ливерпуль",
+        "to_club": "Аль-Иттихад",
+        "id": 108,
+    },
+    {
+        "player": "Virgil van Dijk",
+        "price": "95 млн",
+        "ovr": 114,
+        "event": "Anniversary Special",
+        "from_club": "Ливерпуль",
+        "to_club": "Реал Мадрид",
+        "id": 109,
+    },
+    {
+        "player": "Harry Kane",
+        "price": "115 млн",
+        "ovr": 114,
+        "event": "Golden Era 26 Live",
+        "from_club": "Бавария",
+        "to_club": "Манчестер Юнайтед",
+        "id": 110,
+    },
+    {
+        "player": "Luka Modrić",
+        "price": "50 млн",
+        "ovr": 114,
+        "event": "Record Breakers",
+        "from_club": "Реал Мадрид",
+        "to_club": "Милан",
+        "id": 111,
+    },
+    {
+        "player": "Kevin De Bruyne",
+        "price": "85 млн",
+        "ovr": 114,
+        "event": "World Cup Special",
+        "from_club": "Манчестер Сити",
+        "to_club": "Наполи",
+        "id": 112,
+    },
+    {
+        "player": "Cole Palmer",
+        "price": "125 млн",
+        "ovr": 114,
+        "event": "Special Event",
+        "from_club": "Челси",
+        "to_club": "Бавария",
+        "id": 113,
+    },
+    {
+        "player": "Khvicha Kvaratskhelia",
+        "price": "110 млн",
+        "ovr": 114,
+        "event": "TOTY 26 Live",
+        "from_club": "Наполи",
+        "to_club": "ПСЖ",
+        "id": 114,
+    },
+    {
+        "player": "Rafael Leão",
+        "price": "115 млн",
+        "ovr": 114,
+        "event": "Record Breakers",
+        "from_club": "Милан",
+        "to_club": "Арсенал",
+        "id": 115,
+    },
+    {
+        "player": "Victor Osimhen",
+        "price": "105 млн",
+        "ovr": 114,
+        "event": "Patch 5 Special",
+        "from_club": "Наполи",
+        "to_club": "Челси",
+        "id": 116,
+    },
+    {
+        "player": "Eduardo Camavinga",
+        "price": "90 млн",
+        "ovr": 114,
+        "event": "Lunar New Year",
+        "from_club": "Реал Мадрид",
+        "to_club": "Арсенал",
+        "id": 117,
+    },
+    {
+        "player": "Thibaut Courtois",
+        "price": "80 млн",
+        "ovr": 113,
+        "event": "Anniversary 26 Live",
+        "from_club": "Реал Мадрид",
+        "to_club": "ПСЖ",
+        "id": 118,
     },
 ]
 
 SAMPLE_SURCHARGES = [
     {
         "player": "Erling Haaland",
-        "price": "65 млн",
-        "ovr": 112,
+        "price": "80 млн",
+        "ovr": 114,
+        "event": "TOTY 26 Live",
         "from_club": "Манчестер Сити",
         "id": 201,
     },
     {
-        "player": "Rodri",
-        "price": "50 млн",
-        "ovr": 111,
-        "from_club": "Барселона",
+        "player": "Jude Bellingham",
+        "price": "75 млн",
+        "ovr": 114,
+        "event": "TOTY 26 Live",
+        "from_club": "Реал Мадрид",
         "id": 202,
+    },
+    {
+        "player": "Rodri",
+        "price": "60 млн",
+        "ovr": 114,
+        "event": "Patch 2 Special",
+        "from_club": "Манчестер Сити",
+        "id": 203,
     },
     {
         "player": "Florian Wirtz",
         "price": "70 млн",
-        "ovr": 112,
+        "ovr": 114,
+        "event": "Patch 2 Special",
         "from_club": "Байер",
-        "id": 203,
+        "id": 204,
+    },
+    {
+        "player": "Federico Valverde",
+        "price": "65 млн",
+        "ovr": 114,
+        "event": "Patch 4 Special",
+        "from_club": "Реал Мадрид",
+        "id": 205,
+    },
+    {
+        "player": "Alejandro Grimaldo",
+        "price": "55 млн",
+        "ovr": 114,
+        "event": "TOTS 26 Live",
+        "from_club": "Байер",
+        "id": 206,
+    },
+    {
+        "player": "Bruno Fernandes",
+        "price": "50 млн",
+        "ovr": 114,
+        "event": "FUT Founders",
+        "from_club": "Манчестер Юнайтед",
+        "id": 207,
+    },
+    {
+        "player": "Gianluigi Donnarumma",
+        "price": "45 млн",
+        "ovr": 114,
+        "event": "Special Event",
+        "from_club": "ПСЖ",
+        "id": 208,
     },
 ]
 
@@ -106,9 +271,9 @@ SAMPLE_URNS = [
         "id": 301,
     },
     {
-        "player": "Mykhailo Mudryk",
+        "player": "Mykhaylo Mudryk",
         "price": "30 млн",
-        "ovr": 100,
+        "ovr": 95,
         "from_club": "Челси",
         "id": 302,
     },
@@ -118,6 +283,13 @@ SAMPLE_URNS = [
         "ovr": 101,
         "from_club": "Тоттенхэм",
         "id": 303,
+    },
+    {
+        "player": "Harry Maguire",
+        "price": "20 млн",
+        "ovr": 100,
+        "from_club": "Манчестер Юнайтед",
+        "id": 304,
     },
 ]
 
@@ -394,10 +566,11 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         png = await asyncio.to_thread(_render_sample_deal, sample, style)
 
         mode_desc = "вариант с карточкой FC Mobile" if style == "card" else "вариант с портретом"
+        event_str = f" ({sample['event']})" if sample.get("event") else ""
         caption = (
             f"🔁 <b>HERE WE GO — {sample['player']}</b> ({mode_desc})\n"
             f"Маршрут: {sample['from_club']} → {sample['to_club']}\n"
-            f"Сумма: <b>{sample['price']}</b> | Рейтинг: <b>{sample['ovr']} OVR</b>\n\n"
+            f"Сумма: <b>{sample['price']}</b> | Рейтинг: <b>{sample['ovr']} OVR</b>{event_str}\n\n"
             f"<i>Разрешение: 1440×810 (Retina 2x). Готово к публикации.</i>"
         )
 
@@ -440,11 +613,12 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer(f"🎨 Генерирую спецкарту ({'карточка FC' if style == 'card' else 'портрет'})...")
 
         png = await asyncio.to_thread(_render_sample_surcharge, sample, style)
-        mode_desc = "карточка FC Mobile" if style == "card" else "портрет"
+        mode_desc = "вариант с карточкой FC Mobile" if style == "card" else "вариант с портретом"
+        event_str = f" ({sample['event']})" if sample.get("event") else ""
         caption = (
             f"🌟 <b>СПЕЦКАРТА — {sample['player']}</b> ({mode_desc})\n"
             f"Клуб: {sample['from_club']}\n"
-            f"Доплата: <b>{sample['price']}</b> | Новый рейтинг: <b>{sample['ovr']} OVR</b>\n\n"
+            f"Доплата: <b>{sample['price']}</b> | Новый рейтинг: <b>{sample['ovr']} OVR</b>{event_str}\n\n"
             f"<i>Разрешение: 1440×810 (Retina).</i>"
         )
 
@@ -487,8 +661,9 @@ async def cb_workshop(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
             await query.answer("🎨 Генерирую карточку сдачи в урну...")
 
         png = await asyncio.to_thread(_render_sample_urn, sample, style)
+        mode_desc = "вариант с карточкой FC Mobile" if style == "card" else "вариант с портретом"
         caption = (
-            f"🗑 <b>В УРНУ — {sample['player']}</b>\n"
+            f"🗑 <b>В УРНУ — {sample['player']}</b> ({mode_desc})\n"
             f"Клуб: {sample['from_club']} → Урна\n"
             f"Выплата клубу: <b>{sample['price']}</b> | Рейтинг: <b>{sample['ovr']} OVR</b>\n\n"
             f"<i>Разрешение: 1440×810 (Retina).</i>"

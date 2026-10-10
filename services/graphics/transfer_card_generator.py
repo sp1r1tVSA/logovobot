@@ -105,7 +105,7 @@ def route_sides(kind: str | None, from_club: str | None, to_club: str | None) ->
     if kind == "urn_buy":
         return Side("urn"), club(to_club)
     if kind == "surcharge":
-        return club(to_club), None
+        return club(to_club or from_club), None
     return club(from_club), club(to_club)
 
 
