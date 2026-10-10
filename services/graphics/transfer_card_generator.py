@@ -217,8 +217,8 @@ def _draw_portrait(img: Image.Image, path: str | None, name: str, accent) -> Non
         img.alpha_composite(photo.crop((left, 0, right, height)), (max(x, 0), y))
 
 
-def _draw_card(img: Image.Image, path: str | None, name: str, accent: tuple[int, int, int]) -> None:
-    """Оригинальная карточка FC Mobile/Renderz по центру круга со стильной тенью."""
+def _draw_card(img: Image.Image, path: str | None, name: str, accent: tuple[int, int, int]) -> bool:
+    """Оригинальная карточка FC Mobile/Renderz по центру справа со стильной тенью (без фонового круга)."""
     card = None
     if path:
         resolved_path = path
@@ -235,8 +235,7 @@ def _draw_card(img: Image.Image, path: str | None, name: str, accent: tuple[int,
             logger.debug("transfer card: FC card %s unreadable", path, exc_info=True)
 
     if card is None:
-        _draw_portrait(img, None, name, accent)
-        return
+        return False
 
     # Если у карточки непрозрачный темный фон скриншота (17, 17, 34), очищаем его по углам
     try:
@@ -251,25 +250,26 @@ def _draw_card(img: Image.Image, path: str | None, name: str, accent: tuple[int,
     if bbox:
         card = card.crop(bbox)
 
-    target_h = 670
+    target_h = 700
     target_w = max(1, int(card.width * (target_h / card.height)))
     card = card.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
     card_x = CIRCLE_CX - target_w // 2
-    card_y = CIRCLE_CY - target_h // 2 - 10
+    card_y = (HEIGHT - target_h) // 2
 
-    # Мягкая реалистичная тень под карточкой
+    # Мягкая объемная тень под карточкой
     try:
         from PIL import ImageFilter
         shadow_mask = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
-        shadow_layer = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 130))
-        shadow_mask.paste(shadow_layer, (card_x + 10, card_y + 18), mask=card.getchannel("A"))
-        shadow_blurred = shadow_mask.filter(ImageFilter.GaussianBlur(16))
+        shadow_layer = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 110))
+        shadow_mask.paste(shadow_layer, (card_x + 12, card_y + 20), mask=card.getchannel("A"))
+        shadow_blurred = shadow_mask.filter(ImageFilter.GaussianBlur(20))
         img.paste(shadow_blurred, (0, 0), shadow_blurred)
     except Exception:
         pass
 
     img.alpha_composite(card, (card_x, card_y))
+    return True
 
 
 def render_transfer_card(
@@ -284,21 +284,23 @@ def render_transfer_card(
     card_path: str | None = None,
     transfer_id: int | None = None,
 ) -> bytes:
-    """PNG-карточка трансфера. Если передан `card_path` — рисует полную карточку FC Mobile вместо портрета."""
+    """PNG-карточка трансфера. Если передан `card_path` — рисует полную карточку FC Mobile без фонового круга."""
     accent = accent_color(kind, from_club, to_club)
     img = Image.new("RGBA", (WIDTH, HEIGHT), PAPER + (255,))
     draw = ImageDraw.Draw(img)
 
-    # Круг цвета клуба с тонким белым кантом.
-    cx, cy, r = CIRCLE_CX, CIRCLE_CY, CIRCLE_R
-    draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=accent)
-    draw.ellipse((cx - r + 26, cy - r + 26, cx + r - 26, cy + r - 26), outline=WHITE + (90,), width=4)
-
+    drew_card = False
     has_card = bool(card_path and (os.path.isfile(card_path) or not os.path.isabs(card_path)))
     if has_card:
-        _draw_card(img, card_path, player_name or "", accent)
-    else:
+        drew_card = _draw_card(img, card_path, player_name or "", accent)
+
+    if not drew_card:
+        # Круг цвета клуба с тонким белым кантом (только для портретного режима).
+        cx, cy, r = CIRCLE_CX, CIRCLE_CY, CIRCLE_R
+        draw.ellipse((cx - r, cy - r, cx + r, cy + r), fill=accent)
+        draw.ellipse((cx - r + 26, cy - r + 26, cx + r - 26, cy + r - 26), outline=WHITE + (90,), width=4)
         _draw_portrait(img, portrait_path, player_name or "", accent)
+
     draw = ImageDraw.Draw(img)
 
     # Шапка.
