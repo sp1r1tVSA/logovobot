@@ -218,7 +218,7 @@ def _draw_portrait(img: Image.Image, path: str | None, name: str, accent) -> Non
 
 
 def _draw_card(img: Image.Image, path: str | None, name: str, accent: tuple[int, int, int]) -> bool:
-    """Оригинальная карточка FC Mobile/Renderz по центру справа со стильной тенью (без фонового круга)."""
+    """Оригинальная карточка FC Mobile/Renderz по центру справа с улучшением резкости и мягкой тенью."""
     card = None
     if path:
         resolved_path = path
@@ -237,12 +237,28 @@ def _draw_card(img: Image.Image, path: str | None, name: str, accent: tuple[int,
     if card is None:
         return False
 
-    # Если у карточки непрозрачный темный фон скриншота (17, 17, 34), очищаем его по углам
+    # 1. Тщательная очистка фона скриншота RenderZ (17, 17, 34)
     try:
-        ImageDraw.floodfill(card, (0, 0), (0, 0, 0, 0), thresh=22)
-        ImageDraw.floodfill(card, (card.width - 1, 0), (0, 0, 0, 0), thresh=22)
-        ImageDraw.floodfill(card, (0, card.height - 1), (0, 0, 0, 0), thresh=22)
-        ImageDraw.floodfill(card, (card.width - 1, card.height - 1), (0, 0, 0, 0), thresh=22)
+        # Заливка по всему внешнему периметру для устранения неровностей
+        for x in range(0, card.width, 2):
+            ImageDraw.floodfill(card, (x, 0), (0, 0, 0, 0), thresh=35)
+            ImageDraw.floodfill(card, (x, card.height - 1), (0, 0, 0, 0), thresh=35)
+        for y in range(0, card.height, 2):
+            ImageDraw.floodfill(card, (0, y), (0, 0, 0, 0), thresh=35)
+            ImageDraw.floodfill(card, (card.width - 1, y), (0, 0, 0, 0), thresh=35)
+
+        # Удаление застрявших теневых островков в крайних 20% ширины
+        import numpy as np
+        arr = np.array(card)
+        bg = np.array([17, 17, 34])
+        diffs = np.sum(np.abs(arr[:, :, :3] - bg), axis=2)
+        margin_w = int(card.width * 0.20)
+        outer_mask = (arr[:, :, 3] == 255) & (diffs < 45) & (
+            (np.arange(card.width) < margin_w) | (np.arange(card.width) > (card.width - margin_w))
+        )
+        if np.any(outer_mask):
+            arr[outer_mask, 3] = 0
+            card = Image.fromarray(arr)
     except Exception:
         pass
 
@@ -250,25 +266,47 @@ def _draw_card(img: Image.Image, path: str | None, name: str, accent: tuple[int,
     if bbox:
         card = card.crop(bbox)
 
-    target_h = 700
+    target_h = 710
     target_w = max(1, int(card.width * (target_h / card.height)))
-    card = card.resize((target_w, target_h), Image.Resampling.LANCZOS)
+
+    # 2. Улучшение чёткости и сглаживание контура при увеличении
+    try:
+        from PIL import ImageEnhance, ImageFilter
+        rgb = card.convert("RGB")
+        alpha = card.getchannel("A")
+
+        # Масштабирование с фильтром Lanczos
+        rgb_hi = rgb.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        # Фильтр повышения резкости текста, лица и деталей золотой рамки
+        rgb_hi = rgb_hi.filter(ImageFilter.UnsharpMask(radius=2.2, percent=170, threshold=1))
+        # Микро-контраст и насыщенность для сочной картинки
+        rgb_hi = ImageEnhance.Contrast(rgb_hi).enhance(1.08)
+        rgb_hi = ImageEnhance.Color(rgb_hi).enhance(1.05)
+
+        # Сглаживание альфа-маски (убирает пиксельные лесенки по контуру)
+        alpha_hi = alpha.resize((target_w, target_h), Image.Resampling.LANCZOS)
+        alpha_hi = alpha_hi.filter(ImageFilter.GaussianBlur(0.7))
+
+        card_hi = rgb_hi.convert("RGBA")
+        card_hi.putalpha(alpha_hi)
+    except Exception:
+        card_hi = card.resize((target_w, target_h), Image.Resampling.LANCZOS)
 
     card_x = CIRCLE_CX - target_w // 2
     card_y = (HEIGHT - target_h) // 2
 
-    # Мягкая объемная тень под карточкой
+    # 3. Мягкая объемная тень под карточкой
     try:
         from PIL import ImageFilter
         shadow_mask = Image.new("RGBA", (WIDTH, HEIGHT), (0, 0, 0, 0))
         shadow_layer = Image.new("RGBA", (target_w, target_h), (0, 0, 0, 110))
-        shadow_mask.paste(shadow_layer, (card_x + 12, card_y + 20), mask=card.getchannel("A"))
-        shadow_blurred = shadow_mask.filter(ImageFilter.GaussianBlur(20))
+        shadow_mask.paste(shadow_layer, (card_x + 12, card_y + 22), mask=card_hi.getchannel("A"))
+        shadow_blurred = shadow_mask.filter(ImageFilter.GaussianBlur(22))
         img.paste(shadow_blurred, (0, 0), shadow_blurred)
     except Exception:
         pass
 
-    img.alpha_composite(card, (card_x, card_y))
+    img.alpha_composite(card_hi, (card_x, card_y))
     return True
 
 
