@@ -142,8 +142,8 @@ SAMPLE_DEALS = [
     {
         "player": "Cole Palmer",
         "price": "125 млн",
-        "ovr": 114,
-        "event": "Special Event",
+        "ovr": 113,
+        "event": "Patch 2 Special",
         "from_club": "Челси",
         "to_club": "Бавария",
         "id": 113,

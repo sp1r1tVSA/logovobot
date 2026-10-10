@@ -644,22 +644,42 @@ def resolve_card_id(player_name: str | None, ovr: int | None = None) -> int | No
             try:
                 with open(pth, encoding="utf-8") as fh:
                     data = json.load(fh)
-                for p in data.get("players", []):
+                players = data.get("players", [])
+                candidates = []
+                for p in players:
                     p_key = repo.norm_player(p.get("player", ""))
-                    if p_key == key or key in p_key or p_key in key:
-                        versions = p.get("versions", [])
-                        if not versions:
-                            continue
-                        if ovr:
-                            exact = [v for v in versions if v.get("ovr") == ovr and v.get("selected", True)]
-                            if exact:
-                                return exact[0]["renderz_id"]
-                            sorted_v = sorted(
-                                versions,
-                                key=lambda v: (abs((v.get("ovr") or 0) - ovr), not v.get("selected", True)),
-                            )
-                            return sorted_v[0]["renderz_id"]
-                        return versions[0]["renderz_id"]
+                    if p_key == key:
+                        candidates.append((0, p))
+                    elif key in p_key or p_key in key:
+                        candidates.append((1, p))
+                candidates.sort(key=lambda x: x[0])
+
+                for _, p in candidates:
+                    p_key = repo.norm_player(p.get("player", ""))
+                    versions = p.get("versions", [])
+                    if not versions:
+                        continue
+
+                    # Отсеиваем карточки с явно чужим slug/card_name (например, Isak внутри Rodri)
+                    def is_relevant(v):
+                        c_name = repo.norm_player(v.get("card_name", ""))
+                        slug = repo.norm_player(v.get("slug", ""))
+                        parts = p_key.split()
+                        return any(p[:4] in c_name or p[:4] in slug or c_name in p or slug in p for p in parts if len(p) >= 3)
+
+                    v_list = [v for v in versions if is_relevant(v)]
+                    candidate_versions = v_list if v_list else versions
+
+                    if ovr:
+                        exact = [v for v in candidate_versions if v.get("ovr") == ovr and v.get("selected", True)]
+                        if exact:
+                            return exact[0]["renderz_id"]
+                        sorted_v = sorted(
+                            candidate_versions,
+                            key=lambda v: (abs((v.get("ovr") or 0) - ovr), not v.get("selected", True)),
+                        )
+                        return sorted_v[0]["renderz_id"]
+                    return candidate_versions[0]["renderz_id"]
             except Exception:
                 pass
     return None
