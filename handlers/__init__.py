@@ -30,6 +30,7 @@ from handlers.base import (
     show_division_assists,
     show_division_totw_menu,
     show_division_totw,
+    show_first_half_team_view,
     show_support,
     group_table_command,
     show_round_matches,
@@ -257,6 +258,7 @@ admin_round_matches,
     admin_round_digest_command,
     admin_totw_post_command,
     cb_totw_publish,
+    cb_first_half_team_publish,
     admin_squads_status_command,
     admin_squads_view_cb,
     admin_squads_all_cb,
@@ -472,6 +474,7 @@ def _register_user_handlers(app: Application) -> None:
     app.add_handler(CallbackQueryHandler(show_division_assists, pattern=r"^division_assists:(\d+):(\d+)$"))
     app.add_handler(CallbackQueryHandler(show_division_totw_menu, pattern=r"^division_totw:(\d+):(\d+)$"))
     app.add_handler(CallbackQueryHandler(show_division_totw, pattern=r"^division_totw_view:(\d+):(\d+):(\d+):(\d+)$"))
+    app.add_handler(CallbackQueryHandler(show_first_half_team_view, pattern=r"^first_half_team_view:(\d+):(\d+)$"))
     app.add_handler(CallbackQueryHandler(show_support, pattern="^menu_support$"))
     app.add_handler(CallbackQueryHandler(show_main_menu, pattern="^main_menu$"))
     app.add_handler(CommandHandler("club", club_command))
@@ -960,6 +963,7 @@ def _register_admin_handlers(app: Application) -> None:
     # Символическая сборная: ручная публикация (обычно — джоба job_post_totw)
     app.add_handler(CommandHandler("totw_post", admin_totw_post_command))
     app.add_handler(CallbackQueryHandler(cb_totw_publish, pattern=r"^totw_publish:\d+:\d+:\d+$"))
+    app.add_handler(CallbackQueryHandler(cb_first_half_team_publish, pattern=r"^first_half_team_publish:\d+:\d+$"))
 
     # Squads status
     app.add_handler(CommandHandler(["squads_status", "squads", "sostavy"], admin_squads_status_command))

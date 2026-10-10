@@ -7651,6 +7651,158 @@ async def cb_totw_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         logger.warning("Could not report TOTW publish result", exc_info=True)
 
 
+async def post_first_half_team(
+    context: ContextTypes.DEFAULT_TYPE,
+    division_id: int,
+    season_id: int | None = None,
+    force: bool = False,
+) -> bool:
+    """Опубликовать символическую сборную 1-го круга в топик АНАЛИТИКА дивизиона."""
+    from services import mid_season_team_service
+    from services.graphics.mid_season_generator import generate_mid_season_image
+
+    bounds = await asyncio.to_thread(database.get_division_first_half_bounds, division_id, season_id)
+    start_round, end_round = bounds if bounds else (1, 15)
+
+    if not force and await asyncio.to_thread(database.has_round_content_post, division_id, end_round, "first_half_team"):
+        return False
+
+    completed = await asyncio.to_thread(database.is_first_half_completed, division_id, season_id)
+    if not force and not completed:
+        logger.info(f"First half team skipped: division {division_id} 1st half is not complete.")
+        return False
+
+    topic = await _resolve_totw_topic(division_id)
+    if not topic:
+        logger.info(f"First half team skipped: division {division_id} has no target topic.")
+        return False
+    group_id, topic_id = topic
+
+    payload = await asyncio.to_thread(
+        mid_season_team_service.build_mid_season_payload, division_id, start_round, end_round, season_id
+    )
+    if not payload.get("xi"):
+        logger.info(f"First half team skipped: division {division_id} has no candidates.")
+        return False
+
+    img_buf = await asyncio.to_thread(
+        generate_mid_season_image, payload, division_id, start_round, end_round, False
+    )
+    caption = await asyncio.to_thread(
+        mid_season_team_service.generate_mid_season_caption,
+        payload,
+        payload.get("division_name") or f"Дивизион {division_id}",
+        start_round,
+        end_round,
+        True,
+    )
+
+    try:
+        msg = await context.bot.send_photo(
+            chat_id=group_id, photo=img_buf, caption=caption,
+            parse_mode="HTML", message_thread_id=topic_id
+        )
+    except (BadRequest, TelegramError) as e:
+        logger.warning(f"Could not post first half team to division {division_id}: {e}")
+        return False
+
+    await asyncio.to_thread(
+        database.record_round_content_post, division_id, end_round, "first_half_team", msg.message_id
+    )
+    return True
+
+
+async def cb_first_half_team_publish(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Кнопка публикации сборной 1-го круга в АНАЛИТИКУ (строго супер-админ)."""
+    query = update.callback_query
+    user_id = update.effective_user.id
+    if not is_global_admin(user_id):
+        await query.answer("❌ Доступно только супер-администратору.", show_alert=True)
+        return
+
+    try:
+        _, season_raw, div_raw = query.data.split(":")
+        season_id, division_id = int(season_raw), int(div_raw)
+    except (ValueError, AttributeError):
+        await query.answer("Некорректная кнопка.", show_alert=True)
+        return
+
+    await query.answer("Публикую сборную 1-го круга…")
+    try:
+        ok = await post_first_half_team(context, division_id, season_id, force=True)
+    except Exception:
+        logger.exception(f"First half publish failed for division {division_id}")
+        ok = False
+
+    text = (
+        "✅ <b>Сборная 1-го круга успешно опубликована в топике АНАЛИТИКА!</b>"
+        if ok else
+        "⚠️ Не удалось опубликовать: у дивизиона не привязан топик или нет данных по игрокам."
+    )
+    try:
+        await context.bot.send_message(
+            chat_id=query.message.chat_id,
+            message_thread_id=query.message.message_thread_id if query.message.is_topic_message else None,
+            text=text,
+            parse_mode="HTML",
+        )
+    except (BadRequest, TelegramError):
+        logger.warning("Could not report first half publish result", exc_info=True)
+
+
+async def job_check_first_half_completion(context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Периодический джоб: отправка уведомления супер-админам при завершении 1-го круга."""
+    try:
+        divisions = await asyncio.to_thread(database.get_divisions)
+    except Exception:
+        logger.debug("job_check_first_half_completion: could not load divisions", exc_info=True)
+        return
+
+    for d in divisions or []:
+        div_id = d["id"]
+        try:
+            bounds = await asyncio.to_thread(database.get_division_first_half_bounds, div_id)
+            if not bounds:
+                continue
+            start_r, end_r = bounds
+            completed = await asyncio.to_thread(database.is_first_half_completed, div_id)
+            if not completed:
+                continue
+            already_alerted = await asyncio.to_thread(
+                database.has_round_content_post, div_id, end_r, "first_half_alert"
+            )
+            if already_alerted:
+                continue
+
+            div_name = d.get("name") or f"Дивизион {div_id}"
+            for admin_id in (config.ADMIN_IDS or []):
+                try:
+                    await context.bot.send_message(
+                        chat_id=int(admin_id),
+                        text=(
+                            f"🏆 <b>Дивизион «{html.escape(div_name)}»: 1-й круг завершён!</b>\n\n"
+                            f"Все матчи (Туры {start_r}–{end_r}) сыграны и подтверждены.\n"
+                            "Символическая сборная 1-го круга сформирована строго по статистике "
+                            "(включая титулы «Игрок тура») и ожидает вашей проверки."
+                        ),
+                        parse_mode="HTML",
+                        reply_markup=InlineKeyboardMarkup([[
+                            InlineKeyboardButton(
+                                "🔍 Открыть предпросмотр сборной",
+                                callback_data=f"first_half_team_view:1:{div_id}"
+                            )
+                        ]]),
+                    )
+                except Exception:
+                    logger.debug("Failed sending first half alert to admin %s", admin_id, exc_info=True)
+
+            await asyncio.to_thread(
+                database.record_round_content_post, div_id, end_r, "first_half_alert", 0
+            )
+        except Exception:
+            logger.exception("Error checking first half completion for division %s", div_id)
+
+
 @admin_only
 async def admin_set_squad_topic(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Set the topic where squads will be sent."""

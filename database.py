@@ -8901,6 +8901,98 @@ def get_totw_stats(
         return result
 
 
+def get_division_first_half_bounds(division_id: int, season_id: int | None = None) -> tuple[int, int] | None:
+    """Calculate the first and last round numbers of the first half (1st lap) of a division.
+
+    Returns (start_round, end_round) e.g. (1, 15) for a 30-round tournament, or None.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        target_season_id = season_id
+        if target_season_id is None:
+            act = get_active_season()
+            target_season_id = act["id"] if act else 1
+
+        cursor.execute("""
+            SELECT DISTINCT round_number
+            FROM matches
+            WHERE division_id = ?
+              AND (tournament_type IS NULL OR tournament_type = 'league')
+              AND (season_id = ? OR season_id IS NULL)
+              AND round_number > 0
+            ORDER BY round_number ASC
+        """, (division_id, target_season_id))
+        rounds = [r["round_number"] for r in cursor.fetchall()]
+        if not rounds:
+            teams = get_division_teams(division_id)
+            n = len(teams)
+            if n >= 2:
+                half_rounds = (n - 1) if n % 2 == 0 else n
+                return (1, half_rounds)
+            return None
+        total = len(rounds)
+        if total == 1:
+            return (rounds[0], rounds[0])
+        half = total // 2
+        return (rounds[0], rounds[half - 1])
+
+
+def is_first_half_completed(division_id: int, season_id: int | None = None) -> bool:
+    """Check if all matches in the first half of the division are confirmed."""
+    bounds = get_division_first_half_bounds(division_id, season_id)
+    if not bounds:
+        return False
+    start_r, end_r = bounds
+    return is_round_range_completed(start_r, end_r, division_id, season_id)
+
+
+def get_mid_season_stats(
+    division_id: int,
+    start_round: int,
+    end_round: int,
+    season_id: int | None = None,
+) -> list[dict]:
+    """Gather complete player performance stats for the 1st half of a division.
+
+    In addition to goals, assists, mvp, clean sheets, and club stats,
+    this function also computes `potr_count` (Player of the Round awards)
+    for each round within start_round..end_round.
+    """
+    with transaction() as conn:
+        cursor = conn.cursor()
+        target_season_id = season_id
+        if target_season_id is None:
+            act = get_active_season()
+            target_season_id = act["id"] if act else 1
+
+        candidates = get_totw_stats(start_round, end_round, division_id, target_season_id)
+        if not candidates:
+            return []
+
+        fold = _player_folder(cursor)
+        potr_tally: dict[tuple[str, str], int] = {}
+        for r in range(start_round, end_round + 1):
+            r_stats = get_round_player_stats(r, division_id=division_id, season_id=target_season_id)
+            if not r_stats:
+                continue
+            top_ga = (r_stats[0]["goals"] or 0) + (r_stats[0]["assists"] or 0)
+            top_g = r_stats[0]["goals"] or 0
+            if top_ga > 0:
+                for p in r_stats:
+                    p_ga = (p["goals"] or 0) + (p["assists"] or 0)
+                    p_g = p["goals"] or 0
+                    if (p_ga, p_g) == (top_ga, top_g):
+                        ck, pk, _disp = fold(p.get("team_name"), p.get("player_name"))
+                        if ck and pk:
+                            potr_tally[(ck, pk)] = potr_tally.get((ck, pk), 0) + 1
+
+        for c in candidates:
+            ck, pk, _disp = fold(c.get("team_name"), c.get("player_name"))
+            c["potr_count"] = potr_tally.get((ck, pk), 0)
+
+        return candidates
+
+
 def get_recent_confirmed_matches(
     limit: int = 15,
     division_id: int | None = None,

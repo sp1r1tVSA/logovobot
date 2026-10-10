@@ -124,10 +124,11 @@ def register_jobs(application: Application) -> None:
 
     # Символическая сборная: раз на каждый полностью сыгранный блок из 5 туров.
     try:
-        from handlers.admin import job_post_totw
+        from handlers.admin import job_post_totw, job_check_first_half_completion
         _run_repeating(application, "totw", job_post_totw, 900, 180)
+        _run_repeating(application, "first_half_check", job_check_first_half_completion, 900, 200)
     except Exception as e:
-        logger.warning(f"Could not register TOTW job: {e}")
+        logger.warning(f"Could not register TOTW / first-half jobs: {e}")
 
     # Детектор договорных матчей: только считает индекс подозрительности и
     # показывает дела супер-админу, ставки никогда не блокирует.

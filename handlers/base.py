@@ -624,6 +624,11 @@ async def show_division_menu(update: Update, context: ContextTypes.DEFAULT_TYPE)
         [InlineKeyboardButton("🌟 Символическая сборная", callback_data=f"division_totw:{season_id}:{division_id}")],
         [InlineKeyboardButton("« Назад к дивизионам", callback_data=CB_MENU_DIVISIONS)]
     ]
+    user = update.effective_user
+    if user and is_global_admin(user.id):
+        keyboard.insert(-1, [
+            InlineKeyboardButton("🏆 Сборная 1-го круга (Admin)", callback_data=f"first_half_team_view:{season_id}:{division_id}")
+        ])
     markup = InlineKeyboardMarkup(keyboard)
 
     if query:
@@ -997,6 +1002,77 @@ async def show_division_totw(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("« К выбору туров", callback_data=f"division_totw:{season_id}:{div_id}")],
             [InlineKeyboardButton("« Назад к меню дивизиона", callback_data=f"division_view:{season_id}:{div_id}")],
         ],
+    )
+
+
+async def show_first_half_team_view(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Предпросмотр символической сборной 1-го круга дивизиона (доступен только супер-админу)."""
+    query = update.callback_query
+    user = update.effective_user
+    if not user or not is_global_admin(user.id):
+        if query:
+            try:
+                await query.answer("⛔ Доступно только супер-администратору.", show_alert=True)
+            except Exception:
+                pass
+        return
+
+    if query:
+        try:
+            await query.answer("Формирую сборную 1-го круга…")
+        except Exception:
+            pass
+
+    parts = query.data.split(":") if query and query.data else []
+    season_id = int(parts[1]) if len(parts) >= 2 else 1
+    division_id = int(parts[2]) if len(parts) >= 3 else 1
+
+    from services import mid_season_team_service
+    from services.graphics.mid_season_generator import generate_mid_season_image
+
+    payload = await asyncio.to_thread(
+        mid_season_team_service.build_mid_season_payload, division_id, season_id=season_id
+    )
+    img_buf = await asyncio.to_thread(
+        generate_mid_season_image, payload, division_id, payload.get("start_round"), payload.get("end_round"), False
+    )
+    caption = await asyncio.to_thread(
+        mid_season_team_service.generate_mid_season_caption,
+        payload,
+        payload.get("division_name") or f"Дивизион {division_id}",
+        payload.get("start_round") or 1,
+        payload.get("end_round") or 15,
+        False,
+    )
+
+    rows = []
+    if payload.get("xi"):
+        rows.append([
+            InlineKeyboardButton(
+                "📣 Опубликовать в АНАЛИТИКУ",
+                callback_data=f"first_half_team_publish:{season_id}:{division_id}",
+            )
+        ])
+    rows.append([
+        InlineKeyboardButton("« Назад к меню дивизиона", callback_data=f"division_view:{season_id}:{division_id}")
+    ])
+
+    target_chat_id = query.message.chat_id if query and query.message else user.id
+    thread_id = query.message.message_thread_id if query and query.message and query.message.is_topic_message else None
+
+    if query and query.message:
+        try:
+            await query.message.delete()
+        except Exception:
+            pass
+
+    await context.bot.send_photo(
+        chat_id=target_chat_id,
+        message_thread_id=thread_id,
+        photo=img_buf,
+        caption=caption,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup(rows),
     )
 
 
